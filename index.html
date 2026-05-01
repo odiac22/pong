@@ -48,6 +48,20 @@
       border-color: transparent transparent transparent rgba(255,255,255,0.6);
       opacity: 0.7; z-index: 3;
     }
+    .seek-flash {
+      position: absolute; top: 0; bottom: 30px; width: 40%;
+      z-index: 8; pointer-events: none;
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity 0.15s;
+      background: rgba(255,255,255,0.1);
+    }
+    .seek-flash.left { left: 0; border-radius: 0 50% 50% 0; }
+    .seek-flash.right { right: 0; border-radius: 50% 0 0 50%; }
+    .seek-flash.show { opacity: 1; }
+    .seek-flash span {
+      color: white; font-size: 20px; font-weight: 700;
+      text-shadow: 0 0 8px rgba(0,0,0,0.9);
+    }
     .video-progress-container {
       position: absolute; bottom: 0; left: 0; right: 0; height: 30px;
       display: flex; flex-direction: column; justify-content: flex-end;
@@ -123,8 +137,7 @@
     .controls-overlay {
       position: fixed; bottom: 20px; left: 0; width: 100%;
       display: flex; justify-content: center; z-index: 100;
-      padding: 0 16px; box-sizing: border-box;
-      transition: all 0.3s ease;
+      padding: 0 16px; box-sizing: border-box; transition: all 0.3s ease;
     }
     .controls-hidden .controls-overlay { transform: translateY(120px); opacity: 0; pointer-events: none; }
     .url-input {
@@ -136,19 +149,18 @@
       width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #444;
       background: rgba(255,255,255,0.1); color: white; margin-bottom: 10px;
       height: 60px; resize: none; font-size: 14px; box-sizing: border-box;
-      -webkit-user-select: text; user-select: text; touch-action: manipulation;
-      outline: none;
+      -webkit-user-select: text; user-select: text; touch-action: manipulation; outline: none;
     }
     .url-input textarea:focus { border-color: #FF4040; background: rgba(255,255,255,0.15); }
     .button-container { display: flex; gap: 10px; }
     .url-input button {
-      flex: 1; padding: 10px; border-radius: 6px; color: white;
-      border: none; font-weight: 500; font-size: 14px; cursor: pointer;
+      flex: 1; padding: 10px; border-radius: 6px; color: white; border: none;
+      font-weight: 500; font-size: 14px; cursor: pointer;
       transition: all 0.2s ease; box-shadow: 0 2px 4px rgba(0,0,0,0.2);
     }
     #load-videos { background: linear-gradient(to right, #FF4040, #FF5C5C); }
     #auth-button { background: linear-gradient(to right, #4285F4, #5A95F5); }
-    .url-input button:hover { transform: translateY(-1px); box-shadow: 0 3px 6px rgba(0,0,0,0.3); }
+    .url-input button:hover { transform: translateY(-1px); }
     .control-button {
       position: fixed; bottom: 18px; background: rgba(30,30,30,0.8);
       color: white; width: 28px; height: 28px; border-radius: 50%;
@@ -166,32 +178,27 @@
     .refresh-button { left: 118px; }
     .next-batch-button {
       position: fixed; left: 10px; top: 50%; transform: translateY(-50%);
-      width: 40px; height: 40px; background: rgba(50,50,50,0.7);
-      opacity: 0.5; font-size: 18px; box-shadow: 0 2px 10px rgba(0,0,0,0.5);
-      border: none; border-radius: 50%; z-index: 1000; display: flex;
-      align-items: center; justify-content: center; cursor: pointer;
-      -webkit-tap-highlight-color: transparent; transition: all 0.2s ease; color: white;
+      width: 40px; height: 40px; background: rgba(50,50,50,0.7); opacity: 0.5;
+      font-size: 18px; box-shadow: 0 2px 10px rgba(0,0,0,0.5); border: none;
+      border-radius: 50%; z-index: 1000; display: flex; align-items: center;
+      justify-content: center; cursor: pointer; -webkit-tap-highlight-color: transparent;
+      transition: all 0.2s ease; color: white;
     }
-    .next-batch-button:hover, .next-batch-button:active {
-      opacity: 0.8; transform: translateY(-50%) scale(1.05);
-    }
+    .next-batch-button:hover, .next-batch-button:active { opacity: 0.8; transform: translateY(-50%) scale(1.05); }
     .batch-counter {
-      position: absolute; top: -4px; right: -4px; background: white;
-      color: #333; border-radius: 50%; width: 18px; height: 18px;
-      font-size: 10px; display: flex; align-items: center; justify-content: center;
+      position: absolute; top: -4px; right: -4px; background: white; color: #333;
+      border-radius: 50%; width: 18px; height: 18px; font-size: 10px;
+      display: flex; align-items: center; justify-content: center;
       font-weight: bold; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
     }
     .unwatched-videos-button {
       position: fixed; left: 10px; top: 40%; transform: translateY(-50%);
       width: 30px; height: 30px; background: rgba(50,50,50,0.7); opacity: 0.5;
-      font-size: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.5); border: none;
-      border-radius: 50%; z-index: 1000; display: flex; align-items: center;
-      justify-content: center; cursor: pointer; -webkit-tap-highlight-color: transparent;
-      transition: all 0.2s ease; color: white;
+      font-size: 16px; border: none; border-radius: 50%; z-index: 1000;
+      display: flex; align-items: center; justify-content: center; cursor: pointer;
+      -webkit-tap-highlight-color: transparent; transition: all 0.2s ease; color: white;
     }
-    .unwatched-videos-button:hover, .unwatched-videos-button:active {
-      opacity: 0.8; transform: translateY(-50%) scale(1.1);
-    }
+    .unwatched-videos-button:hover, .unwatched-videos-button:active { opacity: 0.8; transform: translateY(-50%) scale(1.1); }
     .paste-nav-button {
       position: fixed; left: 10px; top: calc(50% + 50px); transform: translateY(-50%);
       width: 35px; height: 35px; background: rgba(50,50,50,0.7); opacity: 0.5;
@@ -201,14 +208,12 @@
       -webkit-tap-highlight-color: transparent;
     }
     .paste-nav-button::after {
-      content: attr(data-count); position: absolute; bottom: -20px;
-      left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8);
-      color: white; padding: 2px 6px; border-radius: 10px; font-size: 10px;
+      content: attr(data-count); position: absolute; bottom: -20px; left: 50%;
+      transform: translateX(-50%); background: rgba(0,0,0,0.8); color: white;
+      padding: 2px 6px; border-radius: 10px; font-size: 10px;
       white-space: nowrap; pointer-events: none;
     }
-    .paste-nav-button:hover, .paste-nav-button:active {
-      opacity: 0.8; transform: translateY(-50%) scale(1.1);
-    }
+    .paste-nav-button:hover, .paste-nav-button:active { opacity: 0.8; transform: translateY(-50%) scale(1.1); }
     .sorting-indicator {
       position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
       background: rgba(0,0,0,0.8); color: white; padding: 12px 20px;
@@ -218,8 +223,8 @@
     }
     .sorting-indicator.fade-out { animation: fadeOut 1s ease-out forwards; }
     @keyframes fadeInPop {
-      from { opacity: 0; transform: translate(-50%,-50%) scale(0.9); }
-      to { opacity: 1; transform: translate(-50%,-50%) scale(1); }
+      from { opacity:0; transform:translate(-50%,-50%) scale(0.9); }
+      to { opacity:1; transform:translate(-50%,-50%) scale(1); }
     }
     @keyframes fadeOut { from { opacity:1; } to { opacity:0; } }
     .video-counter {
@@ -245,9 +250,7 @@
       background: #222; padding: 20px; border-radius: 10px; text-align: center;
       max-width: 90%; width: 90%; height: 85%; display: flex; flex-direction: column;
     }
-    #auth-iframe-container {
-      width: 100%; flex: 1; overflow: auto; margin: 15px 0; border-radius: 8px;
-    }
+    #auth-iframe-container { width: 100%; flex: 1; overflow: auto; margin: 15px 0; border-radius: 8px; }
     #auth-iframe-container iframe { width: 100%; height: 100%; border: none; }
     #auth-close {
       background: rgba(255,64,64,0.5); color: white; border: none;
@@ -268,9 +271,7 @@
       <h3>External Content Authentication</h3>
       <p>Some videos require authentication on the source website.</p>
       <div id="auth-iframe-container"></div>
-      <div>
-        <button id="auth-close">Close Authentication</button>
-      </div>
+      <div><button id="auth-close">Close Authentication</button></div>
     </div>
   </div>
 
@@ -297,28 +298,41 @@ let videoMetadata = [];
 let currentBatch = 0;
 const BATCH_SIZE = 20;
 
+// ─── Paste tracking ───────────────────────────────────────────────────────────
+// Simple and reliable: capture count before paste, measure added after 100ms
 let pasteEvents = [];
 let currentPasteIndex = -1;
-let pasteQueue = [];
-let processingPaste = false;
 let urlCountBeforePaste = 0;
 
 const videoContainer = document.getElementById('video-container');
-const videoUrlsInput = document.getElementById('video-urls');
+const videoUrlsInput  = document.getElementById('video-urls');
 const loadVideosButton = document.getElementById('load-videos');
 
-// ─── Utilities ────────────────────────────────────────────────────────────────
-function formatTime(seconds) {
-  if (!seconds || isNaN(seconds)) return '0:00';
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s < 10 ? '0' : ''}${s}`;
+function parseVideoUrls(text) {
+  return text.split('\n').map(u => u.trim())
+    .filter(u => u && (u.toLowerCase().endsWith('.mp4') || u.toLowerCase().endsWith('.m4v')));
 }
 
-function parseVideoUrls(text) {
-  return text.split('\n')
-    .map(u => u.trim())
-    .filter(u => u && (u.toLowerCase().endsWith('.mp4') || u.toLowerCase().endsWith('.m4v')));
+videoUrlsInput.addEventListener('paste', () => {
+  // Snapshot count before paste lands
+  urlCountBeforePaste = parseVideoUrls(videoUrlsInput.value).length;
+  setTimeout(() => {
+    const added = parseVideoUrls(videoUrlsInput.value).length - urlCountBeforePaste;
+    if (added > 0) {
+      pasteEvents.push({ startIndex: urlCountBeforePaste, count: added, timestamp: Date.now() });
+      updatePasteNavigationButton();
+      console.log(`[Paste] Bundle ${pasteEvents.length}: +${added} URLs at index ${urlCountBeforePaste}`);
+    }
+  }, 100);
+});
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function formatTime(s) {
+  if (!s || isNaN(s)) return '0:00';
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return `${m}:${sec < 10 ? '0' : ''}${sec}`;
 }
 
 function toggleControls() {
@@ -331,19 +345,15 @@ function hideControls() {
   document.body.classList.add('controls-hidden');
 }
 
-function showSortingIndicator(message) {
+function showSortingIndicator(msg) {
   document.querySelectorAll('.sorting-indicator').forEach(el => el.remove());
   const el = document.createElement('div');
-  el.className = 'sorting-indicator';
-  el.textContent = message;
+  el.className = 'sorting-indicator'; el.textContent = msg;
   document.body.appendChild(el);
-  setTimeout(() => {
-    el.classList.add('fade-out');
-    setTimeout(() => el.remove(), 1000);
-  }, 2000);
+  setTimeout(() => { el.classList.add('fade-out'); setTimeout(() => el.remove(), 1000); }, 2000);
 }
 
-// ─── Audio unlock ─────────────────────────────────────────────────────────────
+// ─── Audio ────────────────────────────────────────────────────────────────────
 function setupMobileAudioUnlock() {
   if (window.audioUnlockSetup) return;
   window.audioUnlockSetup = true;
@@ -351,9 +361,7 @@ function setupMobileAudioUnlock() {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     if (ctx.state === 'suspended') {
       const resume = () => {
-        ctx.resume().then(() => {
-          if (window.currentlyPlayingVideo) unmuteSafely(window.currentlyPlayingVideo);
-        });
+        ctx.resume().then(() => { if (window.currentlyPlayingVideo) unmuteSafely(window.currentlyPlayingVideo); });
         ['touchstart','touchend','click','keydown'].forEach(e => document.removeEventListener(e, resume, true));
       };
       ['touchstart','touchend','click','keydown'].forEach(e => document.addEventListener(e, resume, true));
@@ -363,82 +371,28 @@ function setupMobileAudioUnlock() {
 
 function unmuteSafely(video) {
   try {
-    video.muted = false;
-    video.volume = 1.0;
+    video.muted = false; video.volume = 1.0;
     if (navigator.userAgent.includes('Firefox')) {
-      try {
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-      } catch(e) {}
-      setTimeout(() => {
-        if (video.muted) { video.muted = false; video.volume = 0.99; setTimeout(() => { video.volume = 1.0; }, 50); }
-      }, 100);
+      try { const ctx = new (window.AudioContext || window.webkitAudioContext)(); if (ctx.state === 'suspended') ctx.resume().catch(() => {}); } catch(e) {}
+      setTimeout(() => { if (video.muted) { video.muted = false; video.volume = 0.99; setTimeout(() => { video.volume = 1.0; }, 50); } }, 100);
     }
   } catch(e) {}
-}
-
-// ─── Paste tracking ───────────────────────────────────────────────────────────
-videoUrlsInput.addEventListener('paste', () => {
-  const ts = Date.now();
-  const before = parseVideoUrls(videoUrlsInput.value).length;
-  pasteQueue.push({ timestamp: ts, urlCountBefore: before, processed: false });
-  if (!processingPaste) processPasteQueue();
-});
-
-function processPasteQueue() {
-  if (!pasteQueue.length) { processingPaste = false; return; }
-  processingPaste = true;
-  const unprocessed = pasteQueue.filter(p => !p.processed);
-  if (!unprocessed.length) { processingPaste = false; return; }
-  let checkCount = 0;
-  const rapidCheck = () => {
-    checkCount++;
-    const current = parseVideoUrls(videoUrlsInput.value);
-    unprocessed.forEach(item => {
-      if (item.processed) return;
-      const added = current.length - item.urlCountBefore;
-      if (added > 0) {
-        const isDupe = pasteEvents.some(e => Math.abs(e.timestamp - item.timestamp) < 200 && Math.abs(e.count - added) < 3);
-        if (!isDupe) {
-          pasteEvents.push({ count: added, startIndex: item.urlCountBefore, totalUrlsAfter: current.length, timestamp: item.timestamp });
-          updatePasteNavigationButton();
-        }
-        item.processed = true;
-        urlCountBeforePaste = current.length;
-      }
-    });
-    if (unprocessed.some(p => !p.processed) && checkCount < 1000) {
-      setTimeout(rapidCheck, 1);
-    } else {
-      unprocessed.forEach(p => p.processed = true);
-      pasteQueue = pasteQueue.filter((p, i) => !p.processed || i >= pasteQueue.length - 10);
-      setTimeout(processPasteQueue, 10);
-    }
-  };
-  rapidCheck();
 }
 
 // ─── Sorting ──────────────────────────────────────────────────────────────────
 function sortVideosByDuration() {
   if (!videoMetadata.length) return;
-  const withDur = [], withoutDur = [];
-  videoMetadata.forEach((m, i) => {
-    if (m && m.duration > 0) withDur.push({ index: i, duration: m.duration });
-    else withoutDur.push({ index: i });
-  });
-  withDur.sort((a, b) => b.duration - a.duration);
-  reorderAndRedisplayVideos([...withDur.map(x => x.index), ...withoutDur.map(x => x.index)]);
+  const w = [], wo = [];
+  videoMetadata.forEach((m, i) => { if (m && m.duration > 0) w.push({index:i,duration:m.duration}); else wo.push({index:i}); });
+  w.sort((a,b) => b.duration - a.duration);
+  reorderAndRedisplayVideos([...w.map(x=>x.index),...wo.map(x=>x.index)]);
   showSortingIndicator('Sorted by duration ⏱️');
 }
 
 function sortVideosRandomly() {
-  const text = videoUrlsInput.value;
-  const urls = text.split('\n').filter(u => u.trim());
+  const urls = videoUrlsInput.value.split('\n').filter(u => u.trim());
   if (urls.length <= 1) return;
-  for (let i = urls.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [urls[i], urls[j]] = [urls[j], urls[i]];
-  }
+  for (let i = urls.length-1; i > 0; i--) { const j = Math.floor(Math.random()*(i+1)); [urls[i],urls[j]]=[urls[j],urls[i]]; }
   videoUrlsInput.value = urls.join('\n');
   showSortingIndicator('URLs randomized 🎲');
 }
@@ -447,9 +401,7 @@ function reorderAndRedisplayVideos(newOrder) {
   if (window.currentlyPlayingVideo && !window.currentlyPlayingVideo.paused) window.currentlyPlayingVideo.pause();
   videoUrls = newOrder.map(i => videoUrls[i]);
   videoMetadata = newOrder.map(i => videoMetadata[i] || {});
-  createVideoElements();
-  createUnwatchedVideosButton();
-  videoContainer.scrollTo(0, 0);
+  createVideoElements(); createUnwatchedVideosButton(); videoContainer.scrollTo(0,0);
 }
 
 // ─── Video elements ───────────────────────────────────────────────────────────
@@ -460,46 +412,31 @@ function createVideoElements() {
 
   videoUrls.forEach((url, index) => {
     const wrapper = document.createElement('div');
-    wrapper.className = 'video-wrapper';
-    wrapper.dataset.index = index;
+    wrapper.className = 'video-wrapper'; wrapper.dataset.index = index;
 
     const video = document.createElement('video');
-    video.className = 'video-player';
-    video.src = url;
-    video.preload = 'metadata';
-    video.playsInline = true;
-    video.controls = false;
-    video.autoplay = false;
-    video.muted = true;
-    video.volume = 0;
-    video.setAttribute('playsinline', '');
-    video.setAttribute('webkit-playsinline', '');
-    video.style.transform = 'translateZ(0)';
-    video.style.willChange = 'transform';
+    video.className = 'video-player'; video.src = url; video.preload = 'metadata';
+    video.playsInline = true; video.controls = false; video.autoplay = false;
+    video.muted = true; video.volume = 0;
+    video.setAttribute('playsinline',''); video.setAttribute('webkit-playsinline','');
+    video.style.transform = 'translateZ(0)'; video.style.willChange = 'transform';
 
     // Audio unlock on first interaction
     if (!window.audioUnlocked) {
       window.audioUnlocked = false;
-      const unlockAudio = () => {
+      const unlock = () => {
         if (window.audioUnlocked) return;
-        try {
-          const ctx = new (window.AudioContext || window.webkitAudioContext)();
-          const buf = ctx.createBuffer(1, 1, 22050);
-          const src = ctx.createBufferSource();
-          src.buffer = buf; src.connect(ctx.destination); src.start(0); src.stop(0);
-          if (ctx.state === 'suspended') ctx.resume();
-        } catch(e) {}
+        try { const ctx = new (window.AudioContext||window.webkitAudioContext)(); const b=ctx.createBuffer(1,1,22050); const s=ctx.createBufferSource(); s.buffer=b; s.connect(ctx.destination); s.start(0); s.stop(0); if(ctx.state==='suspended') ctx.resume(); } catch(e) {}
         window.audioUnlocked = true;
-        ['touchstart','touchend','mousedown','keydown'].forEach(ev => document.removeEventListener(ev, unlockAudio, true));
+        ['touchstart','touchend','mousedown','keydown'].forEach(ev => document.removeEventListener(ev,unlock,true));
       };
-      ['touchstart','touchend','mousedown','keydown'].forEach(ev => document.addEventListener(ev, unlockAudio, true));
+      ['touchstart','touchend','mousedown','keydown'].forEach(ev => document.addEventListener(ev,unlock,true));
     }
 
-    // Loading indicator
     const loadingIndicator = document.createElement('div');
     loadingIndicator.className = 'video-loading-indicator';
 
-    // Progress container
+    // Progress bar
     const progressContainer = document.createElement('div');
     progressContainer.className = 'video-progress-container';
     const progressBar = document.createElement('div');
@@ -511,44 +448,81 @@ function createVideoElements() {
     progressFill.appendChild(scrubberHandle);
     progressBar.appendChild(progressFill);
     const durationText = document.createElement('div');
-    durationText.className = 'video-duration';
-    durationText.textContent = '0:00';
-    progressContainer.appendChild(progressBar);
-    progressContainer.appendChild(durationText);
+    durationText.className = 'video-duration'; durationText.textContent = '0:00';
+    progressContainer.appendChild(progressBar); progressContainer.appendChild(durationText);
 
     // Audio button
     const audioBtn = document.createElement('div');
-    audioBtn.className = 'audio-toggle-button';
-    audioBtn.innerHTML = '🔇';
-    audioBtn.setAttribute('data-muted', 'true');
+    audioBtn.className = 'audio-toggle-button'; audioBtn.innerHTML = '🔇'; audioBtn.setAttribute('data-muted','true');
     audioBtn.addEventListener('click', e => {
       e.preventDefault(); e.stopPropagation();
-      if (video.muted) {
-        unmuteSafely(video);
-        audioBtn.innerHTML = '🔊';
-        audioBtn.setAttribute('data-muted', 'false');
-      } else {
-        video.muted = true; video.volume = 0;
-        audioBtn.innerHTML = '🔇';
-        audioBtn.setAttribute('data-muted', 'true');
-      }
-      const notif = document.createElement('div');
-      notif.className = 'audio-notification';
-      notif.textContent = video.muted ? '🔈 Audio disabled' : '🔊 Audio enabled';
-      wrapper.appendChild(notif);
-      setTimeout(() => { notif.classList.add('fade-out'); setTimeout(() => notif.remove(), 500); }, 2000);
+      if (video.muted) { unmuteSafely(video); audioBtn.innerHTML='🔊'; audioBtn.setAttribute('data-muted','false'); }
+      else { video.muted=true; video.volume=0; audioBtn.innerHTML='🔇'; audioBtn.setAttribute('data-muted','true'); }
+      const n = document.createElement('div'); n.className='audio-notification';
+      n.textContent = video.muted ? '🔈 Audio disabled' : '🔊 Audio enabled';
+      wrapper.appendChild(n);
+      setTimeout(() => { n.classList.add('fade-out'); setTimeout(()=>n.remove(),500); }, 2000);
     });
 
-    // Tap area
+    // Seek flash overlays
+    const leftFlash = document.createElement('div');
+    leftFlash.className = 'seek-flash left'; leftFlash.innerHTML = '<span>◀◀ 10s</span>';
+    const rightFlash = document.createElement('div');
+    rightFlash.className = 'seek-flash right'; rightFlash.innerHTML = '<span>10s ▶▶</span>';
+    let flashTimer = null;
+    function showFlash(el) {
+      el.classList.add('show'); clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => { leftFlash.classList.remove('show'); rightFlash.classList.remove('show'); }, 500);
+    }
+
+    // ─── Scrub helper — always uses fresh getBoundingClientRect ───────────────
+    function scrubTo(clientX) {
+      const rect = progressBar.getBoundingClientRect();
+      const pos = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      if (video.duration) video.currentTime = pos * video.duration;
+      progressFill.style.width = `${pos * 100}%`;
+    }
+
+    // Progress bar — mouse
+    progressBar.addEventListener('mousedown', e => {
+      e.stopPropagation(); e.preventDefault();
+      scrubberHandle.style.display = 'block';
+      progressFill.classList.add('active-scrubbing');
+      scrubTo(e.clientX);
+      const onMove = ev => { ev.preventDefault(); scrubTo(ev.clientX); };
+      const onUp = () => { document.removeEventListener('mousemove',onMove); progressFill.classList.remove('active-scrubbing'); setTimeout(()=>{ if(!progressBar.matches(':hover')) scrubberHandle.style.display=''; },1500); };
+      document.addEventListener('mousemove',onMove);
+      document.addEventListener('mouseup',onUp,{once:true});
+    });
+    progressBar.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); scrubberHandle.style.display='block'; scrubTo(e.clientX); setTimeout(()=>{ if(!progressBar.matches(':hover')) scrubberHandle.style.display=''; },1500); });
+    progressBar.addEventListener('mouseenter', () => { scrubberHandle.style.display='block'; });
+    progressBar.addEventListener('mouseleave', () => { if(!progressFill.classList.contains('active-scrubbing')) scrubberHandle.style.display=''; });
+
+    // Progress bar — touch (fresh rect on every touchstart fixes offset bug)
+    progressBar.addEventListener('touchstart', e => {
+      e.stopPropagation(); e.preventDefault();
+      if (document.activeElement) document.activeElement.blur();
+      progressFill.classList.add('active-scrubbing');
+      scrubberHandle.style.display = 'block';
+      document.body.classList.add('scrubbing-active');
+      scrubTo(e.touches[0].clientX);
+      const onMove = ev => { ev.preventDefault(); ev.stopPropagation(); scrubTo(ev.touches[0].clientX); };
+      const onEnd = () => { document.removeEventListener('touchmove',onMove); progressFill.classList.remove('active-scrubbing'); document.body.classList.remove('scrubbing-active'); setTimeout(()=>{ scrubberHandle.style.display=''; },1500); };
+      document.addEventListener('touchmove',onMove,{passive:false});
+      document.addEventListener('touchend',onEnd,{once:true});
+    },{passive:false});
+
+    // ─── Tap area ─────────────────────────────────────────────────────────────
     const tapArea = document.createElement('div');
     tapArea.className = 'tap-area';
 
-    let startX = 0, startTime = 0, isDragging = false;
+    let startX=0, startTime=0, isDragging=false;
+    let lastTapTime=0, lastTapX=0;
 
     tapArea.addEventListener('touchstart', e => {
-      if (e.target.closest('.video-progress-container') || e.target.tagName === 'BUTTON') return;
+      if (e.target.closest('.video-progress-container') || e.target.tagName==='BUTTON') return;
       startX = e.touches[0].clientX; startTime = video.currentTime; isDragging = false;
-    }, { passive: true });
+    },{passive:true});
 
     tapArea.addEventListener('touchmove', e => {
       if (e.target.closest('.video-progress-container')) return;
@@ -556,162 +530,95 @@ function createVideoElements() {
       if (Math.abs(dx) > 40) {
         isDragging = true;
         progressContainer.style.opacity = '1';
-        const timeChange = (dx / 250) * video.duration;
-        const newTime = Math.max(0, Math.min(video.duration, startTime + timeChange));
+        const timeChange = (dx/250)*video.duration;
+        const newTime = Math.max(0, Math.min(video.duration, startTime+timeChange));
         wrapper.dataset.pendingTime = newTime;
         if (video.duration && !isNaN(newTime)) {
-          let previewFill = wrapper.querySelector('.preview-fill');
-          if (!previewFill) { previewFill = document.createElement('div'); previewFill.className = 'preview-fill'; progressBar.appendChild(previewFill); }
-          previewFill.style.width = `${(newTime / video.duration) * 100}%`;
+          let pf = wrapper.querySelector('.preview-fill');
+          if (!pf) { pf=document.createElement('div'); pf.className='preview-fill'; progressBar.appendChild(pf); }
+          pf.style.width = `${(newTime/video.duration)*100}%`;
           scrubberHandle.style.display = 'block';
         }
         let ti = wrapper.querySelector('.time-indicator');
-        if (!ti) { ti = document.createElement('div'); ti.className = 'time-indicator'; wrapper.appendChild(ti); }
-        ti.style.opacity = '1'; ti.style.display = 'flex';
-        ti.textContent = `${dx > 0 ? '▶️' : '◀️'} ${formatTime(newTime)} / ${formatTime(video.duration)}`;
+        if (!ti) { ti=document.createElement('div'); ti.className='time-indicator'; wrapper.appendChild(ti); }
+        ti.style.opacity='1'; ti.style.display='flex';
+        ti.textContent = `${dx>0?'▶️':'◀️'} ${formatTime(newTime)} / ${formatTime(video.duration)}`;
         e.preventDefault();
       }
-    }, { passive: false });
+    },{passive:false});
 
     tapArea.addEventListener('touchend', e => {
       if (isDragging) {
         isDragging = false;
         const pt = parseFloat(wrapper.dataset.pendingTime);
-        if (!isNaN(pt) && pt >= 0) {
-          video.currentTime = pt;
-          if (video.duration) progressFill.style.width = `${(pt / video.duration) * 100}%`;
-          delete wrapper.dataset.pendingTime;
-        }
-        const pf = wrapper.querySelector('.preview-fill'); if (pf) pf.remove();
-        const ti = wrapper.querySelector('.time-indicator');
-        if (ti) { ti.classList.add('fade-out'); setTimeout(() => { ti.style.display = 'none'; }, 1000); }
-        setTimeout(() => { scrubberHandle.style.display = ''; }, 1500);
+        if (!isNaN(pt) && pt>=0) { video.currentTime=pt; if(video.duration) progressFill.style.width=`${(pt/video.duration)*100}%`; delete wrapper.dataset.pendingTime; }
+        const pf=wrapper.querySelector('.preview-fill'); if(pf) pf.remove();
+        const ti=wrapper.querySelector('.time-indicator'); if(ti){ti.classList.add('fade-out');setTimeout(()=>{ti.style.display='none';},1000);}
+        setTimeout(()=>{scrubberHandle.style.display='';},1500);
         e.preventDefault(); return;
       }
-      if (e.target.closest('.video-progress-container') || e.target.tagName === 'BUTTON') { e.stopPropagation(); return; }
+      if (e.target.closest('.video-progress-container') || e.target.tagName==='BUTTON') { e.stopPropagation(); return; }
       e.preventDefault(); e.stopPropagation();
-      const timeSinceScroll = Date.now() - (window.lastScrollTime || 0);
+
+      const now = Date.now();
+      const tapX = e.changedTouches[0].clientX;
+      const isDoubleTap = (now - lastTapTime) < 300 && Math.abs(tapX - lastTapX) < 80;
+
+      if (isDoubleTap) {
+        // Double tap: left 40% = -10s, right 40% = +10s
+        if (tapX < wrapper.offsetWidth * 0.4) {
+          video.currentTime = Math.max(0, video.currentTime - 10);
+          showFlash(leftFlash);
+        } else if (tapX > wrapper.offsetWidth * 0.6) {
+          video.currentTime = Math.min(video.duration || 0, video.currentTime + 10);
+          showFlash(rightFlash);
+        }
+        lastTapTime = 0; // reset so triple tap doesn't chain
+        return;
+      }
+
+      lastTapTime = now; lastTapX = tapX;
+
+      const timeSinceScroll = now - (window.lastScrollTime || 0);
       if (timeSinceScroll > 300 && wrapper.getAttribute('data-playable') === 'true') {
-        if (video.paused) video.play().catch(() => {});
+        if (video.paused) video.play().catch(()=>{});
         else video.pause();
       }
-    }, { passive: false });
+    },{passive:false});
 
     tapArea.addEventListener('click', e => {
-      if (e.target.closest('.video-progress-container') || e.target.tagName === 'BUTTON') { e.stopPropagation(); return; }
-      const timeSinceScroll = Date.now() - (window.lastScrollTime || 0);
-      if (timeSinceScroll > 300 && wrapper.getAttribute('data-playable') === 'true') {
-        if (video.paused) video.play();
-        else video.pause();
+      if (e.target.closest('.video-progress-container') || e.target.tagName==='BUTTON') { e.stopPropagation(); return; }
+      if (Date.now() - (window.lastScrollTime||0) > 300 && wrapper.getAttribute('data-playable')==='true') {
+        if (video.paused) video.play(); else video.pause();
       }
     });
-
-    // Progress bar scrubbing
-    const scrub = (clientX) => {
-      const rect = progressBar.getBoundingClientRect();
-      const pos = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-      if (video.duration) video.currentTime = pos * video.duration;
-      progressFill.style.width = `${pos * 100}%`;
-    };
-
-    progressBar.addEventListener('mousedown', e => {
-      e.stopPropagation(); e.preventDefault();
-      scrubberHandle.style.display = 'block';
-      progressFill.classList.add('active-scrubbing');
-      scrub(e.clientX);
-      const onMove = ev => { ev.preventDefault(); scrub(ev.clientX); };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-        progressFill.classList.remove('active-scrubbing');
-        setTimeout(() => { if (!progressBar.matches(':hover')) scrubberHandle.style.display = ''; }, 1500);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp, { once: true });
-    });
-
-    progressBar.addEventListener('click', e => {
-      e.stopPropagation(); e.preventDefault();
-      scrubberHandle.style.display = 'block';
-      scrub(e.clientX);
-      setTimeout(() => { if (!progressBar.matches(':hover')) scrubberHandle.style.display = ''; }, 1500);
-    });
-
-    progressBar.addEventListener('mouseenter', () => { scrubberHandle.style.display = 'block'; });
-    progressBar.addEventListener('mouseleave', () => { if (!progressFill.classList.contains('active-scrubbing')) scrubberHandle.style.display = ''; });
-
-    progressBar.addEventListener('touchstart', e => {
-      e.stopPropagation(); e.preventDefault();
-      document.activeElement && document.activeElement.blur();
-      progressFill.classList.add('active-scrubbing');
-      scrubberHandle.style.display = 'block';
-      document.body.classList.add('scrubbing-active');
-      scrub(e.touches[0].clientX);
-      const onMove = ev => { ev.preventDefault(); ev.stopPropagation(); scrub(ev.touches[0].clientX); };
-      const onEnd = () => {
-        document.removeEventListener('touchmove', onMove);
-        progressFill.classList.remove('active-scrubbing');
-        document.body.classList.remove('scrubbing-active');
-        setTimeout(() => { scrubberHandle.style.display = ''; }, 1500);
-      };
-      document.addEventListener('touchmove', onMove, { passive: false });
-      document.addEventListener('touchend', onEnd, { once: true });
-    }, { passive: false });
 
     // Video events
-    video.addEventListener('loadeddata', () => { video.pause(); }, { once: true });
-
+    video.addEventListener('loadeddata', () => { video.pause(); },{once:true});
     video.addEventListener('play', () => {
-      document.querySelectorAll('.video-player').forEach(v => {
-        if (v !== video && !v.paused) {
-          v.pause();
-          const ow = v.closest('.video-wrapper');
-          if (ow) ow.classList.remove('video-playing');
-        }
-      });
-      wrapper.classList.add('video-playing');
-      window.currentlyPlayingVideo = video;
-      setTimeout(() => {
-        if (video.muted) { video.muted = false; video.volume = 1.0; }
-      }, 100);
+      document.querySelectorAll('.video-player').forEach(v => { if(v!==video&&!v.paused){v.pause();const ow=v.closest('.video-wrapper');if(ow)ow.classList.remove('video-playing');} });
+      wrapper.classList.add('video-playing'); window.currentlyPlayingVideo = video;
+      setTimeout(()=>{ if(video.muted){video.muted=false;video.volume=1.0;} },100);
     });
-
-    video.addEventListener('pause', () => {
-      wrapper.classList.remove('video-playing');
-      if (window.currentlyPlayingVideo === video) window.currentlyPlayingVideo = null;
-      loadingIndicator.style.display = 'none';
-    });
-
-    video.addEventListener('waiting', () => { loadingIndicator.style.display = 'flex'; });
-    video.addEventListener('canplay', () => { loadingIndicator.style.display = 'none'; });
-    video.addEventListener('playing', () => {
-      loadingIndicator.style.display = 'none';
-      if (video.muted) { video.muted = false; video.volume = 1.0; audioBtn.innerHTML = '🔊'; audioBtn.setAttribute('data-muted','false'); }
-    });
-
-    video.addEventListener('timeupdate', () => {
-      if (video.duration) {
-        progressFill.style.width = `${(video.currentTime / video.duration) * 100}%`;
-      }
-    });
-
-    video.addEventListener('loadedmetadata', () => {
-      durationText.textContent = formatTime(video.duration);
-      videoMetadata[index] = { ...videoMetadata[index], duration: video.duration || 0 };
-    });
-
-    video.addEventListener('error', () => { loadingIndicator.style.display = 'flex'; });
+    video.addEventListener('pause', () => { wrapper.classList.remove('video-playing'); if(window.currentlyPlayingVideo===video) window.currentlyPlayingVideo=null; loadingIndicator.style.display='none'; });
+    video.addEventListener('waiting', () => { loadingIndicator.style.display='flex'; });
+    video.addEventListener('canplay', () => { loadingIndicator.style.display='none'; });
+    video.addEventListener('playing', () => { loadingIndicator.style.display='none'; if(video.muted){video.muted=false;video.volume=1.0;audioBtn.innerHTML='🔊';audioBtn.setAttribute('data-muted','false');} });
+    video.addEventListener('timeupdate', () => { if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`; });
+    video.addEventListener('loadedmetadata', () => { durationText.textContent=formatTime(video.duration); videoMetadata[index]={...videoMetadata[index],duration:video.duration||0}; });
+    video.addEventListener('error', () => { loadingIndicator.style.display='flex'; });
 
     wrapper.appendChild(video);
     wrapper.appendChild(loadingIndicator);
     wrapper.appendChild(progressContainer);
     wrapper.appendChild(audioBtn);
+    wrapper.appendChild(leftFlash);
+    wrapper.appendChild(rightFlash);
     wrapper.appendChild(tapArea);
     videoContainer.appendChild(wrapper);
 
-    if (index < videoUrls.length - 1) {
-      const spacer = document.createElement('div');
-      spacer.className = 'blank-space';
-      videoContainer.appendChild(spacer);
+    if (index < videoUrls.length-1) {
+      const spacer = document.createElement('div'); spacer.className='blank-space'; videoContainer.appendChild(spacer);
     }
   });
 
@@ -724,228 +631,151 @@ function setupVisibilityObserver() {
   const wrappers = document.querySelectorAll('.video-wrapper');
   if (!wrappers.length) return;
   let counter = document.getElementById('video-counter');
-  if (!counter) {
-    counter = document.createElement('div');
-    counter.id = 'video-counter';
-    counter.className = 'video-counter';
-    document.body.appendChild(counter);
-  }
+  if (!counter) { counter=document.createElement('div'); counter.id='video-counter'; counter.className='video-counter'; document.body.appendChild(counter); }
   counter.textContent = `1/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
-
   const observer = new IntersectionObserver(entries => {
-    let mostVisible = null, highestVis = 0;
+    let mostVisible=null, highestVis=0;
     entries.forEach(entry => {
-      const v = entry.target.querySelector('video');
-      if (v && !entry.isIntersecting && entry.intersectionRatio < 0.3 && !v.paused) {
-        v.pause(); entry.target.classList.remove('video-playing');
-      }
-      if (entry.isIntersecting && entry.intersectionRatio > highestVis) {
-        highestVis = entry.intersectionRatio; mostVisible = entry.target;
-      }
+      const v=entry.target.querySelector('video');
+      if(v&&!entry.isIntersecting&&entry.intersectionRatio<0.3&&!v.paused){v.pause();entry.target.classList.remove('video-playing');}
+      if(entry.isIntersecting&&entry.intersectionRatio>highestVis){highestVis=entry.intersectionRatio;mostVisible=entry.target;}
     });
-    if (mostVisible && highestVis > 0.7) {
-      wrappers.forEach(w => { w.classList.remove('most-visible'); w.setAttribute('data-playable','false'); });
-      mostVisible.classList.add('most-visible');
-      mostVisible.setAttribute('data-playable','true');
-      currentVideoIndex = parseInt(mostVisible.dataset.index || 0);
-      counter.textContent = `${currentVideoIndex + 1}/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
+    if (mostVisible&&highestVis>0.7) {
+      wrappers.forEach(w=>{w.classList.remove('most-visible');w.setAttribute('data-playable','false');});
+      mostVisible.classList.add('most-visible'); mostVisible.setAttribute('data-playable','true');
+      currentVideoIndex=parseInt(mostVisible.dataset.index||0);
+      counter.textContent=`${currentVideoIndex+1}/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
     }
-  }, { root: null, rootMargin: '0px', threshold: [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9] });
-
-  wrappers.forEach(w => observer.observe(w));
+  },{root:null,rootMargin:'0px',threshold:[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]});
+  wrappers.forEach(w=>observer.observe(w));
 }
 
-// ─── Batch loading ────────────────────────────────────────────────────────────
+// ─── Batching ─────────────────────────────────────────────────────────────────
 function loadNextBatch() {
-  videoUrls = []; videoMetadata = [];
-  const start = currentBatch * BATCH_SIZE;
-  const end = Math.min(start + BATCH_SIZE, allVideoUrls.length);
-  for (let i = start; i < end; i++) videoUrls.push(allVideoUrls[i]);
+  videoUrls=[]; videoMetadata=[];
+  const start=currentBatch*BATCH_SIZE, end=Math.min(start+BATCH_SIZE,allVideoUrls.length);
+  for(let i=start;i<end;i++) videoUrls.push(allVideoUrls[i]);
   currentBatch++;
-  if (videoUrls.length > 0) {
-    videoContainer.innerHTML = '<div class="loading-message">Loading videos...</div>';
-    setTimeout(() => {
-      createVideoElements();
-      updateNextBatchButton();
-      createUnwatchedVideosButton();
-      videoContainer.scrollTo(0, 0);
-    }, 300);
+  if (videoUrls.length>0) {
+    videoContainer.innerHTML='<div class="loading-message">Loading videos...</div>';
+    setTimeout(()=>{createVideoElements();updateNextBatchButton();createUnwatchedVideosButton();videoContainer.scrollTo(0,0);},300);
   } else {
-    videoContainer.innerHTML = '<div class="loading-message">No more videos</div>';
-    removeNextBatchButton();
+    videoContainer.innerHTML='<div class="loading-message">No more videos</div>'; removeNextBatchButton();
   }
 }
 
 function updateNextBatchButton() {
-  let btn = document.getElementById('next-batch-button');
-  if (currentBatch * BATCH_SIZE >= allVideoUrls.length) { if (btn) btn.remove(); return; }
-  if (!btn) {
-    btn = document.createElement('div');
-    btn.id = 'next-batch-button';
-    btn.className = 'next-batch-button';
-    btn.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); loadNextBatch(); });
-    document.body.appendChild(btn);
-  }
-  const remaining = Math.min(BATCH_SIZE, allVideoUrls.length - currentBatch * BATCH_SIZE);
-  btn.innerHTML = '▶️';
-  const c = document.createElement('span');
-  c.className = 'batch-counter'; c.textContent = remaining;
-  btn.appendChild(c);
+  let btn=document.getElementById('next-batch-button');
+  if(currentBatch*BATCH_SIZE>=allVideoUrls.length){if(btn)btn.remove();return;}
+  if(!btn){btn=document.createElement('div');btn.id='next-batch-button';btn.className='next-batch-button';btn.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();loadNextBatch();});document.body.appendChild(btn);}
+  const rem=Math.min(BATCH_SIZE,allVideoUrls.length-currentBatch*BATCH_SIZE);
+  btn.innerHTML='▶️'; const c=document.createElement('span'); c.className='batch-counter'; c.textContent=rem; btn.appendChild(c);
 }
-
-function removeNextBatchButton() {
-  const btn = document.getElementById('next-batch-button'); if (btn) btn.remove();
-}
+function removeNextBatchButton(){const b=document.getElementById('next-batch-button');if(b)b.remove();}
 
 function createUnwatchedVideosButton() {
-  const existing = document.getElementById('unwatched-videos-button'); if (existing) existing.remove();
-  if (!videoUrls.length) return;
-  const btn = document.createElement('div');
-  btn.id = 'unwatched-videos-button'; btn.className = 'unwatched-videos-button'; btn.innerHTML = '👁️';
-  btn.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); reloadUnwatchedVideos(); });
+  const ex=document.getElementById('unwatched-videos-button');if(ex)ex.remove();
+  if(!videoUrls.length)return;
+  const btn=document.createElement('div');btn.id='unwatched-videos-button';btn.className='unwatched-videos-button';btn.innerHTML='👁️';
+  btn.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();reloadUnwatchedVideos();});
   document.body.appendChild(btn);
 }
 
-function reloadUnwatchedVideos() {
-  if (!videoUrls.length) return;
-  if (window.currentlyPlayingVideo && !window.currentlyPlayingVideo.paused) window.currentlyPlayingVideo.pause();
-  const wrappers = document.querySelectorAll('.video-wrapper');
-  const unplayed = [];
-  wrappers.forEach((w, i) => {
-    const v = w.querySelector('video');
-    if (!v) return;
-    if (v.currentTime === 0 || v.error) unplayed.push(videoUrls[i]);
-  });
-  if (!unplayed.length) { showSortingIndicator('All videos played'); return; }
-  videoUrls = unplayed; videoMetadata = Array(videoUrls.length).fill(null).map(() => ({}));
+function reloadUnwatchedVideos(){
+  if(!videoUrls.length)return;
+  if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
+  const wrappers=document.querySelectorAll('.video-wrapper');const unplayed=[];
+  wrappers.forEach((w,i)=>{const v=w.querySelector('video');if(!v)return;if(v.currentTime===0||v.error)unplayed.push(videoUrls[i]);});
+  if(!unplayed.length){showSortingIndicator('All videos played');return;}
+  videoUrls=unplayed;videoMetadata=Array(videoUrls.length).fill(null).map(()=>({}));
   showSortingIndicator(`Reloading ${unplayed.length} unplayed videos`);
-  videoContainer.innerHTML = '<div class="loading-message">Loading...</div>';
-  setTimeout(() => { createVideoElements(); videoContainer.scrollTo(0, 0); }, 300);
+  videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
+  setTimeout(()=>{createVideoElements();videoContainer.scrollTo(0,0);},300);
 }
 
 // ─── Paste navigation ─────────────────────────────────────────────────────────
-function navigateToNextPasteEvent() {
-  if (!pasteEvents.length || !allVideoUrls.length) return;
-  currentPasteIndex = (currentPasteIndex + 1) % pasteEvents.length;
-  const target = pasteEvents[currentPasteIndex];
-  const targetBatch = Math.floor(target.startIndex / BATCH_SIZE);
-  const currentLoaded = currentBatch - 1;
-  if (targetBatch !== currentLoaded) {
-    currentBatch = targetBatch;
-    const start = currentBatch * BATCH_SIZE, end = Math.min(start + BATCH_SIZE, allVideoUrls.length);
-    videoUrls = []; videoMetadata = [];
-    for (let i = start; i < end; i++) videoUrls.push(allVideoUrls[i]);
+function navigateToNextPasteEvent(){
+  if(!pasteEvents.length||!allVideoUrls.length){showSortingIndicator('No paste bundles yet');return;}
+  currentPasteIndex=(currentPasteIndex+1)%pasteEvents.length;
+  const target=pasteEvents[currentPasteIndex];
+  const targetBatch=Math.floor(target.startIndex/BATCH_SIZE);
+  const currentLoaded=currentBatch-1;
+  if(targetBatch!==currentLoaded){
+    currentBatch=targetBatch;
+    const start=currentBatch*BATCH_SIZE,end=Math.min(start+BATCH_SIZE,allVideoUrls.length);
+    videoUrls=[];videoMetadata=[];
+    for(let i=start;i<end;i++)videoUrls.push(allVideoUrls[i]);
     currentBatch++;
-    videoContainer.innerHTML = '<div class="loading-message">Loading...</div>';
-    setTimeout(() => {
-      createVideoElements(); updateNextBatchButton(); createUnwatchedVideosButton(); updatePasteNavigationButton();
-      const idx = target.startIndex % BATCH_SIZE;
-      const tw = document.querySelector(`.video-wrapper[data-index="${idx}"]`);
-      if (tw) setTimeout(() => tw.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
-    }, 300);
+    videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
+    setTimeout(()=>{
+      createVideoElements();updateNextBatchButton();createUnwatchedVideosButton();updatePasteNavigationButton();
+      const idx=target.startIndex%BATCH_SIZE;
+      const tw=document.querySelector(`.video-wrapper[data-index="${idx}"]`);
+      if(tw)setTimeout(()=>tw.scrollIntoView({behavior:'smooth',block:'start'}),100);
+    },300);
   } else {
-    const idx = target.startIndex % BATCH_SIZE;
-    const tw = document.querySelector(`.video-wrapper[data-index="${idx}"]`);
-    if (tw) tw.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const idx=target.startIndex%BATCH_SIZE;
+    const tw=document.querySelector(`.video-wrapper[data-index="${idx}"]`);
+    if(tw)tw.scrollIntoView({behavior:'smooth',block:'start'});
   }
   updatePasteNavigationButton();
 }
 
-function resetPasteEvents() { pasteEvents = []; currentPasteIndex = -1; updatePasteNavigationButton(); }
+function resetPasteEvents(){pasteEvents=[];currentPasteIndex=-1;updatePasteNavigationButton();}
 
-function updatePasteNavigationButton() {
-  let btn = document.getElementById('paste-nav-button');
-  if (!btn) {
-    btn = document.createElement('div');
-    btn.id = 'paste-nav-button'; btn.className = 'paste-nav-button control-button'; btn.innerHTML = '📎';
-    btn.addEventListener('click', e => {
-      e.preventDefault(); e.stopPropagation();
-      if (pasteEvents.length) navigateToNextPasteEvent();
-      else showSortingIndicator('No paste events yet');
-    });
+function updatePasteNavigationButton(){
+  let btn=document.getElementById('paste-nav-button');
+  if(!btn){
+    btn=document.createElement('div');btn.id='paste-nav-button';btn.className='paste-nav-button control-button';btn.innerHTML='📎';
+    btn.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();navigateToNextPasteEvent();});
     document.body.appendChild(btn);
   }
-  if (!pasteEvents.length) {
-    btn.setAttribute('data-count','0/0'); btn.style.opacity = '0.2';
-    btn.style.background = '';
-  } else {
-    const next = (currentPasteIndex + 1) % pasteEvents.length;
-    btn.setAttribute('data-count', `${next + 1}/${pasteEvents.length}`);
-    btn.style.opacity = '0.7';
-    btn.style.background = 'rgba(0,150,255,0.7)';
-  }
+  if(!pasteEvents.length){btn.setAttribute('data-count','0/0');btn.style.opacity='0.2';btn.style.background='';}
+  else{const next=(currentPasteIndex+1)%pasteEvents.length;btn.setAttribute('data-count',`${next+1}/${pasteEvents.length}`);btn.style.opacity='0.7';btn.style.background='rgba(0,150,255,0.7)';}
 }
 
 // ─── Control buttons ──────────────────────────────────────────────────────────
-function createGearButton() {
-  document.querySelectorAll('.control-button').forEach(b => b.remove());
-
-  const makeBtn = (cls, icon, label, fn) => {
-    const b = document.createElement('div');
-    b.className = `control-button ${cls}`; b.innerHTML = icon; b.setAttribute('aria-label', label);
-    b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); fn(); });
-    document.body.appendChild(b);
-  };
-
-  makeBtn('refresh-button', '🔄', 'Refresh', () => { resetPasteEvents(); if (videoUrlsInput) videoUrlsInput.value = ''; window.location.reload(); });
-  makeBtn('duration-sort-button', '⏱️', 'Sort by duration', sortVideosByDuration);
-  makeBtn('random-sort-button', '🎲', 'Randomize', sortVideosRandomly);
-  makeBtn('show-controls-button', '⚙️', 'Toggle controls', toggleControls);
+function createGearButton(){
+  document.querySelectorAll('.control-button').forEach(b=>b.remove());
+  const mk=(cls,icon,label,fn)=>{const b=document.createElement('div');b.className=`control-button ${cls}`;b.innerHTML=icon;b.setAttribute('aria-label',label);b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();fn();});document.body.appendChild(b);};
+  mk('refresh-button','🔄','Refresh',()=>{resetPasteEvents();if(videoUrlsInput)videoUrlsInput.value='';window.location.reload();});
+  mk('duration-sort-button','⏱️','Sort by duration',sortVideosByDuration);
+  mk('random-sort-button','🎲','Randomize',sortVideosRandomly);
+  mk('show-controls-button','⚙️','Toggle controls',toggleControls);
 }
 
 // ─── Load videos ──────────────────────────────────────────────────────────────
-loadVideosButton.addEventListener('click', () => {
-  const newUrls = parseVideoUrls(videoUrlsInput.value);
-  if (!newUrls.length) { alert('No valid MP4 URLs found. Paste one URL per line.'); return; }
-  document.querySelectorAll('video').forEach(v => v.pause());
-  allVideoUrls = newUrls; currentBatch = 0; loadNextBatch();
-  videoUrlsInput.value = '';
-  setTimeout(hideControls, 1000);
+loadVideosButton.addEventListener('click',()=>{
+  const newUrls=parseVideoUrls(videoUrlsInput.value);
+  if(!newUrls.length){alert('No valid MP4 URLs found.');return;}
+  document.querySelectorAll('video').forEach(v=>v.pause());
+  allVideoUrls=newUrls;currentBatch=0;
+  pasteEvents=[];currentPasteIndex=-1;urlCountBeforePaste=0;
+  updatePasteNavigationButton();
+  loadNextBatch();
+  videoUrlsInput.value='';
+  setTimeout(hideControls,1000);
 });
 
-// ─── Auth helper ──────────────────────────────────────────────────────────────
-document.getElementById('auth-button').addEventListener('click', () => {
-  const overlay = document.getElementById('auth-helper');
-  const container = document.getElementById('auth-iframe-container');
-  overlay.style.display = 'block';
-  container.innerHTML = '';
-  const ifr = document.createElement('iframe');
-  ifr.src = 'https://coomer.su/';
-  ifr.style.width = '100%'; ifr.style.height = '100%';
-  container.appendChild(ifr);
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+document.getElementById('auth-button').addEventListener('click',()=>{
+  const ov=document.getElementById('auth-helper'),ct=document.getElementById('auth-iframe-container');
+  ov.style.display='block';ct.innerHTML='';
+  const ifr=document.createElement('iframe');ifr.src='https://coomer.su/';ifr.style.width='100%';ifr.style.height='100%';ct.appendChild(ifr);
 });
-
-document.getElementById('auth-close').addEventListener('click', () => {
-  document.getElementById('auth-helper').style.display = 'none';
-  document.querySelectorAll('video').forEach(v => {
-    if (v.error && v.src.includes('coomer.su')) {
-      const s = v.src; v.src = ''; setTimeout(() => { v.src = s; }, 100);
-    }
-  });
+document.getElementById('auth-close').addEventListener('click',()=>{
+  document.getElementById('auth-helper').style.display='none';
+  document.querySelectorAll('video').forEach(v=>{if(v.error&&v.src.includes('coomer.su')){const s=v.src;v.src='';setTimeout(()=>{v.src=s;},100);}});
 });
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  createGearButton();
-  createUnwatchedVideosButton();
-  updatePasteNavigationButton();
-  setupMobileAudioUnlock();
-
-  // Double tap outside video = toggle controls
-  let lastTap = 0;
-  document.addEventListener('click', e => {
-    if (e.target.closest('.video-wrapper')) return;
-    const now = Date.now();
-    if (now - lastTap < 300 && now - lastTap > 0) toggleControls();
-    lastTap = now;
-  });
-
-  window.addEventListener('scroll', () => { window.lastScrollTime = Date.now(); });
+document.addEventListener('DOMContentLoaded',()=>{
+  createGearButton();createUnwatchedVideosButton();updatePasteNavigationButton();setupMobileAudioUnlock();
+  let lastTap=0;
+  document.addEventListener('click',e=>{if(e.target.closest('.video-wrapper'))return;const now=Date.now();if(now-lastTap<300&&now-lastTap>0)toggleControls();lastTap=now;});
+  window.addEventListener('scroll',()=>{window.lastScrollTime=Date.now();});
 });
-
-window.addEventListener('blur', () => {
-  if (window.currentlyPlayingVideo && !window.currentlyPlayingVideo.paused) window.currentlyPlayingVideo.pause();
-});
+window.addEventListener('blur',()=>{if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();});
 </script>
 </body>
 </html>
