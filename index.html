@@ -9,11 +9,11 @@
   <style>
     html, body {
       height: 100%; width: 100%; margin: 0; padding: 0;
-      background: #000; color: white; font-family: Arial, sans-serif;
+      background: #000 !important; color: white; font-family: Arial, sans-serif;
       overflow: hidden; touch-action: pan-y;
       -webkit-overflow-scrolling: touch;
     }
-    #video-container {
+    #video-container { background: #000;
       width: 100%; height: 100%; position: fixed; top: 0; left: 0;
       scroll-snap-type: y mandatory; overflow-y: scroll;
       scroll-behavior: smooth; -webkit-overflow-scrolling: touch;
@@ -32,7 +32,7 @@
     .video-player {
       width: 100%; height: 100%; object-fit: contain; background: #000;
       outline: none; transform: translateZ(0); backface-visibility: hidden;
-      will-change: transform; pointer-events: auto !important;
+      will-change: transform; pointer-events: auto !important; -webkit-appearance: none; appearance: none;
       cursor: pointer !important; touch-action: manipulation !important;
     }
     .tap-area {
@@ -257,10 +257,10 @@
       padding: 10px 20px; border-radius: 20px; margin-top: 10px; cursor: pointer;
     }
     body.scrubbing-active { overflow: hidden; touch-action: none; }
-    .controls-hidden .video-progress-container { opacity: 0; pointer-events: none; }
+    /* progress bar always visible */
     @supports (-moz-appearance:none) {
       .video-wrapper video { height: 100vh; }
-      #video-container { overscroll-behavior: contain; }
+      #video-container { background: #000; overscroll-behavior: contain; }
     }
   </style>
 </head>
@@ -299,10 +299,13 @@ let currentBatch = 0;
 const BATCH_SIZE = 20;
 
 // ─── Paste tracking ───────────────────────────────────────────────────────────
-// Simple and reliable: capture count before paste, measure added after 100ms
-let pasteEvents = [];
+// Strategy: count URLs in textarea before and after each paste.
+// Store {startIndex, count} for each paste bundle.
+// On Load Videos, these indices map directly to allVideoUrls positions.
+let pasteEvents = [];       // finalised after Load Videos
 let currentPasteIndex = -1;
-let urlCountBeforePaste = 0;
+let pendingPastes = [];     // recorded during textarea editing
+let _prevUrlCount = 0;      // url count before last paste
 
 const videoContainer = document.getElementById('video-container');
 const videoUrlsInput  = document.getElementById('video-urls');
@@ -310,21 +313,61 @@ const loadVideosButton = document.getElementById('load-videos');
 
 function parseVideoUrls(text) {
   return text.split('\n').map(u => u.trim())
-    .filter(u => u && (u.toLowerCase().endsWith('.mp4') || u.toLowerCase().endsWith('.m4v')));
+    .filter(u => u && u.length > 4);
 }
 
-videoUrlsInput.addEventListener('paste', () => {
-  // Snapshot count before paste lands
-  urlCountBeforePaste = parseVideoUrls(videoUrlsInput.value).length;
-  setTimeout(() => {
-    const added = parseVideoUrls(videoUrlsInput.value).length - urlCountBeforePaste;
-    if (added > 0) {
-      pasteEvents.push({ startIndex: urlCountBeforePaste, count: added, timestamp: Date.now() });
-      updatePasteNavigationButton();
-      console.log(`[Paste] Bundle ${pasteEvents.length}: +${added} URLs at index ${urlCountBeforePaste}`);
+// Record url count just before paste text lands
+videoUrlsInput.addEventListener('paste', (e) => {
+  _prevUrlCount = parseVideoUrls(videoUrlsInput.value).length;
+}, true); // capture phase — fires before value changes
+
+// After paste lands, measure what was added
+videoUrlsInput.addEventListener('input', () => {
+  const currentCount = parseVideoUrls(videoUrlsInput.value).length;
+  const added = currentCount - _prevUrlCount;
+  if (added > 0) {
+    pendingPastes.push({ startIndex: _prevUrlCount, count: added });
+    _prevUrlCount = currentCount;
+    // Light up the paperclip immediately
+    const btn = document.getElementById('paste-nav-button');
+    if (btn) {
+      btn.style.opacity = '0.7';
+      btn.style.background = 'rgba(0,150,255,0.7)';
+      btn.setAttribute('data-count', pendingPastes.length + 'p');
     }
-  }, 100);
+    console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + added + ' URLs at index ' + (currentCount - added));
+  }
 });
+
+// ─── Session persistence ──────────────────────────────────────────────────────
+const SESSION_KEY = 'pong_session_v1';
+
+function saveSession() {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      allVideoUrls,
+      currentBatch,
+      currentVideoIndex,
+      pasteEvents
+    }));
+  } catch(e) {}
+}
+
+function loadSession() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+    if (!s || !s.allVideoUrls || !s.allVideoUrls.length) return false;
+    allVideoUrls = s.allVideoUrls;
+    currentBatch = s.currentBatch || 0;
+    currentVideoIndex = s.currentVideoIndex || 0;
+    pasteEvents = s.pasteEvents || [];
+    return true;
+  } catch(e) { return false; }
+}
+
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch(e) {}
+}
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -418,8 +461,8 @@ function createVideoElements() {
     video.className = 'video-player'; video.src = url; video.preload = 'metadata';
     video.playsInline = true; video.controls = false; video.autoplay = false;
     video.muted = true; video.volume = 0;
-    video.setAttribute('playsinline',''); video.setAttribute('webkit-playsinline','');
-    video.style.transform = 'translateZ(0)'; video.style.willChange = 'transform';
+    video.setAttribute('playsinline',''); video.setAttribute('webkit-playsinline',''); video.setAttribute('poster','data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+    video.style.transform = 'translateZ(0)'; video.style.willChange = 'transform'; video.style.background = '#000';
 
     // Audio unlock on first interaction
     if (!window.audioUnlocked) {
@@ -645,20 +688,35 @@ function setupVisibilityObserver() {
       mostVisible.classList.add('most-visible'); mostVisible.setAttribute('data-playable','true');
       currentVideoIndex=parseInt(mostVisible.dataset.index||0);
       counter.textContent=`${currentVideoIndex+1}/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
+      saveSession();
     }
   },{root:null,rootMargin:'0px',threshold:[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]});
   wrappers.forEach(w=>observer.observe(w));
 }
 
 // ─── Batching ─────────────────────────────────────────────────────────────────
-function loadNextBatch() {
+function loadNextBatch(restoreIndex) {
   videoUrls=[]; videoMetadata=[];
   const start=currentBatch*BATCH_SIZE, end=Math.min(start+BATCH_SIZE,allVideoUrls.length);
   for(let i=start;i<end;i++) videoUrls.push(allVideoUrls[i]);
   currentBatch++;
+  saveSession();
   if (videoUrls.length>0) {
     videoContainer.innerHTML='<div class="loading-message">Loading videos...</div>';
-    setTimeout(()=>{createVideoElements();updateNextBatchButton();createUnwatchedVideosButton();videoContainer.scrollTo(0,0);},300);
+    setTimeout(()=>{
+      createVideoElements();
+      updateNextBatchButton();
+      createUnwatchedVideosButton();
+      if (restoreIndex != null) {
+        // Scroll to restored video index
+        setTimeout(() => {
+          const tw = document.querySelector(`.video-wrapper[data-index="${restoreIndex}"]`);
+          if (tw) tw.scrollIntoView({ behavior: 'auto', block: 'start' });
+        }, 200);
+      } else {
+        videoContainer.scrollTo(0,0);
+      }
+    },300);
   } else {
     videoContainer.innerHTML='<div class="loading-message">No more videos</div>'; removeNextBatchButton();
   }
@@ -697,28 +755,38 @@ function reloadUnwatchedVideos(){
 function navigateToNextPasteEvent(){
   if(!pasteEvents.length||!allVideoUrls.length){showSortingIndicator('No paste bundles yet');return;}
   currentPasteIndex=(currentPasteIndex+1)%pasteEvents.length;
+  updatePasteNavigationButton();
+
   const target=pasteEvents[currentPasteIndex];
-  const targetBatch=Math.floor(target.startIndex/BATCH_SIZE);
+  const targetGlobalIndex=target.startIndex;
+  const targetBatch=Math.floor(targetGlobalIndex/BATCH_SIZE);
   const currentLoaded=currentBatch-1;
-  if(targetBatch!==currentLoaded){
-    currentBatch=targetBatch;
-    const start=currentBatch*BATCH_SIZE,end=Math.min(start+BATCH_SIZE,allVideoUrls.length);
-    videoUrls=[];videoMetadata=[];
-    for(let i=start;i<end;i++)videoUrls.push(allVideoUrls[i]);
+
+  const scrollToVideo = () => {
+    const idxInBatch = targetGlobalIndex % BATCH_SIZE;
+    const tw = document.querySelector('.video-wrapper[data-index="' + idxInBatch + '"]');
+    if (tw) tw.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    else videoContainer.scrollTo(0, 0);
+  };
+
+  if(targetBatch !== currentLoaded){
+    videoUrls=[]; videoMetadata=[];
+    currentBatch = targetBatch;
+    const start=currentBatch*BATCH_SIZE, end=Math.min(start+BATCH_SIZE,allVideoUrls.length);
+    for(let i=start;i<end;i++) videoUrls.push(allVideoUrls[i]);
     currentBatch++;
+    saveSession();
     videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
     setTimeout(()=>{
-      createVideoElements();updateNextBatchButton();createUnwatchedVideosButton();updatePasteNavigationButton();
-      const idx=target.startIndex%BATCH_SIZE;
-      const tw=document.querySelector(`.video-wrapper[data-index="${idx}"]`);
-      if(tw)setTimeout(()=>tw.scrollIntoView({behavior:'smooth',block:'start'}),100);
+      createVideoElements();
+      updateNextBatchButton();
+      createUnwatchedVideosButton();
+      updatePasteNavigationButton();
+      setTimeout(scrollToVideo, 150);
     },300);
   } else {
-    const idx=target.startIndex%BATCH_SIZE;
-    const tw=document.querySelector(`.video-wrapper[data-index="${idx}"]`);
-    if(tw)tw.scrollIntoView({behavior:'smooth',block:'start'});
+    scrollToVideo();
   }
-  updatePasteNavigationButton();
 }
 
 function resetPasteEvents(){pasteEvents=[];currentPasteIndex=-1;updatePasteNavigationButton();}
@@ -738,7 +806,7 @@ function updatePasteNavigationButton(){
 function createGearButton(){
   document.querySelectorAll('.control-button').forEach(b=>b.remove());
   const mk=(cls,icon,label,fn)=>{const b=document.createElement('div');b.className=`control-button ${cls}`;b.innerHTML=icon;b.setAttribute('aria-label',label);b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();fn();});document.body.appendChild(b);};
-  mk('refresh-button','🔄','Refresh',()=>{resetPasteEvents();if(videoUrlsInput)videoUrlsInput.value='';window.location.reload();});
+  mk('refresh-button','🔄','Refresh',()=>{resetPasteEvents();clearSession();if(videoUrlsInput)videoUrlsInput.value='';window.location.reload();});
   mk('duration-sort-button','⏱️','Sort by duration',sortVideosByDuration);
   mk('random-sort-button','🎲','Randomize',sortVideosRandomly);
   mk('show-controls-button','⚙️','Toggle controls',toggleControls);
@@ -749,8 +817,22 @@ loadVideosButton.addEventListener('click',()=>{
   const newUrls=parseVideoUrls(videoUrlsInput.value);
   if(!newUrls.length){alert('No valid MP4 URLs found.');return;}
   document.querySelectorAll('video').forEach(v=>v.pause());
-  allVideoUrls=newUrls;currentBatch=0;
-  pasteEvents=[];currentPasteIndex=-1;urlCountBeforePaste=0;
+
+  allVideoUrls = newUrls;
+  currentBatch = 0;
+  currentVideoIndex = 0;
+
+  // Convert pending pastes — textarea indices = allVideoUrls indices (fresh load)
+  if (pendingPastes.length) {
+    pasteEvents = pendingPastes.slice(); // copy as-is, indices already correct
+    pendingPastes = [];
+    currentPasteIndex = -1;
+    console.log('[Load] Finalised ' + pasteEvents.length + ' paste bundles');
+  } else {
+    pasteEvents = []; currentPasteIndex = -1;
+  }
+  _prevUrlCount = 0;
+
   updatePasteNavigationButton();
   loadNextBatch();
   videoUrlsInput.value='';
@@ -771,9 +853,29 @@ document.getElementById('auth-close').addEventListener('click',()=>{
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
   createGearButton();createUnwatchedVideosButton();updatePasteNavigationButton();setupMobileAudioUnlock();
+
+  // Restore previous session if available
+  if (loadSession()) {
+    console.log(`[Session] Restoring ${allVideoUrls.length} videos, batch ${currentBatch}, index ${currentVideoIndex}`);
+    const savedBatch = currentBatch;
+    const savedIndex = currentVideoIndex % BATCH_SIZE;
+    currentBatch = savedBatch; // loadNextBatch will increment from here
+    updatePasteNavigationButton();
+    loadNextBatch(savedIndex);
+  }
+
   let lastTap=0;
   document.addEventListener('click',e=>{if(e.target.closest('.video-wrapper'))return;const now=Date.now();if(now-lastTap<300&&now-lastTap>0)toggleControls();lastTap=now;});
-  window.addEventListener('scroll',()=>{window.lastScrollTime=Date.now();});
+
+  // Save current video index on scroll so we can restore it
+  let scrollSaveTimer = null;
+  videoContainer.addEventListener('scroll', () => {
+    window.lastScrollTime = Date.now();
+    clearTimeout(scrollSaveTimer);
+    scrollSaveTimer = setTimeout(() => {
+      saveSession();
+    }, 500);
+  });
 });
 window.addEventListener('blur',()=>{if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();});
 </script>
