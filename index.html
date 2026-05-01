@@ -16,7 +16,7 @@
     #video-container { background: #000;
       width: 100%; height: 100%; position: fixed; top: 0; left: 0;
       scroll-snap-type: y mandatory; overflow-y: scroll;
-      scroll-behavior: smooth; -webkit-overflow-scrolling: touch;
+      -webkit-overflow-scrolling: touch;
       will-change: scroll-position; overscroll-behavior: contain;
     }
     .video-wrapper {
@@ -260,6 +260,35 @@
     }
     body.scrubbing-active { overflow: hidden; touch-action: none; }
     /* progress bar always visible */
+    /* Pong splash overlay */
+    #pong-overlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: #0a0a1a; z-index: 10000;
+      display: flex; align-items: center; justify-content: center;
+      transition: opacity 0.5s ease;
+    }
+    #pong-overlay.hidden { opacity: 0; pointer-events: none; }
+    #pong-canvas {
+      width: 100%; height: 100%; position: absolute; top: 0; left: 0;
+    }
+#pong-hotspot {
+      position: absolute; top: 0; left: 0;
+      width: 8%; height: 7%;
+      cursor: pointer; z-index: 10001;
+    }
+    /* Scrollbar */
+    #scroll-bar-track {
+      position: fixed; right: 3px; top: 0; bottom: 0;
+      width: 3px; z-index: 500; pointer-events: none;
+    }
+    #scroll-bar-thumb {
+      position: absolute; right: 0; width: 3px;
+      background: rgba(255,255,255,0.35); border-radius: 2px;
+      transition: opacity 0.3s; opacity: 0;
+      min-height: 20px;
+    }
+    #scroll-bar-thumb.visible { opacity: 1; }
+
     @supports (-moz-appearance:none) {
       .video-wrapper video { height: 100vh; }
       #video-container { background: #000; overscroll-behavior: contain; }
@@ -275,6 +304,12 @@
       <div id="auth-iframe-container"></div>
       <div><button id="auth-close">Close Authentication</button></div>
     </div>
+  </div>
+
+  <!-- Pong splash overlay -->
+  <div id="pong-overlay">
+    <canvas id="pong-canvas"></canvas>
+    <div id="pong-hotspot"></div>
   </div>
 
   <div class="version-number">22.22</div>
@@ -678,10 +713,10 @@ function setupVisibilityObserver() {
     let mostVisible=null, highestVis=0;
     entries.forEach(entry => {
       const v=entry.target.querySelector('video');
-      if(v&&!entry.isIntersecting&&entry.intersectionRatio<0.3&&!v.paused){v.pause();entry.target.classList.remove('video-playing');}
+      if(v&&!entry.isIntersecting&&entry.intersectionRatio<0.1&&!v.paused){v.pause();entry.target.classList.remove('video-playing');}
       if(entry.isIntersecting&&entry.intersectionRatio>highestVis){highestVis=entry.intersectionRatio;mostVisible=entry.target;}
     });
-    if (mostVisible&&highestVis>0.7) {
+    if (mostVisible&&highestVis>0.85) {
       wrappers.forEach(w=>{w.classList.remove('most-visible');w.setAttribute('data-playable','false');});
       mostVisible.classList.add('most-visible'); mostVisible.setAttribute('data-playable','true');
       currentVideoIndex=parseInt(mostVisible.dataset.index||0);
@@ -869,6 +904,152 @@ document.getElementById('auth-close').addEventListener('click',()=>{
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
+  // ── Pong splash game ────────────────────────────────────────────────────
+  (function() {
+    const overlay = document.getElementById('pong-overlay');
+    const hotspot = document.getElementById('pong-hotspot');
+    const canvas  = document.getElementById('pong-canvas');
+    if (!overlay || !canvas) return;
+
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+    const ctx = canvas.getContext('2d');
+
+    // Game state
+    const PAD_H = 70, PAD_W = 10, BALL_R = 7;
+    let ly = canvas.height/2 - PAD_H/2;
+    let ry = canvas.height/2 - PAD_H/2;
+    let bx = canvas.width/2, by = canvas.height/2;
+    let vx = 4.5, vy = 3.2;
+    let ls = 0, rs = 0;
+    let running = true;
+
+    function draw() {
+      if (!running) return;
+      ctx.fillStyle = '#0a0a1a';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Centre dashed line
+      ctx.setLineDash([10, 14]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(canvas.width/2, 0);
+      ctx.lineTo(canvas.width/2, canvas.height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Scores
+      ctx.fillStyle = 'rgba(255,255,255,0.2)';
+      ctx.font = 'bold 48px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(ls, canvas.width/2 - 60, 70);
+      ctx.fillText(rs, canvas.width/2 + 60, 70);
+
+      // Paddles
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.beginPath();
+      roundRect(ctx, 18, ly, PAD_W, PAD_H, 4);
+      ctx.fill();
+      ctx.beginPath();
+      roundRect(ctx, canvas.width - 28, ry, PAD_W, PAD_H, 4);
+      ctx.fill();
+
+      // Ball glow
+      ctx.shadowColor = '#fff';
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.arc(bx, by, BALL_R, 0, Math.PI*2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Move ball
+      bx += vx; by += vy;
+
+      // Wall bounce top/bottom
+      if (by - BALL_R < 0)              { by = BALL_R;              vy = Math.abs(vy); }
+      if (by + BALL_R > canvas.height)  { by = canvas.height-BALL_R; vy = -Math.abs(vy); }
+
+      // AI paddles (simple tracking)
+      const speed = 3.2;
+      const lCenter = ly + PAD_H/2;
+      const rCenter = ry + PAD_H/2;
+      if (lCenter < by - 6) ly = Math.min(ly + speed, canvas.height - PAD_H);
+      if (lCenter > by + 6) ly = Math.max(ly - speed, 0);
+      if (rCenter < by - 6) ry = Math.min(ry + speed, canvas.height - PAD_H);
+      if (rCenter > by + 6) ry = Math.max(ry - speed, 0);
+
+      // Paddle collision left
+      if (bx - BALL_R < 28 + PAD_W && by > ly && by < ly + PAD_H && vx < 0) {
+        vx = Math.abs(vx) * 1.04;
+        vy += (by - (ly + PAD_H/2)) * 0.06;
+        bx = 28 + PAD_W + BALL_R;
+      }
+      // Paddle collision right
+      if (bx + BALL_R > canvas.width - 28 && by > ry && by < ry + PAD_H && vx > 0) {
+        vx = -Math.abs(vx) * 1.04;
+        vy += (by - (ry + PAD_H/2)) * 0.06;
+        bx = canvas.width - 28 - BALL_R;
+      }
+      // Speed cap
+      const spd = Math.sqrt(vx*vx+vy*vy);
+      if (spd > 12) { vx = vx/spd*12; vy = vy/spd*12; }
+
+      // Score
+      if (bx < 0)              { rs++; reset(); }
+      if (bx > canvas.width)   { ls++; reset(); }
+
+      requestAnimationFrame(draw);
+    }
+
+    function reset() {
+      bx = canvas.width/2; by = canvas.height/2;
+      vx = (Math.random()>0.5?1:-1) * 4.5;
+      vy = (Math.random()>0.5?1:-1) * 3.2;
+    }
+
+    function roundRect(ctx, x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x+r, y);
+      ctx.lineTo(x+w-r, y);
+      ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+      ctx.lineTo(x+w, y+h-r);
+      ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+      ctx.lineTo(x+r, y+h);
+      ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+      ctx.lineTo(x, y+r);
+      ctx.quadraticCurveTo(x, y, x+r, y);
+      ctx.closePath();
+    }
+
+    draw();
+
+    function dismiss() {
+      running = false;
+      overlay.classList.add('hidden');
+      setTimeout(() => { overlay.style.display = 'none'; }, 600);
+    }
+
+    let tapCount = 0;
+    let tapTimer = null;
+
+    function handleHotspot(e) {
+      e.preventDefault();
+      tapCount++;
+      clearTimeout(tapTimer);
+      if (tapCount >= 3) {
+        tapCount = 0;
+        dismiss();
+      } else {
+        tapTimer = setTimeout(() => { tapCount = 0; }, 2000);
+      }
+    }
+
+    hotspot.addEventListener('click', handleHotspot);
+    hotspot.addEventListener('touchend', handleHotspot);
+  })();
+
   // Load autoplay preference (default ON)
   try { window.autoplayEnabled = localStorage.getItem('pong_autoplay') !== '0'; } catch(_) { window.autoplayEnabled = true; }
   createGearButton();createUnwatchedVideosButton();updatePasteNavigationButton();setupMobileAudioUnlock();
@@ -896,6 +1077,43 @@ document.addEventListener('DOMContentLoaded',()=>{
     }, 500);
   });
 });
+// ─── Scroll bar ──────────────────────────────────────────────────────────────
+(function() {
+  const track = document.createElement('div');
+  track.id = 'scroll-bar-track';
+  const thumb = document.createElement('div');
+  thumb.id = 'scroll-bar-thumb';
+  track.appendChild(thumb);
+  document.body.appendChild(track);
+
+  let hideTimer = null;
+
+  function updateThumb() {
+    const vc = document.getElementById('video-container');
+    if (!vc) return;
+    const totalH = vc.scrollHeight;
+    const viewH  = vc.clientHeight;
+    if (totalH <= viewH) { thumb.classList.remove('visible'); return; }
+    const ratio     = viewH / totalH;
+    const thumbH    = Math.max(20, viewH * ratio);
+    const scrollPct = vc.scrollTop / (totalH - viewH);
+    const topPos    = scrollPct * (viewH - thumbH);
+    thumb.style.height = thumbH + 'px';
+    thumb.style.top    = topPos + 'px';
+    thumb.classList.add('visible');
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => thumb.classList.remove('visible'), 1200);
+  }
+
+  // Attach once video container exists
+  function attachScrollBar() {
+    const vc = document.getElementById('video-container');
+    if (!vc) { setTimeout(attachScrollBar, 200); return; }
+    vc.addEventListener('scroll', updateThumb, { passive: true });
+  }
+  attachScrollBar();
+})();
+
 window.addEventListener('blur',()=>{if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();});
 </script>
 </body>
