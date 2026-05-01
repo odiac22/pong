@@ -176,6 +176,8 @@
     .random-sort-button { left: 46px; }
     .duration-sort-button { left: 82px; }
     .refresh-button { left: 118px; }
+    .autoplay-button { left: 154px; }
+    .autoplay-button.on { background: rgba(255,64,64,0.85) !important; opacity: 0.7 !important; }
     .next-batch-button {
       position: fixed; left: 10px; top: 50%; transform: translateY(-50%);
       width: 40px; height: 40px; background: rgba(50,50,50,0.7); opacity: 0.5;
@@ -622,18 +624,14 @@ function createVideoElements() {
 
       lastTapTime = now; lastTapX = tapX;
 
-      const timeSinceScroll = now - (window.lastScrollTime || 0);
-      if (timeSinceScroll > 300 && wrapper.getAttribute('data-playable') === 'true') {
-        if (video.paused) video.play().catch(()=>{});
-        else video.pause();
-      }
+      // Single tap — play/pause without requiring data-playable check
+      if (video.paused) video.play().catch(()=>{});
+      else video.pause();
     },{passive:false});
 
     tapArea.addEventListener('click', e => {
       if (e.target.closest('.video-progress-container') || e.target.tagName==='BUTTON') { e.stopPropagation(); return; }
-      if (Date.now() - (window.lastScrollTime||0) > 300 && wrapper.getAttribute('data-playable')==='true') {
-        if (video.paused) video.play(); else video.pause();
-      }
+      if (video.paused) video.play(); else video.pause();
     });
 
     // Video events
@@ -689,6 +687,11 @@ function setupVisibilityObserver() {
       currentVideoIndex=parseInt(mostVisible.dataset.index||0);
       counter.textContent=`${currentVideoIndex+1}/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
       saveSession();
+      // Autoplay if enabled
+      if (window.autoplayEnabled) {
+        const mv = mostVisible.querySelector('video');
+        if (mv && mv.paused) mv.play().catch(()=>{});
+      }
     }
   },{root:null,rootMargin:'0px',threshold:[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]});
   wrappers.forEach(w=>observer.observe(w));
@@ -810,6 +813,20 @@ function createGearButton(){
   mk('duration-sort-button','⏱️','Sort by duration',sortVideosByDuration);
   mk('random-sort-button','🎲','Randomize',sortVideosRandomly);
   mk('show-controls-button','⚙️','Toggle controls',toggleControls);
+  // Autoplay toggle button
+  const apBtn = document.createElement('div');
+  apBtn.className = 'control-button autoplay-button' + (window.autoplayEnabled ? ' on' : '');
+  apBtn.innerHTML = '▶️';
+  apBtn.title = 'Toggle autoplay';
+  apBtn.setAttribute('aria-label','Toggle autoplay');
+  apBtn.addEventListener('click', e => {
+    e.preventDefault(); e.stopPropagation();
+    window.autoplayEnabled = !window.autoplayEnabled;
+    apBtn.classList.toggle('on', window.autoplayEnabled);
+    try { localStorage.setItem('pong_autoplay', window.autoplayEnabled ? '1' : '0'); } catch(_) {}
+    showSortingIndicator(window.autoplayEnabled ? '▶️ Autoplay ON' : '⏸ Autoplay OFF');
+  });
+  document.body.appendChild(apBtn);
 }
 
 // ─── Load videos ──────────────────────────────────────────────────────────────
@@ -852,6 +869,8 @@ document.getElementById('auth-close').addEventListener('click',()=>{
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
+  // Load autoplay preference (default ON)
+  try { window.autoplayEnabled = localStorage.getItem('pong_autoplay') !== '0'; } catch(_) { window.autoplayEnabled = true; }
   createGearButton();createUnwatchedVideosButton();updatePasteNavigationButton();setupMobileAudioUnlock();
 
   // Restore previous session if available
