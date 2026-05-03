@@ -289,6 +289,282 @@
     }
     #scroll-bar-thumb.visible { opacity: 1; }
 
+function showSortingIndicator(msg) {
+  document.querySelectorAll('.sorting-indicator').forEach(el => el.remove());
+  const el = document.createElement('div');
+  el.className = 'sorting-indicator'; el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => { el.classList.add('fade-out'); setTimeout(() => el.remove(), 1000); }, 2000);
+                   }
+
+  // ─── Saved videos / saved artists ────────────────────────────────────────────
+const SAVED_VIDEOS_KEY = 'pong_saved_videos_v1';
+const SAVED_ARTISTS_KEY = 'pong_saved_artists_v1';
+
+function loadSavedMap(key) {
+  try {
+    const data = JSON.parse(localStorage.getItem(key) || '{}');
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  } catch(e) {
+    return {};
+  }
+}
+
+function saveSavedMap(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch(e) {}
+}
+
+function updateSaveCounters() {
+  const savedVideos = loadSavedMap(SAVED_VIDEOS_KEY);
+  const savedArtists = loadSavedMap(SAVED_ARTISTS_KEY);
+
+  const videoCount = document.getElementById('saved-video-count');
+  const artistCount = document.getElementById('saved-artist-count');
+
+  if (videoCount) videoCount.textContent = Object.keys(savedVideos).length;
+  if (artistCount) artistCount.textContent = Object.keys(savedArtists).length;
+}
+
+function getCurrentVideoWrapper() {
+  if (window.currentlyPlayingVideo) {
+    const playingWrapper = window.currentlyPlayingVideo.closest('.video-wrapper');
+    if (playingWrapper) return playingWrapper;
+  }
+
+  return (
+    document.querySelector('.video-wrapper.most-visible') ||
+    document.querySelector('.video-wrapper[data-playable="true"]') ||
+    document.querySelector(`.video-wrapper[data-index="${currentVideoIndex}"]`)
+  );
+}
+
+function getCurrentVideoUrl() {
+  const wrapper = getCurrentVideoWrapper();
+  if (wrapper) {
+    const index = parseInt(wrapper.dataset.index || '0', 10);
+    if (!isNaN(index) && videoUrls[index]) return videoUrls[index];
+
+    const video = wrapper.querySelector('video');
+    if (video) return video.currentSrc || video.src || null;
+  }
+
+  if (window.currentlyPlayingVideo) {
+    return window.currentlyPlayingVideo.currentSrc || window.currentlyPlayingVideo.src || null;
+  }
+
+  return null;
+}
+
+function extractArtistKeyFromUrl(rawUrl) {
+  if (!rawUrl) return null;
+
+  let url;
+  try {
+    url = new URL(rawUrl, window.location.href);
+  } catch(e) {
+    return null;
+  }
+
+  const path = decodeURIComponent(url.pathname || '');
+
+  // CoomerFans post format:
+  // /p/18860228/225036/onlyfans
+  // artist key = onlyfans:225036
+  let match = path.match(/^\/p\/[^/]+\/([^/]+)\/([^/?#]+)/i);
+  if (match) {
+    return `${match[2].toLowerCase()}:${match[1].toLowerCase()}`;
+  }
+
+  // Coomer / Coomer.st / Coomer.su post format:
+  // /onlyfans/user/username/post/123
+  match = path.match(/^\/([^/]+)\/user\/([^/]+)(?:\/|$)/i);
+  if (match) {
+    return `${match[1].toLowerCase()}:${match[2].toLowerCase()}`;
+  }
+
+  // Icon format:
+  // /icons/onlyfans/username
+  match = path.match(/\/icons\/([^/]+)\/([^/?#]+)/i);
+  if (match) {
+    return `${match[1].toLowerCase()}:${match[2].toLowerCase()}`;
+  }
+
+  // CoomerFans image/profile id format:
+  // /istorage/225036.jpg
+  match = path.match(/\/istorage\/([^/.?#]+)/i);
+  if (match) {
+    return `coomerfans:${match[1].toLowerCase()}`;
+  }
+
+  // Common query params if your copied links include them
+  const paramNames = [
+    'artist',
+    'creator',
+    'creator_id',
+    'user',
+    'username',
+    'user_id',
+    'model',
+    'account'
+  ];
+
+  for (const name of paramNames) {
+    const value = url.searchParams.get(name);
+    if (value) return `${name}:${value.toLowerCase()}`;
+  }
+
+  // Filename fallback if the URL has ?f=artist_filename.mp4 style data
+  const filename = url.searchParams.get('f') || url.searchParams.get('filename') || '';
+  if (filename) {
+    const fileMatch = filename.match(/(?:onlyfans|fansly|patreon|coomerfans|fansone|candfans)[_\-\s]+([a-z0-9_.-]+)/i);
+    if (fileMatch) return `file:${fileMatch[1].toLowerCase()}`;
+  }
+
+  return null;
+}
+
+function addSavedVideos(urls, artistKey) {
+  const savedVideos = loadSavedMap(SAVED_VIDEOS_KEY);
+  let added = 0;
+
+  urls.forEach(url => {
+    if (!url) return;
+
+    const key = String(url).trim();
+    if (!key) return;
+
+    if (!savedVideos[key]) {
+      savedVideos[key] = {
+        url: key,
+        artistKey: artistKey || extractArtistKeyFromUrl(key) || null,
+        savedAt: new Date().toISOString()
+      };
+      added++;
+    }
+  });
+
+  saveSavedMap(SAVED_VIDEOS_KEY, savedVideos);
+  return added;
+}
+
+function saveCurrentVideoLink() {
+  const url = getCurrentVideoUrl();
+
+  if (!url) {
+    showSortingIndicator('No current video found');
+    return;
+  }
+
+  const artistKey = extractArtistKeyFromUrl(url);
+  const added = addSavedVideos([url], artistKey);
+
+  updateSaveCounters();
+
+  if (added) showSortingIndicator('Saved current video 💾');
+  else showSortingIndicator('Video already saved');
+}
+
+function saveCurrentArtistVideos() {
+  const currentUrl = getCurrentVideoUrl();
+
+  if (!currentUrl) {
+    showSortingIndicator('No current video found');
+    return;
+  }
+
+  const artistKey = extractArtistKeyFromUrl(currentUrl);
+
+  if (!artistKey) {
+    showSortingIndicator('Could not detect artist from this URL');
+    return;
+  }
+
+  const sourceUrls = allVideoUrls && allVideoUrls.length ? allVideoUrls : videoUrls;
+  const artistVideos = [...new Set(
+    sourceUrls.filter(url => extractArtistKeyFromUrl(url) === artistKey)
+  )];
+
+  if (!artistVideos.length) {
+    showSortingIndicator('No artist videos found');
+    return;
+  }
+
+  const savedArtists = loadSavedMap(SAVED_ARTISTS_KEY);
+  const existing = savedArtists[artistKey];
+
+  const mergedVideos = existing && Array.isArray(existing.videos)
+    ? [...new Set([...existing.videos, ...artistVideos])]
+    : artistVideos;
+
+  savedArtists[artistKey] = {
+    artistKey,
+    videos: mergedVideos,
+    savedAt: existing?.savedAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  saveSavedMap(SAVED_ARTISTS_KEY, savedArtists);
+
+  const addedVideoCount = addSavedVideos(artistVideos, artistKey);
+
+  updateSaveCounters();
+
+  if (addedVideoCount > 0) {
+    showSortingIndicator(`Saved artist + ${addedVideoCount} videos 👤`);
+  } else {
+    showSortingIndicator('Artist already saved');
+  }
+}
+
+function createSaveButtons() {
+  if (document.getElementById('save-actions-panel')) {
+    updateSaveCounters();
+    return;
+  }
+
+  const panel = document.createElement('div');
+  panel.id = 'save-actions-panel';
+  panel.className = 'save-actions-panel';
+
+  const videoBtn = document.createElement('button');
+  videoBtn.id = 'save-current-video-button';
+  videoBtn.className = 'side-save-button';
+  videoBtn.type = 'button';
+  videoBtn.innerHTML = `
+    <span class="side-save-icon">💾</span>
+    <span class="side-save-label">Video</span>
+    <span id="saved-video-count" class="side-save-count">0</span>
+  `;
+  videoBtn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    saveCurrentVideoLink();
+  });
+
+  const artistBtn = document.createElement('button');
+  artistBtn.id = 'save-current-artist-button';
+  artistBtn.className = 'side-save-button';
+  artistBtn.type = 'button';
+  artistBtn.innerHTML = `
+    <span class="side-save-icon">👤</span>
+    <span class="side-save-label">Artist</span>
+    <span id="saved-artist-count" class="side-save-count">0</span>
+  `;
+  artistBtn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    saveCurrentArtistVideos();
+  });
+
+  panel.appendChild(videoBtn);
+  panel.appendChild(artistBtn);
+  document.body.appendChild(panel);
+
+  updateSaveCounters();
+    }
+    
     @supports (-moz-appearance:none) {
       .video-wrapper video { height: 100vh; }
       #video-container { background: #000; overscroll-behavior: contain; }
@@ -1052,8 +1328,7 @@ document.addEventListener('DOMContentLoaded',()=>{
 
   // Load autoplay preference (default ON)
   try { window.autoplayEnabled = localStorage.getItem('pong_autoplay') !== '0'; } catch(_) { window.autoplayEnabled = true; }
-  createGearButton();createUnwatchedVideosButton();updatePasteNavigationButton();setupMobileAudioUnlock();
-
+  createGearButton();createUnwatchedVideosButton();updatePasteNavigationButton();createSaveButtons();setupMobileAudioUnlock();
   // Restore previous session if available
   if (loadSession()) {
     console.log(`[Session] Restoring ${allVideoUrls.length} videos, batch ${currentBatch}, index ${currentVideoIndex}`);
