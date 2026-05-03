@@ -1,5 +1,11 @@
 // Pong GitHub shared saved videos/artists sync override.
-// This file loads after index.html and replaces the local-only save buttons.
+// Loads after index.html and replaces the local-only save buttons.
+// Adds:
+// - Sync / Artist / Video buttons under the paperclip
+// - GitHub shared JSON saving
+// - Artist save = current paperclip bundle
+// - Hold Artist = load saved bundles and rebuild paperclip navigation
+// - Smooth horizontal scrub without interfering with vertical swipes
 
 (function () {
   'use strict';
@@ -15,8 +21,97 @@
     path: 'pong-data/saved-links.json'
   };
 
-  function emptySharedData(
-) {
+  // Scrub tuning
+  // Bigger SCRUB_START_PX = less accidental scrubbing while swiping.
+  // Bigger SCRUB_PIXELS_PER_SECOND = slower/more precise scrubbing.
+  const SCRUB_START_PX = 34;
+  const SCRUB_DOMINANCE_RATIO = 2.0;
+  const VERTICAL_START_PX = 12;
+  const VERTICAL_DOMINANCE_RATIO = 1.2;
+  const SCRUB_PIXELS_PER_SECOND = 22;
+
+  function injectPongSyncStyles() {
+    let style = document.getElementById('pong-sync-style');
+
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'pong-sync-style';
+      document.head.appendChild(style);
+    }
+
+    style.textContent = `
+      /* Pong Sync buttons under paperclip */
+      .save-actions-panel {
+        position: fixed !important;
+        left: 10px !important;
+        top: calc(50% + 92px) !important;
+        right: auto !important;
+        transform: translateY(0) !important;
+        z-index: 1200 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 7px !important;
+        pointer-events: auto !important;
+      }
+
+      .side-save-button {
+        width: 36px !important;
+        min-height: 40px !important;
+        border: none !important;
+        border-radius: 11px !important;
+        background: rgba(30,30,30,0.78) !important;
+        color: white !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 1px !important;
+        cursor: pointer !important;
+        opacity: 0.62 !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.5) !important;
+        backdrop-filter: blur(5px) !important;
+        -webkit-backdrop-filter: blur(5px) !important;
+        -webkit-tap-highlight-color: transparent !important;
+        touch-action: manipulation !important;
+        transition: all 0.2s ease !important;
+        padding: 2px !important;
+      }
+
+      .side-save-button:hover,
+      .side-save-button:active {
+        opacity: 1 !important;
+        transform: scale(1.08) !important;
+      }
+
+      .side-save-icon {
+        font-size: 14px !important;
+        line-height: 1 !important;
+      }
+
+      .side-save-label {
+        font-size: 7px !important;
+        font-weight: 700 !important;
+        line-height: 1 !important;
+      }
+
+      .side-save-count {
+        margin-top: 1px !important;
+        min-width: 14px !important;
+        height: 11px !important;
+        padding: 0 3px !important;
+        border-radius: 999px !important;
+        background: rgba(255,64,64,0.95) !important;
+        color: white !important;
+        font-size: 8px !important;
+        font-weight: 800 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+      }
+    `;
+  }
+
+  function emptySharedData() {
     return {
       savedVideos: {},
       savedArtists: {}
@@ -257,7 +352,7 @@
     return copy;
   }
 
-  function loadSavedListIntoPlayer(urls, message) {
+  function loadSavedListIntoPlayer(urls, message, newPasteEvents) {
     if (!urls || !urls.length) {
       showMsg('No saved videos found');
       return;
@@ -273,6 +368,15 @@
     currentBatch = 0;
     currentVideoIndex = 0;
 
+    if (Array.isArray(newPasteEvents)) {
+      pasteEvents = newPasteEvents;
+      currentPasteIndex = -1;
+
+      if (typeof updatePasteNavigationButton === 'function') {
+        updatePasteNavigationButton();
+      }
+    }
+
     if (typeof saveSession === 'function') {
       saveSession();
     }
@@ -284,6 +388,10 @@
 
       if (typeof hideControls === 'function') {
         hideControls();
+      }
+
+      if (typeof updatePasteNavigationButton === 'function') {
+        updatePasteNavigationButton();
       }
 
       showMsg(message);
@@ -310,7 +418,8 @@
 
       loadSavedListIntoPlayer(
         randomizedVideos,
-        `Playing ${randomizedVideos.length} saved videos 🎲`
+        `Playing ${randomizedVideos.length} saved videos 🎲`,
+        []
       );
     } catch (e) {
       showMsg('Could not load saved videos');
@@ -333,19 +442,38 @@
         return;
       }
 
+      const randomizedArtists = shuffleArray(artistEntries);
       const groupedVideos = [];
+      const rebuiltPasteEvents = [];
 
-      shuffleArray(artistEntries).forEach(artist => {
-        artist.videos.forEach(url => {
-          if (url && !groupedVideos.includes(url)) {
-            groupedVideos.push(url);
-          }
+      randomizedArtists.forEach((artist, artistIndex) => {
+        const cleanVideos = [...new Set(artist.videos.filter(Boolean))];
+
+        if (!cleanVideos.length) return;
+
+        const startIndex = groupedVideos.length;
+
+        cleanVideos.forEach(url => {
+          groupedVideos.push(url);
+        });
+
+        rebuiltPasteEvents.push({
+          startIndex,
+          count: cleanVideos.length,
+          artistKey: artist.artistKey || `saved-artist-${artistIndex}`,
+          source: 'saved-artist-bundle'
         });
       });
 
+      if (!groupedVideos.length) {
+        showMsg('No saved artist videos found');
+        return;
+      }
+
       loadSavedListIntoPlayer(
         groupedVideos,
-        `Playing ${artistEntries.length} saved artists 👤🎲`
+        `Playing ${rebuiltPasteEvents.length} saved bundles 👤🎲`,
+        rebuiltPasteEvents
       );
     } catch (e) {
       showMsg('Could not load saved artists');
@@ -488,6 +616,59 @@
     return added;
   }
 
+  function getCurrentGlobalVideoIndex() {
+    const wrapper = getCurrentVideoWrapperOverride();
+
+    if (!wrapper) return -1;
+
+    const localIndex = parseInt(wrapper.dataset.index || '0', 10);
+
+    if (isNaN(localIndex)) return -1;
+
+    const loadedBatchIndex = Math.max(0, currentBatch - 1);
+
+    return loadedBatchIndex * BATCH_SIZE + localIndex;
+  }
+
+  function getCurrentPasteBundleInfo() {
+    const globalIndex = getCurrentGlobalVideoIndex();
+
+    if (globalIndex < 0) return null;
+
+    if (!Array.isArray(pasteEvents) || !pasteEvents.length) {
+      return {
+        bundleKey: `loaded-batch:${Math.max(0, currentBatch - 1)}`,
+        startIndex: Math.max(0, currentBatch - 1) * BATCH_SIZE,
+        count: videoUrls.length,
+        urls: videoUrls.slice()
+      };
+    }
+
+    const bundle = pasteEvents.find(item => {
+      if (!item) return false;
+
+      const start = Number(item.startIndex);
+      const count = Number(item.count);
+
+      return globalIndex >= start && globalIndex < start + count;
+    });
+
+    if (!bundle) {
+      return null;
+    }
+
+    const startIndex = Number(bundle.startIndex);
+    const count = Number(bundle.count);
+    const urls = allVideoUrls.slice(startIndex, startIndex + count).filter(Boolean);
+
+    return {
+      bundleKey: bundle.artistKey || bundle.bundleKey || `paste-bundle:${startIndex}:${count}`,
+      startIndex,
+      count,
+      urls
+    };
+  }
+
   async function saveCurrentVideoLinkOverride() {
     const url = getCurrentVideoUrlOverride();
 
@@ -499,7 +680,8 @@
     try {
       showMsg('Saving video...');
 
-      const artistKey = extractArtistKeyOverride(url);
+      const bundleInfo = getCurrentPasteBundleInfo();
+      const artistKey = bundleInfo?.bundleKey || extractArtistKeyOverride(url);
 
       const result = await updateSharedData(data => {
         return {
@@ -519,33 +701,18 @@
   }
 
   async function saveCurrentArtistVideosOverride() {
-    const currentUrl = getCurrentVideoUrlOverride();
+    const bundleInfo = getCurrentPasteBundleInfo();
 
-    if (!currentUrl) {
-      showMsg('No current video found');
+    if (!bundleInfo || !bundleInfo.urls || !bundleInfo.urls.length) {
+      showMsg('No paperclip bundle found');
       return;
     }
 
-    const artistKey = extractArtistKeyOverride(currentUrl);
-
-    if (!artistKey) {
-      showMsg('Could not detect artist from this URL');
-      return;
-    }
-
-    const sourceUrls = allVideoUrls && allVideoUrls.length ? allVideoUrls : videoUrls;
-
-    const artistVideos = [...new Set(
-      sourceUrls.filter(url => extractArtistKeyOverride(url) === artistKey)
-    )];
-
-    if (!artistVideos.length) {
-      showMsg('No artist videos found');
-      return;
-    }
+    const artistKey = bundleInfo.bundleKey;
+    const artistVideos = [...new Set(bundleInfo.urls.filter(Boolean))];
 
     try {
-      showMsg('Saving artist...');
+      showMsg('Saving paperclip bundle...');
 
       const result = await updateSharedData(data => {
         data.savedArtists = data.savedArtists || {};
@@ -558,6 +725,9 @@
 
         data.savedArtists[artistKey] = {
           artistKey,
+          source: 'paperclip-bundle',
+          startIndex: bundleInfo.startIndex,
+          count: bundleInfo.count,
           videos: mergedVideos,
           savedAt: existing?.savedAt || new Date().toISOString(),
           updatedAt: new Date().toISOString()
@@ -570,17 +740,19 @@
       });
 
       if (result.result.addedVideoCount > 0) {
-        showMsg(`Saved artist + ${result.result.addedVideoCount} videos 👤`);
+        showMsg(`Saved bundle + ${result.result.addedVideoCount} videos 👤`);
       } else {
-        showMsg('Artist already saved');
+        showMsg('Bundle already saved');
       }
     } catch (e) {
-      showMsg('Could not save artist');
+      showMsg('Could not save bundle');
       console.error(e);
     }
   }
 
   function createSaveButtonsOverride() {
+    injectPongSyncStyles();
+
     const existing = document.getElementById('save-actions-panel');
 
     if (existing) {
@@ -606,6 +778,50 @@
       e.stopPropagation();
       setGitHubToken();
     });
+
+    const artistBtn = document.createElement('button');
+    artistBtn.id = 'save-current-artist-button';
+    artistBtn.className = 'side-save-button';
+    artistBtn.type = 'button';
+    artistBtn.title = 'Press to save current paperclip bundle. Hold 2 seconds to play saved bundles randomized.';
+    artistBtn.innerHTML = `
+      <span class="side-save-icon">👤</span>
+      <span class="side-save-label">Artist</span>
+      <span id="saved-artist-count" class="side-save-count">0</span>
+    `;
+
+    let artistHoldTimer = null;
+    let artistLongPress = false;
+
+    function startArtistHold() {
+      artistLongPress = false;
+      clearTimeout(artistHoldTimer);
+
+      artistHoldTimer = setTimeout(() => {
+        artistLongPress = true;
+        playSavedArtistsRandomized();
+      }, 2000);
+    }
+
+    function endArtistHold(e) {
+      clearTimeout(artistHoldTimer);
+
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+
+      if (!artistLongPress) {
+        saveCurrentArtistVideosOverride();
+      }
+    }
+
+    artistBtn.addEventListener('touchstart', startArtistHold, { passive: true });
+    artistBtn.addEventListener('touchend', endArtistHold);
+    artistBtn.addEventListener('touchcancel', () => clearTimeout(artistHoldTimer));
+    artistBtn.addEventListener('mousedown', startArtistHold);
+    artistBtn.addEventListener('mouseup', endArtistHold);
+    artistBtn.addEventListener('mouseleave', () => clearTimeout(artistHoldTimer));
 
     const videoBtn = document.createElement('button');
     videoBtn.id = 'save-current-video-button';
@@ -651,56 +867,243 @@
     videoBtn.addEventListener('mouseup', endVideoHold);
     videoBtn.addEventListener('mouseleave', () => clearTimeout(videoHoldTimer));
 
-    const artistBtn = document.createElement('button');
-    artistBtn.id = 'save-current-artist-button';
-    artistBtn.className = 'side-save-button';
-    artistBtn.type = 'button';
-    artistBtn.title = 'Press to save current artist. Hold 2 seconds to play saved artists randomized.';
-    artistBtn.innerHTML = `
-      <span class="side-save-icon">👤</span>
-      <span class="side-save-label">Artist</span>
-      <span id="saved-artist-count" class="side-save-count">0</span>
-    `;
-
-    let artistHoldTimer = null;
-    let artistLongPress = false;
-
-    function startArtistHold() {
-      artistLongPress = false;
-      clearTimeout(artistHoldTimer);
-
-      artistHoldTimer = setTimeout(() => {
-        artistLongPress = true;
-        playSavedArtistsRandomized();
-      }, 2000);
-    }
-
-    function endArtistHold(e) {
-      clearTimeout(artistHoldTimer);
-
-      if (e) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-
-      if (!artistLongPress) {
-        saveCurrentArtistVideosOverride();
-      }
-    }
-
-    artistBtn.addEventListener('touchstart', startArtistHold, { passive: true });
-    artistBtn.addEventListener('touchend', endArtistHold);
-    artistBtn.addEventListener('touchcancel', () => clearTimeout(artistHoldTimer));
-    artistBtn.addEventListener('mousedown', startArtistHold);
-    artistBtn.addEventListener('mouseup', endArtistHold);
-    artistBtn.addEventListener('mouseleave', () => clearTimeout(artistHoldTimer));
-
     panel.appendChild(tokenBtn);
     panel.appendChild(artistBtn);
     panel.appendChild(videoBtn);
     document.body.appendChild(panel);
 
     updateSaveCountersOverride();
+  }
+
+  function showSeekFlash(wrapper, side) {
+    const flash = wrapper.querySelector(`.seek-flash.${side}`);
+
+    if (!flash) return;
+
+    flash.classList.add('show');
+
+    setTimeout(() => {
+      flash.classList.remove('show');
+    }, 500);
+  }
+
+  function attachSmoothScrubToTapArea(tapArea) {
+    if (!tapArea || tapArea.dataset.pongSmoothScrub === 'true') return;
+
+    tapArea.dataset.pongSmoothScrub = 'true';
+
+    const wrapper = tapArea.closest('.video-wrapper');
+
+    if (!wrapper) return;
+
+    const video = wrapper.querySelector('video');
+    const progressBar = wrapper.querySelector('.video-progress-bar');
+    const progressFill = wrapper.querySelector('.video-progress-fill');
+    const scrubberHandle = wrapper.querySelector('.scrubber-handle');
+
+    if (!video || !progressBar || !progressFill) return;
+
+    const state = {
+      startX: 0,
+      startY: 0,
+      startTime: 0,
+      isHorizontalScrub: false,
+      isVerticalSwipe: false,
+      lastTapTime: 0,
+      lastTapX: 0,
+      lastTouchActionTime: 0
+    };
+
+    function removePreviewAndFadeTime() {
+      const preview = wrapper.querySelector('.preview-fill');
+
+      if (preview) {
+        preview.remove();
+      }
+
+      const timeIndicator = wrapper.querySelector('.time-indicator');
+
+      if (timeIndicator) {
+        timeIndicator.classList.add('fade-out');
+        setTimeout(() => {
+          timeIndicator.style.display = 'none';
+        }, 1000);
+      }
+
+      if (scrubberHandle) {
+        setTimeout(() => {
+          scrubberHandle.style.display = '';
+        }, 1200);
+      }
+    }
+
+    tapArea.addEventListener('touchstart', e => {
+      if (!e.touches || !e.touches[0]) return;
+
+      e.stopImmediatePropagation();
+
+      state.startX = e.touches[0].clientX;
+      state.startY = e.touches[0].clientY;
+      state.startTime = video.currentTime || 0;
+      state.isHorizontalScrub = false;
+      state.isVerticalSwipe = false;
+    }, { capture: true, passive: true });
+
+    tapArea.addEventListener('touchmove', e => {
+      if (!e.touches || !e.touches[0]) return;
+
+      e.stopImmediatePropagation();
+
+      const dx = e.touches[0].clientX - state.startX;
+      const dy = e.touches[0].clientY - state.startY;
+      const absX = Math.abs(dx);
+      const absY = Math.abs(dy);
+
+      if (state.isVerticalSwipe) {
+        return;
+      }
+
+      if (!state.isHorizontalScrub && absY > VERTICAL_START_PX && absY > absX * VERTICAL_DOMINANCE_RATIO) {
+        state.isVerticalSwipe = true;
+        return;
+      }
+
+      const shouldStartScrub =
+        state.isHorizontalScrub ||
+        (absX > SCRUB_START_PX && absX > absY * SCRUB_DOMINANCE_RATIO);
+
+      if (!shouldStartScrub) {
+        return;
+      }
+
+      state.isHorizontalScrub = true;
+
+      e.preventDefault();
+
+      const timeChange = dx / SCRUB_PIXELS_PER_SECOND;
+      const duration = video.duration || 0;
+      const newTime = Math.max(0, Math.min(duration, state.startTime + timeChange));
+
+      wrapper.dataset.pendingTime = newTime;
+
+      if (duration && !isNaN(newTime)) {
+        let preview = wrapper.querySelector('.preview-fill');
+
+        if (!preview) {
+          preview = document.createElement('div');
+          preview.className = 'preview-fill';
+          progressBar.appendChild(preview);
+        }
+
+        preview.style.width = `${(newTime / duration) * 100}%`;
+
+        if (scrubberHandle) {
+          scrubberHandle.style.display = 'block';
+        }
+      }
+
+      let timeIndicator = wrapper.querySelector('.time-indicator');
+
+      if (!timeIndicator) {
+        timeIndicator = document.createElement('div');
+        timeIndicator.className = 'time-indicator';
+        wrapper.appendChild(timeIndicator);
+      }
+
+      timeIndicator.classList.remove('fade-out');
+      timeIndicator.style.opacity = '1';
+      timeIndicator.style.display = 'flex';
+      timeIndicator.textContent = `${dx > 0 ? '▶️' : '◀️'} ${formatTime(newTime)} / ${formatTime(duration)}`;
+    }, { capture: true, passive: false });
+
+    tapArea.addEventListener('touchend', e => {
+      e.stopImmediatePropagation();
+
+      state.lastTouchActionTime = Date.now();
+
+      if (state.isVerticalSwipe) {
+        state.isVerticalSwipe = false;
+        state.isHorizontalScrub = false;
+        return;
+      }
+
+      if (state.isHorizontalScrub) {
+        e.preventDefault();
+
+        const pendingTime = parseFloat(wrapper.dataset.pendingTime);
+
+        if (!isNaN(pendingTime) && pendingTime >= 0) {
+          video.currentTime = pendingTime;
+
+          if (video.duration) {
+            progressFill.style.width = `${(pendingTime / video.duration) * 100}%`;
+          }
+
+          delete wrapper.dataset.pendingTime;
+        }
+
+        state.isHorizontalScrub = false;
+
+        removePreviewAndFadeTime();
+        return;
+      }
+
+      if (!e.changedTouches || !e.changedTouches[0]) return;
+
+      e.preventDefault();
+
+      const now = Date.now();
+      const tapX = e.changedTouches[0].clientX;
+      const isDoubleTap = (now - state.lastTapTime) < 300 && Math.abs(tapX - state.lastTapX) < 80;
+
+      if (isDoubleTap) {
+        if (tapX < wrapper.offsetWidth * 0.4) {
+          video.currentTime = Math.max(0, video.currentTime - 10);
+          showSeekFlash(wrapper, 'left');
+        } else if (tapX > wrapper.offsetWidth * 0.6) {
+          video.currentTime = Math.min(video.duration || 0, video.currentTime + 10);
+          showSeekFlash(wrapper, 'right');
+        }
+
+        state.lastTapTime = 0;
+        return;
+      }
+
+      state.lastTapTime = now;
+      state.lastTapX = tapX;
+
+      if (video.paused) {
+        video.play().catch(() => {});
+      } else {
+        video.pause();
+      }
+    }, { capture: true, passive: false });
+
+    tapArea.addEventListener('click', e => {
+      if (Date.now() - state.lastTouchActionTime < 700) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    }, { capture: true });
+  }
+
+  function attachSmoothScrubToAllTapAreas() {
+    document.querySelectorAll('.tap-area').forEach(attachSmoothScrubToTapArea);
+  }
+
+  function startSmoothScrubObserver() {
+    attachSmoothScrubToAllTapAreas();
+
+    const target = document.getElementById('video-container') || document.body;
+
+    const observer = new MutationObserver(() => {
+      attachSmoothScrubToAllTapAreas();
+    });
+
+    observer.observe(target, {
+      childList: true,
+      subtree: true
+    });
   }
 
   try {
@@ -712,16 +1115,19 @@
     console.warn('Could not override original save functions:', e);
   }
 
-  function bootSyncButtons() {
+  function bootPongSync() {
+    injectPongSyncStyles();
+
     setTimeout(() => {
       createSaveButtonsOverride();
+      startSmoothScrubObserver();
     }, 0);
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', bootSyncButtons);
+    document.addEventListener('DOMContentLoaded', bootPongSync);
   } else {
-    bootSyncButtons();
+    bootPongSync();
   }
 
   window.PongGitHubSync = {
