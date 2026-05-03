@@ -259,7 +259,7 @@
       padding: 10px 20px; border-radius: 20px; margin-top: 10px; cursor: pointer;
     }
     body.scrubbing-active { overflow: hidden; touch-action: none; }
-    /* progress bar always visible */
+
     /* Pong splash overlay */
     #pong-overlay {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -271,11 +271,12 @@
     #pong-canvas {
       width: 100%; height: 100%; position: absolute; top: 0; left: 0;
     }
-#pong-hotspot {
+    #pong-hotspot {
       position: absolute; top: 0; left: 0;
       width: 8%; height: 7%;
       cursor: pointer; z-index: 10001;
     }
+
     /* Scrollbar */
     #scroll-bar-track {
       position: fixed; right: 3px; top: 0; bottom: 0;
@@ -289,15 +290,215 @@
     }
     #scroll-bar-thumb.visible { opacity: 1; }
 
+    /* Right-side save buttons */
+    .save-actions-panel {
+      position: fixed;
+      right: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      z-index: 1200;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      pointer-events: auto;
+    }
+
+    .side-save-button {
+      width: 58px;
+      min-height: 62px;
+      border: none;
+      border-radius: 16px;
+      background: rgba(30,30,30,0.78);
+      color: white;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      cursor: pointer;
+      opacity: 0.62;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.55);
+      backdrop-filter: blur(5px);
+      -webkit-backdrop-filter: blur(5px);
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+      transition: all 0.2s ease;
+    }
+
+    .side-save-button:hover,
+    .side-save-button:active {
+      opacity: 1;
+      transform: scale(1.06);
+    }
+
+    .side-save-icon {
+      font-size: 18px;
+      line-height: 1;
+    }
+
+    .side-save-label {
+      font-size: 9px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .side-save-count {
+      margin-top: 2px;
+      min-width: 20px;
+      height: 16px;
+      padding: 0 5px;
+      border-radius: 999px;
+      background: rgba(255,64,64,0.95);
+      color: white;
+      font-size: 10px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    @supports (-moz-appearance:none) {
+      .video-wrapper video { height: 100vh; }
+      #video-container { background: #000; overscroll-behavior: contain; }
+    }
+  </style>
+</head>
+<body>
+
+  <div id="auth-helper">
+    <div class="auth-inner">
+      <h3>External Content Authentication</h3>
+      <p>Some videos require authentication on the source website.</p>
+      <div id="auth-iframe-container"></div>
+      <div><button id="auth-close">Close Authentication</button></div>
+    </div>
+  </div>
+
+  <div id="pong-overlay">
+    <canvas id="pong-canvas"></canvas>
+    <div id="pong-hotspot"></div>
+  </div>
+
+  <div class="version-number">22.22</div>
+  <div id="video-container"></div>
+
+  <div class="controls-overlay">
+    <div class="url-input">
+      <textarea id="video-urls" placeholder="Paste video links here (one per line)"></textarea>
+      <div class="button-container">
+        <button id="load-videos">Load Videos</button>
+        <button id="auth-button">Solve Authentication</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+let videoUrls = [];
+let allVideoUrls = [];
+let currentVideoIndex = 0;
+let isControlsVisible = true;
+let videoMetadata = [];
+let currentBatch = 0;
+const BATCH_SIZE = 20;
+
+// ─── Paste tracking ───────────────────────────────────────────────────────────
+let pasteEvents = [];
+let currentPasteIndex = -1;
+let pendingPastes = [];
+let _prevUrlCount = 0;
+
+const videoContainer = document.getElementById('video-container');
+const videoUrlsInput  = document.getElementById('video-urls');
+const loadVideosButton = document.getElementById('load-videos');
+
+function parseVideoUrls(text) {
+  return text.split('\n').map(u => u.trim())
+    .filter(u => u && u.length > 4);
+}
+
+videoUrlsInput.addEventListener('paste', (e) => {
+  _prevUrlCount = parseVideoUrls(videoUrlsInput.value).length;
+}, true);
+
+videoUrlsInput.addEventListener('input', () => {
+  const currentCount = parseVideoUrls(videoUrlsInput.value).length;
+  const added = currentCount - _prevUrlCount;
+  if (added > 0) {
+    pendingPastes.push({ startIndex: _prevUrlCount, count: added });
+    _prevUrlCount = currentCount;
+    const btn = document.getElementById('paste-nav-button');
+    if (btn) {
+      btn.style.opacity = '0.7';
+      btn.style.background = 'rgba(0,150,255,0.7)';
+      btn.setAttribute('data-count', pendingPastes.length + 'p');
+    }
+    console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + added + ' URLs at index ' + (currentCount - added));
+  }
+});
+
+// ─── Session persistence ──────────────────────────────────────────────────────
+const SESSION_KEY = 'pong_session_v1';
+
+function saveSession() {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      allVideoUrls,
+      currentBatch,
+      currentVideoIndex,
+      pasteEvents
+    }));
+  } catch(e) {}
+}
+
+function loadSession() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+    if (!s || !s.allVideoUrls || !s.allVideoUrls.length) return false;
+    allVideoUrls = s.allVideoUrls;
+    currentBatch = s.currentBatch || 0;
+    currentVideoIndex = s.currentVideoIndex || 0;
+    pasteEvents = s.pasteEvents || [];
+    return true;
+  } catch(e) { return false; }
+}
+
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch(e) {}
+}
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function formatTime(s) {
+  if (!s || isNaN(s)) return '0:00';
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return `${m}:${sec < 10 ? '0' : ''}${sec}`;
+}
+
+function toggleControls() {
+  isControlsVisible = !isControlsVisible;
+  document.body.classList.toggle('controls-hidden', !isControlsVisible);
+}
+
+function hideControls() {
+  isControlsVisible = false;
+  document.body.classList.add('controls-hidden');
+}
+
 function showSortingIndicator(msg) {
   document.querySelectorAll('.sorting-indicator').forEach(el => el.remove());
   const el = document.createElement('div');
-  el.className = 'sorting-indicator'; el.textContent = msg;
+  el.className = 'sorting-indicator';
+  el.textContent = msg;
   document.body.appendChild(el);
-  setTimeout(() => { el.classList.add('fade-out'); setTimeout(() => el.remove(), 1000); }, 2000);
-                   }
+  setTimeout(() => {
+    el.classList.add('fade-out');
+    setTimeout(() => el.remove(), 1000);
+  }, 2000);
+}
 
-  // ─── Saved videos / saved artists ────────────────────────────────────────────
+// ─── Saved videos / saved artists ────────────────────────────────────────────
 const SAVED_VIDEOS_KEY = 'pong_saved_videos_v1';
 const SAVED_ARTISTS_KEY = 'pong_saved_artists_v1';
 
@@ -342,6 +543,7 @@ function getCurrentVideoWrapper() {
 
 function getCurrentVideoUrl() {
   const wrapper = getCurrentVideoWrapper();
+
   if (wrapper) {
     const index = parseInt(wrapper.dataset.index || '0', 10);
     if (!isNaN(index) && videoUrls[index]) return videoUrls[index];
@@ -369,36 +571,26 @@ function extractArtistKeyFromUrl(rawUrl) {
 
   const path = decodeURIComponent(url.pathname || '');
 
-  // CoomerFans post format:
-  // /p/18860228/225036/onlyfans
-  // artist key = onlyfans:225036
   let match = path.match(/^\/p\/[^/]+\/([^/]+)\/([^/?#]+)/i);
   if (match) {
     return `${match[2].toLowerCase()}:${match[1].toLowerCase()}`;
   }
 
-  // Coomer / Coomer.st / Coomer.su post format:
-  // /onlyfans/user/username/post/123
   match = path.match(/^\/([^/]+)\/user\/([^/]+)(?:\/|$)/i);
   if (match) {
     return `${match[1].toLowerCase()}:${match[2].toLowerCase()}`;
   }
 
-  // Icon format:
-  // /icons/onlyfans/username
   match = path.match(/\/icons\/([^/]+)\/([^/?#]+)/i);
   if (match) {
     return `${match[1].toLowerCase()}:${match[2].toLowerCase()}`;
   }
 
-  // CoomerFans image/profile id format:
-  // /istorage/225036.jpg
   match = path.match(/\/istorage\/([^/.?#]+)/i);
   if (match) {
     return `coomerfans:${match[1].toLowerCase()}`;
   }
 
-  // Common query params if your copied links include them
   const paramNames = [
     'artist',
     'creator',
@@ -415,7 +607,6 @@ function extractArtistKeyFromUrl(rawUrl) {
     if (value) return `${name}:${value.toLowerCase()}`;
   }
 
-  // Filename fallback if the URL has ?f=artist_filename.mp4 style data
   const filename = url.searchParams.get('f') || url.searchParams.get('filename') || '';
   if (filename) {
     const fileMatch = filename.match(/(?:onlyfans|fansly|patreon|coomerfans|fansone|candfans)[_\-\s]+([a-z0-9_.-]+)/i);
@@ -563,150 +754,6 @@ function createSaveButtons() {
   document.body.appendChild(panel);
 
   updateSaveCounters();
-    }
-    
-    @supports (-moz-appearance:none) {
-      .video-wrapper video { height: 100vh; }
-      #video-container { background: #000; overscroll-behavior: contain; }
-    }
-  </style>
-</head>
-<body>
-
-  <div id="auth-helper">
-    <div class="auth-inner">
-      <h3>External Content Authentication</h3>
-      <p>Some videos require authentication on the source website.</p>
-      <div id="auth-iframe-container"></div>
-      <div><button id="auth-close">Close Authentication</button></div>
-    </div>
-  </div>
-
-  <!-- Pong splash overlay -->
-  <div id="pong-overlay">
-    <canvas id="pong-canvas"></canvas>
-    <div id="pong-hotspot"></div>
-  </div>
-
-  <div class="version-number">22.22</div>
-  <div id="video-container"></div>
-
-  <div class="controls-overlay">
-    <div class="url-input">
-      <textarea id="video-urls" placeholder="Paste video links here (one per line)"></textarea>
-      <div class="button-container">
-        <button id="load-videos">Load Videos</button>
-        <button id="auth-button">Solve Authentication</button>
-      </div>
-    </div>
-  </div>
-
-<script>
-// ─── State ────────────────────────────────────────────────────────────────────
-let videoUrls = [];
-let allVideoUrls = [];
-let currentVideoIndex = 0;
-let isControlsVisible = true;
-let videoMetadata = [];
-let currentBatch = 0;
-const BATCH_SIZE = 20;
-
-// ─── Paste tracking ───────────────────────────────────────────────────────────
-// Strategy: count URLs in textarea before and after each paste.
-// Store {startIndex, count} for each paste bundle.
-// On Load Videos, these indices map directly to allVideoUrls positions.
-let pasteEvents = [];       // finalised after Load Videos
-let currentPasteIndex = -1;
-let pendingPastes = [];     // recorded during textarea editing
-let _prevUrlCount = 0;      // url count before last paste
-
-const videoContainer = document.getElementById('video-container');
-const videoUrlsInput  = document.getElementById('video-urls');
-const loadVideosButton = document.getElementById('load-videos');
-
-function parseVideoUrls(text) {
-  return text.split('\n').map(u => u.trim())
-    .filter(u => u && u.length > 4);
-}
-
-// Record url count just before paste text lands
-videoUrlsInput.addEventListener('paste', (e) => {
-  _prevUrlCount = parseVideoUrls(videoUrlsInput.value).length;
-}, true); // capture phase — fires before value changes
-
-// After paste lands, measure what was added
-videoUrlsInput.addEventListener('input', () => {
-  const currentCount = parseVideoUrls(videoUrlsInput.value).length;
-  const added = currentCount - _prevUrlCount;
-  if (added > 0) {
-    pendingPastes.push({ startIndex: _prevUrlCount, count: added });
-    _prevUrlCount = currentCount;
-    // Light up the paperclip immediately
-    const btn = document.getElementById('paste-nav-button');
-    if (btn) {
-      btn.style.opacity = '0.7';
-      btn.style.background = 'rgba(0,150,255,0.7)';
-      btn.setAttribute('data-count', pendingPastes.length + 'p');
-    }
-    console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + added + ' URLs at index ' + (currentCount - added));
-  }
-});
-
-// ─── Session persistence ──────────────────────────────────────────────────────
-const SESSION_KEY = 'pong_session_v1';
-
-function saveSession() {
-  try {
-    localStorage.setItem(SESSION_KEY, JSON.stringify({
-      allVideoUrls,
-      currentBatch,
-      currentVideoIndex,
-      pasteEvents
-    }));
-  } catch(e) {}
-}
-
-function loadSession() {
-  try {
-    const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
-    if (!s || !s.allVideoUrls || !s.allVideoUrls.length) return false;
-    allVideoUrls = s.allVideoUrls;
-    currentBatch = s.currentBatch || 0;
-    currentVideoIndex = s.currentVideoIndex || 0;
-    pasteEvents = s.pasteEvents || [];
-    return true;
-  } catch(e) { return false; }
-}
-
-function clearSession() {
-  try { localStorage.removeItem(SESSION_KEY); } catch(e) {}
-}
-
-// ─── Utilities ────────────────────────────────────────────────────────────────
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-function formatTime(s) {
-  if (!s || isNaN(s)) return '0:00';
-  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
-  return `${m}:${sec < 10 ? '0' : ''}${sec}`;
-}
-
-function toggleControls() {
-  isControlsVisible = !isControlsVisible;
-  document.body.classList.toggle('controls-hidden', !isControlsVisible);
-}
-
-function hideControls() {
-  isControlsVisible = false;
-  document.body.classList.add('controls-hidden');
-}
-
-function showSortingIndicator(msg) {
-  document.querySelectorAll('.sorting-indicator').forEach(el => el.remove());
-  const el = document.createElement('div');
-  el.className = 'sorting-indicator'; el.textContent = msg;
-  document.body.appendChild(el);
-  setTimeout(() => { el.classList.add('fade-out'); setTimeout(() => el.remove(), 1000); }, 2000);
 }
 
 // ─── Audio ────────────────────────────────────────────────────────────────────
@@ -777,7 +824,6 @@ function createVideoElements() {
     video.setAttribute('playsinline',''); video.setAttribute('webkit-playsinline',''); video.setAttribute('poster','data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
     video.style.transform = 'translateZ(0)'; video.style.willChange = 'transform'; video.style.background = '#000';
 
-    // Audio unlock on first interaction
     if (!window.audioUnlocked) {
       window.audioUnlocked = false;
       const unlock = () => {
@@ -792,7 +838,6 @@ function createVideoElements() {
     const loadingIndicator = document.createElement('div');
     loadingIndicator.className = 'video-loading-indicator';
 
-    // Progress bar
     const progressContainer = document.createElement('div');
     progressContainer.className = 'video-progress-container';
     const progressBar = document.createElement('div');
@@ -807,7 +852,6 @@ function createVideoElements() {
     durationText.className = 'video-duration'; durationText.textContent = '0:00';
     progressContainer.appendChild(progressBar); progressContainer.appendChild(durationText);
 
-    // Audio button
     const audioBtn = document.createElement('div');
     audioBtn.className = 'audio-toggle-button'; audioBtn.innerHTML = '🔇'; audioBtn.setAttribute('data-muted','true');
     audioBtn.addEventListener('click', e => {
@@ -820,7 +864,6 @@ function createVideoElements() {
       setTimeout(() => { n.classList.add('fade-out'); setTimeout(()=>n.remove(),500); }, 2000);
     });
 
-    // Seek flash overlays
     const leftFlash = document.createElement('div');
     leftFlash.className = 'seek-flash left'; leftFlash.innerHTML = '<span>◀◀ 10s</span>';
     const rightFlash = document.createElement('div');
@@ -831,7 +874,6 @@ function createVideoElements() {
       flashTimer = setTimeout(() => { leftFlash.classList.remove('show'); rightFlash.classList.remove('show'); }, 500);
     }
 
-    // ─── Scrub helper — always uses fresh getBoundingClientRect ───────────────
     function scrubTo(clientX) {
       const rect = progressBar.getBoundingClientRect();
       const pos = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
@@ -839,7 +881,6 @@ function createVideoElements() {
       progressFill.style.width = `${pos * 100}%`;
     }
 
-    // Progress bar — mouse
     progressBar.addEventListener('mousedown', e => {
       e.stopPropagation(); e.preventDefault();
       scrubberHandle.style.display = 'block';
@@ -850,11 +891,11 @@ function createVideoElements() {
       document.addEventListener('mousemove',onMove);
       document.addEventListener('mouseup',onUp,{once:true});
     });
+
     progressBar.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); scrubberHandle.style.display='block'; scrubTo(e.clientX); setTimeout(()=>{ if(!progressBar.matches(':hover')) scrubberHandle.style.display=''; },1500); });
     progressBar.addEventListener('mouseenter', () => { scrubberHandle.style.display='block'; });
     progressBar.addEventListener('mouseleave', () => { if(!progressFill.classList.contains('active-scrubbing')) scrubberHandle.style.display=''; });
 
-    // Progress bar — touch (fresh rect on every touchstart fixes offset bug)
     progressBar.addEventListener('touchstart', e => {
       e.stopPropagation(); e.preventDefault();
       if (document.activeElement) document.activeElement.blur();
@@ -868,7 +909,6 @@ function createVideoElements() {
       document.addEventListener('touchend',onEnd,{once:true});
     },{passive:false});
 
-    // ─── Tap area ─────────────────────────────────────────────────────────────
     const tapArea = document.createElement('div');
     tapArea.className = 'tap-area';
 
@@ -921,7 +961,6 @@ function createVideoElements() {
       const isDoubleTap = (now - lastTapTime) < 300 && Math.abs(tapX - lastTapX) < 80;
 
       if (isDoubleTap) {
-        // Double tap: left 40% = -10s, right 40% = +10s
         if (tapX < wrapper.offsetWidth * 0.4) {
           video.currentTime = Math.max(0, video.currentTime - 10);
           showFlash(leftFlash);
@@ -929,13 +968,12 @@ function createVideoElements() {
           video.currentTime = Math.min(video.duration || 0, video.currentTime + 10);
           showFlash(rightFlash);
         }
-        lastTapTime = 0; // reset so triple tap doesn't chain
+        lastTapTime = 0;
         return;
       }
 
       lastTapTime = now; lastTapX = tapX;
 
-      // Single tap — play/pause without requiring data-playable check
       if (video.paused) video.play().catch(()=>{});
       else video.pause();
     },{passive:false});
@@ -945,7 +983,6 @@ function createVideoElements() {
       if (video.paused) video.play(); else video.pause();
     });
 
-    // Video events
     video.addEventListener('loadeddata', () => { video.pause(); },{once:true});
     video.addEventListener('play', () => {
       document.querySelectorAll('.video-player').forEach(v => { if(v!==video&&!v.paused){v.pause();const ow=v.closest('.video-wrapper');if(ow)ow.classList.remove('video-playing');} });
@@ -982,29 +1019,49 @@ function createVideoElements() {
 function setupVisibilityObserver() {
   const wrappers = document.querySelectorAll('.video-wrapper');
   if (!wrappers.length) return;
+
   let counter = document.getElementById('video-counter');
-  if (!counter) { counter=document.createElement('div'); counter.id='video-counter'; counter.className='video-counter'; document.body.appendChild(counter); }
+  if (!counter) {
+    counter=document.createElement('div');
+    counter.id='video-counter';
+    counter.className='video-counter';
+    document.body.appendChild(counter);
+  }
+
   counter.textContent = `1/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
+
   const observer = new IntersectionObserver(entries => {
     let mostVisible=null, highestVis=0;
     entries.forEach(entry => {
       const v=entry.target.querySelector('video');
-      if(v&&!entry.isIntersecting&&entry.intersectionRatio<0.1&&!v.paused){v.pause();entry.target.classList.remove('video-playing');}
-      if(entry.isIntersecting&&entry.intersectionRatio>highestVis){highestVis=entry.intersectionRatio;mostVisible=entry.target;}
+      if(v&&!entry.isIntersecting&&entry.intersectionRatio<0.1&&!v.paused){
+        v.pause();
+        entry.target.classList.remove('video-playing');
+      }
+      if(entry.isIntersecting&&entry.intersectionRatio>highestVis){
+        highestVis=entry.intersectionRatio;
+        mostVisible=entry.target;
+      }
     });
+
     if (mostVisible&&highestVis>0.85) {
-      wrappers.forEach(w=>{w.classList.remove('most-visible');w.setAttribute('data-playable','false');});
-      mostVisible.classList.add('most-visible'); mostVisible.setAttribute('data-playable','true');
+      wrappers.forEach(w=>{
+        w.classList.remove('most-visible');
+        w.setAttribute('data-playable','false');
+      });
+      mostVisible.classList.add('most-visible');
+      mostVisible.setAttribute('data-playable','true');
       currentVideoIndex=parseInt(mostVisible.dataset.index||0);
       counter.textContent=`${currentVideoIndex+1}/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
       saveSession();
-      // Autoplay if enabled
+
       if (window.autoplayEnabled) {
         const mv = mostVisible.querySelector('video');
         if (mv && mv.paused) mv.play().catch(()=>{});
       }
     }
   },{root:null,rootMargin:'0px',threshold:[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]});
+
   wrappers.forEach(w=>observer.observe(w));
 }
 
@@ -1015,14 +1072,15 @@ function loadNextBatch(restoreIndex) {
   for(let i=start;i<end;i++) videoUrls.push(allVideoUrls[i]);
   currentBatch++;
   saveSession();
+
   if (videoUrls.length>0) {
     videoContainer.innerHTML='<div class="loading-message">Loading videos...</div>';
     setTimeout(()=>{
       createVideoElements();
       updateNextBatchButton();
       createUnwatchedVideosButton();
+
       if (restoreIndex != null) {
-        // Scroll to restored video index
         setTimeout(() => {
           const tw = document.querySelector(`.video-wrapper[data-index="${restoreIndex}"]`);
           if (tw) tw.scrollIntoView({ behavior: 'auto', block: 'start' });
@@ -1032,42 +1090,95 @@ function loadNextBatch(restoreIndex) {
       }
     },300);
   } else {
-    videoContainer.innerHTML='<div class="loading-message">No more videos</div>'; removeNextBatchButton();
+    videoContainer.innerHTML='<div class="loading-message">No more videos</div>';
+    removeNextBatchButton();
   }
 }
 
 function updateNextBatchButton() {
   let btn=document.getElementById('next-batch-button');
-  if(currentBatch*BATCH_SIZE>=allVideoUrls.length){if(btn)btn.remove();return;}
-  if(!btn){btn=document.createElement('div');btn.id='next-batch-button';btn.className='next-batch-button';btn.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();loadNextBatch();});document.body.appendChild(btn);}
+  if(currentBatch*BATCH_SIZE>=allVideoUrls.length){
+    if(btn)btn.remove();
+    return;
+  }
+
+  if(!btn){
+    btn=document.createElement('div');
+    btn.id='next-batch-button';
+    btn.className='next-batch-button';
+    btn.addEventListener('click',e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      loadNextBatch();
+    });
+    document.body.appendChild(btn);
+  }
+
   const rem=Math.min(BATCH_SIZE,allVideoUrls.length-currentBatch*BATCH_SIZE);
-  btn.innerHTML='▶️'; const c=document.createElement('span'); c.className='batch-counter'; c.textContent=rem; btn.appendChild(c);
+  btn.innerHTML='▶️';
+  const c=document.createElement('span');
+  c.className='batch-counter';
+  c.textContent=rem;
+  btn.appendChild(c);
 }
-function removeNextBatchButton(){const b=document.getElementById('next-batch-button');if(b)b.remove();}
+
+function removeNextBatchButton(){
+  const b=document.getElementById('next-batch-button');
+  if(b)b.remove();
+}
 
 function createUnwatchedVideosButton() {
-  const ex=document.getElementById('unwatched-videos-button');if(ex)ex.remove();
+  const ex=document.getElementById('unwatched-videos-button');
+  if(ex)ex.remove();
   if(!videoUrls.length)return;
-  const btn=document.createElement('div');btn.id='unwatched-videos-button';btn.className='unwatched-videos-button';btn.innerHTML='👁️';
-  btn.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();reloadUnwatchedVideos();});
+
+  const btn=document.createElement('div');
+  btn.id='unwatched-videos-button';
+  btn.className='unwatched-videos-button';
+  btn.innerHTML='👁️';
+  btn.addEventListener('click',e=>{
+    e.preventDefault();
+    e.stopPropagation();
+    reloadUnwatchedVideos();
+  });
   document.body.appendChild(btn);
 }
 
 function reloadUnwatchedVideos(){
   if(!videoUrls.length)return;
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
-  const wrappers=document.querySelectorAll('.video-wrapper');const unplayed=[];
-  wrappers.forEach((w,i)=>{const v=w.querySelector('video');if(!v)return;if(v.currentTime===0||v.error)unplayed.push(videoUrls[i]);});
-  if(!unplayed.length){showSortingIndicator('All videos played');return;}
-  videoUrls=unplayed;videoMetadata=Array(videoUrls.length).fill(null).map(()=>({}));
+
+  const wrappers=document.querySelectorAll('.video-wrapper');
+  const unplayed=[];
+
+  wrappers.forEach((w,i)=>{
+    const v=w.querySelector('video');
+    if(!v)return;
+    if(v.currentTime===0||v.error)unplayed.push(videoUrls[i]);
+  });
+
+  if(!unplayed.length){
+    showSortingIndicator('All videos played');
+    return;
+  }
+
+  videoUrls=unplayed;
+  videoMetadata=Array(videoUrls.length).fill(null).map(()=>({}));
   showSortingIndicator(`Reloading ${unplayed.length} unplayed videos`);
   videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
-  setTimeout(()=>{createVideoElements();videoContainer.scrollTo(0,0);},300);
+  setTimeout(()=>{
+    createVideoElements();
+    videoContainer.scrollTo(0,0);
+  },300);
 }
 
 // ─── Paste navigation ─────────────────────────────────────────────────────────
 function navigateToNextPasteEvent(){
-  if(!pasteEvents.length||!allVideoUrls.length){showSortingIndicator('No paste bundles yet');return;}
+  if(!pasteEvents.length||!allVideoUrls.length){
+    showSortingIndicator('No paste bundles yet');
+    return;
+  }
+
   currentPasteIndex=(currentPasteIndex+1)%pasteEvents.length;
   updatePasteNavigationButton();
 
@@ -1090,6 +1201,7 @@ function navigateToNextPasteEvent(){
     for(let i=start;i<end;i++) videoUrls.push(allVideoUrls[i]);
     currentBatch++;
     saveSession();
+
     videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
     setTimeout(()=>{
       createVideoElements();
@@ -1103,35 +1215,76 @@ function navigateToNextPasteEvent(){
   }
 }
 
-function resetPasteEvents(){pasteEvents=[];currentPasteIndex=-1;updatePasteNavigationButton();}
+function resetPasteEvents(){
+  pasteEvents=[];
+  currentPasteIndex=-1;
+  updatePasteNavigationButton();
+}
 
 function updatePasteNavigationButton(){
   let btn=document.getElementById('paste-nav-button');
+
   if(!btn){
-    btn=document.createElement('div');btn.id='paste-nav-button';btn.className='paste-nav-button control-button';btn.innerHTML='📎';
-    btn.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();navigateToNextPasteEvent();});
+    btn=document.createElement('div');
+    btn.id='paste-nav-button';
+    btn.className='paste-nav-button control-button';
+    btn.innerHTML='📎';
+    btn.addEventListener('click',e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      navigateToNextPasteEvent();
+    });
     document.body.appendChild(btn);
   }
-  if(!pasteEvents.length){btn.setAttribute('data-count','0/0');btn.style.opacity='0.2';btn.style.background='';}
-  else{const next=(currentPasteIndex+1)%pasteEvents.length;btn.setAttribute('data-count',`${next+1}/${pasteEvents.length}`);btn.style.opacity='0.7';btn.style.background='rgba(0,150,255,0.7)';}
+
+  if(!pasteEvents.length){
+    btn.setAttribute('data-count','0/0');
+    btn.style.opacity='0.2';
+    btn.style.background='';
+  } else {
+    const next=(currentPasteIndex+1)%pasteEvents.length;
+    btn.setAttribute('data-count',`${next+1}/${pasteEvents.length}`);
+    btn.style.opacity='0.7';
+    btn.style.background='rgba(0,150,255,0.7)';
+  }
 }
 
 // ─── Control buttons ──────────────────────────────────────────────────────────
 function createGearButton(){
   document.querySelectorAll('.control-button').forEach(b=>b.remove());
-  const mk=(cls,icon,label,fn)=>{const b=document.createElement('div');b.className=`control-button ${cls}`;b.innerHTML=icon;b.setAttribute('aria-label',label);b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();fn();});document.body.appendChild(b);};
-  mk('refresh-button','🔄','Refresh',()=>{resetPasteEvents();clearSession();if(videoUrlsInput)videoUrlsInput.value='';window.location.reload();});
+
+  const mk=(cls,icon,label,fn)=>{
+    const b=document.createElement('div');
+    b.className=`control-button ${cls}`;
+    b.innerHTML=icon;
+    b.setAttribute('aria-label',label);
+    b.addEventListener('click',e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      fn();
+    });
+    document.body.appendChild(b);
+  };
+
+  mk('refresh-button','🔄','Refresh',()=>{
+    resetPasteEvents();
+    clearSession();
+    if(videoUrlsInput)videoUrlsInput.value='';
+    window.location.reload();
+  });
+
   mk('duration-sort-button','⏱️','Sort by duration',sortVideosByDuration);
   mk('random-sort-button','🎲','Randomize',sortVideosRandomly);
   mk('show-controls-button','⚙️','Toggle controls',toggleControls);
-  // Autoplay toggle button
+
   const apBtn = document.createElement('div');
   apBtn.className = 'control-button autoplay-button' + (window.autoplayEnabled ? ' on' : '');
   apBtn.innerHTML = '▶️';
   apBtn.title = 'Toggle autoplay';
   apBtn.setAttribute('aria-label','Toggle autoplay');
   apBtn.addEventListener('click', e => {
-    e.preventDefault(); e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
     window.autoplayEnabled = !window.autoplayEnabled;
     apBtn.classList.toggle('on', window.autoplayEnabled);
     try { localStorage.setItem('pong_autoplay', window.autoplayEnabled ? '1' : '0'); } catch(_) {}
@@ -1143,22 +1296,27 @@ function createGearButton(){
 // ─── Load videos ──────────────────────────────────────────────────────────────
 loadVideosButton.addEventListener('click',()=>{
   const newUrls=parseVideoUrls(videoUrlsInput.value);
-  if(!newUrls.length){alert('No valid MP4 URLs found.');return;}
+  if(!newUrls.length){
+    alert('No valid MP4 URLs found.');
+    return;
+  }
+
   document.querySelectorAll('video').forEach(v=>v.pause());
 
   allVideoUrls = newUrls;
   currentBatch = 0;
   currentVideoIndex = 0;
 
-  // Convert pending pastes — textarea indices = allVideoUrls indices (fresh load)
   if (pendingPastes.length) {
-    pasteEvents = pendingPastes.slice(); // copy as-is, indices already correct
+    pasteEvents = pendingPastes.slice();
     pendingPastes = [];
     currentPasteIndex = -1;
     console.log('[Load] Finalised ' + pasteEvents.length + ' paste bundles');
   } else {
-    pasteEvents = []; currentPasteIndex = -1;
+    pasteEvents = [];
+    currentPasteIndex = -1;
   }
+
   _prevUrlCount = 0;
 
   updatePasteNavigationButton();
@@ -1170,17 +1328,28 @@ loadVideosButton.addEventListener('click',()=>{
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 document.getElementById('auth-button').addEventListener('click',()=>{
   const ov=document.getElementById('auth-helper'),ct=document.getElementById('auth-iframe-container');
-  ov.style.display='block';ct.innerHTML='';
-  const ifr=document.createElement('iframe');ifr.src='https://coomer.su/';ifr.style.width='100%';ifr.style.height='100%';ct.appendChild(ifr);
+  ov.style.display='block';
+  ct.innerHTML='';
+  const ifr=document.createElement('iframe');
+  ifr.src='https://coomer.su/';
+  ifr.style.width='100%';
+  ifr.style.height='100%';
+  ct.appendChild(ifr);
 });
+
 document.getElementById('auth-close').addEventListener('click',()=>{
   document.getElementById('auth-helper').style.display='none';
-  document.querySelectorAll('video').forEach(v=>{if(v.error&&v.src.includes('coomer.su')){const s=v.src;v.src='';setTimeout(()=>{v.src=s;},100);}});
+  document.querySelectorAll('video').forEach(v=>{
+    if(v.error&&v.src.includes('coomer.su')){
+      const s=v.src;
+      v.src='';
+      setTimeout(()=>{v.src=s;},100);
+    }
+  });
 });
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
-  // ── Pong splash game ────────────────────────────────────────────────────
   (function() {
     const overlay = document.getElementById('pong-overlay');
     const hotspot = document.getElementById('pong-hotspot');
@@ -1191,7 +1360,6 @@ document.addEventListener('DOMContentLoaded',()=>{
     canvas.height = window.innerHeight;
     const ctx = canvas.getContext('2d');
 
-    // Game state
     const PAD_H = 70, PAD_W = 10, BALL_R = 7;
     let ly = canvas.height/2 - PAD_H/2;
     let ry = canvas.height/2 - PAD_H/2;
@@ -1205,7 +1373,6 @@ document.addEventListener('DOMContentLoaded',()=>{
       ctx.fillStyle = '#0a0a1a';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Centre dashed line
       ctx.setLineDash([10, 14]);
       ctx.strokeStyle = 'rgba(255,255,255,0.12)';
       ctx.lineWidth = 2;
@@ -1215,14 +1382,12 @@ document.addEventListener('DOMContentLoaded',()=>{
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Scores
       ctx.fillStyle = 'rgba(255,255,255,0.2)';
       ctx.font = 'bold 48px monospace';
       ctx.textAlign = 'center';
       ctx.fillText(ls, canvas.width/2 - 60, 70);
       ctx.fillText(rs, canvas.width/2 + 60, 70);
 
-      // Paddles
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
       ctx.beginPath();
       roundRect(ctx, 18, ly, PAD_W, PAD_H, 4);
@@ -1231,7 +1396,6 @@ document.addEventListener('DOMContentLoaded',()=>{
       roundRect(ctx, canvas.width - 28, ry, PAD_W, PAD_H, 4);
       ctx.fill();
 
-      // Ball glow
       ctx.shadowColor = '#fff';
       ctx.shadowBlur = 12;
       ctx.beginPath();
@@ -1240,47 +1404,62 @@ document.addEventListener('DOMContentLoaded',()=>{
       ctx.fill();
       ctx.shadowBlur = 0;
 
-      // Move ball
-      bx += vx; by += vy;
+      bx += vx;
+      by += vy;
 
-      // Wall bounce top/bottom
-      if (by - BALL_R < 0)              { by = BALL_R;              vy = Math.abs(vy); }
-      if (by + BALL_R > canvas.height)  { by = canvas.height-BALL_R; vy = -Math.abs(vy); }
+      if (by - BALL_R < 0) {
+        by = BALL_R;
+        vy = Math.abs(vy);
+      }
 
-      // AI paddles (simple tracking)
+      if (by + BALL_R > canvas.height) {
+        by = canvas.height-BALL_R;
+        vy = -Math.abs(vy);
+      }
+
       const speed = 3.2;
       const lCenter = ly + PAD_H/2;
       const rCenter = ry + PAD_H/2;
+
       if (lCenter < by - 6) ly = Math.min(ly + speed, canvas.height - PAD_H);
       if (lCenter > by + 6) ly = Math.max(ly - speed, 0);
       if (rCenter < by - 6) ry = Math.min(ry + speed, canvas.height - PAD_H);
       if (rCenter > by + 6) ry = Math.max(ry - speed, 0);
 
-      // Paddle collision left
       if (bx - BALL_R < 28 + PAD_W && by > ly && by < ly + PAD_H && vx < 0) {
         vx = Math.abs(vx) * 1.04;
         vy += (by - (ly + PAD_H/2)) * 0.06;
         bx = 28 + PAD_W + BALL_R;
       }
-      // Paddle collision right
+
       if (bx + BALL_R > canvas.width - 28 && by > ry && by < ry + PAD_H && vx > 0) {
         vx = -Math.abs(vx) * 1.04;
         vy += (by - (ry + PAD_H/2)) * 0.06;
         bx = canvas.width - 28 - BALL_R;
       }
-      // Speed cap
-      const spd = Math.sqrt(vx*vx+vy*vy);
-      if (spd > 12) { vx = vx/spd*12; vy = vy/spd*12; }
 
-      // Score
-      if (bx < 0)              { rs++; reset(); }
-      if (bx > canvas.width)   { ls++; reset(); }
+      const spd = Math.sqrt(vx*vx+vy*vy);
+      if (spd > 12) {
+        vx = vx/spd*12;
+        vy = vy/spd*12;
+      }
+
+      if (bx < 0) {
+        rs++;
+        reset();
+      }
+
+      if (bx > canvas.width) {
+        ls++;
+        reset();
+      }
 
       requestAnimationFrame(draw);
     }
 
     function reset() {
-      bx = canvas.width/2; by = canvas.height/2;
+      bx = canvas.width/2;
+      by = canvas.height/2;
       vx = (Math.random()>0.5?1:-1) * 4.5;
       vy = (Math.random()>0.5?1:-1) * 3.2;
     }
@@ -1304,7 +1483,9 @@ document.addEventListener('DOMContentLoaded',()=>{
     function dismiss() {
       running = false;
       overlay.classList.add('hidden');
-      setTimeout(() => { overlay.style.display = 'none'; }, 600);
+      setTimeout(() => {
+        overlay.style.display = 'none';
+      }, 600);
     }
 
     let tapCount = 0;
@@ -1318,7 +1499,9 @@ document.addEventListener('DOMContentLoaded',()=>{
         tapCount = 0;
         dismiss();
       } else {
-        tapTimer = setTimeout(() => { tapCount = 0; }, 2000);
+        tapTimer = setTimeout(() => {
+          tapCount = 0;
+        }, 2000);
       }
     }
 
@@ -1326,23 +1509,35 @@ document.addEventListener('DOMContentLoaded',()=>{
     hotspot.addEventListener('touchend', handleHotspot);
   })();
 
-  // Load autoplay preference (default ON)
-  try { window.autoplayEnabled = localStorage.getItem('pong_autoplay') !== '0'; } catch(_) { window.autoplayEnabled = true; }
-  createGearButton();createUnwatchedVideosButton();updatePasteNavigationButton();createSaveButtons();setupMobileAudioUnlock();
-  // Restore previous session if available
+  try {
+    window.autoplayEnabled = localStorage.getItem('pong_autoplay') !== '0';
+  } catch(_) {
+    window.autoplayEnabled = true;
+  }
+
+  createGearButton();
+  createUnwatchedVideosButton();
+  updatePasteNavigationButton();
+  createSaveButtons();
+  setupMobileAudioUnlock();
+
   if (loadSession()) {
     console.log(`[Session] Restoring ${allVideoUrls.length} videos, batch ${currentBatch}, index ${currentVideoIndex}`);
     const savedBatch = currentBatch;
     const savedIndex = currentVideoIndex % BATCH_SIZE;
-    currentBatch = savedBatch; // loadNextBatch will increment from here
+    currentBatch = savedBatch;
     updatePasteNavigationButton();
     loadNextBatch(savedIndex);
   }
 
   let lastTap=0;
-  document.addEventListener('click',e=>{if(e.target.closest('.video-wrapper'))return;const now=Date.now();if(now-lastTap<300&&now-lastTap>0)toggleControls();lastTap=now;});
+  document.addEventListener('click',e=>{
+    if(e.target.closest('.video-wrapper'))return;
+    const now=Date.now();
+    if(now-lastTap<300&&now-lastTap>0)toggleControls();
+    lastTap=now;
+  });
 
-  // Save current video index on scroll so we can restore it
   let scrollSaveTimer = null;
   videoContainer.addEventListener('scroll', () => {
     window.lastScrollTime = Date.now();
@@ -1352,6 +1547,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     }, 500);
   });
 });
+
 // ─── Scroll bar ──────────────────────────────────────────────────────────────
 (function() {
   const track = document.createElement('div');
@@ -1366,30 +1562,43 @@ document.addEventListener('DOMContentLoaded',()=>{
   function updateThumb() {
     const vc = document.getElementById('video-container');
     if (!vc) return;
+
     const totalH = vc.scrollHeight;
     const viewH  = vc.clientHeight;
-    if (totalH <= viewH) { thumb.classList.remove('visible'); return; }
+
+    if (totalH <= viewH) {
+      thumb.classList.remove('visible');
+      return;
+    }
+
     const ratio     = viewH / totalH;
     const thumbH    = Math.max(20, viewH * ratio);
     const scrollPct = vc.scrollTop / (totalH - viewH);
     const topPos    = scrollPct * (viewH - thumbH);
+
     thumb.style.height = thumbH + 'px';
     thumb.style.top    = topPos + 'px';
     thumb.classList.add('visible');
+
     clearTimeout(hideTimer);
     hideTimer = setTimeout(() => thumb.classList.remove('visible'), 1200);
   }
 
-  // Attach once video container exists
   function attachScrollBar() {
     const vc = document.getElementById('video-container');
-    if (!vc) { setTimeout(attachScrollBar, 200); return; }
+    if (!vc) {
+      setTimeout(attachScrollBar, 200);
+      return;
+    }
     vc.addEventListener('scroll', updateThumb, { passive: true });
   }
+
   attachScrollBar();
 })();
 
-window.addEventListener('blur',()=>{if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();});
+window.addEventListener('blur',()=>{
+  if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
+});
 </script>
 </body>
 </html>
