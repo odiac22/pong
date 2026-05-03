@@ -291,23 +291,24 @@
     #scroll-bar-thumb.visible { opacity: 1; }
 
     /* Right-side save buttons */
-  .save-actions-panel {
+/* Save / Sync buttons under paperclip */
+.save-actions-panel {
   position: fixed;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
+  left: 10px;
+  top: calc(50% + 92px);
+  transform: translateY(0);
   z-index: 1200;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
   pointer-events: auto;
 }
 
 .side-save-button {
-  width: 30px;
-  min-height: 32px;
+  width: 36px;
+  min-height: 40px;
   border: none;
-  border-radius: 10px;
+  border-radius: 11px;
   background: rgba(30,30,30,0.78);
   color: white;
   display: flex;
@@ -329,29 +330,29 @@
 .side-save-button:hover,
 .side-save-button:active {
   opacity: 1;
-  transform: scale(1.06);
+  transform: scale(1.08);
 }
 
 .side-save-icon {
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1;
 }
 
 .side-save-label {
-  font-size: 6px;
+  font-size: 7px;
   font-weight: 700;
   line-height: 1;
 }
 
 .side-save-count {
   margin-top: 1px;
-  min-width: 12px;
-  height: 10px;
+  min-width: 14px;
+  height: 11px;
   padding: 0 3px;
   border-radius: 999px;
   background: rgba(255,64,64,0.95);
   color: white;
-  font-size: 7px;
+  font-size: 8px;
   font-weight: 800;
   display: flex;
   align-items: center;
