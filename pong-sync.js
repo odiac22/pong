@@ -15,7 +15,8 @@
     path: 'pong-data/saved-links.json'
   };
 
-  function emptySharedData() {
+  function emptySharedData(
+) {
     return {
       savedVideos: {},
       savedArtists: {}
@@ -695,8 +696,8 @@
     artistBtn.addEventListener('mouseleave', () => clearTimeout(artistHoldTimer));
 
     panel.appendChild(tokenBtn);
-    panel.appendChild(videoBtn);
     panel.appendChild(artistBtn);
+    panel.appendChild(videoBtn);
     document.body.appendChild(panel);
 
     updateSaveCountersOverride();
