@@ -1,1 +1,10 @@
-{ "savedVideos": {}, "savedArtists": {} }
+{
+  "savedVideos": {
+    "https://img3.coomerfans.com/storage/10/ud/al/2892ac-0197e34d-4e88-75f2-928b-94006e950f59.m4v": {
+      "url": "https://img3.coomerfans.com/storage/10/ud/al/2892ac-0197e34d-4e88-75f2-928b-94006e950f59.m4v",
+      "artistKey": null,
+      "savedAt": "2026-05-03T22:49:12.390Z"
+    }
+  },
+  "savedArtists": {}
+}
