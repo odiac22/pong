@@ -1,11 +1,8 @@
 // Pong GitHub shared saved videos/artists sync override.
 // Loads after index.html and replaces the local-only save buttons.
-// Adds:
-// - Sync / Artist / Video buttons under the paperclip
-// - GitHub shared JSON saving
-// - Artist save = current paperclip bundle
-// - Hold Artist = load saved bundles and rebuild paperclip navigation
-// - Smooth horizontal scrub without interfering with vertical swipes
+// Separate lists:
+// - savedVideos = only videos saved with the Video button
+// - savedArtists = only paperclip bundles saved with the Artist button
 
 (function () {
   'use strict';
@@ -22,8 +19,6 @@
   };
 
   // Scrub tuning
-  // Bigger SCRUB_START_PX = less accidental scrubbing while swiping.
-  // Bigger SCRUB_PIXELS_PER_SECOND = slower/more precise scrubbing.
   const SCRUB_START_PX = 34;
   const SCRUB_DOMINANCE_RATIO = 2.0;
   const VERTICAL_START_PX = 12;
@@ -40,7 +35,6 @@
     }
 
     style.textContent = `
-      /* Pong Sync buttons under paperclip */
       .save-actions-panel {
         position: fixed !important;
         left: 10px !important;
@@ -680,8 +674,7 @@
     try {
       showMsg('Saving video...');
 
-      const bundleInfo = getCurrentPasteBundleInfo();
-      const artistKey = bundleInfo?.bundleKey || extractArtistKeyOverride(url);
+      const artistKey = extractArtistKeyOverride(url);
 
       const result = await updateSharedData(data => {
         return {
@@ -718,10 +711,18 @@
         data.savedArtists = data.savedArtists || {};
 
         const existing = data.savedArtists[artistKey];
+        const existingVideos = existing && Array.isArray(existing.videos)
+          ? existing.videos
+          : [];
 
-        const mergedVideos = existing && Array.isArray(existing.videos)
-          ? [...new Set([...existing.videos, ...artistVideos])]
-          : artistVideos;
+        const newVideosOnly = artistVideos.filter(url => !existingVideos.includes(url));
+
+        const mergedVideos = [
+          ...new Set([
+            ...existingVideos,
+            ...artistVideos
+          ])
+        ];
 
         data.savedArtists[artistKey] = {
           artistKey,
@@ -734,13 +735,13 @@
         };
 
         return {
-          addedVideoCount: addSavedVideosToData(data, artistVideos, artistKey),
+          addedBundleVideoCount: newVideosOnly.length,
           artistVideoCount: mergedVideos.length
         };
       });
 
-      if (result.result.addedVideoCount > 0) {
-        showMsg(`Saved bundle + ${result.result.addedVideoCount} videos 👤`);
+      if (result.result.addedBundleVideoCount > 0) {
+        showMsg(`Saved bundle + ${result.result.addedBundleVideoCount} videos 👤`);
       } else {
         showMsg('Bundle already saved');
       }
