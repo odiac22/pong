@@ -924,10 +924,10 @@ function createVideoElements() {
     tapArea.addEventListener('touchmove', e => {
       if (e.target.closest('.video-progress-container')) return;
       const dx = e.touches[0].clientX - startX;
-      if (Math.abs(dx) > 40) {
+      if (Math.abs(dx) > 8) {
         isDragging = true;
         progressContainer.style.opacity = '1';
-        const timeChange = (dx/250)*video.duration;
+        const timeChange = dx / 12;
         const newTime = Math.max(0, Math.min(video.duration, startTime+timeChange));
         wrapper.dataset.pendingTime = newTime;
         if (video.duration && !isNaN(newTime)) {
