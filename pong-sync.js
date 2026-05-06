@@ -1,8 +1,14 @@
 // Pong GitHub shared saved videos/artists sync override.
-// Loads after index.html and replaces the local-only save buttons.
 // Separate lists:
 // - savedVideos = only videos saved with the Video button
-// - savedArtists = only paperclip bundles saved with the Artist button
+// - savedArtists = only paperclip/artist bundles saved with the Artist button
+//
+// Added:
+// - Remove button above the eye button
+// - If viewing saved videos: remove current video only
+// - If viewing saved artist bundles: remove the whole current artist bundle only
+// - Saved videos play fully randomized
+// - Saved artists play randomized by artist bundle, and videos inside each artist bundle are also randomized, but bundles stay grouped
 
 (function () {
   'use strict';
@@ -18,12 +24,13 @@
     path: 'pong-data/saved-links.json'
   };
 
-  // Scrub tuning
   const SCRUB_START_PX = 34;
   const SCRUB_DOMINANCE_RATIO = 2.0;
   const VERTICAL_START_PX = 12;
   const VERTICAL_DOMINANCE_RATIO = 1.2;
   const SCRUB_PIXELS_PER_SECOND = 22;
+
+  window.PongLoadedSavedMode = window.PongLoadedSavedMode || 'normal';
 
   function injectPongSyncStyles() {
     let style = document.getElementById('pong-sync-style');
@@ -101,6 +108,36 @@
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
+      }
+
+      .remove-saved-button {
+        position: fixed !important;
+        left: 10px !important;
+        top: calc(40% - 42px) !important;
+        transform: translateY(-50%) !important;
+        width: 30px !important;
+        height: 30px !important;
+        background: rgba(185,28,28,0.78) !important;
+        opacity: 0.55 !important;
+        font-size: 15px !important;
+        border: none !important;
+        border-radius: 50% !important;
+        z-index: 1200 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        color: white !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.5) !important;
+        -webkit-tap-highlight-color: transparent !important;
+        touch-action: manipulation !important;
+        transition: all 0.2s ease !important;
+      }
+
+      .remove-saved-button:hover,
+      .remove-saved-button:active {
+        opacity: 1 !important;
+        transform: translateY(-50%) scale(1.1) !important;
       }
     `;
   }
@@ -287,7 +324,6 @@
         const result = mutatorFn(data) || {};
 
         await writeSharedDataToGitHub(data, loaded.sha);
-
         mirrorSharedDataToLocal(data);
 
         return {
@@ -346,7 +382,11 @@
     return copy;
   }
 
-  function loadSavedListIntoPlayer(urls, message, newPasteEvents) {
+  function resetSavedPlaybackMode() {
+    window.PongLoadedSavedMode = 'normal';
+  }
+
+  function loadSavedListIntoPlayer(urls, message, newPasteEvents, mode) {
     if (!urls || !urls.length) {
       showMsg('No saved videos found');
       return;
@@ -355,6 +395,8 @@
     if (window.currentlyPlayingVideo && !window.currentlyPlayingVideo.paused) {
       window.currentlyPlayingVideo.pause();
     }
+
+    window.PongLoadedSavedMode = mode || 'normal';
 
     allVideoUrls = urls.slice();
     videoUrls = [];
@@ -413,7 +455,8 @@
       loadSavedListIntoPlayer(
         randomizedVideos,
         `Playing ${randomizedVideos.length} saved videos 🎲`,
-        []
+        [],
+        'savedVideos'
       );
     } catch (e) {
       showMsg('Could not load saved videos');
@@ -441,7 +484,7 @@
       const rebuiltPasteEvents = [];
 
       randomizedArtists.forEach((artist, artistIndex) => {
-        const cleanVideos = [...new Set(artist.videos.filter(Boolean))];
+        const cleanVideos = shuffleArray([...new Set(artist.videos.filter(Boolean))]);
 
         if (!cleanVideos.length) return;
 
@@ -467,7 +510,8 @@
       loadSavedListIntoPlayer(
         groupedVideos,
         `Playing ${rebuiltPasteEvents.length} saved bundles 👤🎲`,
-        rebuiltPasteEvents
+        rebuiltPasteEvents,
+        'savedArtists'
       );
     } catch (e) {
       showMsg('Could not load saved artists');
@@ -663,6 +707,21 @@
     };
   }
 
+  function getCurrentPasteEventIndex() {
+    const globalIndex = getCurrentGlobalVideoIndex();
+
+    if (globalIndex < 0 || !Array.isArray(pasteEvents)) return -1;
+
+    return pasteEvents.findIndex(item => {
+      if (!item) return false;
+
+      const start = Number(item.startIndex);
+      const count = Number(item.count);
+
+      return globalIndex >= start && globalIndex < start + count;
+    });
+  }
+
   async function saveCurrentVideoLinkOverride() {
     const url = getCurrentVideoUrlOverride();
 
@@ -749,6 +808,215 @@
       showMsg('Could not save bundle');
       console.error(e);
     }
+  }
+
+  function rebuildSavedArtistsAfterRemovingEvent(removeEventIndex) {
+    const rebuiltUrls = [];
+    const rebuiltEvents = [];
+
+    if (!Array.isArray(pasteEvents) || removeEventIndex < 0) {
+      return {
+        urls: [],
+        events: []
+      };
+    }
+
+    pasteEvents.forEach((event, index) => {
+      if (index === removeEventIndex) return;
+
+      const oldStart = Number(event.startIndex);
+      const oldCount = Number(event.count);
+      const eventUrls = allVideoUrls.slice(oldStart, oldStart + oldCount).filter(Boolean);
+
+      if (!eventUrls.length) return;
+
+      const newStart = rebuiltUrls.length;
+
+      eventUrls.forEach(url => rebuiltUrls.push(url));
+
+      rebuiltEvents.push({
+        ...event,
+        startIndex: newStart,
+        count: eventUrls.length
+      });
+    });
+
+    return {
+      urls: rebuiltUrls,
+      events: rebuiltEvents
+    };
+  }
+
+  function reloadCurrentSavedVideosAfterRemoval(removedUrl) {
+    const remaining = allVideoUrls.filter(url => url !== removedUrl);
+
+    if (!remaining.length) {
+      allVideoUrls = [];
+      videoUrls = [];
+      videoMetadata = [];
+      pasteEvents = [];
+      currentBatch = 0;
+      currentVideoIndex = 0;
+      videoContainer.innerHTML = '<div class="loading-message">No saved videos left</div>';
+      showMsg('Removed video');
+      return;
+    }
+
+    loadSavedListIntoPlayer(
+      remaining,
+      `Removed video. ${remaining.length} left`,
+      [],
+      'savedVideos'
+    );
+  }
+
+  function reloadCurrentSavedArtistsAfterRemoval(removeEventIndex) {
+    const rebuilt = rebuildSavedArtistsAfterRemovingEvent(removeEventIndex);
+
+    if (!rebuilt.urls.length) {
+      allVideoUrls = [];
+      videoUrls = [];
+      videoMetadata = [];
+      pasteEvents = [];
+      currentBatch = 0;
+      currentVideoIndex = 0;
+      videoContainer.innerHTML = '<div class="loading-message">No saved artist bundles left</div>';
+      showMsg('Removed artist bundle');
+      return;
+    }
+
+    loadSavedListIntoPlayer(
+      rebuilt.urls,
+      `Removed bundle. ${rebuilt.events.length} left`,
+      rebuilt.events,
+      'savedArtists'
+    );
+  }
+
+  async function removeCurrentSavedItemOverride() {
+    const mode = window.PongLoadedSavedMode || 'normal';
+
+    if (mode === 'savedVideos') {
+      const url = getCurrentVideoUrlOverride();
+
+      if (!url) {
+        showMsg('No current video found');
+        return;
+      }
+
+      try {
+        showMsg('Removing saved video...');
+
+        const result = await updateSharedData(data => {
+          data.savedVideos = data.savedVideos || {};
+
+          let removed = false;
+
+          if (data.savedVideos[url]) {
+            delete data.savedVideos[url];
+            removed = true;
+          } else {
+            Object.keys(data.savedVideos).forEach(key => {
+              if (data.savedVideos[key]?.url === url) {
+                delete data.savedVideos[key];
+                removed = true;
+              }
+            });
+          }
+
+          return {
+            removed
+          };
+        });
+
+        if (result.result.removed) {
+          reloadCurrentSavedVideosAfterRemoval(url);
+        } else {
+          showMsg('Video was not in saved list');
+        }
+      } catch (e) {
+        showMsg('Could not remove video');
+        console.error(e);
+      }
+
+      return;
+    }
+
+    if (mode === 'savedArtists') {
+      const bundleInfo = getCurrentPasteBundleInfo();
+      const eventIndex = getCurrentPasteEventIndex();
+
+      if (!bundleInfo || !bundleInfo.bundleKey || eventIndex < 0) {
+        showMsg('No current artist bundle found');
+        return;
+      }
+
+      const artistKey = bundleInfo.bundleKey;
+
+      try {
+        showMsg('Removing artist bundle...');
+
+        const result = await updateSharedData(data => {
+          data.savedArtists = data.savedArtists || {};
+
+          let removed = false;
+
+          if (data.savedArtists[artistKey]) {
+            delete data.savedArtists[artistKey];
+            removed = true;
+          } else {
+            Object.keys(data.savedArtists).forEach(key => {
+              if (data.savedArtists[key]?.artistKey === artistKey) {
+                delete data.savedArtists[key];
+                removed = true;
+              }
+            });
+          }
+
+          return {
+            removed
+          };
+        });
+
+        if (result.result.removed) {
+          reloadCurrentSavedArtistsAfterRemoval(eventIndex);
+        } else {
+          showMsg('Artist bundle was not in saved list');
+        }
+      } catch (e) {
+        showMsg('Could not remove artist bundle');
+        console.error(e);
+      }
+
+      return;
+    }
+
+    showMsg('Load saved videos or artists first');
+  }
+
+  function createRemoveSavedButtonOverride() {
+    injectPongSyncStyles();
+
+    const existing = document.getElementById('remove-saved-button');
+
+    if (existing) {
+      existing.remove();
+    }
+
+    const btn = document.createElement('button');
+    btn.id = 'remove-saved-button';
+    btn.className = 'remove-saved-button';
+    btn.type = 'button';
+    btn.innerHTML = '🗑️';
+    btn.title = 'Remove current saved video, or remove current saved artist bundle';
+
+    btn.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      removeCurrentSavedItemOverride();
+    });
+
+    document.body.appendChild(btn);
   }
 
   function createSaveButtonsOverride() {
@@ -1107,6 +1375,17 @@
     });
   }
 
+  function attachNormalModeReset() {
+    const loadBtn = document.getElementById('load-videos');
+
+    if (loadBtn && loadBtn.dataset.pongModeReset !== 'true') {
+      loadBtn.dataset.pongModeReset = 'true';
+      loadBtn.addEventListener('click', () => {
+        resetSavedPlaybackMode();
+      }, true);
+    }
+  }
+
   try {
     updateSaveCounters = updateSaveCountersOverride;
     saveCurrentVideoLink = saveCurrentVideoLinkOverride;
@@ -1121,7 +1400,9 @@
 
     setTimeout(() => {
       createSaveButtonsOverride();
+      createRemoveSavedButtonOverride();
       startSmoothScrubObserver();
+      attachNormalModeReset();
     }, 0);
   }
 
@@ -1136,6 +1417,7 @@
     playSavedVideosRandomized,
     playSavedArtistsRandomized,
     saveCurrentVideoLink: saveCurrentVideoLinkOverride,
-    saveCurrentArtistVideos: saveCurrentArtistVideosOverride
+    saveCurrentArtistVideos: saveCurrentArtistVideosOverride,
+    removeCurrentSavedItem: removeCurrentSavedItemOverride
   };
 })();
