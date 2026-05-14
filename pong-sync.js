@@ -263,23 +263,29 @@
     const file = await res.json();
 
     let parsed = null;
+    const inlineContent =
+      typeof file?.content === 'string' && file.content.trim()
+        ? file.content
+        : '';
 
-    if (file && file.content && file.encoding === 'base64') {
+    if (inlineContent && file?.encoding === 'base64') {
       try {
-        parsed = JSON.parse(base64DecodeUnicode(file.content));
+        parsed = JSON.parse(base64DecodeUnicode(inlineContent));
       } catch (e) {
         parsed = null;
       }
     }
 
     if (!parsed) {
-      const rawUrl =
-        file?.download_url ||
+      const rawUrl = (
+        typeof file?.download_url === 'string' && file.download_url.trim()
+          ? file.download_url
+          : ''
+      ) ||
         `https://raw.githubusercontent.com/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/${GITHUB_SYNC.branch}/${GITHUB_SYNC.path}`;
 
       const rawRes = await fetch(`${rawUrl}${rawUrl.includes('?') ? '&' : '?'}t=${Date.now()}`, {
         method: 'GET',
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
         cache: 'no-store'
       });
 
