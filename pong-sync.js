@@ -316,7 +316,7 @@
 
     const body = {
       message: `Update Pong saved links ${new Date().toISOString()}`,
-      content: base64EncodeUnicode(JSON.stringify(data, null, 2)),
+      content: base64EncodeUnicode(JSON.stringify(data)),
       branch: GITHUB_SYNC.branch
     };
 
