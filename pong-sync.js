@@ -262,14 +262,40 @@
 
     const file = await res.json();
 
-    let parsed = emptySharedData();
+    let parsed = null;
 
-    if (file && file.content) {
+    if (file && file.content && file.encoding === 'base64') {
       try {
         parsed = JSON.parse(base64DecodeUnicode(file.content));
       } catch (e) {
-        parsed = emptySharedData();
+        parsed = null;
       }
+    }
+
+    if (!parsed) {
+      const rawUrl =
+        file?.download_url ||
+        `https://raw.githubusercontent.com/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/${GITHUB_SYNC.branch}/${GITHUB_SYNC.path}`;
+
+      const rawRes = await fetch(`${rawUrl}${rawUrl.includes('?') ? '&' : '?'}t=${Date.now()}`, {
+        method: 'GET',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+        cache: 'no-store'
+      });
+
+      if (!rawRes.ok) {
+        throw new Error(`GitHub raw load failed: ${rawRes.status}`);
+      }
+
+      try {
+        parsed = await rawRes.json();
+      } catch (e) {
+        throw new Error('GitHub raw JSON parse failed');
+      }
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      parsed = emptySharedData();
     }
 
     parsed.savedVideos = parsed.savedVideos || {};
