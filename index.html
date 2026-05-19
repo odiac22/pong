@@ -395,7 +395,15 @@
   </div>
 
 <script>
-// ─── State
+
+// ─── State ────────────────────────────────────────────────────────────────────
+let videoUrls = [];
+let allVideoUrls = [];
+let currentVideoIndex = 0;
+let isControlsVisible = true;
+let videoMetadata = [];
+let currentBatch = 0;
+const BATCH_SIZE = 20;
 
  ────────────────────────────────────────────────────────────────────
 // ─── Paste tracking ───────────────────────────────────────────────────────────
