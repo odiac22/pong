@@ -395,7 +395,6 @@
   </div>
 
 <script>
-
 // ─── State ────────────────────────────────────────────────────────────────────
 let videoUrls = [];
 let allVideoUrls = [];
@@ -405,13 +404,11 @@ let videoMetadata = [];
 let currentBatch = 0;
 const BATCH_SIZE = 20;
 
- ────────────────────────────────────────────────────────────────────
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
 let currentPasteIndex = -1;
 let pendingPastes = [];
 let _prevUrlCount = 0;
-let _isHandlingPaste = false;
 
 const videoContainer = document.getElementById('video-container');
 const videoUrlsInput  = document.getElementById('video-urls');
@@ -422,47 +419,25 @@ function parseVideoUrls(text) {
     .filter(u => u && u.length > 4);
 }
 
-function countValidUrls(text) {
-  if (!text) return 0;
-
-  let count = 0;
-  const lines = text.split(/\r?\n/);
-
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].trim().length > 4) count++;
-  }
-
-  return count;
-}
-
-function markPasteNavButtonActive() {
-  const btn = document.getElementById('paste-nav-button');
-  if (!btn) return;
-
-  btn.style.opacity = '0.7';
-  btn.style.background = 'rgba(0,150,255,0.7)';
-  btn.setAttribute('data-count', pendingPastes.length + 'p');
-}
-
-videoUrlsInput.addEventListener('paste', () => {
-  _prevUrlCount = countValidUrls(videoUrlsInput.value);
-  _isHandlingPaste = true;
-
-  setTimeout(() => {
-    const currentCount = countValidUrls(videoUrlsInput.value);
-    const added = currentCount - _prevUrlCount;
-
-    if (added > 0) {
-      pendingPastes.push({ startIndex: _prevUrlCount, count: added });
-      _prevUrlCount = currentCount;
-      markPasteNavButtonActive();
-
-      console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + added + ' URLs at index ' + _prevUrlCount);
-    }
-
-    _isHandlingPaste = false;
-  }, 0);
+videoUrlsInput.addEventListener('paste', (e) => {
+  _prevUrlCount = parseVideoUrls(videoUrlsInput.value).length;
 }, true);
+
+videoUrlsInput.addEventListener('input', () => {
+  const currentCount = parseVideoUrls(videoUrlsInput.value).length;
+  const added = currentCount - _prevUrlCount;
+  if (added > 0) {
+    pendingPastes.push({ startIndex: _prevUrlCount, count: added });
+    _prevUrlCount = currentCount;
+    const btn = document.getElementById('paste-nav-button');
+    if (btn) {
+      btn.style.opacity = '0.7';
+      btn.style.background = 'rgba(0,150,255,0.7)';
+      btn.setAttribute('data-count', pendingPastes.length + 'p');
+    }
+    console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + added + ' URLs at index ' + (currentCount - added));
+  }
+});
 
 // ─── Session persistence ──────────────────────────────────────────────────────
 const SESSION_KEY = 'pong_session_v1';
