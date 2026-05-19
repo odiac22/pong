@@ -396,15 +396,6 @@
 
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
-let videoUrls = [];
-let allVideoUrls = [];
-let currentVideoIndex = 0;
-let isControlsVisible = true;
-let videoMetadata = [];
-let currentBatch = 0;
-const BATCH_SIZE = 20;
-
-// ─── Paste tracking ───────────────────────────────────────────────────────────
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
 let currentPasteIndex = -1;
@@ -456,12 +447,13 @@ videoUrlsInput.addEventListener('paste', () => {
       _prevUrlCount = currentCount;
       markPasteNavButtonActive();
 
-      console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + added + ' URLs at index ' + (currentCount - added));
+      console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + added + ' URLs at index ' + _prevUrlCount);
     }
 
     _isHandlingPaste = false;
   }, 0);
 }, true);
+
 // ─── Session persistence ──────────────────────────────────────────────────────
 const SESSION_KEY = 'pong_session_v1';
 
