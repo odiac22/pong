@@ -405,11 +405,12 @@ let currentBatch = 0;
 const BATCH_SIZE = 20;
 
 // ─── Paste tracking ───────────────────────────────────────────────────────────
+// ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
 let currentPasteIndex = -1;
 let pendingPastes = [];
 let _prevUrlCount = 0;
-let _pendingPasteFinalize = null;
+let _isHandlingPaste = false;
 
 const videoContainer = document.getElementById('video-container');
 const videoUrlsInput  = document.getElementById('video-urls');
@@ -442,29 +443,25 @@ function markPasteNavButtonActive() {
   btn.setAttribute('data-count', pendingPastes.length + 'p');
 }
 
-videoUrlsInput.addEventListener('paste', (e) => {
-  const pastedText = e.clipboardData?.getData('text/plain') || '';
-  const added = countValidUrls(pastedText);
+videoUrlsInput.addEventListener('paste', () => {
+  _prevUrlCount = countValidUrls(videoUrlsInput.value);
+  _isHandlingPaste = true;
 
-  if (added <= 0) return;
+  setTimeout(() => {
+    const currentCount = countValidUrls(videoUrlsInput.value);
+    const added = currentCount - _prevUrlCount;
 
-  const startIndex = countValidUrls(videoUrlsInput.value);
+    if (added > 0) {
+      pendingPastes.push({ startIndex: _prevUrlCount, count: added });
+      _prevUrlCount = currentCount;
+      markPasteNavButtonActive();
 
-  if (_pendingPasteFinalize != null) {
-    cancelAnimationFrame(_pendingPasteFinalize);
-  }
+      console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + added + ' URLs at index ' + (currentCount - added));
+    }
 
-  _pendingPasteFinalize = requestAnimationFrame(() => {
-    pendingPastes.push({ startIndex, count: added });
-    _prevUrlCount = startIndex + added;
-    markPasteNavButtonActive();
-
-    console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + added + ' URLs at index ' + startIndex);
-
-    _pendingPasteFinalize = null;
-  });
+    _isHandlingPaste = false;
+  }, 0);
 }, true);
-
 // ─── Session persistence ──────────────────────────────────────────────────────
 const SESSION_KEY = 'pong_session_v1';
 
