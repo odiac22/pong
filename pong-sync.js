@@ -16,6 +16,9 @@
   const SAVED_VIDEOS_KEY = 'pong_saved_videos_v1';
   const SAVED_ARTISTS_KEY = 'pong_saved_artists_v1';
   const GITHUB_TOKEN_KEY = 'pong_github_token_v1';
+  const MEDIA_SIGNATURE_CACHE_KEY = 'pong_media_signature_cache_v1';
+  const PONG_ARTIST_PREFIX = '#PONG_ARTIST ';
+  const PONG_VIDEO_PREFIX = '#PONG_VIDEO ';
 
   const GITHUB_SYNC = {
     owner: 'odiac22',
@@ -306,6 +309,7 @@
 
     parsed.savedVideos = parsed.savedVideos || {};
     parsed.savedArtists = parsed.savedArtists || {};
+    refreshSharedDataMediaUrls(parsed);
 
     return {
       data: parsed,
@@ -353,7 +357,7 @@
       try {
         const loaded = await fetchSharedDataFromGitHub();
         const data = loaded.data;
-        const result = mutatorFn(data) || {};
+        const result = await mutatorFn(data) || {};
 
         await writeSharedDataToGitHub(data, loaded.sha);
         mirrorSharedDataToLocal(data);
@@ -414,6 +418,436 @@
     return copy;
   }
 
+  function toUrl(rawUrl) {
+    try {
+      return new URL(String(rawUrl || '').trim(), window.location.href);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function getMediaUrlKey(rawUrl) {
+    const url = toUrl(rawUrl);
+
+    if (!url) return null;
+
+    const host = url.hostname.toLowerCase();
+
+    if (!/(^|\.)coomerfans\.com$/i.test(host) && !/(^|\.)coomer\.(su|st)$/i.test(host)) {
+      return null;
+    }
+
+    const path = decodeURIComponent(url.pathname || '').replace(/\/+/g, '/');
+    const storageMatch = path.match(/\/(?:storage|storager)\/(.+\.(?:mp4|m4v|webm|mov))$/i);
+
+    if (storageMatch) {
+      return `media:${storageMatch[1].toLowerCase()}`;
+    }
+
+    const fileMatch = path.match(/\/([^/?#]+\.(?:mp4|m4v|webm|mov))$/i);
+
+    return fileMatch ? `media-file:${fileMatch[1].toLowerCase()}` : null;
+  }
+
+  function getSavedVideoKey(rawUrl) {
+    return getMediaUrlKey(rawUrl) || String(rawUrl || '').trim();
+  }
+
+  function getSignedMediaInfo(rawUrl) {
+    const url = toUrl(rawUrl);
+
+    if (!url || !url.searchParams.get('hash')) return null;
+
+    const expiresAt = Number(url.searchParams.get('e') || 0);
+
+    return {
+      url: url.href,
+      expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0
+    };
+  }
+
+  function signedUrlStillFresh(rawUrl, graceSeconds) {
+    const info = getSignedMediaInfo(rawUrl);
+
+    if (!info) return false;
+    if (!info.expiresAt) return true;
+
+    return info.expiresAt > Math.floor(Date.now() / 1000) + (graceSeconds || 60);
+  }
+
+  function loadMediaSignatureCache() {
+    try {
+      const data = JSON.parse(localStorage.getItem(MEDIA_SIGNATURE_CACHE_KEY) || '{}');
+      return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function saveMediaSignatureCache(cache) {
+    try {
+      localStorage.setItem(MEDIA_SIGNATURE_CACHE_KEY, JSON.stringify(cache));
+    } catch (e) {}
+  }
+
+  function rememberFreshMediaUrls(urls) {
+    if (!Array.isArray(urls) || !urls.length) return 0;
+
+    const cache = loadMediaSignatureCache();
+    let changed = 0;
+
+    urls.forEach(rawUrl => {
+      const trimmed = String(rawUrl || '').trim();
+      const mediaKey = getMediaUrlKey(trimmed);
+      const signed = getSignedMediaInfo(trimmed);
+
+      if (!mediaKey || !signed || !signedUrlStillFresh(trimmed, 30)) return;
+
+      const existing = cache[mediaKey];
+      const existingExpiresAt = Number(existing?.expiresAt || 0);
+
+      if (!existing || signed.expiresAt >= existingExpiresAt || existing.url !== signed.url) {
+        cache[mediaKey] = {
+          url: signed.url,
+          expiresAt: signed.expiresAt,
+          cachedAt: new Date().toISOString()
+        };
+        changed++;
+      }
+    });
+
+    if (changed) {
+      saveMediaSignatureCache(cache);
+    }
+
+    return changed;
+  }
+
+  function getCachedFreshMediaUrl(rawUrl) {
+    const mediaKey = getMediaUrlKey(rawUrl);
+
+    if (!mediaKey) return null;
+
+    const entry = loadMediaSignatureCache()[mediaKey];
+
+    if (!entry || !entry.url || !signedUrlStillFresh(entry.url, 60)) {
+      return null;
+    }
+
+    return entry.url;
+  }
+
+  function preferFreshMediaUrl(rawUrl) {
+    const trimmed = String(rawUrl || '').trim();
+    return getCachedFreshMediaUrl(trimmed) || trimmed;
+  }
+
+  function chooseBestMediaUrl(firstUrl, secondUrl) {
+    const first = String(firstUrl || '').trim();
+    const second = String(secondUrl || '').trim();
+
+    if (!first) return second;
+    if (!second) return first;
+
+    const firstSigned = getSignedMediaInfo(first);
+    const secondSigned = getSignedMediaInfo(second);
+
+    if (secondSigned && !firstSigned) return second;
+    if (!secondSigned && firstSigned) return signedUrlStillFresh(first, 60) ? first : second;
+    if (firstSigned && secondSigned) {
+      return Number(secondSigned.expiresAt || 0) >= Number(firstSigned.expiresAt || 0) ? second : first;
+    }
+
+    return first;
+  }
+
+  function dedupeAndRefreshMediaUrls(urls) {
+    rememberFreshMediaUrls(urls);
+
+    const byMediaKey = new Map();
+    const orderedKeys = [];
+
+    (urls || []).forEach(rawUrl => {
+      const refreshed = preferFreshMediaUrl(rawUrl);
+      const mediaKey = getSavedVideoKey(refreshed);
+
+      if (!mediaKey) return;
+
+      if (!byMediaKey.has(mediaKey)) {
+        orderedKeys.push(mediaKey);
+        byMediaKey.set(mediaKey, refreshed);
+      } else {
+        byMediaKey.set(mediaKey, chooseBestMediaUrl(byMediaKey.get(mediaKey), refreshed));
+      }
+    });
+
+    return orderedKeys.map(key => byMediaKey.get(key)).filter(Boolean);
+  }
+
+  function refreshSharedDataMediaUrls(data) {
+    if (!data || typeof data !== 'object') {
+      return {
+        data,
+        changed: false
+      };
+    }
+
+    data.savedVideos = data.savedVideos || {};
+    data.savedArtists = data.savedArtists || {};
+
+    const allKnownUrls = [];
+
+    Object.entries(data.savedVideos).forEach(([key, item]) => {
+      allKnownUrls.push(item?.url || key);
+    });
+
+    Object.values(data.savedArtists).forEach(artist => {
+      if (artist && Array.isArray(artist.videos)) {
+        artist.videos.forEach(url => allKnownUrls.push(url));
+      }
+    });
+
+    rememberFreshMediaUrls(allKnownUrls);
+
+    const rebuiltSavedVideos = {};
+    let changed = false;
+
+    Object.entries(data.savedVideos).forEach(([key, item]) => {
+      const originalUrl = String(item?.url || key || '').trim();
+      const refreshedUrl = preferFreshMediaUrl(originalUrl);
+      const stableKey = getSavedVideoKey(originalUrl);
+
+      if (!stableKey) return;
+
+      const existing = rebuiltSavedVideos[stableKey];
+      const merged = {
+        ...(existing || {}),
+        ...(item || {}),
+        url: chooseBestMediaUrl(existing?.url, refreshedUrl),
+        mediaKey: stableKey
+      };
+
+      if (merged.url !== originalUrl || stableKey !== key) {
+        merged.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+
+      rebuiltSavedVideos[stableKey] = merged;
+    });
+
+    data.savedVideos = rebuiltSavedVideos;
+
+    Object.values(data.savedArtists).forEach(artist => {
+      if (!artist || !Array.isArray(artist.videos)) return;
+
+      const refreshedVideos = dedupeAndRefreshMediaUrls(artist.videos);
+
+      if (JSON.stringify(refreshedVideos) !== JSON.stringify(artist.videos)) {
+        artist.videos = refreshedVideos;
+        artist.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+    });
+
+    return {
+      data,
+      changed
+    };
+  }
+
+  function refreshPastedInputMediaUrls() {
+    const input = document.getElementById('video-urls');
+
+    if (!input || !input.value) return;
+
+    capturePastedMetadata(input.value);
+
+    const originalUrls = input.value
+      .split('\n')
+      .map(url => url.trim())
+      .filter(url => url && !url.startsWith('#PONG_') && isPlayableVideoUrl(url));
+
+    const refreshedUrls = dedupeAndRefreshMediaUrls(originalUrls);
+
+    if (refreshedUrls.length && JSON.stringify(refreshedUrls) !== JSON.stringify(originalUrls)) {
+      input.value = refreshedUrls.join('\n');
+      showMsg('Refreshed saved CDN URLs from known signed links');
+    }
+  }
+
+  function isPlayableVideoUrl(rawUrl) {
+    return /\.(mp4|m4v|mov|webm)(\?|$)/i.test(String(rawUrl || '').trim());
+  }
+
+  function parsePongJsonLine(line, prefix) {
+    if (!line.startsWith(prefix)) return null;
+
+    try {
+      const parsed = JSON.parse(line.slice(prefix.length).trim());
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function emptyPastedMetadata() {
+    return {
+      artist: null,
+      videosByUrl: {},
+      videosByMediaKey: {},
+      orderedVideos: []
+    };
+  }
+
+  function parsePastedMetadata(text) {
+    const result = emptyPastedMetadata();
+    let activeArtist = null;
+    let pendingVideo = null;
+
+    String(text || '').split(/\r?\n/).forEach(rawLine => {
+      const line = rawLine.trim();
+
+      if (!line) return;
+
+      const artist = parsePongJsonLine(line, PONG_ARTIST_PREFIX);
+
+      if (artist) {
+        activeArtist = artist;
+        result.artist = artist;
+        pendingVideo = null;
+        return;
+      }
+
+      const videoMeta = parsePongJsonLine(line, PONG_VIDEO_PREFIX);
+
+      if (videoMeta) {
+        pendingVideo = {
+          ...(activeArtist || {}),
+          ...videoMeta
+        };
+        return;
+      }
+
+      if (!isPlayableVideoUrl(line)) return;
+
+      const mediaKey = getSavedVideoKey(line);
+      const mergedMeta = {
+        ...(activeArtist || {}),
+        ...(pendingVideo || {}),
+        videoUrl: line,
+        mediaKey
+      };
+
+      result.videosByUrl[line] = mergedMeta;
+
+      if (mediaKey) {
+        result.videosByMediaKey[mediaKey] = mergedMeta;
+      }
+
+      result.orderedVideos.push(mergedMeta);
+      pendingVideo = null;
+    });
+
+    return result;
+  }
+
+  function mergePastedMetadata(existing, incoming) {
+    const merged = existing || emptyPastedMetadata();
+
+    if (incoming.artist) {
+      merged.artist = incoming.artist;
+    }
+
+    Object.assign(merged.videosByUrl, incoming.videosByUrl || {});
+    Object.assign(merged.videosByMediaKey, incoming.videosByMediaKey || {});
+
+    (incoming.orderedVideos || []).forEach(item => {
+      if (!item?.videoUrl) return;
+
+      const mediaKey = item.mediaKey || getSavedVideoKey(item.videoUrl);
+      const alreadyKnown = merged.orderedVideos.some(existingItem => {
+        const existingKey = existingItem.mediaKey || getSavedVideoKey(existingItem.videoUrl);
+        return existingKey && mediaKey && existingKey === mediaKey;
+      });
+
+      if (!alreadyKnown) {
+        merged.orderedVideos.push(item);
+      }
+    });
+
+    return merged;
+  }
+
+  function capturePastedMetadata(text) {
+    const parsed = parsePastedMetadata(text);
+    const urls = parsed.orderedVideos.map(item => item.videoUrl).filter(Boolean);
+
+    rememberFreshMediaUrls(urls);
+
+    window.PongCurrentPastedMetadata = mergePastedMetadata(window.PongCurrentPastedMetadata, parsed);
+
+    return window.PongCurrentPastedMetadata;
+  }
+
+  function getPastedMetadataForUrl(rawUrl) {
+    const metadata = window.PongCurrentPastedMetadata || emptyPastedMetadata();
+    const direct = metadata.videosByUrl[String(rawUrl || '').trim()];
+
+    if (direct) return direct;
+
+    const mediaKey = getSavedVideoKey(rawUrl);
+
+    return mediaKey ? metadata.videosByMediaKey[mediaKey] || null : null;
+  }
+
+  function compactVideoMetadata(meta) {
+    if (!meta) return null;
+
+    return {
+      source: meta.source || 'coomerfans',
+      artistName: meta.artistName || '',
+      artistKey: meta.artistKey || '',
+      artistUrl: meta.artistUrl || '',
+      postUrl: meta.postUrl || '',
+      postIndex: Number(meta.postIndex || 0),
+      scrapedAt: meta.scrapedAt || '',
+      mediaKey: meta.mediaKey || ''
+    };
+  }
+
+  function compactArtistMetadata(videos) {
+    const metadata = window.PongCurrentPastedMetadata || emptyPastedMetadata();
+    const firstVideoMeta = (videos || [])
+      .map(url => getPastedMetadataForUrl(url))
+      .find(Boolean);
+    const artist = metadata.artist || firstVideoMeta || null;
+
+    if (!artist) return {};
+
+    return {
+      artistName: artist.artistName || '',
+      artistKey: artist.artistKey || '',
+      artistUrl: artist.artistUrl || '',
+      source: artist.source || 'coomerfans',
+      scrapedAt: artist.scrapedAt || ''
+    };
+  }
+
+  function buildVideoMetadataMap(urls) {
+    const map = {};
+
+    (urls || []).forEach(url => {
+      const mediaKey = getSavedVideoKey(url);
+      const meta = compactVideoMetadata(getPastedMetadataForUrl(url));
+
+      if (mediaKey && meta) {
+        map[mediaKey] = meta;
+      }
+    });
+
+    return map;
+  }
+
   function resetSavedPlaybackMode() {
     window.PongLoadedSavedMode = 'normal';
   }
@@ -471,6 +905,7 @@
       showMsg('Loading saved videos...');
 
       const loaded = await fetchSharedDataFromGitHub();
+      refreshSharedDataMediaUrls(loaded.data);
       mirrorSharedDataToLocal(loaded.data);
 
       const urls = Object.values(loaded.data.savedVideos || {})
@@ -482,7 +917,7 @@
         return;
       }
 
-      const randomizedVideos = shuffleArray([...new Set(urls)]);
+      const randomizedVideos = shuffleArray(dedupeAndRefreshMediaUrls(urls));
 
       loadSavedListIntoPlayer(
         randomizedVideos,
@@ -501,6 +936,7 @@
       showMsg('Loading saved artists...');
 
       const loaded = await fetchSharedDataFromGitHub();
+      refreshSharedDataMediaUrls(loaded.data);
       mirrorSharedDataToLocal(loaded.data);
 
       const artistEntries = Object.values(loaded.data.savedArtists || {})
@@ -516,7 +952,7 @@
       const rebuiltPasteEvents = [];
 
       randomizedArtists.forEach((artist, artistIndex) => {
-        const cleanVideos = shuffleArray([...new Set(artist.videos.filter(Boolean))]);
+        const cleanVideos = shuffleArray(dedupeAndRefreshMediaUrls(artist.videos.filter(Boolean)));
 
         if (!cleanVideos.length) return;
 
@@ -662,24 +1098,52 @@
 
   function addSavedVideosToData(data, urls, artistKey) {
     data.savedVideos = data.savedVideos || {};
+    rememberFreshMediaUrls(urls);
 
     let added = 0;
 
     urls.forEach(url => {
       if (!url) return;
 
-      const key = String(url).trim();
+      const rawUrl = String(url).trim();
+      const key = getSavedVideoKey(rawUrl);
+      const playableUrl = preferFreshMediaUrl(rawUrl);
 
       if (!key) return;
 
       if (!data.savedVideos[key]) {
+        const pastedMeta = compactVideoMetadata(getPastedMetadataForUrl(rawUrl));
         data.savedVideos[key] = {
-          url: key,
-          artistKey: artistKey || extractArtistKeyOverride(key) || null,
+          url: playableUrl,
+          mediaKey: key,
+          artistKey: artistKey || extractArtistKeyOverride(playableUrl) || null,
+          ...(pastedMeta || {}),
           savedAt: new Date().toISOString()
         };
 
         added++;
+      } else {
+        const existing = data.savedVideos[key];
+        const bestUrl = chooseBestMediaUrl(existing.url, playableUrl);
+
+        if (bestUrl !== existing.url) {
+          existing.url = bestUrl;
+          existing.updatedAt = new Date().toISOString();
+        }
+
+        if (!existing.mediaKey) {
+          existing.mediaKey = key;
+        }
+
+        if (!existing.artistKey && artistKey) {
+          existing.artistKey = artistKey;
+        }
+
+        const pastedMeta = compactVideoMetadata(getPastedMetadataForUrl(rawUrl));
+
+        if (pastedMeta) {
+          Object.assign(existing, pastedMeta);
+        }
       }
     });
 
@@ -793,7 +1257,7 @@
     }
 
     const artistKey = bundleInfo.bundleKey;
-    const artistVideos = [...new Set(bundleInfo.urls.filter(Boolean))];
+    const artistVideos = dedupeAndRefreshMediaUrls(bundleInfo.urls.filter(Boolean));
 
     try {
       showMsg('Saving paperclip bundle...');
@@ -803,24 +1267,26 @@
 
         const existing = data.savedArtists[artistKey];
         const existingVideos = existing && Array.isArray(existing.videos)
-          ? existing.videos
+          ? dedupeAndRefreshMediaUrls(existing.videos)
           : [];
 
-        const newVideosOnly = artistVideos.filter(url => !existingVideos.includes(url));
-
-        const mergedVideos = [
-          ...new Set([
-            ...existingVideos,
-            ...artistVideos
-          ])
-        ];
+        const existingKeys = new Set(existingVideos.map(url => getSavedVideoKey(url)));
+        const newVideosOnly = artistVideos.filter(url => !existingKeys.has(getSavedVideoKey(url)));
+        const mergedVideos = dedupeAndRefreshMediaUrls([...existingVideos, ...artistVideos]);
+        const artistMeta = compactArtistMetadata(artistVideos);
+        const videoMeta = {
+          ...(existing?.videoMeta || {}),
+          ...buildVideoMetadataMap(mergedVideos)
+        };
 
         data.savedArtists[artistKey] = {
           artistKey,
           source: 'paperclip-bundle',
+          ...artistMeta,
           startIndex: bundleInfo.startIndex,
           count: bundleInfo.count,
           videos: mergedVideos,
+          videoMeta,
           savedAt: existing?.savedAt || new Date().toISOString(),
           updatedAt: new Date().toISOString()
         };
@@ -1026,6 +1492,260 @@
     showMsg('Load saved videos or artists first');
   }
 
+  function repairEntriesFromCurrentPaste() {
+    const input = document.getElementById('video-urls');
+
+    if (input && input.value) {
+      capturePastedMetadata(input.value);
+    }
+
+    return (window.PongCurrentPastedMetadata?.orderedVideos || [])
+      .filter(item => item?.videoUrl);
+  }
+
+  function buildFreshEntryMaps(entries) {
+    const byMediaKey = {};
+    const byPostKey = {};
+    const urls = [];
+
+    (entries || []).forEach(entry => {
+      const videoUrl = entry?.videoUrl || entry?.url;
+
+      if (!videoUrl) return;
+
+      urls.push(videoUrl);
+
+      const mediaKey = entry.mediaKey || getSavedVideoKey(videoUrl);
+
+      if (mediaKey) {
+        byMediaKey[mediaKey] = {
+          ...entry,
+          videoUrl,
+          mediaKey
+        };
+      }
+
+      if (entry.postUrl) {
+        byPostKey[`${entry.postUrl}#${Number(entry.postIndex || 0)}`] = {
+          ...entry,
+          videoUrl,
+          mediaKey
+        };
+      }
+    });
+
+    rememberFreshMediaUrls(urls);
+
+    return {
+      byMediaKey,
+      byPostKey
+    };
+  }
+
+  function freshEntryForSavedUrl(rawUrl, savedMeta, maps) {
+    const mediaKey = savedMeta?.mediaKey || getSavedVideoKey(rawUrl);
+
+    if (mediaKey && maps.byMediaKey[mediaKey]) {
+      return maps.byMediaKey[mediaKey];
+    }
+
+    if (savedMeta?.postUrl) {
+      return maps.byPostKey[`${savedMeta.postUrl}#${Number(savedMeta.postIndex || 0)}`] || null;
+    }
+
+    return null;
+  }
+
+  function applyFreshEntryToSavedVideo(item, freshEntry) {
+    if (!item || !freshEntry?.videoUrl) return false;
+
+    const bestUrl = chooseBestMediaUrl(item.url, freshEntry.videoUrl);
+    const changed = bestUrl && bestUrl !== item.url;
+
+    if (changed) {
+      item.url = bestUrl;
+    }
+
+    Object.assign(item, compactVideoMetadata(freshEntry) || {});
+
+    if (changed) {
+      item.updatedAt = new Date().toISOString();
+    }
+
+    return changed;
+  }
+
+  function repairDataWithEntries(data, entries, options = {}) {
+    if (!entries || !entries.length) {
+      return {
+        repaired: 0
+      };
+    }
+
+    const maps = buildFreshEntryMaps(entries);
+    let repaired = 0;
+
+    data.savedVideos = data.savedVideos || {};
+    data.savedArtists = data.savedArtists || {};
+
+    Object.entries(data.savedVideos).forEach(([key, item]) => {
+      if (options.savedVideoKey && key !== options.savedVideoKey) return;
+
+      const freshEntry = freshEntryForSavedUrl(item?.url || key, item, maps);
+
+      if (freshEntry && applyFreshEntryToSavedVideo(item, freshEntry)) {
+        repaired++;
+      }
+    });
+
+    Object.entries(data.savedArtists).forEach(([artistKey, artist]) => {
+      if (options.artistKey && artistKey !== options.artistKey) return;
+      if (!artist || !Array.isArray(artist.videos)) return;
+
+      artist.videoMeta = artist.videoMeta || {};
+
+      const repairedVideos = artist.videos.map(oldUrl => {
+        const mediaKey = getSavedVideoKey(oldUrl);
+        const savedMeta = mediaKey ? artist.videoMeta[mediaKey] : null;
+        const freshEntry = freshEntryForSavedUrl(oldUrl, savedMeta, maps);
+
+        if (!freshEntry?.videoUrl) return oldUrl;
+
+        const bestUrl = chooseBestMediaUrl(oldUrl, freshEntry.videoUrl);
+        const freshMeta = compactVideoMetadata(freshEntry);
+
+        if (mediaKey && freshMeta) {
+          artist.videoMeta[mediaKey] = freshMeta;
+        }
+
+        if (bestUrl && bestUrl !== oldUrl) {
+          repaired++;
+          return bestUrl;
+        }
+
+        return oldUrl;
+      });
+
+      artist.videos = dedupeAndRefreshMediaUrls(repairedVideos);
+
+      const artistMeta = compactArtistMetadata(artist.videos);
+
+      Object.assign(artist, artistMeta);
+
+      if (repaired) {
+        artist.updatedAt = new Date().toISOString();
+      }
+    });
+
+    return {
+      repaired
+    };
+  }
+
+  function getSavedVideoRepairTarget(data, rawUrl) {
+    data.savedVideos = data.savedVideos || {};
+
+    const mediaKey = getSavedVideoKey(rawUrl);
+
+    if (mediaKey && data.savedVideos[mediaKey]) {
+      return {
+        key: mediaKey,
+        item: data.savedVideos[mediaKey]
+      };
+    }
+
+    const foundKey = Object.keys(data.savedVideos).find(key => {
+      const item = data.savedVideos[key];
+      return item?.url === rawUrl || getSavedVideoKey(item?.url || key) === mediaKey;
+    });
+
+    return foundKey
+      ? {
+          key: foundKey,
+          item: data.savedVideos[foundKey]
+        }
+      : null;
+  }
+
+  async function scrapeRepairEntriesForTarget(target) {
+    const api = window.PongCoomerfansRepair;
+
+    if (!api) return [];
+
+    if (target?.postUrl && typeof api.scrapePost === 'function') {
+      return await api.scrapePost(target.postUrl);
+    }
+
+    if (target?.artistUrl && typeof api.scrapeArtist === 'function') {
+      return await api.scrapeArtist(target.artistUrl);
+    }
+
+    return [];
+  }
+
+  async function repairSavedLinksOverride() {
+    const mode = window.PongLoadedSavedMode || 'normal';
+
+    try {
+      showMsg('Repairing saved links...');
+
+      const result = await updateSharedData(async data => {
+        let repaired = 0;
+        let usedStoredSource = false;
+        const pastedEntries = repairEntriesFromCurrentPaste();
+
+        if (pastedEntries.length) {
+          repaired += repairDataWithEntries(data, pastedEntries).repaired;
+        }
+
+        if (mode === 'savedVideos') {
+          const currentUrl = getCurrentVideoUrlOverride();
+          const target = getSavedVideoRepairTarget(data, currentUrl);
+          const sourceEntries = await scrapeRepairEntriesForTarget(target?.item);
+
+          if (sourceEntries.length) {
+            usedStoredSource = true;
+            repaired += repairDataWithEntries(data, sourceEntries, {
+              savedVideoKey: target.key
+            }).repaired;
+          }
+        } else if (mode === 'savedArtists') {
+          const bundleInfo = getCurrentPasteBundleInfo();
+          const artistKey = bundleInfo?.bundleKey;
+          const artist = artistKey ? data.savedArtists?.[artistKey] : null;
+          const sourceEntries = await scrapeRepairEntriesForTarget(artist);
+
+          if (sourceEntries.length) {
+            usedStoredSource = true;
+            repaired += repairDataWithEntries(data, sourceEntries, {
+              artistKey
+            }).repaired;
+          }
+        }
+
+        refreshSharedDataMediaUrls(data);
+
+        return {
+          repaired,
+          usedStoredSource,
+          hadPastedEntries: pastedEntries.length > 0,
+          hasRepairBridge: !!window.PongCoomerfansRepair
+        };
+      });
+
+      if (result.result.repaired > 0) {
+        showMsg(`Repaired ${result.result.repaired} saved links`);
+      } else if (!result.result.hasRepairBridge && !result.result.hadPastedEntries) {
+        showMsg('Paste fresh scraped links, or install the updated Tampermonkey script here');
+      } else {
+        showMsg('No matching saved links needed repair');
+      }
+    } catch (e) {
+      showMsg('Could not repair saved links');
+      console.error(e);
+    }
+  }
+
   function createRemoveSavedButtonOverride() {
     injectPongSyncStyles();
 
@@ -1078,6 +1798,22 @@
       e.preventDefault();
       e.stopPropagation();
       setGitHubToken();
+    });
+
+    const repairBtn = document.createElement('button');
+    repairBtn.id = 'repair-saved-links-button';
+    repairBtn.className = 'side-save-button';
+    repairBtn.type = 'button';
+    repairBtn.title = 'Repair saved links from pasted fresh metadata, or from stored artist/post URLs when the updated Tampermonkey script is installed on this page.';
+    repairBtn.innerHTML = `
+      <span class="side-save-icon">â™»</span>
+      <span class="side-save-label">Repair</span>
+      <span class="side-save-count">Fix</span>
+    `;
+    repairBtn.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      repairSavedLinksOverride();
     });
 
     const artistBtn = document.createElement('button');
@@ -1169,6 +1905,7 @@
     videoBtn.addEventListener('mouseleave', () => clearTimeout(videoHoldTimer));
 
     panel.appendChild(tokenBtn);
+    panel.appendChild(repairBtn);
     panel.appendChild(artistBtn);
     panel.appendChild(videoBtn);
     document.body.appendChild(panel);
@@ -1413,9 +2150,50 @@
     if (loadBtn && loadBtn.dataset.pongModeReset !== 'true') {
       loadBtn.dataset.pongModeReset = 'true';
       loadBtn.addEventListener('click', () => {
+        refreshPastedInputMediaUrls();
         resetSavedPlaybackMode();
       }, true);
     }
+  }
+
+  function attachExpiredMediaHintsToVideo(video) {
+    if (!video || video.dataset.pongExpiredMediaHint === 'true') return;
+
+    video.dataset.pongExpiredMediaHint = 'true';
+    video.addEventListener('error', () => {
+      const failedUrl = video.currentSrc || video.src || '';
+
+      if (!getMediaUrlKey(failedUrl)) return;
+
+      const cachedFreshUrl = getCachedFreshMediaUrl(failedUrl);
+
+      if (cachedFreshUrl && cachedFreshUrl !== failedUrl) {
+        video.src = cachedFreshUrl;
+        video.load();
+        showMsg('Retried with refreshed signed URL');
+        return;
+      }
+
+      if (!getSignedMediaInfo(failedUrl) || !signedUrlStillFresh(failedUrl, 0)) {
+        showMsg('Saved CDN link expired. Paste a fresh link for this file to refresh it.');
+      }
+    });
+  }
+
+  function attachExpiredMediaHints() {
+    document.querySelectorAll('video.video-player').forEach(attachExpiredMediaHintsToVideo);
+  }
+
+  function startExpiredMediaHintObserver() {
+    attachExpiredMediaHints();
+
+    const target = document.getElementById('video-container') || document.body;
+    const observer = new MutationObserver(attachExpiredMediaHints);
+
+    observer.observe(target, {
+      childList: true,
+      subtree: true
+    });
   }
 
   try {
@@ -1434,6 +2212,7 @@
       createSaveButtonsOverride();
       createRemoveSavedButtonOverride();
       startSmoothScrubObserver();
+      startExpiredMediaHintObserver();
       attachNormalModeReset();
     }, 0);
   }
@@ -1450,6 +2229,14 @@
     playSavedArtistsRandomized,
     saveCurrentVideoLink: saveCurrentVideoLinkOverride,
     saveCurrentArtistVideos: saveCurrentArtistVideosOverride,
-    removeCurrentSavedItem: removeCurrentSavedItemOverride
+    removeCurrentSavedItem: removeCurrentSavedItemOverride,
+    repairSavedLinks: repairSavedLinksOverride
+  };
+
+  window.PongMetadataSync = {
+    capturePastedText: capturePastedMetadata,
+    parsePastedMetadata,
+    getPastedMetadataForUrl,
+    getCurrentMetadata: () => window.PongCurrentPastedMetadata || emptyPastedMetadata()
   };
 })();
