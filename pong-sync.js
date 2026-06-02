@@ -2039,6 +2039,9 @@
   }
 
   const REPAIR_ITEM_TIMEOUT_MS = 15000;
+  const DIRECT_REPAIR_ITEM_TIMEOUT_MS = 60000;
+  const DIRECT_REPAIR_POST_CONCURRENCY = 20;
+  const DIRECT_REPAIR_MAX_RETRIES = 2;
   let iframeRepairState = null;
 
   function appendRepairHash(rawUrl, item) {
@@ -2114,6 +2117,7 @@
         savedKey: extra.savedKey || '',
         savedKeys: extra.savedKey ? [extra.savedKey] : [],
         savedCount: extra.savedCount || 1,
+        sourceMeta: extra.sourceMeta || null,
         skipReason: extra.skipReason || ''
       };
 
@@ -2128,7 +2132,8 @@
         add('artist', source.url, source.label || artist?.artistDisplayName || artist?.artistName || artistKey, {
           phase: 'artist',
           savedKey: artistKey,
-          savedCount: 1
+          savedCount: 1,
+          sourceMeta: artist
         });
       });
     });
@@ -2141,6 +2146,7 @@
       add(kind, sourceUrl, label, {
         phase: 'video',
         savedKey: key,
+        sourceMeta: item,
         countMissing: true,
         skipReason: sourceUrl ? '' : 'No post URL saved yet'
       });
@@ -2186,7 +2192,7 @@
         <span id="pong-repair-videos">Videos 0/0</span>
       </div>
       <pre id="pong-repair-log" class="pong-repair-log"></pre>
-      <div id="pong-repair-worker-note" class="pong-repair-worker-note">Repair worker opens in a visible tab and reports back automatically.</div>
+      <div id="pong-repair-worker-note" class="pong-repair-worker-note">Repair tries direct browser scraping first; a visible tab is only used as fallback.</div>
       <iframe id="pong-repair-frame" class="pong-repair-frame" title="Pong repair worker"></iframe>
     `;
 
@@ -2212,6 +2218,281 @@
     }
 
     return panel;
+  }
+
+  function directRepairBaseUrl(rawUrl) {
+    const url = new URL(rawUrl, window.location.href);
+    url.searchParams.delete('page');
+    url.hash = '';
+    return url.toString();
+  }
+
+  function directRepairPageUrl(base, page) {
+    const url = new URL(base, window.location.href);
+    if (page > 1) {
+      url.searchParams.set('page', page);
+    } else {
+      url.searchParams.delete('page');
+    }
+    return url.toString();
+  }
+
+  async function directRepairFetchText(url) {
+    const res = await fetch(url, {
+      credentials: 'include',
+      cache: 'no-store'
+    });
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    return res.text();
+  }
+
+  async function directRepairFetchDoc(url, attempt = 1) {
+    try {
+      const html = await directRepairFetchText(url);
+      return new DOMParser().parseFromString(html, 'text/html');
+    } catch (e) {
+      if (attempt >= DIRECT_REPAIR_MAX_RETRIES) {
+        throw e;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 400 * attempt));
+      return directRepairFetchDoc(url, attempt + 1);
+    }
+  }
+
+  async function directRepairPool(tasks, limit) {
+    const results = new Array(tasks.length);
+    let index = 0;
+
+    async function worker() {
+      while (index < tasks.length) {
+        const current = index++;
+        results[current] = await tasks[current]();
+      }
+    }
+
+    await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+    return results;
+  }
+
+  function directRepairShuffle(items) {
+    const copy = items.slice();
+    const cryptoApi = window.crypto || window.msCrypto;
+
+    if (!cryptoApi?.getRandomValues) {
+      return copy.sort(() => Math.random() - 0.5);
+    }
+
+    const randoms = new Uint32Array(copy.length);
+    cryptoApi.getRandomValues(randoms);
+
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = randoms[i] % (i + 1);
+      [copy[i], copy[j]] = [copy[j], copy[i]];
+    }
+
+    return copy;
+  }
+
+  function directRepairExtractVideoPostLinks(doc, baseUrl) {
+    const links = [];
+
+    doc.querySelectorAll('div.post').forEach(post => {
+      if (post.querySelector('img')) return;
+
+      const link = post.querySelector('a.view-post');
+      const href = link?.getAttribute('href') || '';
+
+      if (href) {
+        links.push(new URL(href, baseUrl).toString());
+      }
+    });
+
+    return links;
+  }
+
+  function directRepairArtistInfo(rawUrl, doc, fallbackMeta = {}) {
+    const url = new URL(directRepairBaseUrl(rawUrl), window.location.href);
+    const parts = url.pathname.split('/').filter(Boolean);
+    const userIndex = parts.findIndex(part => part.toLowerCase() === 'u');
+    const service = userIndex >= 0 ? parts[userIndex + 1] || '' : '';
+    const accountId = userIndex >= 0 ? parts[userIndex + 2] || '' : '';
+    const username = userIndex >= 0 ? parts[userIndex + 3] || accountId || '' : '';
+    const titleText = (
+      doc?.querySelector('h1')?.textContent ||
+      doc?.querySelector('meta[property="og:title"]')?.getAttribute('content') ||
+      ''
+    ).trim();
+    const artistName = decodeURIComponent(username || fallbackMeta.artistDisplayName || fallbackMeta.artistName || titleText || 'unknown').trim();
+    const artistKey = service && (accountId || username)
+      ? `${service.toLowerCase()}:${decodeURIComponent(accountId || username).toLowerCase()}`
+      : (fallbackMeta.artistKey || url.pathname.toLowerCase());
+
+    return {
+      type: 'artist',
+      source: fallbackMeta.source || 'coomerfans',
+      artistName,
+      artistDisplayName: artistName,
+      artistKey,
+      artistUrl: url.toString(),
+      scrapedAt: new Date().toISOString()
+    };
+  }
+
+  async function directRepairVideoEntriesFromPost(postUrl, artistInfo) {
+    const doc = await directRepairFetchDoc(postUrl);
+    const body = doc.querySelector('div.post-body');
+
+    if (!body) return [];
+
+    const urls = [];
+
+    body.querySelectorAll('video source').forEach(source => {
+      const src = source.getAttribute('src');
+      if (src) urls.push(new URL(src, postUrl).toString());
+    });
+
+    body.querySelectorAll('a[href]').forEach(link => {
+      const href = link.getAttribute('href');
+
+      if (href && /\.(mp4|m4v|mov|webm)(\?|$)/i.test(href)) {
+        urls.push(new URL(href, postUrl).toString());
+      }
+    });
+
+    return [...new Set(urls)].map((videoUrl, postIndex) => ({
+      ...artistInfo,
+      type: 'video',
+      videoUrl,
+      mediaKey: getSavedVideoKey(videoUrl),
+      postUrl,
+      postIndex
+    }));
+  }
+
+  function directRepairFormatPongExport(entries) {
+    const cleanEntries = (entries || []).filter(entry => entry?.videoUrl);
+
+    if (!cleanEntries.length) return '';
+
+    const first = cleanEntries[0];
+    const lines = [
+      `#PA|${first.source || 'coomerfans'}|${first.artistKey || ''}|${first.artistUrl || ''}|${first.artistDisplayName || first.artistName || ''}`
+    ];
+
+    cleanEntries.forEach(entry => {
+      lines.push(`#PV|${entry.postUrl || ''}|${Number(entry.postIndex || 0)}`);
+      lines.push(entry.videoUrl);
+    });
+
+    return lines.join('\n');
+  }
+
+  function directRepairWithTimeout(promise, ms, label) {
+    let timer = null;
+
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${formatRepairSeconds(ms)}`)), ms);
+    });
+
+    return Promise.race([promise, timeout]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
+
+  async function directRepairScrapeArtist(item) {
+    const base = directRepairBaseUrl(item.url);
+    const firstDoc = await directRepairFetchDoc(directRepairPageUrl(base, 1));
+    const artistInfo = directRepairArtistInfo(base, firstDoc, item.sourceMeta || {});
+    const firstPagePosts = firstDoc.querySelectorAll('div.post').length;
+    const postLinks = directRepairExtractVideoPostLinks(firstDoc, base);
+
+    writeRepairLog(`Direct page 1: ${postLinks.length}/${firstPagePosts} video posts`);
+
+    if (firstDoc.querySelector('a[href*="page="]')) {
+      let batchStart = 2;
+      const batchSize = 8;
+
+      while (true) {
+        const pages = Array.from({ length: batchSize }, (_, i) => batchStart + i);
+        const docs = await Promise.all(pages.map(page => {
+          const pageUrl = directRepairPageUrl(base, page);
+          return directRepairFetchDoc(pageUrl).catch(error => {
+            writeRepairLog(`Direct page ${page} failed: ${error?.message || error}`);
+            return null;
+          });
+        }));
+        let anyContent = false;
+        let batchPostCount = 0;
+        let batchVideoPostCount = 0;
+
+        docs.forEach(doc => {
+          if (!doc) return;
+
+          const posts = doc.querySelectorAll('div.post').length;
+          const links = directRepairExtractVideoPostLinks(doc, base);
+
+          if (posts > 0) anyContent = true;
+
+          batchPostCount += posts;
+          batchVideoPostCount += links.length;
+          postLinks.push(...links);
+        });
+
+        writeRepairLog(`Direct pages ${batchStart}-${batchStart + batchSize - 1}: ${batchVideoPostCount}/${batchPostCount} video posts`);
+
+        if (!anyContent) break;
+
+        batchStart += batchSize;
+      }
+    }
+
+    const shuffledPostLinks = directRepairShuffle([...new Set(postLinks)]);
+
+    writeRepairLog(`Direct fetching ${shuffledPostLinks.length} video posts`);
+
+    let done = 0;
+    const tasks = shuffledPostLinks.map(postUrl => async () => {
+      const entries = await directRepairVideoEntriesFromPost(postUrl, artistInfo).catch(error => {
+        writeRepairLog(`Direct post failed: ${postUrl} (${error?.message || error})`);
+        return [];
+      });
+
+      done++;
+
+      if (done % 20 === 0 || done === shuffledPostLinks.length) {
+        writeRepairLog(`Direct post progress: ${done}/${shuffledPostLinks.length}`);
+      }
+
+      return entries;
+    });
+    const results = await directRepairPool(tasks, DIRECT_REPAIR_POST_CONCURRENCY);
+
+    return directRepairShuffle(results.flat());
+  }
+
+  async function directRepairScrapePost(item) {
+    const doc = await directRepairFetchDoc(item.url);
+    const artistInfo = directRepairArtistInfo(item.sourceMeta?.artistUrl || item.url, doc, item.sourceMeta || {});
+    return directRepairVideoEntriesFromPost(item.url, artistInfo);
+  }
+
+  async function directRepairScrapeItem(item) {
+    const entries = await directRepairWithTimeout(
+      item.kind === 'post' ? directRepairScrapePost(item) : directRepairScrapeArtist(item),
+      DIRECT_REPAIR_ITEM_TIMEOUT_MS,
+      `Direct scrape for ${item.label}`
+    );
+
+    return {
+      ok: true,
+      count: entries.length,
+      text: directRepairFormatPongExport(entries)
+    };
   }
 
   function getRepairElapsedMs() {
@@ -2513,7 +2794,7 @@
     writeRepairLog('Repair finished; copy the log before closing if you want me to inspect timing');
   }
 
-  function runNextIframeRepairItem() {
+  async function runNextIframeRepairItem() {
     const state = iframeRepairState;
     if (!state || !state.active) return;
 
@@ -2549,6 +2830,36 @@
 
     state.itemStartedAt = Date.now();
     writeRepairLog(`Start ${item.phase} ${state.index + 1}/${state.queue.length}: ${item.label}`);
+
+    try {
+      updateRepairQueuePanel(`Direct scrape: ${item.label}`);
+      writeRepairLog(`Direct browser scrape starting: ${item.url}`);
+      const data = await directRepairScrapeItem(item);
+
+      if (!iframeRepairState || iframeRepairState.id !== state.id || !state.active) return;
+
+      if (data.ok && data.text && Number(data.count || 0) > 0) {
+        state.results.push({
+          item,
+          text: String(data.text)
+        });
+        state.freshCount += Number(data.count || 0);
+
+        state.completed = Math.max(state.completed || 0, state.index + 1);
+        writeRepairLog(`Direct result ${item.label}: ${Number(data.count || 0)} videos in ${formatRepairSeconds(Date.now() - (state.itemStartedAt || Date.now()))}`);
+        updateRepairQueuePanel(`Done: ${item.label}`);
+        setTimeout(runNextIframeRepairItem, 350);
+        return;
+      }
+
+      writeRepairLog(`Direct scrape returned 0 videos for ${item.label}`);
+      writeRepairLog('Falling back to visible repair tab worker');
+    } catch (e) {
+      if (!iframeRepairState || iframeRepairState.id !== state.id || !state.active) return;
+
+      writeRepairLog(`Direct scrape failed: ${e?.message || e}`);
+      writeRepairLog('Falling back to visible repair tab worker');
+    }
 
     if (!navigateRepairWorker(item)) {
       state.completed = Math.max(state.completed || 0, state.index + 1);
@@ -2598,7 +2909,8 @@
 
     updateRepairQueuePanel('Starting repair...');
     writeRepairLog(`Queue created: ${queue.length} jobs`);
-    writeRepairLog(workerWindow ? 'Visible repair tab opened' : 'No repair tab available yet; will try to open when needed');
+    writeRepairLog('Direct browser scrape enabled');
+    writeRepairLog(workerWindow ? 'Visible repair tab opened' : 'Visible repair tab fallback is closed until needed');
     writeRepairLog(`${stats.savedArtists || 0} saved artists, ${stats.uniqueArtists || 0} unique artist pages`);
     writeRepairLog(`${stats.savedVideos || 0} saved videos, ${stats.repairableVideos || 0} repairable source pages`);
     runNextIframeRepairItem();
@@ -2653,7 +2965,7 @@
   }
 
   async function repairSavedLinksOverride() {
-    const workerWindow = openRepairWorkerWindow();
+    const workerWindow = null;
 
     try {
       showMsg('Repairing saved links...');
