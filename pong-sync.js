@@ -273,7 +273,7 @@
       }
 
       .pong-repair-frame {
-        display: block !important;
+        display: none !important;
         width: 100% !important;
         height: clamp(180px, 42vh, 430px) !important;
         margin-top: 8px !important;
@@ -300,6 +300,17 @@
         font-size: 8px !important;
         line-height: 1.35 !important;
         white-space: pre-wrap !important;
+      }
+
+      .pong-repair-worker-note {
+        margin-top: 8px !important;
+        padding: 6px 8px !important;
+        border-radius: 8px !important;
+        border: 1px solid rgba(255,255,255,0.08) !important;
+        background: rgba(0,0,0,0.22) !important;
+        color: rgba(229,231,235,0.48) !important;
+        font-size: 8px !important;
+        line-height: 1.25 !important;
       }
 
       .pong-video-expired-hint {
@@ -2175,6 +2186,7 @@
         <span id="pong-repair-videos">Videos 0/0</span>
       </div>
       <pre id="pong-repair-log" class="pong-repair-log"></pre>
+      <div id="pong-repair-worker-note" class="pong-repair-worker-note">Repair worker opens in a visible tab and reports back automatically.</div>
       <iframe id="pong-repair-frame" class="pong-repair-frame" title="Pong repair worker"></iframe>
     `;
 
@@ -2250,6 +2262,56 @@
     }
   }
 
+  function openRepairWorkerWindow() {
+    let worker = null;
+
+    try {
+      worker = window.open('about:blank', 'pong-repair-worker', 'popup,width=980,height=760');
+    } catch (e) {
+      worker = null;
+    }
+
+    if (worker) {
+      try {
+        worker.document.write('<!doctype html><title>Pong repair worker</title><body style="background:#05070a;color:#d1d5db;font:13px system-ui;margin:16px">Pong repair worker starting...</body>');
+        worker.document.close();
+      } catch (_) {}
+    }
+
+    return worker;
+  }
+
+  function closeRepairWorkerWindow(worker) {
+    try {
+      if (worker && !worker.closed) worker.close();
+    } catch (_) {}
+  }
+
+  function navigateRepairWorker(item) {
+    const state = iframeRepairState;
+    const targetUrl = appendRepairHash(item.url, item);
+
+    if (!state?.workerWindow || state.workerWindow.closed) {
+      state.workerWindow = openRepairWorkerWindow();
+      writeRepairLog(state.workerWindow ? 'Repair worker tab reopened' : 'Repair worker tab could not open');
+    }
+
+    if (!state.workerWindow) {
+      return false;
+    }
+
+    try {
+      state.workerWindow.location.href = targetUrl;
+      state.workerWindow.focus();
+      writeRepairLog(`Opened repair tab: ${item.url}`);
+      writeRepairLog(`Waiting for Tampermonkey result: ${targetUrl}`);
+      return true;
+    } catch (e) {
+      writeRepairLog(`Could not navigate repair tab: ${e?.message || e}`);
+      return false;
+    }
+  }
+
   function updateRepairQueuePanel(status) {
     if (!iframeRepairState) return;
 
@@ -2307,6 +2369,7 @@
       clearTimeout(iframeRepairState.timeoutId);
     }
 
+    closeRepairWorkerWindow(iframeRepairState.workerWindow);
     iframeRepairState.active = false;
     iframeRepairState = null;
 
@@ -2444,9 +2507,8 @@
     showMsg(repaired ? `Repaired ${repaired} saved links` : 'No matching saved links needed repair');
 
     state.active = false;
-    const frame = document.getElementById('pong-repair-frame');
     const stop = document.getElementById('pong-repair-stop');
-    if (frame) frame.removeAttribute('src');
+    closeRepairWorkerWindow(state.workerWindow);
     if (stop) stop.textContent = 'Close';
     writeRepairLog('Repair finished; copy the log before closing if you want me to inspect timing');
   }
@@ -2474,7 +2536,6 @@
     }
 
     const item = state.queue[state.index];
-    const frame = document.getElementById('pong-repair-frame');
 
     updateRepairQueuePanel();
 
@@ -2489,21 +2550,24 @@
     state.itemStartedAt = Date.now();
     writeRepairLog(`Start ${item.phase} ${state.index + 1}/${state.queue.length}: ${item.label}`);
 
-    if (frame) {
-      frame.src = appendRepairHash(item.url, item);
-      writeRepairLog(`Opened repair worker: ${item.url}`);
+    if (!navigateRepairWorker(item)) {
+      state.completed = Math.max(state.completed || 0, state.index + 1);
+      updateRepairQueuePanel(`Skipped: ${item.label} (repair tab blocked)`);
+      setTimeout(runNextIframeRepairItem, 250);
+      return;
     }
 
     state.timeoutId = setTimeout(() => {
       if (!iframeRepairState || iframeRepairState.id !== state.id) return;
       state.completed = Math.max(state.completed || 0, state.index + 1);
       writeRepairLog(`Timeout after ${formatRepairSeconds(REPAIR_ITEM_TIMEOUT_MS)}: ${item.label}`);
+      writeRepairLog('No userscript message received; check that Tampermonkey is enabled in the repair tab browser/profile.');
       updateRepairQueuePanel(`Timed out: ${item.label}`);
       setTimeout(runNextIframeRepairItem, 250);
     }, REPAIR_ITEM_TIMEOUT_MS);
   }
 
-  function startIframeRepairQueue(queueInfo, initialRepaired = 0) {
+  function startIframeRepairQueue(queueInfo, initialRepaired = 0, workerWindow = null) {
     const queue = Array.isArray(queueInfo) ? queueInfo : queueInfo?.queue || [];
     const stats = Array.isArray(queueInfo) ? {} : queueInfo?.stats || {};
 
@@ -2528,11 +2592,13 @@
       timeoutId: null,
       startedAt: Date.now(),
       itemStartedAt: 0,
-      logLines: []
+      logLines: [],
+      workerWindow
     };
 
     updateRepairQueuePanel('Starting repair...');
     writeRepairLog(`Queue created: ${queue.length} jobs`);
+    writeRepairLog(workerWindow ? 'Visible repair tab opened' : 'No repair tab available yet; will try to open when needed');
     writeRepairLog(`${stats.savedArtists || 0} saved artists, ${stats.uniqueArtists || 0} unique artist pages`);
     writeRepairLog(`${stats.savedVideos || 0} saved videos, ${stats.repairableVideos || 0} repairable source pages`);
     runNextIframeRepairItem();
@@ -2546,7 +2612,10 @@
     if (!state || !state.active || data.type !== 'PONG_REPAIR_RESULT') return;
 
     const current = state.queue[state.index];
-    if (!current || data.repairId !== current.id) return;
+    if (!current || data.repairId !== current.id) {
+      writeRepairLog(`Ignored repair message for ${data.repairId || 'missing id'} while waiting for ${current?.id || 'none'}`);
+      return;
+    }
 
     if (state.timeoutId) {
       clearTimeout(state.timeoutId);
@@ -2584,6 +2653,8 @@
   }
 
   async function repairSavedLinksOverride() {
+    const workerWindow = openRepairWorkerWindow();
+
     try {
       showMsg('Repairing saved links...');
 
@@ -2606,12 +2677,14 @@
       const queueInfo = buildIframeRepairQueue(loaded.data);
 
       if (queueInfo.queue.length) {
-        startIframeRepairQueue(queueInfo, pastedRepaired);
+        startIframeRepairQueue(queueInfo, pastedRepaired, workerWindow);
         return;
       }
 
+      closeRepairWorkerWindow(workerWindow);
       showMsg(pastedRepaired ? `Repaired ${pastedRepaired} saved links` : 'No repairable artist or post URLs found');
     } catch (e) {
+      closeRepairWorkerWindow(workerWindow);
       showMsg('Could not repair saved links');
       console.error(e);
     }
