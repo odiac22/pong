@@ -478,7 +478,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.35</div>
+  <div class="version-number">22.36</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1917,19 +1917,20 @@ function createVideoElements() {
 
       lastTapTime = now; lastTapX = tapX;
 
-      markVideoViewed(wrapper);
+      markVideoPlayIntent(wrapper, video);
       if (video.paused) playVideoCleanly(video);
       else video.pause();
     },{passive:false});
 
     tapArea.addEventListener('click', e => {
       if (e.target.closest('.video-progress-container') || e.target.tagName==='BUTTON') { e.stopPropagation(); return; }
-      markVideoViewed(wrapper);
+      markVideoPlayIntent(wrapper, video);
       if (video.paused) playVideoCleanly(video); else video.pause();
     });
 
     video.addEventListener('play', () => {
       prepareVideoForPlayback(video);
+      markVideoPlayIntent(wrapper, video);
       setTimeout(()=>{ if(video.muted){video.muted=false;video.volume=1.0;} },100);
     });
     video.addEventListener('pause', () => { wrapper.classList.remove('video-playing'); if(window.currentlyPlayingVideo===video) window.currentlyPlayingVideo=null; loadingIndicator.style.display='none'; });
@@ -1938,21 +1939,20 @@ function createVideoElements() {
     video.addEventListener('canplay', () => { markVideoAutoRetryDone(video, 'canplay'); loadingIndicator.style.display='none'; });
     video.addEventListener('playing', () => {
       markVideoAutoRetryDone(video, 'playing');
-      setTimeout(() => {
-        if (!video.paused && video.currentTime > 0.25) markVideoViewed(wrapper);
-      }, 1200);
+      markVideoPlayIntent(wrapper, video);
     });
     video.addEventListener('loadedmetadata', () => { updateVideoReadyLoader(video); });
     video.addEventListener('playing', () => { loadingIndicator.style.display='none'; if(video.muted){video.muted=false;video.volume=1.0;audioBtn.innerHTML='🔊';audioBtn.setAttribute('data-muted','false');} });
     video.addEventListener('timeupdate', () => {
       if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`;
-      const viewThreshold = video.duration ? Math.min(1, video.duration * 0.08) : 0.75;
+      const viewThreshold = video.duration ? 0.01 : 0.75;
       if (video.currentTime >= viewThreshold) markVideoViewed(wrapper);
     });
     video.addEventListener('loadedmetadata', () => {
       const metadataIndex = Number(wrapper.dataset.index || index);
       durationText.textContent=formatTime(video.duration);
       videoMetadata[metadataIndex]={...videoMetadata[metadataIndex],duration:video.duration||0};
+      if (wrapper.dataset.playIntent === 'true') markVideoPlayIntent(wrapper, video);
       updateVideoReadyLoader(video);
     });
     video.addEventListener('error', () => { loadingIndicator.style.display='none'; updateVideoReadyLoader(video); });
@@ -2101,6 +2101,20 @@ function markVideoViewed(wrapper) {
   wrapper.dataset.viewed = 'true';
 }
 
+function hasVideoDuration(video) {
+  return !!video && Number.isFinite(video.duration) && video.duration > 0;
+}
+
+function markVideoPlayIntent(wrapper, video) {
+  if (!wrapper) return;
+
+  wrapper.dataset.playIntent = 'true';
+
+  if (hasVideoDuration(video)) {
+    markVideoViewed(wrapper);
+  }
+}
+
 function isWrapperViewed(wrapper) {
   return wrapper && wrapper.dataset.viewed === 'true';
 }
@@ -2175,7 +2189,8 @@ function recycleSkippedVideosBelow() {
       index >= 0 &&
       index < videoUrls.length - 1 &&
       isAboveViewport &&
-      (!isWrapperViewed(wrapper) || !isWrapperReady(wrapper))
+      isWrapperReady(wrapper) &&
+      !isWrapperViewed(wrapper)
     ) {
       moveSkippedVideoToBottom(wrapper);
       return;
@@ -2761,6 +2776,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=28"></script>
+<script src="pong-sync.js?v=29"></script>
 </body>
 </html>
