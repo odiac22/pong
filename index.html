@@ -532,39 +532,58 @@ videoUrlsInput.addEventListener('paste', (e) => {
   const pastedText = e.clipboardData?.getData('text/plain') || '';
   const pastedParsed = parsePastedVideoLines(pastedText);
   const pastedUrls = pastedParsed.urls;
-  const valueLength = videoUrlsInput.value.length;
-  const isAppendPaste = videoUrlsInput.selectionStart === valueLength && videoUrlsInput.selectionEnd === valueLength;
+
+  // If this is not a video-link paste, let the browser handle it normally.
+  if (!pastedUrls.length) return;
+
+  // This is the main speed fix.
+  // Do NOT let the browser insert 1,000+ lines into the textarea.
+  e.preventDefault();
+  e.stopPropagation();
 
   isHandlingPaste = true;
 
-  if (!isAppendPaste && parsedVideoUrlsCache.length) {
-    parseCacheDirty = true;
-    pendingPastes = [];
-  } else {
-    if (parseCacheDirty) {
-      const parsedExisting = parsePastedVideoLines(videoUrlsInput.value);
-      parsedVideoUrlsCache = parsedExisting.urls;
-      parsedVideoMetadataCache = parsedExisting.metadata;
-      _prevUrlCount = parsedVideoUrlsCache.length;
-      parseCacheDirty = false;
-    }
+  // If the cache was dirty but empty, try to recover any existing real links once.
+  // This keeps normal typed/pasted text behavior from breaking.
+  if (!parsedVideoUrlsCache.length && parseCacheDirty) {
+    const existingParsed = parsePastedVideoLines(videoUrlsInput.value);
+    parsedVideoUrlsCache = existingParsed.urls;
+    parsedVideoMetadataCache = existingParsed.metadata;
+    _prevUrlCount = parsedVideoUrlsCache.length;
+  }
 
-    if (pastedUrls.length) {
-      const startIndex = parsedVideoUrlsCache.length;
-      parsedVideoUrlsCache.push(...pastedUrls);
-      parsedVideoMetadataCache.push(...pastedParsed.metadata);
-      pendingPastes.push({ startIndex, count: pastedUrls.length });
-      _prevUrlCount = parsedVideoUrlsCache.length;
+  const startIndex = parsedVideoUrlsCache.length;
 
-      const btn = document.getElementById('paste-nav-button');
-      if (btn) {
-        btn.style.opacity = '0.7';
-        btn.style.background = 'rgba(0,150,255,0.7)';
-        btn.setAttribute('data-count', pendingPastes.length + 'p');
-      }
+  parsedVideoUrlsCache.push(...pastedUrls);
+  parsedVideoMetadataCache.push(...pastedParsed.metadata);
 
-      console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + pastedUrls.length + ' URLs at index ' + startIndex);
-    }
+  pendingPastes.push({
+    startIndex,
+    count: pastedUrls.length
+  });
+
+  _prevUrlCount = parsedVideoUrlsCache.length;
+  parseCacheDirty = false;
+
+  // Instead of inserting the huge paste, insert one small marker line.
+  const pasteNumber = pendingPastes.length;
+  const marker = `# Fast paste ${pasteNumber}: ${pastedUrls.length} video links cached (${parsedVideoUrlsCache.length} total)`;
+
+  const currentText = videoUrlsInput.value.trim();
+  videoUrlsInput.value = currentText ? `${currentText}\n${marker}` : marker;
+  videoUrlsInput.scrollTop = videoUrlsInput.scrollHeight;
+
+  const btn = document.getElementById('paste-nav-button');
+  if (btn) {
+    btn.style.opacity = '0.7';
+    btn.style.background = 'rgba(0,150,255,0.7)';
+    btn.setAttribute('data-count', pendingPastes.length + 'p');
+  }
+
+  console.log('[Fast Paste] Bundle ' + pendingPastes.length + ': +' + pastedUrls.length + ' URLs at index ' + startIndex);
+
+  if (typeof showSortingIndicator === 'function') {
+    showSortingIndicator(`Cached ${pastedUrls.length} pasted videos`);
   }
 
   if (window.PongMetadataSync && typeof window.PongMetadataSync.capturePastedTextAsync === 'function') {
@@ -1554,12 +1573,15 @@ function createGearButton(){
 
 // ─── Load videos ──────────────────────────────────────────────────────────────
 loadVideosButton.addEventListener('click',()=>{
-  const parsedLoad = parseCacheDirty
-    ? parsePastedVideoLines(videoUrlsInput.value)
-    : {
+  const hasCachedPasteUrls = parsedVideoUrlsCache.length > 0;
+
+  const parsedLoad = hasCachedPasteUrls
+    ? {
         urls: parsedVideoUrlsCache.slice(),
         metadata: parsedVideoMetadataCache.slice()
-      };
+      }
+    : parsePastedVideoLines(videoUrlsInput.value);
+
   const newUrls = parsedLoad.urls;
 
   if(!newUrls.length){
@@ -1571,18 +1593,30 @@ loadVideosButton.addEventListener('click',()=>{
 
   allVideoUrls = newUrls;
   allVideoMetadata = (parsedLoad.metadata || []).map(meta => meta || {});
+
+  while (allVideoMetadata.length < allVideoUrls.length) {
+    allVideoMetadata.push({});
+  }
+
   currentBatch = 0;
   currentVideoIndex = 0;
 
+  // This fixes the paperclip/paste counter showing 0.
   if (pendingPastes.length) {
     pasteEvents = pendingPastes.slice();
-    pendingPastes = [];
-    currentPasteIndex = -1;
-    console.log('[Load] Finalised ' + pasteEvents.length + ' paste bundles');
+  } else if (hasCachedPasteUrls) {
+    pasteEvents = [{
+      startIndex: 0,
+      count: newUrls.length
+    }];
   } else {
     pasteEvents = [];
-    currentPasteIndex = -1;
   }
+
+  pendingPastes = [];
+  currentPasteIndex = -1;
+
+  console.log('[Load] Finalised ' + pasteEvents.length + ' paste bundles');
 
   _prevUrlCount = 0;
   parsedVideoUrlsCache = [];
