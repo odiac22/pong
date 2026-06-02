@@ -56,6 +56,9 @@
         flex-direction: column !important;
         gap: 7px !important;
         pointer-events: auto !important;
+        user-select: none !important;
+        -webkit-user-select: none !important;
+        -webkit-touch-callout: none !important;
       }
 
       .side-save-button {
@@ -79,6 +82,9 @@
         touch-action: manipulation !important;
         transition: all 0.2s ease !important;
         padding: 2px !important;
+        user-select: none !important;
+        -webkit-user-select: none !important;
+        -webkit-touch-callout: none !important;
       }
 
       .side-save-button:hover,
@@ -90,12 +96,16 @@
       .side-save-icon {
         font-size: 14px !important;
         line-height: 1 !important;
+        user-select: none !important;
+        -webkit-user-select: none !important;
       }
 
       .side-save-label {
         font-size: 7px !important;
         font-weight: 700 !important;
         line-height: 1 !important;
+        user-select: none !important;
+        -webkit-user-select: none !important;
       }
 
       .side-save-count {
@@ -111,6 +121,8 @@
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
+        user-select: none !important;
+        -webkit-user-select: none !important;
       }
 
       .remove-saved-button {
@@ -842,6 +854,8 @@
   }
 
   function artistNameFromUrl(rawUrl) {
+    if (!String(rawUrl || '').trim()) return '';
+
     try {
       const url = new URL(String(rawUrl || ''), window.location.href);
       const parts = url.pathname.split('/').map(part => part.trim()).filter(Boolean);
@@ -855,11 +869,24 @@
   function getArtistDisplayName(meta) {
     if (!meta) return '';
 
-    return (
+    const displayName =
       meta.artistDisplayName ||
       artistNameFromUrl(meta.artistUrl) ||
-      String(meta.artistName || '').trim()
-    );
+      String(meta.artistName || '').trim();
+
+    if (!displayName || /^\d+$/.test(displayName) || displayName.toLowerCase() === 'pong') return '';
+
+    return displayName;
+  }
+
+  function getLoadedMetadataForUrl(rawUrl) {
+    const mediaKey = getSavedVideoKey(rawUrl);
+
+    if (!mediaKey || !Array.isArray(allVideoUrls) || !Array.isArray(allVideoMetadata)) return null;
+
+    const index = allVideoUrls.findIndex(url => getSavedVideoKey(url) === mediaKey);
+
+    return index >= 0 ? allVideoMetadata[index] || null : null;
   }
 
   function compactVideoMetadata(meta) {
@@ -881,7 +908,7 @@
   function compactArtistMetadata(videos) {
     const metadata = window.PongCurrentPastedMetadata || emptyPastedMetadata();
     const firstVideoMeta = (videos || [])
-      .map(url => getPastedMetadataForUrl(url))
+      .map(url => getPastedMetadataForUrl(url) || getLoadedMetadataForUrl(url))
       .find(Boolean);
     const artist = metadata.artist || firstVideoMeta || null;
 
@@ -902,7 +929,7 @@
 
     (urls || []).forEach(url => {
       const mediaKey = getSavedVideoKey(url);
-      const meta = compactVideoMetadata(getPastedMetadataForUrl(url));
+      const meta = compactVideoMetadata(getPastedMetadataForUrl(url) || getLoadedMetadataForUrl(url));
 
       if (mediaKey && meta) {
         map[mediaKey] = meta;
@@ -1044,7 +1071,7 @@
           groupedMetadata.push({
             ...(artist || {}),
             ...(videoMeta || {}),
-            artistDisplayName: getArtistDisplayName(videoMeta || artist)
+            artistDisplayName: getArtistDisplayName(videoMeta) || getArtistDisplayName(artist)
           });
         });
 
