@@ -17,6 +17,7 @@
   const SAVED_ARTISTS_KEY = 'pong_saved_artists_v1';
   const GITHUB_TOKEN_KEY = 'pong_github_token_v1';
   const MEDIA_SIGNATURE_CACHE_KEY = 'pong_media_signature_cache_v1';
+  const COOMERFANS_PROXY_URL_KEY = 'pong_coomerfans_proxy_url_v1';
   const PONG_ARTIST_PREFIX = '#PONG_ARTIST ';
   const PONG_VIDEO_PREFIX = '#PONG_VIDEO ';
 
@@ -387,6 +388,50 @@
     }
 
     return token;
+  }
+
+  function getCoomerfansProxyUrl() {
+    try {
+      const configured = String(window.PONG_COOMERFANS_PROXY_URL || localStorage.getItem(COOMERFANS_PROXY_URL_KEY) || '').trim();
+      return configured.replace(/\/+$/, '');
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function setCoomerfansProxyUrl() {
+    const current = getCoomerfansProxyUrl();
+    const proxyUrl = prompt('Paste Cloudflare Worker repair proxy URL:', current);
+
+    if (proxyUrl === null) return current;
+
+    const trimmed = proxyUrl.trim().replace(/\/+$/, '');
+
+    try {
+      if (trimmed) {
+        localStorage.setItem(COOMERFANS_PROXY_URL_KEY, trimmed);
+      } else {
+        localStorage.removeItem(COOMERFANS_PROXY_URL_KEY);
+      }
+
+      showMsg(trimmed ? 'Repair proxy saved' : 'Repair proxy cleared');
+    } catch (e) {
+      showMsg('Could not save repair proxy');
+    }
+
+    return trimmed;
+  }
+
+  function repairProxyFetchUrl(rawUrl) {
+    const proxy = getCoomerfansProxyUrl();
+
+    if (!proxy) {
+      return rawUrl;
+    }
+
+    const separator = proxy.includes('?') ? '&' : '?';
+
+    return `${proxy}${separator}url=${encodeURIComponent(rawUrl)}`;
   }
 
   function loadSavedMap(key) {
@@ -2238,13 +2283,15 @@
   }
 
   async function directRepairFetchText(url) {
-    const res = await fetch(url, {
-      credentials: 'include',
+    const fetchUrl = repairProxyFetchUrl(url);
+    const usingProxy = fetchUrl !== url;
+    const res = await fetch(fetchUrl, {
+      credentials: 'omit',
       cache: 'no-store'
     });
 
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+      throw new Error(`${usingProxy ? 'Proxy ' : ''}HTTP ${res.status}`);
     }
 
     return res.text();
@@ -2920,6 +2967,7 @@
     updateRepairQueuePanel('Starting repair...');
     writeRepairLog(`Queue created: ${queue.length} jobs`);
     writeRepairLog('Direct browser scrape enabled');
+    writeRepairLog(getCoomerfansProxyUrl() ? `Repair proxy: ${getCoomerfansProxyUrl()}` : 'Repair proxy not configured; direct fetch will likely fail');
     writeRepairLog(workerWindow ? 'Visible repair tab opened' : 'Visible repair tab fallback is closed until needed');
     writeRepairLog(`${stats.savedArtists || 0} saved artists, ${stats.uniqueArtists || 0} unique artist pages`);
     writeRepairLog(`${stats.savedVideos || 0} saved videos, ${stats.repairableVideos || 0} repairable source pages`);
@@ -3013,6 +3061,10 @@
       const queueInfo = buildIframeRepairQueue(loaded.data);
 
       if (queueInfo.queue.length) {
+        if (!getCoomerfansProxyUrl()) {
+          setCoomerfansProxyUrl();
+        }
+
         startIframeRepairQueue(queueInfo, pastedRepaired, workerWindow);
         return;
       }
