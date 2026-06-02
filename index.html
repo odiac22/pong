@@ -401,7 +401,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.25</div>
+  <div class="version-number">22.26</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -435,10 +435,16 @@ let parsedVideoMetadataCache = [];
 let parseCacheDirty = false;
 let isHandlingPaste = false;
 let ignoreNextPasteInput = false;
+let lastVideoUrlsInputValue = '';
+let mobilePasteSnapshotValue = '';
+let mobilePastePending = false;
+let lastHandledPasteText = '';
+let lastHandledPasteAt = 0;
 
 const videoContainer = document.getElementById('video-container');
 const videoUrlsInput  = document.getElementById('video-urls');
 const loadVideosButton = document.getElementById('load-videos');
+lastVideoUrlsInputValue = videoUrlsInput ? videoUrlsInput.value || '' : '';
 
 function parseVideoUrls(text) {
   return parsePastedVideoLines(text).urls;
@@ -549,43 +555,14 @@ function updatePendingPasteButton() {
   }
 }
 
-function getFastPasteMarkerCounts() {
-  const value = videoUrlsInput ? videoUrlsInput.value || '' : '';
-  const counts = [];
-  const pattern = /# Fast paste \d+:\s+(\d+)\s+video links cached\b/g;
-  let match;
-
-  while ((match = pattern.exec(value))) {
-    const count = Number(match[1]);
-    if (Number.isFinite(count) && count > 0) counts.push(count);
-  }
-
-  return counts;
-}
-
-function buildPasteEventsFromCounts(counts, totalUrls) {
-  const events = [];
-  let startIndex = 0;
-
-  (counts || []).forEach(count => {
-    const safeCount = Math.max(0, Math.min(Number(count) || 0, Math.max(0, totalUrls - startIndex)));
-    if (!safeCount) return;
-    events.push({ startIndex, count: safeCount });
-    startIndex += safeCount;
-  });
-
-  return events;
-}
-
 function getPendingPasteBundleCount() {
-  if (pendingPastes.length) return pendingPastes.length;
-  return getFastPasteMarkerCounts().length;
+  return pendingPastes.length;
 }
 
 function recoverDirtyPasteCache() {
   if (!parseCacheDirty) return;
 
-  if (parsedVideoUrlsCache.length && getFastPasteMarkerCounts().length) {
+  if (parsedVideoUrlsCache.length) {
     parseCacheDirty = false;
     return;
   }
@@ -616,6 +593,90 @@ function insertTextAtVideoCursor(text) {
   videoUrlsInput.scrollTop = videoUrlsInput.scrollHeight;
 }
 
+function replaceInsertedText(previousValue, currentValue, replacementText) {
+  const previous = String(previousValue || '');
+  const current = String(currentValue || '');
+  let prefixLength = 0;
+
+  while (
+    prefixLength < previous.length &&
+    prefixLength < current.length &&
+    previous[prefixLength] === current[prefixLength]
+  ) {
+    prefixLength++;
+  }
+
+  let previousSuffix = previous.length;
+  let currentSuffix = current.length;
+
+  while (
+    previousSuffix > prefixLength &&
+    currentSuffix > prefixLength &&
+    previous[previousSuffix - 1] === current[currentSuffix - 1]
+  ) {
+    previousSuffix--;
+    currentSuffix--;
+  }
+
+  const insertedText = current.slice(prefixLength, currentSuffix);
+  let replacement = String(replacementText || '');
+
+  if (insertedText.startsWith('\n') && replacement && !replacement.startsWith('\n')) {
+    replacement = '\n' + replacement;
+  } else if (
+    prefixLength > 0 &&
+    current[prefixLength - 1] !== '\n' &&
+    replacement &&
+    !replacement.startsWith('\n')
+  ) {
+    replacement = '\n' + replacement;
+  }
+
+  const nextValue = current.slice(0, prefixLength) + replacement + current.slice(currentSuffix);
+  const nextCaret = prefixLength + replacement.length;
+
+  videoUrlsInput.value = nextValue;
+  videoUrlsInput.selectionStart = nextCaret;
+  videoUrlsInput.selectionEnd = nextCaret;
+  videoUrlsInput.scrollTop = videoUrlsInput.scrollHeight;
+  lastVideoUrlsInputValue = nextValue;
+
+  return insertedText;
+}
+
+function getInsertedText(previousValue, currentValue) {
+  const previous = String(previousValue || '');
+  const current = String(currentValue || '');
+  let prefixLength = 0;
+
+  while (
+    prefixLength < previous.length &&
+    prefixLength < current.length &&
+    previous[prefixLength] === current[prefixLength]
+  ) {
+    prefixLength++;
+  }
+
+  let previousSuffix = previous.length;
+  let currentSuffix = current.length;
+
+  while (
+    previousSuffix > prefixLength &&
+    currentSuffix > prefixLength &&
+    previous[previousSuffix - 1] === current[currentSuffix - 1]
+  ) {
+    previousSuffix--;
+    currentSuffix--;
+  }
+
+  return current.slice(prefixLength, currentSuffix);
+}
+
+function insertVideoUrlsAtCursor(urls) {
+  insertTextAtVideoCursor((urls || []).join('\n'));
+  lastVideoUrlsInputValue = videoUrlsInput.value || '';
+}
+
 function recordPasteEvent(parsedPaste) {
   recoverDirtyPasteCache();
 
@@ -637,10 +698,51 @@ function recordPasteEvent(parsedPaste) {
   return event;
 }
 
+function captureOriginalPasteText(text) {
+  if (window.PongMetadataSync && typeof window.PongMetadataSync.capturePastedTextAsync === 'function') {
+    window.PongMetadataSync.capturePastedTextAsync(text);
+  }
+}
+
+function markPasteTextHandled(text) {
+  lastHandledPasteText = String(text || '');
+  lastHandledPasteAt = Date.now();
+}
+
+function wasPasteTextJustHandled(text) {
+  const pastedText = String(text || '');
+  return Date.now() - lastHandledPasteAt < 120 && (!pastedText || pastedText === lastHandledPasteText);
+}
+
+function finishPasteInputState() {
+  lastVideoUrlsInputValue = videoUrlsInput.value || '';
+  mobilePastePending = false;
+  mobilePasteSnapshotValue = '';
+
+  setTimeout(() => {
+    isHandlingPaste = false;
+    ignoreNextPasteInput = false;
+  }, 80);
+}
+
 videoUrlsInput.addEventListener('paste', (e) => {
   const pastedText = e.clipboardData?.getData('text/plain') || '';
+
+  if (pastedText && wasPasteTextJustHandled(pastedText)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
+
   const pastedParsed = parsePastedVideoLines(pastedText);
   const pastedUrls = pastedParsed.urls;
+
+  if (!pastedText) {
+    mobilePasteSnapshotValue = videoUrlsInput.value || '';
+    mobilePastePending = true;
+    lastVideoUrlsInputValue = mobilePasteSnapshotValue;
+    return;
+  }
 
   // Count every paste immediately. Then handle insertion ourselves so the
   // browser never gets a chance to desync the paperclip counter.
@@ -653,17 +755,10 @@ videoUrlsInput.addEventListener('paste', (e) => {
   const pasteEvent = recordPasteEvent(pastedParsed);
 
   if (pastedUrls.length) {
-    // Instead of inserting the huge paste, insert one small marker line.
-    const pasteNumber = pendingPastes.length;
-    const marker = `# Fast paste ${pasteNumber}: ${pastedUrls.length} video links cached (${parsedVideoUrlsCache.length} total)`;
+    // Keep the visible textarea as real links so save/repair can read it.
+    insertVideoUrlsAtCursor(pastedUrls);
 
-    const currentText = videoUrlsInput.value.trim();
-    videoUrlsInput.value = currentText ? `${currentText}\n${marker}` : marker;
-    videoUrlsInput.selectionStart = videoUrlsInput.value.length;
-    videoUrlsInput.selectionEnd = videoUrlsInput.value.length;
-    videoUrlsInput.scrollTop = videoUrlsInput.scrollHeight;
-
-    console.log('[Fast Paste] Event ' + pendingPastes.length + ': +' + pastedUrls.length + ' URLs at index ' + pasteEvent.startIndex);
+    console.log('[Paste Cache] Event ' + pendingPastes.length + ': +' + pastedUrls.length + ' URLs at index ' + pasteEvent.startIndex);
 
     if (typeof showSortingIndicator === 'function') {
       showSortingIndicator(`Cached paste ${pendingPastes.length}: ${pastedUrls.length} videos`);
@@ -677,35 +772,92 @@ videoUrlsInput.addEventListener('paste', (e) => {
     }
   }
 
-  if (window.PongMetadataSync && typeof window.PongMetadataSync.capturePastedTextAsync === 'function') {
-    window.PongMetadataSync.capturePastedTextAsync(pastedText);
+  captureOriginalPasteText(pastedText);
+  markPasteTextHandled(pastedText);
+  finishPasteInputState();
+}, true);
+
+videoUrlsInput.addEventListener('beforeinput', e => {
+  if (e.inputType !== 'insertFromPaste') return;
+
+  mobilePasteSnapshotValue = videoUrlsInput.value || '';
+  mobilePastePending = true;
+  lastVideoUrlsInputValue = mobilePasteSnapshotValue;
+
+  const pastedText = e.dataTransfer?.getData('text/plain') || e.data || '';
+
+  if (wasPasteTextJustHandled(pastedText)) {
+    e.preventDefault();
+    return;
   }
 
-  setTimeout(() => {
-    isHandlingPaste = false;
-    ignoreNextPasteInput = false;
-  }, 250);
-}, true);
+  if (!pastedText) return;
+
+  e.preventDefault();
+  isHandlingPaste = true;
+  ignoreNextPasteInput = true;
+
+  const parsedPaste = parsePastedVideoLines(pastedText);
+  const pastedUrls = parsedPaste.urls;
+
+  recordPasteEvent(parsedPaste);
+
+  if (pastedUrls.length) {
+    insertVideoUrlsAtCursor(pastedUrls);
+    if (typeof showSortingIndicator === 'function') {
+      showSortingIndicator(`Cached paste ${pendingPastes.length}: ${pastedUrls.length} videos`);
+    }
+  } else {
+    insertTextAtVideoCursor(pastedText);
+    parseCacheDirty = true;
+    if (typeof showSortingIndicator === 'function') {
+      showSortingIndicator(`Recorded paste ${pendingPastes.length}`);
+    }
+  }
+
+  captureOriginalPasteText(pastedText);
+  markPasteTextHandled(pastedText);
+  finishPasteInputState();
+});
 
 videoUrlsInput.addEventListener('input', e => {
   if (isHandlingPaste || ignoreNextPasteInput) {
+    lastVideoUrlsInputValue = videoUrlsInput.value || '';
     return;
   }
 
-  if (e.inputType === 'insertFromPaste') {
-    const parsedCurrent = parsePastedVideoLines(videoUrlsInput.value);
-    const addedCount = parsedCurrent.urls.length - _prevUrlCount;
+  const currentValue = videoUrlsInput.value || '';
+  const snapshotValue = mobilePastePending ? mobilePasteSnapshotValue : lastVideoUrlsInputValue;
+  const insertedText = getInsertedText(snapshotValue, currentValue);
+  const parsedInserted = parsePastedVideoLines(insertedText);
+  const looksLikeMobilePaste =
+    e.inputType === 'insertFromPaste' ||
+    mobilePastePending ||
+    (parsedInserted.urls.length > 0 && (insertedText.length > 120 || insertedText.includes('\n') || insertedText.includes('#PONG_')));
 
-    recordPasteEvent(addedCount > 0 ? {
-        urls: parsedCurrent.urls.slice(-addedCount),
-        metadata: parsedCurrent.metadata.slice(-addedCount)
-      } : { urls: [], metadata: [] });
+  if (looksLikeMobilePaste) {
+    recordPasteEvent(parsedInserted);
 
-    updatePendingPasteButton();
-    return;
-  }
+    if (parsedInserted.urls.length) {
+      replaceInsertedText(snapshotValue, currentValue, parsedInserted.urls.join('\n'));
+      parseCacheDirty = false;
 
-  if (parsedVideoUrlsCache.length && getFastPasteMarkerCounts().length) {
+      if (typeof showSortingIndicator === 'function') {
+        showSortingIndicator(`Cached paste ${pendingPastes.length}: ${parsedInserted.urls.length} videos`);
+      }
+    } else {
+      parseCacheDirty = true;
+      lastVideoUrlsInputValue = currentValue;
+
+      if (typeof showSortingIndicator === 'function') {
+        showSortingIndicator(`Recorded paste ${pendingPastes.length}`);
+      }
+    }
+
+    captureOriginalPasteText(insertedText);
+    markPasteTextHandled(insertedText);
+    mobilePastePending = false;
+    mobilePasteSnapshotValue = '';
     updatePendingPasteButton();
     return;
   }
@@ -717,6 +869,7 @@ videoUrlsInput.addEventListener('input', e => {
     parsedVideoUrlsCache = [];
     parsedVideoMetadataCache = [];
   }
+  lastVideoUrlsInputValue = videoUrlsInput.value || '';
   updatePendingPasteButton();
 });
 
@@ -1720,13 +1873,9 @@ loadVideosButton.addEventListener('click',()=>{
   currentBatch = 0;
   currentVideoIndex = 0;
 
-  const markerPasteEvents = buildPasteEventsFromCounts(getFastPasteMarkerCounts(), newUrls.length);
-
   // This fixes the paperclip/paste counter showing 0.
   if (pendingPastes.length) {
     pasteEvents = pendingPastes.filter(event => event && event.count > 0);
-  } else if (markerPasteEvents.length) {
-    pasteEvents = markerPasteEvents;
   } else if (hasCachedPasteUrls) {
     pasteEvents = [{
       startIndex: 0,
@@ -2027,6 +2176,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=19"></script>
+<script src="pong-sync.js?v=20"></script>
 </body>
 </html>
