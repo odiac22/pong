@@ -231,6 +231,23 @@
         font-size: 9px !important;
       }
 
+      .pong-repair-detail {
+        display: flex !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        gap: 8px !important;
+        margin-top: 4px !important;
+        color: rgba(244,248,255,0.38) !important;
+        font-size: 8px !important;
+        line-height: 1.2 !important;
+      }
+
+      .pong-repair-detail span {
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
+      }
+
       .pong-repair-stop {
         border: 1px solid rgba(255,255,255,0.13) !important;
         border-radius: 999px !important;
@@ -251,6 +268,32 @@
         opacity: 0.01 !important;
         pointer-events: none !important;
         border: 0 !important;
+      }
+
+      .pong-video-expired-hint {
+        position: absolute !important;
+        left: 50% !important;
+        top: calc(50% + 60px) !important;
+        transform: translateX(-50%) !important;
+        max-width: min(70vw, 260px) !important;
+        z-index: 25 !important;
+        color: rgba(210,214,220,0.42) !important;
+        background: rgba(8,12,16,0.18) !important;
+        border: 1px solid rgba(255,255,255,0.05) !important;
+        border-radius: 999px !important;
+        padding: 2px 6px !important;
+        font-size: 7px !important;
+        line-height: 1.15 !important;
+        font-weight: 600 !important;
+        letter-spacing: 0 !important;
+        text-align: center !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        opacity: 0.45 !important;
+        pointer-events: none !important;
+        backdrop-filter: blur(6px) !important;
+        -webkit-backdrop-filter: blur(6px) !important;
       }
     `;
   }
@@ -1971,12 +2014,16 @@
   function buildIframeRepairQueue(data) {
     const queue = [];
     const seen = {};
+    const savedArtists = Object.entries(data?.savedArtists || {});
+    const savedVideos = Object.entries(data?.savedVideos || {});
 
-    function add(kind, rawUrl, label) {
+    function add(kind, rawUrl, label, extra = {}) {
       const url = String(rawUrl || '').trim();
-      if (!url) return;
+      const phase = extra.phase || (kind === 'post' ? 'video' : 'artist');
 
-      const key = `${kind}:${url}`;
+      if (!url && !extra.countMissing) return;
+
+      const key = url ? `${phase}:${kind}:${url}` : `${phase}:${kind}:missing:${extra.savedKey || queue.length}`;
       if (seen[key]) return;
 
       seen[key] = true;
@@ -1984,20 +2031,44 @@
         id: `${Date.now().toString(36)}-${queue.length + 1}`,
         kind,
         url,
-        label: label || url
+        phase,
+        label: label || url || 'Missing source URL',
+        savedKey: extra.savedKey || '',
+        savedCount: extra.savedCount || 1,
+        skipReason: extra.skipReason || ''
       });
     }
 
-    Object.entries(data?.savedArtists || {}).forEach(([artistKey, artist]) => {
-      add('artist', artist?.artistUrl, artist?.artistDisplayName || artist?.artistName || artistKey);
+    savedArtists.forEach(([artistKey, artist]) => {
+      add('artist', artist?.artistUrl, artist?.artistDisplayName || artist?.artistName || artistKey, {
+        phase: 'artist',
+        savedKey: artistKey,
+        savedCount: 1
+      });
     });
 
-    Object.entries(data?.savedVideos || {}).forEach(([key, item]) => {
-      add('artist', item?.artistUrl, item?.artistDisplayName || item?.artistName || key);
-      add('post', item?.postUrl, item?.artistDisplayName || item?.artistName || key);
+    savedVideos.forEach(([key, item]) => {
+      const label = item?.artistDisplayName || item?.artistName || key;
+      const sourceUrl = item?.postUrl || item?.artistUrl || '';
+      const kind = item?.postUrl ? 'post' : item?.artistUrl ? 'artist' : 'missing';
+
+      add(kind, sourceUrl, label, {
+        phase: 'video',
+        savedKey: key,
+        countMissing: true,
+        skipReason: sourceUrl ? '' : 'No post URL saved yet'
+      });
     });
 
-    return queue;
+    return {
+      queue,
+      stats: {
+        savedArtists: savedArtists.length,
+        uniqueArtists: queue.filter(item => item.phase === 'artist').length,
+        savedVideos: savedVideos.length,
+        repairableVideos: queue.filter(item => item.phase === 'video' && item.url).length
+      }
+    };
   }
 
   function ensureRepairQueuePanel() {
@@ -2021,6 +2092,10 @@
         <span id="pong-repair-count">0/0</span>
         <span id="pong-repair-found">0 fresh</span>
       </div>
+      <div class="pong-repair-detail">
+        <span id="pong-repair-artists">Artists 0/0 unique</span>
+        <span id="pong-repair-videos">Videos 0/0</span>
+      </div>
       <iframe id="pong-repair-frame" class="pong-repair-frame" title="Pong repair worker"></iframe>
     `;
 
@@ -2042,21 +2117,50 @@
     if (!iframeRepairState) return;
 
     const total = iframeRepairState.queue.length;
-    const done = Math.min(total, Math.max(0, iframeRepairState.index));
+    const done = Math.min(total, Math.max(0, iframeRepairState.completed || 0));
     const current = iframeRepairState.queue[iframeRepairState.index] || null;
     const pct = total ? Math.round((done / total) * 100) : 0;
+    const stats = iframeRepairState.stats || {};
+    const artistTotal = Number(stats.uniqueArtists || 0);
+    const savedArtistTotal = Number(stats.savedArtists || 0);
+    const videoTotal = Number(stats.savedVideos || 0);
+    const artistDone = iframeRepairState.queue
+      .slice(0, done)
+      .filter(item => item.phase === 'artist').length;
+    const videoDone = iframeRepairState.queue
+      .slice(0, done)
+      .filter(item => item.phase === 'video').length;
+    const currentPhaseItems = current
+      ? iframeRepairState.queue.filter(item => item.phase === current.phase)
+      : [];
+    const currentPhaseIndex = current
+      ? Math.max(0, currentPhaseItems.findIndex(item => item.id === current.id)) + 1
+      : 0;
+    const currentPrefix = current?.phase === 'video'
+      ? `Video ${currentPhaseIndex}/${videoTotal || currentPhaseItems.length}`
+      : current?.phase === 'artist'
+        ? `Artist ${currentPhaseIndex}/${artistTotal || currentPhaseItems.length} unique`
+        : '';
     const statusEl = document.getElementById('pong-repair-status');
     const fill = document.getElementById('pong-repair-fill');
     const count = document.getElementById('pong-repair-count');
     const found = document.getElementById('pong-repair-found');
+    const artists = document.getElementById('pong-repair-artists');
+    const videos = document.getElementById('pong-repair-videos');
 
     if (statusEl) {
-      statusEl.textContent = status || (current ? `${current.kind}: ${current.label}` : 'Preparing...');
+      statusEl.textContent = status || (current ? `${currentPrefix}: ${current.label}` : 'Preparing...');
     }
 
     if (fill) fill.style.width = `${pct}%`;
-    if (count) count.textContent = `${done}/${total}`;
+    if (count) {
+      count.textContent = current?.phase === 'video'
+        ? `${videoDone}/${videoTotal || currentPhaseItems.length} videos`
+        : `${artistDone}/${artistTotal || currentPhaseItems.length} artists`;
+    }
     if (found) found.textContent = `${iframeRepairState.freshCount} fresh`;
+    if (artists) artists.textContent = `${savedArtistTotal} saved artists · ${artistTotal} unique`;
+    if (videos) videos.textContent = `${videoDone}/${videoTotal} saved videos`;
   }
 
   function stopIframeRepairQueue(message) {
@@ -2091,6 +2195,7 @@
       clearTimeout(state.timeoutId);
     }
 
+    state.completed = state.queue.length;
     updateRepairQueuePanel('Applying fresh links...');
 
     const entries = state.texts
@@ -2147,7 +2252,14 @@
     const item = state.queue[state.index];
     const frame = document.getElementById('pong-repair-frame');
 
-    updateRepairQueuePanel(`${item.kind}: ${item.label}`);
+    updateRepairQueuePanel();
+
+    if (!item.url) {
+      state.completed = Math.max(state.completed || 0, state.index + 1);
+      updateRepairQueuePanel(`Skipped: ${item.label} (${item.skipReason || 'No source URL'})`);
+      setTimeout(runNextIframeRepairItem, 250);
+      return;
+    }
 
     if (frame) {
       frame.src = appendRepairHash(item.url, item);
@@ -2159,7 +2271,10 @@
     }, 90000);
   }
 
-  function startIframeRepairQueue(queue, initialRepaired = 0) {
+  function startIframeRepairQueue(queueInfo, initialRepaired = 0) {
+    const queue = Array.isArray(queueInfo) ? queueInfo : queueInfo?.queue || [];
+    const stats = Array.isArray(queueInfo) ? {} : queueInfo?.stats || {};
+
     if (!queue.length) return false;
 
     if (iframeRepairState) {
@@ -2173,9 +2288,11 @@
       active: true,
       queue,
       index: -1,
+      completed: 0,
       texts: [],
       freshCount: 0,
       initialRepaired,
+      stats,
       timeoutId: null
     };
 
@@ -2203,6 +2320,7 @@
       state.freshCount += Number(data.count || 0);
     }
 
+    state.completed = Math.max(state.completed || 0, state.index + 1);
     updateRepairQueuePanel(data.ok ? `Done: ${current.label}` : `Skipped: ${current.label}`);
     setTimeout(runNextIframeRepairItem, 350);
   });
@@ -2243,10 +2361,10 @@
       }
 
       const loaded = await fetchSharedDataFromGitHub();
-      const queue = buildIframeRepairQueue(loaded.data);
+      const queueInfo = buildIframeRepairQueue(loaded.data);
 
-      if (queue.length) {
-        startIframeRepairQueue(queue, pastedRepaired);
+      if (queueInfo.queue.length) {
+        startIframeRepairQueue(queueInfo, pastedRepaired);
         return;
       }
 
@@ -2692,9 +2810,30 @@
       }
 
       if (!getSignedMediaInfo(failedUrl) || !signedUrlStillFresh(failedUrl, 0)) {
-        showMsg('Saved CDN link expired. Paste a fresh link for this file to refresh it.');
+        showVideoExpiredHint(video, 'CDN link expired. Repair or paste fresh link.');
       }
     });
+  }
+
+  function showVideoExpiredHint(video, message) {
+    injectPongSyncStyles();
+
+    const wrapper = video && video.closest('.video-wrapper');
+
+    if (!wrapper) {
+      showMsg(message);
+      return;
+    }
+
+    let hint = wrapper.querySelector('.pong-video-expired-hint');
+
+    if (!hint) {
+      hint = document.createElement('div');
+      hint.className = 'pong-video-expired-hint';
+      wrapper.appendChild(hint);
+    }
+
+    hint.textContent = message;
   }
 
   function attachExpiredMediaHints() {
