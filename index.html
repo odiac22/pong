@@ -478,12 +478,12 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.47</div>
+  <div class="version-number">22.48</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
     <div class="url-input">
-      <textarea id="video-urls" placeholder="Paste video links here (one per line)"></textarea>
+      <textarea id="video-urls" placeholder="Paste video links here (one per line)" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="done"></textarea>
       <div class="button-container">
         <button id="load-videos">Load Videos</button>
         <button id="auth-button">Auth URL</button>
@@ -519,6 +519,8 @@ let ignoreNextPasteInput = false;
 let lastVideoUrlsInputValue = '';
 let mobilePasteSnapshotValue = '';
 let mobilePastePending = false;
+let mobilePasteSelectionStart = 0;
+let mobilePasteSelectionEnd = 0;
 let lastHandledPasteText = '';
 let lastHandledPasteAt = 0;
 let pasteParseQueue = [];
@@ -788,6 +790,61 @@ function replaceInsertedText(previousValue, currentValue, replacementText) {
 
   const nextValue = current.slice(0, prefixLength) + replacement + current.slice(currentSuffix);
   const nextCaret = prefixLength + replacement.length;
+
+  videoUrlsInput.value = nextValue;
+  videoUrlsInput.selectionStart = nextCaret;
+  videoUrlsInput.selectionEnd = nextCaret;
+  videoUrlsInput.scrollTop = videoUrlsInput.scrollHeight;
+  lastVideoUrlsInputValue = nextValue;
+
+  return insertedText;
+}
+
+function rememberMobilePasteSnapshot() {
+  mobilePasteSnapshotValue = videoUrlsInput.value || '';
+  mobilePasteSelectionStart = Number.isFinite(videoUrlsInput.selectionStart)
+    ? videoUrlsInput.selectionStart
+    : mobilePasteSnapshotValue.length;
+  mobilePasteSelectionEnd = Number.isFinite(videoUrlsInput.selectionEnd)
+    ? videoUrlsInput.selectionEnd
+    : mobilePasteSelectionStart;
+  mobilePastePending = true;
+  lastVideoUrlsInputValue = mobilePasteSnapshotValue;
+}
+
+function getInsertedTextFromRememberedRange(currentValue) {
+  const current = String(currentValue || '');
+  const previous = String(mobilePasteSnapshotValue || '');
+  const start = Math.max(0, Math.min(mobilePasteSelectionStart, current.length));
+  const replacedLength = Math.max(0, mobilePasteSelectionEnd - mobilePasteSelectionStart);
+  const insertedLength = Math.max(0, current.length - (previous.length - replacedLength));
+
+  return current.slice(start, start + insertedLength);
+}
+
+function replaceRememberedPasteRange(currentValue, replacementText) {
+  const current = String(currentValue || '');
+  const previous = String(mobilePasteSnapshotValue || '');
+  const start = Math.max(0, Math.min(mobilePasteSelectionStart, current.length));
+  const replacedLength = Math.max(0, mobilePasteSelectionEnd - mobilePasteSelectionStart);
+  const insertedLength = Math.max(0, current.length - (previous.length - replacedLength));
+  const end = Math.max(start, Math.min(current.length, start + insertedLength));
+  const insertedText = current.slice(start, end);
+  let replacement = String(replacementText || '');
+
+  if (insertedText.startsWith('\n') && replacement && !replacement.startsWith('\n')) {
+    replacement = '\n' + replacement;
+  } else if (
+    start > 0 &&
+    current[start - 1] !== '\n' &&
+    replacement &&
+    !replacement.startsWith('\n')
+  ) {
+    replacement = '\n' + replacement;
+  }
+
+  const nextValue = current.slice(0, start) + replacement + current.slice(end);
+  const nextCaret = start + replacement.length;
 
   videoUrlsInput.value = nextValue;
   videoUrlsInput.selectionStart = nextCaret;
@@ -1118,9 +1175,7 @@ videoUrlsInput.addEventListener('paste', (e) => {
       return;
     }
 
-    mobilePasteSnapshotValue = videoUrlsInput.value || '';
-    mobilePastePending = true;
-    lastVideoUrlsInputValue = mobilePasteSnapshotValue;
+    rememberMobilePasteSnapshot();
     return;
   }
 
@@ -1138,9 +1193,7 @@ videoUrlsInput.addEventListener('paste', (e) => {
 videoUrlsInput.addEventListener('beforeinput', e => {
   if (e.inputType !== 'insertFromPaste') return;
 
-  mobilePasteSnapshotValue = videoUrlsInput.value || '';
-  mobilePastePending = true;
-  lastVideoUrlsInputValue = mobilePasteSnapshotValue;
+  rememberMobilePasteSnapshot();
 
   const pastedText = e.dataTransfer?.getData('text/plain') || e.data || '';
 
@@ -1172,7 +1225,9 @@ videoUrlsInput.addEventListener('input', e => {
 
   const currentValue = videoUrlsInput.value || '';
   const snapshotValue = mobilePastePending ? mobilePasteSnapshotValue : lastVideoUrlsInputValue;
-  const insertedText = getInsertedText(snapshotValue, currentValue);
+  const insertedText = mobilePastePending
+    ? getInsertedTextFromRememberedRange(currentValue)
+    : getInsertedText(snapshotValue, currentValue);
   const quickInserted = quickScanPaste(insertedText);
   const looksLikeMobilePaste =
     e.inputType === 'insertFromPaste' ||
@@ -1183,7 +1238,11 @@ videoUrlsInput.addEventListener('input', e => {
     const event = createPendingPasteEvent(quickInserted);
 
     if (quickInserted.count) {
-      replaceInsertedText(snapshotValue, currentValue, pasteSummaryText(event, quickInserted));
+      if (mobilePastePending) {
+        replaceRememberedPasteRange(currentValue, pasteSummaryText(event, quickInserted));
+      } else {
+        replaceInsertedText(snapshotValue, currentValue, pasteSummaryText(event, quickInserted));
+      }
       pasteParseQueue.push({
         text: String(insertedText || ''),
         event
@@ -2951,6 +3010,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=40"></script>
+<script src="pong-sync.js?v=41"></script>
 </body>
 </html>
