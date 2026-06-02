@@ -118,26 +118,12 @@
       z-index: 22; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,0.55);
     }
     .video-ready-loader {
-      position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
-      z-index: 24; display: flex; flex-direction: column; align-items: center; gap: 3px;
+      position: absolute; left: 50%; top: calc(50% + 42px); transform: translate(-50%,-50%);
+      z-index: 24; display: flex; flex-direction: column; align-items: center; gap: 0;
       pointer-events: none; opacity: 0.84; transition: opacity 0.18s ease, transform 0.18s ease;
     }
     .video-ready-loader.ready {
       opacity: 0; transform: translate(-50%,-50%) scale(0.9);
-    }
-    .video-ready-ring {
-      width: 30px; height: 30px; border-radius: 50%;
-      background: conic-gradient(var(--ui-accent) calc(var(--ready-pct) * 1%), rgba(255,255,255,0.16) 0);
-      box-shadow: 0 8px 24px rgba(0,0,0,0.34);
-      position: relative;
-    }
-    .video-ready-ring::before {
-      content: ""; position: absolute; inset: 4px; border-radius: 50%; background: rgba(0,0,0,0.54);
-    }
-    .video-ready-ring::after {
-      content: ""; position: absolute; left: 12px; top: 9px;
-      border-style: solid; border-width: 6px 0 6px 9px;
-      border-color: transparent transparent transparent rgba(255,255,255,0.72);
     }
     .video-ready-percent {
       min-width: 24px; text-align: center; font-size: 9px; line-height: 1;
@@ -145,15 +131,13 @@
       border: 1px solid rgba(255,255,255,0.08); border-radius: 999px; padding: 2px 4px;
       backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     }
-    .video-wrapper.auto-reload-pulse::after {
-      content: ""; position: absolute; inset: 0; z-index: 23; pointer-events: none;
-      box-shadow: inset 0 0 0 2px rgba(103,232,249,0.52);
-      animation: autoReloadPulse 0.9s ease-out;
+    .video-ready-percent.refreshing {
+      animation: readyPercentRefresh 0.9s ease-out;
     }
-    @keyframes autoReloadPulse {
-      0% { opacity: 0; transform: scale(0.985); }
-      28% { opacity: 1; transform: scale(1); }
-      100% { opacity: 0; transform: scale(1.015); }
+    @keyframes readyPercentRefresh {
+      0% { color: rgba(255,255,255,0.66); border-color: rgba(255,255,255,0.08); transform: scale(1); }
+      35% { color: rgba(255,255,255,0.92); border-color: rgba(103,232,249,0.48); transform: scale(1.16); box-shadow: 0 0 12px rgba(103,232,249,0.34); }
+      100% { color: rgba(255,255,255,0.66); border-color: rgba(255,255,255,0.08); transform: scale(1); }
     }
     .video-loading-indicator {
       position: absolute; top: 50%; left: 50%;
@@ -238,10 +222,10 @@
     }
     .control-button:hover, .control-button:active { opacity: 0.9; transform: scale(1.06); }
     .show-controls-button { left: 12px; }
-    .random-sort-button { left: 42px; font-size: 9px; font-weight: 850; letter-spacing: 0; }
-    .duration-sort-button { left: 72px; }
+    .random-sort-button { left: 42px; font-size: 7px; font-weight: 850; letter-spacing: 0; }
+    .duration-sort-button { left: 72px; font-size: 17px; }
     .refresh-button { left: 102px; }
-    .autoplay-button { left: 132px; }
+    .autoplay-button { left: 132px; font-size: 8px; font-weight: 850; letter-spacing: 0; }
     .autoplay-button.on { background: rgba(103,232,249,0.28) !important; opacity: 0.74 !important; }
     .next-batch-button {
       position: fixed; left: 12px; top: 50%; transform: translateY(-50%);
@@ -488,7 +472,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.31</div>
+  <div class="version-number">22.32</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -511,8 +495,8 @@ let isControlsVisible = true;
 let videoMetadata = [];
 let currentBatch = 0;
 const BATCH_SIZE = 20;
-const VIDEO_LOAD_RETRY_INTERVAL_MS = 3000;
-const VIDEO_LOAD_RETRY_LIMIT = 12;
+const VIDEO_LOAD_RETRY_DELAYS_MS = [3000, 5000, 7000, 10000, 15000, 20000];
+const VIDEO_LOAD_RETRY_POLL_MS = 1000;
 let visibleBatchRetryTimer = null;
 let visibleBatchRetryToken = 0;
 
@@ -1548,7 +1532,13 @@ function updateBatchReadyCounter() {
     const label = wrapper.querySelector('.artist-label');
     if (!label) return;
 
-    const artistName = label.dataset.artistName || '';
+    const index = Number(wrapper.dataset.index || -1);
+    const artistName = label.dataset.artistName || getArtistDisplayName(videoMetadata[index]);
+
+    if (artistName && !label.dataset.artistName) {
+      label.dataset.artistName = artistName;
+    }
+
     label.textContent = artistName ? `${artistName}  ${countText}` : countText;
     label.style.display = total ? '' : 'none';
   });
@@ -1597,11 +1587,28 @@ function markVideoAutoRetryDone(video, state) {
   updateVideoReadyLoader(video, true);
 }
 
+function getVideoRetryDelay(attempts) {
+  return VIDEO_LOAD_RETRY_DELAYS_MS[Math.min(attempts, VIDEO_LOAD_RETRY_DELAYS_MS.length - 1)];
+}
+
+function showVideoRefreshPercentPulse(wrapper) {
+  const percentText = wrapper && wrapper.querySelector('.video-ready-percent');
+
+  if (!percentText) return;
+
+  percentText.classList.remove('refreshing');
+  void percentText.offsetWidth;
+  percentText.classList.add('refreshing');
+  setTimeout(() => percentText.classList.remove('refreshing'), 950);
+}
+
 function retryVisibleBatchVideoLoads(token) {
   if (token !== visibleBatchRetryToken) return;
 
   const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
   let stillPending = 0;
+  let nextDelay = VIDEO_LOAD_RETRY_POLL_MS;
+  const now = Date.now();
 
   wrappers.forEach(wrapper => {
     const video = wrapper.querySelector('video');
@@ -1614,22 +1621,19 @@ function retryVisibleBatchVideoLoads(token) {
     }
 
     const attempts = Number(wrapper.dataset.autoRetryCount || 0);
-    const startedAt = Number(wrapper.dataset.autoRetryStartedAt || Date.now());
+    const nextRetryAt = Number(wrapper.dataset.autoRetryNextAt || (now + getVideoRetryDelay(0)));
 
-    if (attempts >= VIDEO_LOAD_RETRY_LIMIT) {
-      wrapper.dataset.autoRetryDone = 'true';
-      wrapper.dataset.autoRetryState = 'stopped';
+    stillPending++;
+
+    if (now < nextRetryAt) {
+      nextDelay = Math.min(nextDelay, Math.max(250, nextRetryAt - now));
       return;
     }
 
-    stillPending++;
     wrapper.dataset.autoRetryCount = String(attempts + 1);
+    wrapper.dataset.autoRetryNextAt = String(now + getVideoRetryDelay(attempts + 1));
     wrapper.dataset.autoRetryState = 'retrying';
-
-    if (Date.now() - startedAt >= 5000) {
-      wrapper.classList.add('auto-reload-pulse');
-      setTimeout(() => wrapper.classList.remove('auto-reload-pulse'), 950);
-    }
+    showVideoRefreshPercentPulse(wrapper);
 
     try {
       if (video.preload !== 'auto') video.preload = 'auto';
@@ -1640,7 +1644,7 @@ function retryVisibleBatchVideoLoads(token) {
   });
 
   if (stillPending > 0 && token === visibleBatchRetryToken) {
-    visibleBatchRetryTimer = setTimeout(() => retryVisibleBatchVideoLoads(token), VIDEO_LOAD_RETRY_INTERVAL_MS);
+    visibleBatchRetryTimer = setTimeout(() => retryVisibleBatchVideoLoads(token), nextDelay);
   } else {
     visibleBatchRetryTimer = null;
   }
@@ -1654,8 +1658,16 @@ function startVisibleBatchAutoRetry() {
   if (!wrappers.length) return;
 
   const token = visibleBatchRetryToken;
+  const now = Date.now();
 
-  visibleBatchRetryTimer = setTimeout(() => retryVisibleBatchVideoLoads(token), VIDEO_LOAD_RETRY_INTERVAL_MS);
+  wrappers.forEach(wrapper => {
+    wrapper.dataset.autoRetryCount = '0';
+    wrapper.dataset.autoRetryStartedAt = String(now);
+    wrapper.dataset.autoRetryNextAt = String(now + getVideoRetryDelay(0));
+    wrapper.dataset.autoRetryDone = 'false';
+  });
+
+  visibleBatchRetryTimer = setTimeout(() => retryVisibleBatchVideoLoads(token), getVideoRetryDelay(0));
 }
 
 // ─── Video elements ───────────────────────────────────────────────────────────
@@ -1693,7 +1705,7 @@ function createVideoElements() {
     loadingIndicator.className = 'video-loading-indicator';
     const readyLoader = document.createElement('div');
     readyLoader.className = 'video-ready-loader';
-    readyLoader.innerHTML = '<div class="video-ready-ring"></div><div class="video-ready-percent">0%</div>';
+    readyLoader.innerHTML = '<div class="video-ready-percent">0%</div>';
 
     const progressContainer = document.createElement('div');
     progressContainer.className = 'video-progress-container';
@@ -2192,12 +2204,12 @@ function createGearButton(){
   });
 
   mk('duration-sort-button','◷','Sort by duration',sortVideosByDuration);
-  mk('random-sort-button','Rnd','Randomize',sortVideosRandomly);
+  mk('random-sort-button','Random','Randomize',sortVideosRandomly);
   mk('show-controls-button','⚙','Toggle controls',toggleControls);
 
   const apBtn = document.createElement('div');
   apBtn.className = 'control-button autoplay-button' + (window.autoplayEnabled ? ' on' : '');
-  apBtn.innerHTML = '▶';
+  apBtn.innerHTML = 'Auto';
   apBtn.title = 'Toggle autoplay';
   apBtn.setAttribute('aria-label','Toggle autoplay');
   apBtn.addEventListener('click', e => {
@@ -2577,6 +2589,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=24"></script>
+<script src="pong-sync.js?v=25"></script>
 </body>
 </html>
