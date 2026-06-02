@@ -168,7 +168,9 @@
         left: 50% !important;
         top: 12px !important;
         transform: translateX(-50%) !important;
-        width: min(92vw, 340px) !important;
+        width: min(96vw, 720px) !important;
+        max-height: calc(100vh - 24px) !important;
+        overflow: auto !important;
         z-index: 14000 !important;
         border: 1px solid rgba(255,255,255,0.13) !important;
         border-radius: 10px !important;
@@ -193,6 +195,12 @@
         font-weight: 800 !important;
         line-height: 1.2 !important;
         margin-bottom: 7px !important;
+      }
+
+      .pong-repair-actions {
+        display: flex !important;
+        align-items: center !important;
+        gap: 5px !important;
       }
 
       .pong-repair-status {
@@ -248,7 +256,8 @@
         white-space: nowrap !important;
       }
 
-      .pong-repair-stop {
+      .pong-repair-stop,
+      .pong-repair-copy {
         border: 1px solid rgba(255,255,255,0.13) !important;
         border-radius: 999px !important;
         background: rgba(251,113,133,0.16) !important;
@@ -259,15 +268,38 @@
         cursor: pointer !important;
       }
 
+      .pong-repair-copy {
+        background: rgba(103,232,249,0.14) !important;
+      }
+
       .pong-repair-frame {
-        position: absolute !important;
-        width: 1px !important;
-        height: 1px !important;
-        left: -2px !important;
-        top: -2px !important;
-        opacity: 0.01 !important;
-        pointer-events: none !important;
-        border: 0 !important;
+        display: block !important;
+        width: 100% !important;
+        height: clamp(180px, 42vh, 430px) !important;
+        margin-top: 8px !important;
+        border: 1px solid rgba(255,255,255,0.12) !important;
+        border-radius: 8px !important;
+        background: #05070a !important;
+        opacity: 1 !important;
+        pointer-events: auto !important;
+      }
+
+      .pong-repair-log {
+        display: block !important;
+        width: 100% !important;
+        max-height: 96px !important;
+        overflow: auto !important;
+        box-sizing: border-box !important;
+        margin: 8px 0 0 !important;
+        padding: 6px !important;
+        border: 1px solid rgba(255,255,255,0.09) !important;
+        border-radius: 8px !important;
+        background: rgba(0,0,0,0.28) !important;
+        color: rgba(229,231,235,0.58) !important;
+        font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace !important;
+        font-size: 8px !important;
+        line-height: 1.35 !important;
+        white-space: pre-wrap !important;
       }
 
       .pong-video-expired-hint {
@@ -1995,6 +2027,7 @@
       : null;
   }
 
+  const REPAIR_ITEM_TIMEOUT_MS = 15000;
   let iframeRepairState = null;
 
   function appendRepairHash(rawUrl, item) {
@@ -2126,7 +2159,10 @@
     panel.innerHTML = `
       <div class="pong-repair-title">
         <span>Repairing saved links</span>
-        <button id="pong-repair-stop" class="pong-repair-stop" type="button">Stop</button>
+        <div class="pong-repair-actions">
+          <button id="pong-repair-copy-log" class="pong-repair-copy" type="button">Copy log</button>
+          <button id="pong-repair-stop" class="pong-repair-stop" type="button">Stop</button>
+        </div>
       </div>
       <div id="pong-repair-status" class="pong-repair-status">Preparing...</div>
       <div class="pong-repair-track"><div id="pong-repair-fill" class="pong-repair-fill"></div></div>
@@ -2138,6 +2174,7 @@
         <span id="pong-repair-artists">Artists 0/0 unique</span>
         <span id="pong-repair-videos">Videos 0/0</span>
       </div>
+      <pre id="pong-repair-log" class="pong-repair-log"></pre>
       <iframe id="pong-repair-frame" class="pong-repair-frame" title="Pong repair worker"></iframe>
     `;
 
@@ -2148,11 +2185,69 @@
       stop.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
+        writeRepairLog('Repair stopped by user');
         stopIframeRepairQueue('Repair stopped');
       });
     }
 
+    const copy = document.getElementById('pong-repair-copy-log');
+    if (copy) {
+      copy.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        copyRepairLog();
+      });
+    }
+
     return panel;
+  }
+
+  function getRepairElapsedMs() {
+    return iframeRepairState?.startedAt ? Date.now() - iframeRepairState.startedAt : 0;
+  }
+
+  function formatRepairSeconds(ms) {
+    return `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
+  }
+
+  function writeRepairLog(message) {
+    const state = iframeRepairState;
+    const line = `[+${formatRepairSeconds(getRepairElapsedMs())}] ${message}`;
+
+    console.log(`[Pong repair] ${line}`);
+
+    if (!state) return;
+
+    state.logLines = state.logLines || [];
+    state.logLines.push(line);
+
+    const log = document.getElementById('pong-repair-log');
+    if (log) {
+      log.textContent = state.logLines.join('\n');
+      log.scrollTop = log.scrollHeight;
+    }
+  }
+
+  async function copyRepairLog() {
+    const text = (iframeRepairState?.logLines || []).join('\n');
+
+    if (!text) return;
+
+    try {
+      await navigator.clipboard.writeText(text);
+      writeRepairLog('Log copied to clipboard');
+    } catch (e) {
+      const log = document.getElementById('pong-repair-log');
+      if (log) {
+        log.focus();
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(log);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      writeRepairLog('Clipboard copy failed; log text selected');
+    }
   }
 
   function updateRepairQueuePanel(status) {
@@ -2314,6 +2409,8 @@
     }
 
     state.completed = state.queue.length;
+    writeRepairLog('Applying scraped links to saved data');
+    const applyStartedAt = Date.now();
     updateRepairQueuePanel('Applying fresh links...');
 
     const entries = state.results
@@ -2335,6 +2432,7 @@
       repaired += result.result.repaired || 0;
     }
 
+    writeRepairLog(`Apply complete in ${formatRepairSeconds(Date.now() - applyStartedAt)}; repaired ${repaired} links`);
     updateRepairQueuePanel(`Done. Repaired ${repaired} links.`);
     updateSaveCountersOverride();
 
@@ -2345,7 +2443,12 @@
 
     showMsg(repaired ? `Repaired ${repaired} saved links` : 'No matching saved links needed repair');
 
-    setTimeout(() => stopIframeRepairQueue(), 2200);
+    state.active = false;
+    const frame = document.getElementById('pong-repair-frame');
+    const stop = document.getElementById('pong-repair-stop');
+    if (frame) frame.removeAttribute('src');
+    if (stop) stop.textContent = 'Close';
+    writeRepairLog('Repair finished; copy the log before closing if you want me to inspect timing');
   }
 
   function runNextIframeRepairItem() {
@@ -2360,9 +2463,11 @@
     state.index++;
 
     if (state.index >= state.queue.length) {
+      writeRepairLog('Queue complete; finishing repair');
       finishIframeRepairQueue().catch(e => {
         showMsg('Could not apply repaired links');
         console.error(e);
+        writeRepairLog(`Repair failed while applying results: ${e?.message || e}`);
         stopIframeRepairQueue('Repair failed');
       });
       return;
@@ -2375,19 +2480,27 @@
 
     if (!item.url) {
       state.completed = Math.max(state.completed || 0, state.index + 1);
+      writeRepairLog(`Skip ${item.phase} ${state.index + 1}/${state.queue.length}: ${item.label} (${item.skipReason || 'No source URL'})`);
       updateRepairQueuePanel(`Skipped: ${item.label} (${item.skipReason || 'No source URL'})`);
       setTimeout(runNextIframeRepairItem, 250);
       return;
     }
 
+    state.itemStartedAt = Date.now();
+    writeRepairLog(`Start ${item.phase} ${state.index + 1}/${state.queue.length}: ${item.label}`);
+
     if (frame) {
       frame.src = appendRepairHash(item.url, item);
+      writeRepairLog(`Opened repair worker: ${item.url}`);
     }
 
     state.timeoutId = setTimeout(() => {
       if (!iframeRepairState || iframeRepairState.id !== state.id) return;
-      runNextIframeRepairItem();
-    }, 90000);
+      state.completed = Math.max(state.completed || 0, state.index + 1);
+      writeRepairLog(`Timeout after ${formatRepairSeconds(REPAIR_ITEM_TIMEOUT_MS)}: ${item.label}`);
+      updateRepairQueuePanel(`Timed out: ${item.label}`);
+      setTimeout(runNextIframeRepairItem, 250);
+    }, REPAIR_ITEM_TIMEOUT_MS);
   }
 
   function startIframeRepairQueue(queueInfo, initialRepaired = 0) {
@@ -2412,10 +2525,16 @@
       freshCount: 0,
       initialRepaired,
       stats,
-      timeoutId: null
+      timeoutId: null,
+      startedAt: Date.now(),
+      itemStartedAt: 0,
+      logLines: []
     };
 
     updateRepairQueuePanel('Starting repair...');
+    writeRepairLog(`Queue created: ${queue.length} jobs`);
+    writeRepairLog(`${stats.savedArtists || 0} saved artists, ${stats.uniqueArtists || 0} unique artist pages`);
+    writeRepairLog(`${stats.savedVideos || 0} saved videos, ${stats.repairableVideos || 0} repairable source pages`);
     runNextIframeRepairItem();
     return true;
   }
@@ -2443,6 +2562,7 @@
     }
 
     state.completed = Math.max(state.completed || 0, state.index + 1);
+    writeRepairLog(`${data.ok ? 'Result' : 'Skip'} ${current.label}: ${Number(data.count || 0)} videos in ${formatRepairSeconds(Date.now() - (state.itemStartedAt || Date.now()))}`);
     updateRepairQueuePanel(data.ok ? `Done: ${current.label}` : `Skipped: ${current.label}`);
     setTimeout(runNextIframeRepairItem, 350);
   });
