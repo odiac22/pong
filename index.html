@@ -117,6 +117,44 @@
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       z-index: 22; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,0.55);
     }
+    .video-ready-loader {
+      position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+      z-index: 24; display: flex; flex-direction: column; align-items: center; gap: 3px;
+      pointer-events: none; opacity: 0.84; transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+    .video-ready-loader.ready {
+      opacity: 0; transform: translate(-50%,-50%) scale(0.9);
+    }
+    .video-ready-ring {
+      width: 30px; height: 30px; border-radius: 50%;
+      background: conic-gradient(var(--ui-accent) calc(var(--ready-pct) * 1%), rgba(255,255,255,0.16) 0);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.34);
+      position: relative;
+    }
+    .video-ready-ring::before {
+      content: ""; position: absolute; inset: 4px; border-radius: 50%; background: rgba(0,0,0,0.54);
+    }
+    .video-ready-ring::after {
+      content: ""; position: absolute; left: 12px; top: 9px;
+      border-style: solid; border-width: 6px 0 6px 9px;
+      border-color: transparent transparent transparent rgba(255,255,255,0.72);
+    }
+    .video-ready-percent {
+      min-width: 24px; text-align: center; font-size: 9px; line-height: 1;
+      color: rgba(255,255,255,0.66); background: rgba(8,12,16,0.32);
+      border: 1px solid rgba(255,255,255,0.08); border-radius: 999px; padding: 2px 4px;
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    }
+    .video-wrapper.auto-reload-pulse::after {
+      content: ""; position: absolute; inset: 0; z-index: 23; pointer-events: none;
+      box-shadow: inset 0 0 0 2px rgba(103,232,249,0.52);
+      animation: autoReloadPulse 0.9s ease-out;
+    }
+    @keyframes autoReloadPulse {
+      0% { opacity: 0; transform: scale(0.985); }
+      28% { opacity: 1; transform: scale(1); }
+      100% { opacity: 0; transform: scale(1.015); }
+    }
     .video-loading-indicator {
       position: absolute; top: 50%; left: 50%;
       transform: translate(-50%, -50%); width: 24px; height: 24px;
@@ -450,7 +488,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.30</div>
+  <div class="version-number">22.31</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1476,6 +1514,79 @@ function isVideoReadyForInitialPlayback(video) {
   return hasDuration || video.readyState >= 2;
 }
 
+function getVideoReadyPercent(video) {
+  if (!video) return 0;
+  if (isVideoReadyForInitialPlayback(video)) return 100;
+
+  let percent = 0;
+
+  if (video.readyState >= 1) percent = 35;
+  if (video.readyState >= 2) percent = 82;
+
+  try {
+    if (Number.isFinite(video.duration) && video.duration > 0 && video.buffered && video.buffered.length) {
+      let bufferedEnd = 0;
+
+      for (let i = 0; i < video.buffered.length; i++) {
+        bufferedEnd = Math.max(bufferedEnd, video.buffered.end(i));
+      }
+
+      percent = Math.max(percent, Math.min(96, (bufferedEnd / video.duration) * 100));
+    }
+  } catch (_) {}
+
+  return Math.max(0, Math.min(99, percent));
+}
+
+function updateBatchReadyCounter() {
+  const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
+  const total = wrappers.length || videoUrls.length || 0;
+  const ready = wrappers.filter(wrapper => wrapper.dataset.readyPlayable === 'true').length;
+  const countText = `${ready}/${total}`;
+
+  wrappers.forEach(wrapper => {
+    const label = wrapper.querySelector('.artist-label');
+    if (!label) return;
+
+    const artistName = label.dataset.artistName || '';
+    label.textContent = artistName ? `${artistName}  ${countText}` : countText;
+    label.style.display = total ? '' : 'none';
+  });
+}
+
+function updateVideoReadyLoader(video, forceReady = false) {
+  const wrapper = video && video.closest('.video-wrapper');
+
+  if (!wrapper) return;
+
+  const loader = wrapper.querySelector('.video-ready-loader');
+  const percentText = wrapper.querySelector('.video-ready-percent');
+  const percent = forceReady ? 100 : getVideoReadyPercent(video);
+  const rounded = Math.round(percent);
+
+  wrapper.style.setProperty('--ready-pct', rounded);
+
+  if (percentText) {
+    percentText.textContent = `${rounded}%`;
+  }
+
+  if (percent >= 100) {
+    wrapper.dataset.readyPlayable = 'true';
+
+    if (loader) {
+      loader.classList.add('ready');
+      setTimeout(() => {
+        if (loader.classList.contains('ready')) loader.style.display = 'none';
+      }, 200);
+    }
+  } else if (loader) {
+    loader.style.display = '';
+    loader.classList.remove('ready');
+  }
+
+  updateBatchReadyCounter();
+}
+
 function markVideoAutoRetryDone(video, state) {
   const wrapper = video && video.closest('.video-wrapper');
 
@@ -1483,6 +1594,7 @@ function markVideoAutoRetryDone(video, state) {
 
   wrapper.dataset.autoRetryDone = 'true';
   wrapper.dataset.autoRetryState = state || 'loaded';
+  updateVideoReadyLoader(video, true);
 }
 
 function retryVisibleBatchVideoLoads(token) {
@@ -1502,6 +1614,7 @@ function retryVisibleBatchVideoLoads(token) {
     }
 
     const attempts = Number(wrapper.dataset.autoRetryCount || 0);
+    const startedAt = Number(wrapper.dataset.autoRetryStartedAt || Date.now());
 
     if (attempts >= VIDEO_LOAD_RETRY_LIMIT) {
       wrapper.dataset.autoRetryDone = 'true';
@@ -1512,6 +1625,11 @@ function retryVisibleBatchVideoLoads(token) {
     stillPending++;
     wrapper.dataset.autoRetryCount = String(attempts + 1);
     wrapper.dataset.autoRetryState = 'retrying';
+
+    if (Date.now() - startedAt >= 5000) {
+      wrapper.classList.add('auto-reload-pulse');
+      setTimeout(() => wrapper.classList.remove('auto-reload-pulse'), 950);
+    }
 
     try {
       if (video.preload !== 'auto') video.preload = 'auto';
@@ -1550,6 +1668,8 @@ function createVideoElements() {
   videoUrls.forEach((url, index) => {
     const wrapper = document.createElement('div');
     wrapper.className = 'video-wrapper'; wrapper.dataset.index = index;
+    wrapper.dataset.readyPlayable = 'false';
+    wrapper.dataset.autoRetryStartedAt = String(Date.now());
 
     const video = document.createElement('video');
     video.className = 'video-player'; video.src = url; video.preload = 'metadata';
@@ -1571,6 +1691,9 @@ function createVideoElements() {
 
     const loadingIndicator = document.createElement('div');
     loadingIndicator.className = 'video-loading-indicator';
+    const readyLoader = document.createElement('div');
+    readyLoader.className = 'video-ready-loader';
+    readyLoader.innerHTML = '<div class="video-ready-ring"></div><div class="video-ready-percent">0%</div>';
 
     const progressContainer = document.createElement('div');
     progressContainer.className = 'video-progress-container';
@@ -1588,8 +1711,9 @@ function createVideoElements() {
     const artistLabel = document.createElement('div');
     artistLabel.className = 'artist-label';
     const artistLabelText = getArtistDisplayName(videoMetadata[index]);
-    artistLabel.textContent = artistLabelText;
-    artistLabel.style.display = artistLabelText ? '' : 'none';
+    artistLabel.dataset.artistName = artistLabelText;
+    artistLabel.textContent = artistLabelText ? `${artistLabelText}  0/${videoUrls.length}` : `0/${videoUrls.length}`;
+    artistLabel.style.display = videoUrls.length ? '' : 'none';
 
     const audioBtn = document.createElement('div');
     audioBtn.className = 'audio-toggle-button'; audioBtn.innerHTML = '🔇'; audioBtn.setAttribute('data-muted','true');
@@ -1726,17 +1850,19 @@ function createVideoElements() {
       setTimeout(()=>{ if(video.muted){video.muted=false;video.volume=1.0;} },100);
     });
     video.addEventListener('pause', () => { wrapper.classList.remove('video-playing'); if(window.currentlyPlayingVideo===video) window.currentlyPlayingVideo=null; loadingIndicator.style.display='none'; });
-    video.addEventListener('waiting', () => { loadingIndicator.style.display='flex'; });
+    video.addEventListener('waiting', () => { loadingIndicator.style.display='none'; updateVideoReadyLoader(video); });
+    video.addEventListener('progress', () => { updateVideoReadyLoader(video); });
     video.addEventListener('canplay', () => { markVideoAutoRetryDone(video, 'canplay'); loadingIndicator.style.display='none'; });
     video.addEventListener('playing', () => { markVideoAutoRetryDone(video, 'playing'); });
-    video.addEventListener('loadedmetadata', () => { markVideoAutoRetryDone(video, 'metadata'); });
+    video.addEventListener('loadedmetadata', () => { updateVideoReadyLoader(video); });
     video.addEventListener('playing', () => { loadingIndicator.style.display='none'; if(video.muted){video.muted=false;video.volume=1.0;audioBtn.innerHTML='🔊';audioBtn.setAttribute('data-muted','false');} });
     video.addEventListener('timeupdate', () => { if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`; });
-    video.addEventListener('loadedmetadata', () => { durationText.textContent=formatTime(video.duration); videoMetadata[index]={...videoMetadata[index],duration:video.duration||0}; });
-    video.addEventListener('error', () => { loadingIndicator.style.display='flex'; });
+    video.addEventListener('loadedmetadata', () => { durationText.textContent=formatTime(video.duration); videoMetadata[index]={...videoMetadata[index],duration:video.duration||0}; markVideoAutoRetryDone(video, 'metadata'); });
+    video.addEventListener('error', () => { loadingIndicator.style.display='none'; updateVideoReadyLoader(video); });
 
     wrapper.appendChild(video);
     wrapper.appendChild(loadingIndicator);
+    wrapper.appendChild(readyLoader);
     wrapper.appendChild(artistLabel);
     wrapper.appendChild(progressContainer);
     wrapper.appendChild(audioBtn);
@@ -1751,6 +1877,7 @@ function createVideoElements() {
   });
 
   if (allVideoUrls.length > BATCH_SIZE) updateNextBatchButton();
+  updateBatchReadyCounter();
   setupVisibilityObserver();
   startVisibleBatchAutoRetry();
 }
@@ -2450,6 +2577,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=23"></script>
+<script src="pong-sync.js?v=24"></script>
 </body>
 </html>

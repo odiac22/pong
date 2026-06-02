@@ -162,6 +162,96 @@
         opacity: 0.88 !important;
         transform: translateY(-50%) scale(1.06) !important;
       }
+
+      .pong-repair-panel {
+        position: fixed !important;
+        left: 50% !important;
+        top: 12px !important;
+        transform: translateX(-50%) !important;
+        width: min(92vw, 340px) !important;
+        z-index: 14000 !important;
+        border: 1px solid rgba(255,255,255,0.13) !important;
+        border-radius: 10px !important;
+        background: rgba(7,11,15,0.78) !important;
+        color: rgba(244,248,255,0.88) !important;
+        box-shadow: 0 18px 48px rgba(0,0,0,0.42) !important;
+        backdrop-filter: blur(16px) !important;
+        -webkit-backdrop-filter: blur(16px) !important;
+        padding: 10px !important;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif !important;
+        user-select: none !important;
+        -webkit-user-select: none !important;
+        -webkit-touch-callout: none !important;
+      }
+
+      .pong-repair-title {
+        display: flex !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        gap: 8px !important;
+        font-size: 12px !important;
+        font-weight: 800 !important;
+        line-height: 1.2 !important;
+        margin-bottom: 7px !important;
+      }
+
+      .pong-repair-status {
+        color: rgba(244,248,255,0.62) !important;
+        font-size: 10px !important;
+        line-height: 1.25 !important;
+        min-height: 13px !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
+        margin-bottom: 7px !important;
+      }
+
+      .pong-repair-track {
+        height: 5px !important;
+        border-radius: 999px !important;
+        background: rgba(255,255,255,0.12) !important;
+        overflow: hidden !important;
+      }
+
+      .pong-repair-fill {
+        height: 100% !important;
+        width: 0 !important;
+        border-radius: inherit !important;
+        background: rgba(103,232,249,0.78) !important;
+        transition: width 0.24s ease !important;
+      }
+
+      .pong-repair-meta {
+        display: flex !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        gap: 8px !important;
+        margin-top: 7px !important;
+        color: rgba(244,248,255,0.56) !important;
+        font-size: 9px !important;
+      }
+
+      .pong-repair-stop {
+        border: 1px solid rgba(255,255,255,0.13) !important;
+        border-radius: 999px !important;
+        background: rgba(251,113,133,0.16) !important;
+        color: rgba(244,248,255,0.82) !important;
+        padding: 3px 8px !important;
+        font-size: 9px !important;
+        font-weight: 800 !important;
+        cursor: pointer !important;
+      }
+
+      .pong-repair-frame {
+        position: absolute !important;
+        width: 1px !important;
+        height: 1px !important;
+        left: -2px !important;
+        top: -2px !important;
+        opacity: 0.01 !important;
+        pointer-events: none !important;
+        border: 0 !important;
+      }
     `;
   }
 
@@ -1862,6 +1952,261 @@
       : null;
   }
 
+  let iframeRepairState = null;
+
+  function appendRepairHash(rawUrl, item) {
+    try {
+      const url = new URL(rawUrl, window.location.href);
+      const params = new URLSearchParams();
+      params.set('pongRepair', '1');
+      params.set('repairId', item.id);
+      params.set('kind', item.kind);
+      url.hash = params.toString();
+      return url.toString();
+    } catch (_) {
+      return rawUrl;
+    }
+  }
+
+  function buildIframeRepairQueue(data) {
+    const queue = [];
+    const seen = {};
+
+    function add(kind, rawUrl, label) {
+      const url = String(rawUrl || '').trim();
+      if (!url) return;
+
+      const key = `${kind}:${url}`;
+      if (seen[key]) return;
+
+      seen[key] = true;
+      queue.push({
+        id: `${Date.now().toString(36)}-${queue.length + 1}`,
+        kind,
+        url,
+        label: label || url
+      });
+    }
+
+    Object.entries(data?.savedArtists || {}).forEach(([artistKey, artist]) => {
+      add('artist', artist?.artistUrl, artist?.artistDisplayName || artist?.artistName || artistKey);
+    });
+
+    Object.entries(data?.savedVideos || {}).forEach(([key, item]) => {
+      add('artist', item?.artistUrl, item?.artistDisplayName || item?.artistName || key);
+      add('post', item?.postUrl, item?.artistDisplayName || item?.artistName || key);
+    });
+
+    return queue;
+  }
+
+  function ensureRepairQueuePanel() {
+    injectPongSyncStyles();
+
+    let panel = document.getElementById('pong-repair-panel');
+
+    if (panel) return panel;
+
+    panel = document.createElement('div');
+    panel.id = 'pong-repair-panel';
+    panel.className = 'pong-repair-panel';
+    panel.innerHTML = `
+      <div class="pong-repair-title">
+        <span>Repairing saved links</span>
+        <button id="pong-repair-stop" class="pong-repair-stop" type="button">Stop</button>
+      </div>
+      <div id="pong-repair-status" class="pong-repair-status">Preparing...</div>
+      <div class="pong-repair-track"><div id="pong-repair-fill" class="pong-repair-fill"></div></div>
+      <div class="pong-repair-meta">
+        <span id="pong-repair-count">0/0</span>
+        <span id="pong-repair-found">0 fresh</span>
+      </div>
+      <iframe id="pong-repair-frame" class="pong-repair-frame" title="Pong repair worker"></iframe>
+    `;
+
+    document.body.appendChild(panel);
+
+    const stop = document.getElementById('pong-repair-stop');
+    if (stop) {
+      stop.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        stopIframeRepairQueue('Repair stopped');
+      });
+    }
+
+    return panel;
+  }
+
+  function updateRepairQueuePanel(status) {
+    if (!iframeRepairState) return;
+
+    const total = iframeRepairState.queue.length;
+    const done = Math.min(total, Math.max(0, iframeRepairState.index));
+    const current = iframeRepairState.queue[iframeRepairState.index] || null;
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    const statusEl = document.getElementById('pong-repair-status');
+    const fill = document.getElementById('pong-repair-fill');
+    const count = document.getElementById('pong-repair-count');
+    const found = document.getElementById('pong-repair-found');
+
+    if (statusEl) {
+      statusEl.textContent = status || (current ? `${current.kind}: ${current.label}` : 'Preparing...');
+    }
+
+    if (fill) fill.style.width = `${pct}%`;
+    if (count) count.textContent = `${done}/${total}`;
+    if (found) found.textContent = `${iframeRepairState.freshCount} fresh`;
+  }
+
+  function stopIframeRepairQueue(message) {
+    if (!iframeRepairState) return;
+
+    if (iframeRepairState.timeoutId) {
+      clearTimeout(iframeRepairState.timeoutId);
+    }
+
+    iframeRepairState.active = false;
+    iframeRepairState = null;
+
+    const frame = document.getElementById('pong-repair-frame');
+    if (frame) frame.removeAttribute('src');
+
+    const panel = document.getElementById('pong-repair-panel');
+    if (panel && message) {
+      const statusEl = document.getElementById('pong-repair-status');
+      if (statusEl) statusEl.textContent = message;
+      setTimeout(() => panel.remove(), 1600);
+    } else if (panel) {
+      panel.remove();
+    }
+  }
+
+  async function finishIframeRepairQueue() {
+    const state = iframeRepairState;
+
+    if (!state) return;
+
+    if (state.timeoutId) {
+      clearTimeout(state.timeoutId);
+    }
+
+    updateRepairQueuePanel('Applying fresh links...');
+
+    const entries = state.texts
+      .flatMap(text => parsePastedMetadata(text).orderedVideos || [])
+      .filter(item => item?.videoUrl);
+
+    let repaired = state.initialRepaired || 0;
+
+    if (entries.length) {
+      const result = await updateSharedData(data => {
+        const applied = repairDataWithEntries(data, entries).repaired;
+        refreshSharedDataMediaUrls(data);
+        return {
+          repaired: applied
+        };
+      });
+
+      repaired += result.result.repaired || 0;
+    }
+
+    updateRepairQueuePanel(`Done. Repaired ${repaired} links.`);
+    updateSaveCountersOverride();
+
+    const fill = document.getElementById('pong-repair-fill');
+    const count = document.getElementById('pong-repair-count');
+    if (fill) fill.style.width = '100%';
+    if (count) count.textContent = `${state.queue.length}/${state.queue.length}`;
+
+    showMsg(repaired ? `Repaired ${repaired} saved links` : 'No matching saved links needed repair');
+
+    setTimeout(() => stopIframeRepairQueue(), 2200);
+  }
+
+  function runNextIframeRepairItem() {
+    const state = iframeRepairState;
+    if (!state || !state.active) return;
+
+    if (state.timeoutId) {
+      clearTimeout(state.timeoutId);
+      state.timeoutId = null;
+    }
+
+    state.index++;
+
+    if (state.index >= state.queue.length) {
+      finishIframeRepairQueue().catch(e => {
+        showMsg('Could not apply repaired links');
+        console.error(e);
+        stopIframeRepairQueue('Repair failed');
+      });
+      return;
+    }
+
+    const item = state.queue[state.index];
+    const frame = document.getElementById('pong-repair-frame');
+
+    updateRepairQueuePanel(`${item.kind}: ${item.label}`);
+
+    if (frame) {
+      frame.src = appendRepairHash(item.url, item);
+    }
+
+    state.timeoutId = setTimeout(() => {
+      if (!iframeRepairState || iframeRepairState.id !== state.id) return;
+      runNextIframeRepairItem();
+    }, 90000);
+  }
+
+  function startIframeRepairQueue(queue, initialRepaired = 0) {
+    if (!queue.length) return false;
+
+    if (iframeRepairState) {
+      stopIframeRepairQueue();
+    }
+
+    ensureRepairQueuePanel();
+
+    iframeRepairState = {
+      id: Date.now().toString(36),
+      active: true,
+      queue,
+      index: -1,
+      texts: [],
+      freshCount: 0,
+      initialRepaired,
+      timeoutId: null
+    };
+
+    updateRepairQueuePanel('Starting repair...');
+    runNextIframeRepairItem();
+    return true;
+  }
+
+  window.addEventListener('message', event => {
+    const state = iframeRepairState;
+    const data = event.data || {};
+
+    if (!state || !state.active || data.type !== 'PONG_REPAIR_RESULT') return;
+
+    const current = state.queue[state.index];
+    if (!current || data.repairId !== current.id) return;
+
+    if (state.timeoutId) {
+      clearTimeout(state.timeoutId);
+      state.timeoutId = null;
+    }
+
+    if (data.ok && data.text) {
+      state.texts.push(String(data.text));
+      state.freshCount += Number(data.count || 0);
+    }
+
+    updateRepairQueuePanel(data.ok ? `Done: ${current.label}` : `Skipped: ${current.label}`);
+    setTimeout(runNextIframeRepairItem, 350);
+  });
+
   async function scrapeRepairEntriesForTarget(target) {
     const api = window.PongCoomerfansRepair;
 
@@ -1879,62 +2224,33 @@
   }
 
   async function repairSavedLinksOverride() {
-    const mode = window.PongLoadedSavedMode || 'normal';
-
     try {
       showMsg('Repairing saved links...');
 
-      const result = await updateSharedData(async data => {
-        let repaired = 0;
-        let usedStoredSource = false;
-        const pastedEntries = repairEntriesFromCurrentPaste();
+      let pastedRepaired = 0;
+      const pastedEntries = repairEntriesFromCurrentPaste();
 
-        if (pastedEntries.length) {
-          repaired += repairDataWithEntries(data, pastedEntries).repaired;
-        }
+      if (pastedEntries.length) {
+        const pastedResult = await updateSharedData(data => {
+          const repaired = repairDataWithEntries(data, pastedEntries).repaired;
+          refreshSharedDataMediaUrls(data);
+          return {
+            repaired
+          };
+        });
 
-        if (mode === 'savedVideos') {
-          const currentUrl = getCurrentVideoUrlOverride();
-          const target = getSavedVideoRepairTarget(data, currentUrl);
-          const sourceEntries = await scrapeRepairEntriesForTarget(target?.item);
-
-          if (sourceEntries.length) {
-            usedStoredSource = true;
-            repaired += repairDataWithEntries(data, sourceEntries, {
-              savedVideoKey: target.key
-            }).repaired;
-          }
-        } else if (mode === 'savedArtists') {
-          const bundleInfo = getCurrentPasteBundleInfo();
-          const artistKey = bundleInfo?.bundleKey;
-          const artist = artistKey ? data.savedArtists?.[artistKey] : null;
-          const sourceEntries = await scrapeRepairEntriesForTarget(artist);
-
-          if (sourceEntries.length) {
-            usedStoredSource = true;
-            repaired += repairDataWithEntries(data, sourceEntries, {
-              artistKey
-            }).repaired;
-          }
-        }
-
-        refreshSharedDataMediaUrls(data);
-
-        return {
-          repaired,
-          usedStoredSource,
-          hadPastedEntries: pastedEntries.length > 0,
-          hasRepairBridge: !!window.PongCoomerfansRepair
-        };
-      });
-
-      if (result.result.repaired > 0) {
-        showMsg(`Repaired ${result.result.repaired} saved links`);
-      } else if (!result.result.hasRepairBridge && !result.result.hadPastedEntries) {
-        showMsg('Paste fresh scraped links, or install the updated Tampermonkey script here');
-      } else {
-        showMsg('No matching saved links needed repair');
+        pastedRepaired = pastedResult.result.repaired || 0;
       }
+
+      const loaded = await fetchSharedDataFromGitHub();
+      const queue = buildIframeRepairQueue(loaded.data);
+
+      if (queue.length) {
+        startIframeRepairQueue(queue, pastedRepaired);
+        return;
+      }
+
+      showMsg(pastedRepaired ? `Repaired ${pastedRepaired} saved links` : 'No repairable artist or post URLs found');
     } catch (e) {
       showMsg('Could not repair saved links');
       console.error(e);
