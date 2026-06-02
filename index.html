@@ -401,7 +401,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.24</div>
+  <div class="version-number">22.25</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -552,7 +552,7 @@ function updatePendingPasteButton() {
 function getFastPasteMarkerCounts() {
   const value = videoUrlsInput ? videoUrlsInput.value || '' : '';
   const counts = [];
-  const pattern = /^# Fast paste \d+:\s+(\d+)\s+video links cached\b/gm;
+  const pattern = /# Fast paste \d+:\s+(\d+)\s+video links cached\b/g;
   let match;
 
   while ((match = pattern.exec(value))) {
@@ -579,30 +579,62 @@ function buildPasteEventsFromCounts(counts, totalUrls) {
 
 function getPendingPasteBundleCount() {
   if (pendingPastes.length) return pendingPastes.length;
-  if (parsedVideoUrlsCache.length) return getFastPasteMarkerCounts().length;
-  return 0;
+  return getFastPasteMarkerCounts().length;
 }
 
-function recordPastedBundle(parsedPaste) {
-  if (!parsedPaste || !parsedPaste.urls || !parsedPaste.urls.length) return false;
+function recoverDirtyPasteCache() {
+  if (!parseCacheDirty) return;
 
-  if (parseCacheDirty) {
-    const parsedExisting = parsePastedVideoLines(videoUrlsInput.value);
-    parsedVideoUrlsCache = parsedExisting.urls;
-    parsedVideoMetadataCache = parsedExisting.metadata;
-    _prevUrlCount = parsedVideoUrlsCache.length;
+  if (parsedVideoUrlsCache.length && getFastPasteMarkerCounts().length) {
     parseCacheDirty = false;
+    return;
   }
 
+  const parsedExisting = parsePastedVideoLines(videoUrlsInput.value);
+  parsedVideoUrlsCache = parsedExisting.urls;
+  parsedVideoMetadataCache = parsedExisting.metadata;
+  _prevUrlCount = parsedVideoUrlsCache.length;
+  parseCacheDirty = false;
+}
+
+function insertTextAtVideoCursor(text) {
+  const value = videoUrlsInput.value || '';
+  const start = Number.isFinite(videoUrlsInput.selectionStart) ? videoUrlsInput.selectionStart : value.length;
+  const end = Number.isFinite(videoUrlsInput.selectionEnd) ? videoUrlsInput.selectionEnd : start;
+  let insertText = String(text || '');
+
+  if (value && start === value.length && value[start - 1] !== '\n' && insertText && !insertText.startsWith('\n')) {
+    insertText = '\n' + insertText;
+  }
+
+  const nextValue = value.slice(0, start) + insertText + value.slice(end);
+  const nextCaret = start + insertText.length;
+
+  videoUrlsInput.value = nextValue;
+  videoUrlsInput.selectionStart = nextCaret;
+  videoUrlsInput.selectionEnd = nextCaret;
+  videoUrlsInput.scrollTop = videoUrlsInput.scrollHeight;
+}
+
+function recordPasteEvent(parsedPaste) {
+  recoverDirtyPasteCache();
+
   const startIndex = parsedVideoUrlsCache.length;
-  parsedVideoUrlsCache.push(...parsedPaste.urls);
-  parsedVideoMetadataCache.push(...(parsedPaste.metadata || parsedPaste.urls.map(() => ({}))));
-  pendingPastes.push({ startIndex, count: parsedPaste.urls.length });
+  const urls = parsedPaste && Array.isArray(parsedPaste.urls) ? parsedPaste.urls : [];
+  const metadata = parsedPaste && Array.isArray(parsedPaste.metadata) ? parsedPaste.metadata : [];
+  const event = { startIndex, count: urls.length };
+
+  if (urls.length) {
+    parsedVideoUrlsCache.push(...urls);
+    parsedVideoMetadataCache.push(...(metadata.length ? metadata : urls.map(() => ({}))));
+  }
+
+  pendingPastes.push(event);
   _prevUrlCount = parsedVideoUrlsCache.length;
   updatePendingPasteButton();
 
-  console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + parsedPaste.urls.length + ' URLs at index ' + startIndex);
-  return true;
+  console.log('[Paste] Event ' + pendingPastes.length + ': +' + event.count + ' URLs at index ' + startIndex);
+  return event;
 }
 
 videoUrlsInput.addEventListener('paste', (e) => {
@@ -610,42 +642,39 @@ videoUrlsInput.addEventListener('paste', (e) => {
   const pastedParsed = parsePastedVideoLines(pastedText);
   const pastedUrls = pastedParsed.urls;
 
-  // If this is not a video-link paste, let the browser handle it normally.
-  if (!pastedUrls.length) return;
-
-  // This is the main speed fix.
-  // Do NOT let the browser insert 1,000+ lines into the textarea.
+  // Count every paste immediately. Then handle insertion ourselves so the
+  // browser never gets a chance to desync the paperclip counter.
   e.preventDefault();
   e.stopPropagation();
 
   isHandlingPaste = true;
   ignoreNextPasteInput = true;
 
-  // If the cache was dirty but empty, try to recover any existing real links once.
-  // This keeps normal typed/pasted text behavior from breaking.
-  if (!parsedVideoUrlsCache.length && parseCacheDirty) {
-    const existingParsed = parsePastedVideoLines(videoUrlsInput.value);
-    parsedVideoUrlsCache = existingParsed.urls;
-    parsedVideoMetadataCache = existingParsed.metadata;
-    _prevUrlCount = parsedVideoUrlsCache.length;
-    parseCacheDirty = false;
-  }
+  const pasteEvent = recordPasteEvent(pastedParsed);
 
-  const startIndex = parsedVideoUrlsCache.length;
-  recordPastedBundle(pastedParsed);
+  if (pastedUrls.length) {
+    // Instead of inserting the huge paste, insert one small marker line.
+    const pasteNumber = pendingPastes.length;
+    const marker = `# Fast paste ${pasteNumber}: ${pastedUrls.length} video links cached (${parsedVideoUrlsCache.length} total)`;
 
-  // Instead of inserting the huge paste, insert one small marker line.
-  const pasteNumber = pendingPastes.length;
-  const marker = `# Fast paste ${pasteNumber}: ${pastedUrls.length} video links cached (${parsedVideoUrlsCache.length} total)`;
+    const currentText = videoUrlsInput.value.trim();
+    videoUrlsInput.value = currentText ? `${currentText}\n${marker}` : marker;
+    videoUrlsInput.selectionStart = videoUrlsInput.value.length;
+    videoUrlsInput.selectionEnd = videoUrlsInput.value.length;
+    videoUrlsInput.scrollTop = videoUrlsInput.scrollHeight;
 
-  const currentText = videoUrlsInput.value.trim();
-  videoUrlsInput.value = currentText ? `${currentText}\n${marker}` : marker;
-  videoUrlsInput.scrollTop = videoUrlsInput.scrollHeight;
+    console.log('[Fast Paste] Event ' + pendingPastes.length + ': +' + pastedUrls.length + ' URLs at index ' + pasteEvent.startIndex);
 
-  console.log('[Fast Paste] Bundle ' + pendingPastes.length + ': +' + pastedUrls.length + ' URLs at index ' + startIndex);
+    if (typeof showSortingIndicator === 'function') {
+      showSortingIndicator(`Cached paste ${pendingPastes.length}: ${pastedUrls.length} videos`);
+    }
+  } else {
+    insertTextAtVideoCursor(pastedText);
+    parseCacheDirty = true;
 
-  if (typeof showSortingIndicator === 'function') {
-    showSortingIndicator(`Cached ${pastedUrls.length} pasted videos`);
+    if (typeof showSortingIndicator === 'function') {
+      showSortingIndicator(`Recorded paste ${pendingPastes.length}`);
+    }
   }
 
   if (window.PongMetadataSync && typeof window.PongMetadataSync.capturePastedTextAsync === 'function') {
@@ -667,12 +696,10 @@ videoUrlsInput.addEventListener('input', e => {
     const parsedCurrent = parsePastedVideoLines(videoUrlsInput.value);
     const addedCount = parsedCurrent.urls.length - _prevUrlCount;
 
-    if (addedCount > 0) {
-      recordPastedBundle({
+    recordPasteEvent(addedCount > 0 ? {
         urls: parsedCurrent.urls.slice(-addedCount),
         metadata: parsedCurrent.metadata.slice(-addedCount)
-      });
-    }
+      } : { urls: [], metadata: [] });
 
     updatePendingPasteButton();
     return;
@@ -684,9 +711,12 @@ videoUrlsInput.addEventListener('input', e => {
   }
 
   parseCacheDirty = true;
-  pendingPastes = [];
-  _prevUrlCount = 0;
-  parsedVideoMetadataCache = [];
+  if (!String(videoUrlsInput.value || '').trim()) {
+    pendingPastes = [];
+    _prevUrlCount = 0;
+    parsedVideoUrlsCache = [];
+    parsedVideoMetadataCache = [];
+  }
   updatePendingPasteButton();
 });
 
@@ -1574,6 +1604,7 @@ function navigateToNextPasteEvent(){
 
 function resetPasteEvents(){
   pasteEvents=[];
+  pendingPastes=[];
   currentPasteIndex=-1;
   updatePasteNavigationButton();
 }
@@ -1693,7 +1724,7 @@ loadVideosButton.addEventListener('click',()=>{
 
   // This fixes the paperclip/paste counter showing 0.
   if (pendingPastes.length) {
-    pasteEvents = pendingPastes.slice();
+    pasteEvents = pendingPastes.filter(event => event && event.count > 0);
   } else if (markerPasteEvents.length) {
     pasteEvents = markerPasteEvents;
   } else if (hasCachedPasteUrls) {
@@ -1996,6 +2027,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=18"></script>
+<script src="pong-sync.js?v=19"></script>
 </body>
 </html>
