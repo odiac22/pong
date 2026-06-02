@@ -659,6 +659,7 @@
     const input = document.getElementById('video-urls');
 
     if (!input || !input.value) return;
+    if (input.value.length > 50000) return;
 
     capturePastedMetadata(input.value);
 
@@ -761,21 +762,61 @@
     Object.assign(merged.videosByUrl, incoming.videosByUrl || {});
     Object.assign(merged.videosByMediaKey, incoming.videosByMediaKey || {});
 
+    if (!merged.orderedMediaKeys) {
+      merged.orderedMediaKeys = {};
+      (merged.orderedVideos || []).forEach(existingItem => {
+        const existingKey = existingItem.mediaKey || getSavedVideoKey(existingItem.videoUrl);
+        if (existingKey) merged.orderedMediaKeys[existingKey] = true;
+      });
+    }
+
     (incoming.orderedVideos || []).forEach(item => {
       if (!item?.videoUrl) return;
 
       const mediaKey = item.mediaKey || getSavedVideoKey(item.videoUrl);
-      const alreadyKnown = merged.orderedVideos.some(existingItem => {
-        const existingKey = existingItem.mediaKey || getSavedVideoKey(existingItem.videoUrl);
-        return existingKey && mediaKey && existingKey === mediaKey;
-      });
 
-      if (!alreadyKnown) {
+      if (!mediaKey || !merged.orderedMediaKeys[mediaKey]) {
         merged.orderedVideos.push(item);
+        if (mediaKey) merged.orderedMediaKeys[mediaKey] = true;
       }
     });
 
     return merged;
+  }
+
+  const metadataCaptureQueue = [];
+  let metadataCaptureScheduled = false;
+
+  function scheduleMetadataCaptureQueue() {
+    if (metadataCaptureScheduled) return;
+
+    metadataCaptureScheduled = true;
+
+    const run = () => {
+      metadataCaptureScheduled = false;
+      const next = metadataCaptureQueue.shift();
+
+      if (next) {
+        capturePastedMetadata(next);
+      }
+
+      if (metadataCaptureQueue.length) {
+        scheduleMetadataCaptureQueue();
+      }
+    };
+
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(run, { timeout: 750 });
+    } else {
+      setTimeout(run, 0);
+    }
+  }
+
+  function capturePastedMetadataAsync(text) {
+    if (!text) return;
+
+    metadataCaptureQueue.push(text);
+    scheduleMetadataCaptureQueue();
   }
 
   function capturePastedMetadata(text) {
@@ -800,6 +841,27 @@
     return mediaKey ? metadata.videosByMediaKey[mediaKey] || null : null;
   }
 
+  function artistNameFromUrl(rawUrl) {
+    try {
+      const url = new URL(String(rawUrl || ''), window.location.href);
+      const parts = url.pathname.split('/').map(part => part.trim()).filter(Boolean);
+      const lastPart = parts.length ? decodeURIComponent(parts[parts.length - 1]) : '';
+      return /^\d+$/.test(lastPart) ? '' : lastPart;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function getArtistDisplayName(meta) {
+    if (!meta) return '';
+
+    return (
+      meta.artistDisplayName ||
+      artistNameFromUrl(meta.artistUrl) ||
+      String(meta.artistName || '').trim()
+    );
+  }
+
   function compactVideoMetadata(meta) {
     if (!meta) return null;
 
@@ -808,6 +870,7 @@
       artistName: meta.artistName || '',
       artistKey: meta.artistKey || '',
       artistUrl: meta.artistUrl || '',
+      artistDisplayName: getArtistDisplayName(meta),
       postUrl: meta.postUrl || '',
       postIndex: Number(meta.postIndex || 0),
       scrapedAt: meta.scrapedAt || '',
@@ -828,6 +891,7 @@
       artistName: artist.artistName || '',
       artistKey: artist.artistKey || '',
       artistUrl: artist.artistUrl || '',
+      artistDisplayName: getArtistDisplayName(artist),
       source: artist.source || 'coomerfans',
       scrapedAt: artist.scrapedAt || ''
     };
@@ -852,7 +916,7 @@
     window.PongLoadedSavedMode = 'normal';
   }
 
-  function loadSavedListIntoPlayer(urls, message, newPasteEvents, mode) {
+  function loadSavedListIntoPlayer(urls, message, newPasteEvents, mode, metadata) {
     if (!urls || !urls.length) {
       showMsg('No saved videos found');
       return;
@@ -865,6 +929,7 @@
     window.PongLoadedSavedMode = mode || 'normal';
 
     allVideoUrls = urls.slice();
+    allVideoMetadata = Array.isArray(metadata) ? metadata.slice() : urls.map(() => ({}));
     videoUrls = [];
     videoMetadata = [];
     currentBatch = 0;
@@ -908,7 +973,9 @@
       refreshSharedDataMediaUrls(loaded.data);
       mirrorSharedDataToLocal(loaded.data);
 
-      const urls = Object.values(loaded.data.savedVideos || {})
+      const savedVideoItems = Object.values(loaded.data.savedVideos || {})
+        .filter(Boolean);
+      const urls = savedVideoItems
         .map(item => item && item.url)
         .filter(Boolean);
 
@@ -917,13 +984,24 @@
         return;
       }
 
+      const savedVideoMetaByKey = {};
+      savedVideoItems.forEach(item => {
+        const key = getSavedVideoKey(item?.url);
+        if (key) savedVideoMetaByKey[key] = compactVideoMetadata(item) || {};
+      });
+
       const randomizedVideos = shuffleArray(dedupeAndRefreshMediaUrls(urls));
+      const randomizedMetadata = randomizedVideos.map(url => {
+        const key = getSavedVideoKey(url);
+        return key ? savedVideoMetaByKey[key] || {} : {};
+      });
 
       loadSavedListIntoPlayer(
         randomizedVideos,
         `Playing ${randomizedVideos.length} saved videos 🎲`,
         [],
-        'savedVideos'
+        'savedVideos',
+        randomizedMetadata
       );
     } catch (e) {
       showMsg('Could not load saved videos');
@@ -949,6 +1027,7 @@
 
       const randomizedArtists = shuffleArray(artistEntries);
       const groupedVideos = [];
+      const groupedMetadata = [];
       const rebuiltPasteEvents = [];
 
       randomizedArtists.forEach((artist, artistIndex) => {
@@ -960,6 +1039,13 @@
 
         cleanVideos.forEach(url => {
           groupedVideos.push(url);
+          const mediaKey = getSavedVideoKey(url);
+          const videoMeta = mediaKey && artist.videoMeta ? artist.videoMeta[mediaKey] : null;
+          groupedMetadata.push({
+            ...(artist || {}),
+            ...(videoMeta || {}),
+            artistDisplayName: getArtistDisplayName(videoMeta || artist)
+          });
         });
 
         rebuiltPasteEvents.push({
@@ -979,7 +1065,8 @@
         groupedVideos,
         `Playing ${rebuiltPasteEvents.length} saved bundles 👤🎲`,
         rebuiltPasteEvents,
-        'savedArtists'
+        'savedArtists',
+        groupedMetadata
       );
     } catch (e) {
       showMsg('Could not load saved artists');
@@ -2018,9 +2105,11 @@
 
       e.preventDefault();
 
-      const timeChange = dx / SCRUB_PIXELS_PER_SECOND;
       const duration = video.duration || 0;
-      const newTime = Math.max(0, Math.min(duration, state.startTime + timeChange));
+      const newTime =
+        typeof window.getAdaptiveScrubTime === 'function'
+          ? window.getAdaptiveScrubTime(state.startTime, dx, duration, wrapper.offsetWidth)
+          : Math.max(0, Math.min(duration, state.startTime + dx / SCRUB_PIXELS_PER_SECOND));
 
       wrapper.dataset.pendingTime = newTime;
 
@@ -2111,7 +2200,11 @@
       state.lastTapX = tapX;
 
       if (video.paused) {
-        video.play().catch(() => {});
+        if (typeof window.playVideoCleanly === 'function') {
+          window.playVideoCleanly(video);
+        } else {
+          video.play().catch(() => {});
+        }
       } else {
         video.pause();
       }
@@ -2235,6 +2328,7 @@
 
   window.PongMetadataSync = {
     capturePastedText: capturePastedMetadata,
+    capturePastedTextAsync: capturePastedMetadataAsync,
     parsePastedMetadata,
     getPastedMetadataForUrl,
     getCurrentMetadata: () => window.PongCurrentPastedMetadata || emptyPastedMetadata()

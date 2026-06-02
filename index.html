@@ -96,6 +96,14 @@
       color: white; font-size: 12px; text-shadow: 1px 1px 1px rgba(0,0,0,0.5);
       text-align: right; padding-right: 5px;
     }
+    .artist-label {
+      position: absolute; left: 50%; bottom: 38px; transform: translateX(-50%);
+      max-width: min(70vw, 320px); padding: 3px 9px; border-radius: 10px;
+      background: rgba(80,80,80,0.55); color: rgba(255,255,255,0.78);
+      font-size: 11px; line-height: 1.2; font-weight: 600; text-align: center;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      z-index: 22; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,0.55);
+    }
     .video-loading-indicator {
       position: absolute; top: 50%; left: 50%;
       transform: translate(-50%, -50%); width: 24px; height: 24px;
@@ -398,6 +406,7 @@
 // ─── State ────────────────────────────────────────────────────────────────────
 let videoUrls = [];
 let allVideoUrls = [];
+let allVideoMetadata = [];
 let currentVideoIndex = 0;
 let isControlsVisible = true;
 let videoMetadata = [];
@@ -409,37 +418,160 @@ let pasteEvents = [];
 let currentPasteIndex = -1;
 let pendingPastes = [];
 let _prevUrlCount = 0;
+let parsedVideoUrlsCache = [];
+let parsedVideoMetadataCache = [];
+let parseCacheDirty = false;
+let isHandlingPaste = false;
 
 const videoContainer = document.getElementById('video-container');
 const videoUrlsInput  = document.getElementById('video-urls');
 const loadVideosButton = document.getElementById('load-videos');
 
 function parseVideoUrls(text) {
-  if (window.PongMetadataSync && typeof window.PongMetadataSync.capturePastedText === 'function') {
-    window.PongMetadataSync.capturePastedText(text);
-  }
+  return parsePastedVideoLines(text).urls;
+}
 
-  return text.split('\n').map(u => u.trim())
-    .filter(u => u && u.length > 4 && !u.startsWith('#PONG_') && /\.(mp4|m4v|mov|webm)(\?|$)/i.test(u));
+function isVideoUrlLine(line) {
+  return line && line.length > 4 && !line.startsWith('#PONG_') && /\.(mp4|m4v|mov|webm)(\?|$)/i.test(line);
+}
+
+function parsePongJsonLine(line, prefix) {
+  if (!line.startsWith(prefix)) return null;
+
+  try {
+    const parsed = JSON.parse(line.slice(prefix.length).trim());
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch(e) {
+    return null;
+  }
+}
+
+function artistNameFromUrl(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ''), window.location.href);
+    const parts = url.pathname.split('/').map(part => part.trim()).filter(Boolean);
+    const lastPart = parts.length ? decodeURIComponent(parts[parts.length - 1]) : '';
+    return /^\d+$/.test(lastPart) ? '' : lastPart;
+  } catch(e) {
+    return '';
+  }
+}
+
+function getArtistDisplayName(meta) {
+  if (!meta) return '';
+
+  return (
+    meta.artistDisplayName ||
+    artistNameFromUrl(meta.artistUrl) ||
+    String(meta.artistName || '').trim()
+  );
+}
+
+function parsePastedVideoLines(text) {
+  const urls = [];
+  const metadata = [];
+  let activeArtist = null;
+  let pendingVideo = null;
+
+  String(text || '').split('\n').forEach(rawLine => {
+    const line = rawLine.trim();
+    if (!line) return;
+
+    const artistMeta = parsePongJsonLine(line, '#PONG_ARTIST ');
+
+    if (artistMeta) {
+      activeArtist = artistMeta;
+      return;
+    }
+
+    const videoMeta = parsePongJsonLine(line, '#PONG_VIDEO ');
+
+    if (videoMeta) {
+      pendingVideo = {
+        ...(activeArtist || {}),
+        ...videoMeta
+      };
+      return;
+    }
+
+    if (!isVideoUrlLine(line)) return;
+
+    const meta = {
+      ...(activeArtist || {}),
+      ...(pendingVideo || {}),
+      videoUrl: line
+    };
+    const artistDisplayName = getArtistDisplayName(meta);
+
+    urls.push(line);
+    metadata.push(artistDisplayName ? { ...meta, artistDisplayName } : {});
+    pendingVideo = null;
+  });
+
+  return { urls, metadata };
 }
 
 videoUrlsInput.addEventListener('paste', (e) => {
-  _prevUrlCount = parseVideoUrls(videoUrlsInput.value).length;
+  const pastedText = e.clipboardData?.getData('text/plain') || '';
+  const pastedParsed = parsePastedVideoLines(pastedText);
+  const pastedUrls = pastedParsed.urls;
+  const valueLength = videoUrlsInput.value.length;
+  const isAppendPaste = videoUrlsInput.selectionStart === valueLength && videoUrlsInput.selectionEnd === valueLength;
+
+  isHandlingPaste = true;
+
+  if (!isAppendPaste && parsedVideoUrlsCache.length) {
+    parseCacheDirty = true;
+    pendingPastes = [];
+  } else {
+    if (parseCacheDirty) {
+      const parsedExisting = parsePastedVideoLines(videoUrlsInput.value);
+      parsedVideoUrlsCache = parsedExisting.urls;
+      parsedVideoMetadataCache = parsedExisting.metadata;
+      _prevUrlCount = parsedVideoUrlsCache.length;
+      parseCacheDirty = false;
+    }
+
+    if (pastedUrls.length) {
+      const startIndex = parsedVideoUrlsCache.length;
+      parsedVideoUrlsCache.push(...pastedUrls);
+      parsedVideoMetadataCache.push(...pastedParsed.metadata);
+      pendingPastes.push({ startIndex, count: pastedUrls.length });
+      _prevUrlCount = parsedVideoUrlsCache.length;
+
+      const btn = document.getElementById('paste-nav-button');
+      if (btn) {
+        btn.style.opacity = '0.7';
+        btn.style.background = 'rgba(0,150,255,0.7)';
+        btn.setAttribute('data-count', pendingPastes.length + 'p');
+      }
+
+      console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + pastedUrls.length + ' URLs at index ' + startIndex);
+    }
+  }
+
+  if (window.PongMetadataSync && typeof window.PongMetadataSync.capturePastedTextAsync === 'function') {
+    window.PongMetadataSync.capturePastedTextAsync(pastedText);
+  }
+
+  setTimeout(() => {
+    isHandlingPaste = false;
+  }, 0);
 }, true);
 
 videoUrlsInput.addEventListener('input', () => {
-  const currentCount = parseVideoUrls(videoUrlsInput.value).length;
-  const added = currentCount - _prevUrlCount;
-  if (added > 0) {
-    pendingPastes.push({ startIndex: _prevUrlCount, count: added });
-    _prevUrlCount = currentCount;
-    const btn = document.getElementById('paste-nav-button');
-    if (btn) {
-      btn.style.opacity = '0.7';
-      btn.style.background = 'rgba(0,150,255,0.7)';
-      btn.setAttribute('data-count', pendingPastes.length + 'p');
-    }
-    console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + added + ' URLs at index ' + (currentCount - added));
+  if (isHandlingPaste) return;
+
+  parseCacheDirty = true;
+  pendingPastes = [];
+  _prevUrlCount = 0;
+  parsedVideoMetadataCache = [];
+
+  const btn = document.getElementById('paste-nav-button');
+  if (btn) {
+    btn.setAttribute('data-count', '0/0');
+    btn.style.opacity = '0.2';
+    btn.style.background = '';
   }
 });
 
@@ -450,6 +582,7 @@ function saveSession() {
   try {
     localStorage.setItem(SESSION_KEY, JSON.stringify({
       allVideoUrls,
+      allVideoMetadata,
       currentBatch,
       currentVideoIndex,
       pasteEvents
@@ -462,6 +595,7 @@ function loadSession() {
     const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     if (!s || !s.allVideoUrls || !s.allVideoUrls.length) return false;
     allVideoUrls = s.allVideoUrls;
+    allVideoMetadata = Array.isArray(s.allVideoMetadata) ? s.allVideoMetadata : [];
     currentBatch = s.currentBatch || 0;
     currentVideoIndex = s.currentVideoIndex || 0;
     pasteEvents = s.pasteEvents || [];
@@ -813,6 +947,65 @@ function reorderAndRedisplayVideos(newOrder) {
   createVideoElements(); createUnwatchedVideosButton(); videoContainer.scrollTo(0,0);
 }
 
+function getAdaptiveScrubTime(startTime, dx, duration, width) {
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
+  const safeWidth = Math.max(240, width || window.innerWidth || 360);
+
+  if (!safeDuration) return Math.max(0, startTime + dx / 22);
+
+  const dragRatio = dx / safeWidth;
+  const secondsPerScreen = Math.min(Math.max(safeDuration * 0.18, 24), 210);
+  return Math.max(0, Math.min(safeDuration, startTime + dragRatio * secondsPerScreen));
+}
+
+function pauseOtherVideos(activeVideo) {
+  document.querySelectorAll('.video-player').forEach(v => {
+    if (v !== activeVideo && !v.paused) v.pause();
+
+    if (v !== activeVideo) {
+      const otherWrapper = v.closest('.video-wrapper');
+      if (otherWrapper) otherWrapper.classList.remove('video-playing');
+    }
+  });
+}
+
+function tuneVideoPreloadAround(activeWrapper) {
+  const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
+  const activeIndex = wrappers.indexOf(activeWrapper);
+
+  wrappers.forEach((w, index) => {
+    const v = w.querySelector('video');
+    if (!v) return;
+
+    const distance = activeIndex < 0 ? Infinity : Math.abs(index - activeIndex);
+    const desiredPreload = distance <= 1 ? 'auto' : 'metadata';
+
+    if (v.preload !== desiredPreload) v.preload = desiredPreload;
+    if (distance <= 1 && v.readyState === 0) v.load();
+  });
+}
+
+function prepareVideoForPlayback(video) {
+  const wrapper = video && video.closest('.video-wrapper');
+  if (!video || !wrapper) return;
+
+  pauseOtherVideos(video);
+  tuneVideoPreloadAround(wrapper);
+  wrapper.classList.add('video-playing');
+  window.currentlyPlayingVideo = video;
+}
+
+function playVideoCleanly(video) {
+  if (!video) return Promise.resolve();
+  prepareVideoForPlayback(video);
+  return video.play().catch(() => {});
+}
+
+window.getAdaptiveScrubTime = getAdaptiveScrubTime;
+window.pauseOtherVideos = pauseOtherVideos;
+window.tuneVideoPreloadAround = tuneVideoPreloadAround;
+window.playVideoCleanly = playVideoCleanly;
+
 // ─── Video elements ───────────────────────────────────────────────────────────
 function createVideoElements() {
   videoContainer.innerHTML = '';
@@ -857,6 +1050,11 @@ function createVideoElements() {
     const durationText = document.createElement('div');
     durationText.className = 'video-duration'; durationText.textContent = '0:00';
     progressContainer.appendChild(progressBar); progressContainer.appendChild(durationText);
+    const artistLabel = document.createElement('div');
+    artistLabel.className = 'artist-label';
+    const artistLabelText = getArtistDisplayName(videoMetadata[index]);
+    artistLabel.textContent = artistLabelText;
+    artistLabel.style.display = artistLabelText ? '' : 'none';
 
     const audioBtn = document.createElement('div');
     audioBtn.className = 'audio-toggle-button'; audioBtn.innerHTML = '🔇'; audioBtn.setAttribute('data-muted','true');
@@ -932,8 +1130,7 @@ function createVideoElements() {
       if (Math.abs(dx) > 8) {
         isDragging = true;
         progressContainer.style.opacity = '1';
-        const timeChange = dx / 12;
-        const newTime = Math.max(0, Math.min(video.duration, startTime+timeChange));
+        const newTime = getAdaptiveScrubTime(startTime, dx, video.duration || 0, wrapper.offsetWidth);
         wrapper.dataset.pendingTime = newTime;
         if (video.duration && !isNaN(newTime)) {
           let pf = wrapper.querySelector('.preview-fill');
@@ -980,19 +1177,17 @@ function createVideoElements() {
 
       lastTapTime = now; lastTapX = tapX;
 
-      if (video.paused) video.play().catch(()=>{});
+      if (video.paused) playVideoCleanly(video);
       else video.pause();
     },{passive:false});
 
     tapArea.addEventListener('click', e => {
       if (e.target.closest('.video-progress-container') || e.target.tagName==='BUTTON') { e.stopPropagation(); return; }
-      if (video.paused) video.play(); else video.pause();
+      if (video.paused) playVideoCleanly(video); else video.pause();
     });
 
-    video.addEventListener('loadeddata', () => { video.pause(); },{once:true});
     video.addEventListener('play', () => {
-      document.querySelectorAll('.video-player').forEach(v => { if(v!==video&&!v.paused){v.pause();const ow=v.closest('.video-wrapper');if(ow)ow.classList.remove('video-playing');} });
-      wrapper.classList.add('video-playing'); window.currentlyPlayingVideo = video;
+      prepareVideoForPlayback(video);
       setTimeout(()=>{ if(video.muted){video.muted=false;video.volume=1.0;} },100);
     });
     video.addEventListener('pause', () => { wrapper.classList.remove('video-playing'); if(window.currentlyPlayingVideo===video) window.currentlyPlayingVideo=null; loadingIndicator.style.display='none'; });
@@ -1005,6 +1200,7 @@ function createVideoElements() {
 
     wrapper.appendChild(video);
     wrapper.appendChild(loadingIndicator);
+    wrapper.appendChild(artistLabel);
     wrapper.appendChild(progressContainer);
     wrapper.appendChild(audioBtn);
     wrapper.appendChild(leftFlash);
@@ -1036,46 +1232,83 @@ function setupVisibilityObserver() {
 
   counter.textContent = `1/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
 
-  const observer = new IntersectionObserver(entries => {
-    let mostVisible=null, highestVis=0;
-    entries.forEach(entry => {
-      const v=entry.target.querySelector('video');
-      if(v&&!entry.isIntersecting&&entry.intersectionRatio<0.1&&!v.paused){
+  function getVisibleRatio(wrapper) {
+    const rect = wrapper.getBoundingClientRect();
+    const visibleTop = Math.max(rect.top, 0);
+    const visibleBottom = Math.min(rect.bottom, window.innerHeight || document.documentElement.clientHeight);
+    const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+    return rect.height ? Math.max(0, Math.min(1, visibleHeight / rect.height)) : 0;
+  }
+
+  function updateMostVisibleVideo() {
+    let mostVisible = null;
+    let highestVis = 0;
+
+    wrappers.forEach(w => {
+      const ratio = getVisibleRatio(w);
+      const v = w.querySelector('video');
+
+      if (v && ratio < 0.03 && !v.paused) {
         v.pause();
-        entry.target.classList.remove('video-playing');
+        w.classList.remove('video-playing');
       }
-      if(entry.isIntersecting&&entry.intersectionRatio>highestVis){
-        highestVis=entry.intersectionRatio;
-        mostVisible=entry.target;
+
+      if (ratio > highestVis) {
+        highestVis = ratio;
+        mostVisible = w;
       }
     });
 
-    if (mostVisible&&highestVis>0.85) {
-      wrappers.forEach(w=>{
-        w.classList.remove('most-visible');
-        w.setAttribute('data-playable','false');
-      });
-      mostVisible.classList.add('most-visible');
-      mostVisible.setAttribute('data-playable','true');
-      currentVideoIndex=parseInt(mostVisible.dataset.index||0);
-      counter.textContent=`${currentVideoIndex+1}/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
-      saveSession();
+    if (!mostVisible || highestVis < 0.5) return;
 
-      if (window.autoplayEnabled) {
-        const mv = mostVisible.querySelector('video');
-        if (mv && mv.paused) mv.play().catch(()=>{});
-      }
+    wrappers.forEach(w => {
+      w.classList.toggle('most-visible', w === mostVisible);
+      w.setAttribute('data-playable', w === mostVisible ? 'true' : 'false');
+    });
+
+    tuneVideoPreloadAround(mostVisible);
+    currentVideoIndex = parseInt(mostVisible.dataset.index || 0);
+    counter.textContent = `${currentVideoIndex+1}/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
+    saveSession();
+
+    const mostVisibleVideo = mostVisible.querySelector('video');
+
+    if (highestVis > 0.7) {
+      wrappers.forEach(w => {
+        if (w === mostVisible) return;
+        const v = w.querySelector('video');
+        if (v && !v.paused) v.pause();
+      });
     }
+
+    if (window.autoplayEnabled && highestVis > 0.85 && mostVisibleVideo && mostVisibleVideo.paused) {
+      playVideoCleanly(mostVisibleVideo);
+    }
+  }
+
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      const v=entry.target.querySelector('video');
+      if(v&&!entry.isIntersecting&&entry.intersectionRatio<0.03&&!v.paused){
+        v.pause();
+        entry.target.classList.remove('video-playing');
+      }
+    });
+    updateMostVisibleVideo();
   },{root:null,rootMargin:'0px',threshold:[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]});
 
   wrappers.forEach(w=>observer.observe(w));
+  updateMostVisibleVideo();
 }
 
 // ─── Batching ─────────────────────────────────────────────────────────────────
 function loadNextBatch(restoreIndex) {
   videoUrls=[]; videoMetadata=[];
   const start=currentBatch*BATCH_SIZE, end=Math.min(start+BATCH_SIZE,allVideoUrls.length);
-  for(let i=start;i<end;i++) videoUrls.push(allVideoUrls[i]);
+  for(let i=start;i<end;i++) {
+    videoUrls.push(allVideoUrls[i]);
+    videoMetadata.push(allVideoMetadata[i] || {});
+  }
   currentBatch++;
   saveSession();
 
@@ -1204,7 +1437,10 @@ function navigateToNextPasteEvent(){
     videoUrls=[]; videoMetadata=[];
     currentBatch = targetBatch;
     const start=currentBatch*BATCH_SIZE, end=Math.min(start+BATCH_SIZE,allVideoUrls.length);
-    for(let i=start;i<end;i++) videoUrls.push(allVideoUrls[i]);
+    for(let i=start;i<end;i++) {
+      videoUrls.push(allVideoUrls[i]);
+      videoMetadata.push(allVideoMetadata[i] || {});
+    }
     currentBatch++;
     saveSession();
 
@@ -1301,7 +1537,14 @@ function createGearButton(){
 
 // ─── Load videos ──────────────────────────────────────────────────────────────
 loadVideosButton.addEventListener('click',()=>{
-  const newUrls=parseVideoUrls(videoUrlsInput.value);
+  const parsedLoad = parseCacheDirty
+    ? parsePastedVideoLines(videoUrlsInput.value)
+    : {
+        urls: parsedVideoUrlsCache.slice(),
+        metadata: parsedVideoMetadataCache.slice()
+      };
+  const newUrls = parsedLoad.urls;
+
   if(!newUrls.length){
     alert('No valid MP4 URLs found.');
     return;
@@ -1310,6 +1553,7 @@ loadVideosButton.addEventListener('click',()=>{
   document.querySelectorAll('video').forEach(v=>v.pause());
 
   allVideoUrls = newUrls;
+  allVideoMetadata = (parsedLoad.metadata || []).map(meta => meta || {});
   currentBatch = 0;
   currentVideoIndex = 0;
 
@@ -1324,6 +1568,9 @@ loadVideosButton.addEventListener('click',()=>{
   }
 
   _prevUrlCount = 0;
+  parsedVideoUrlsCache = [];
+  parsedVideoMetadataCache = [];
+  parseCacheDirty = false;
 
   updatePasteNavigationButton();
   loadNextBatch();
@@ -1606,6 +1853,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=11"></script>
+<script src="pong-sync.js?v=14"></script>
 </body>
 </html>
