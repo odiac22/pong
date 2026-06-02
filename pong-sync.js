@@ -18,6 +18,7 @@
   const GITHUB_TOKEN_KEY = 'pong_github_token_v1';
   const MEDIA_SIGNATURE_CACHE_KEY = 'pong_media_signature_cache_v1';
   const COOMERFANS_PROXY_URL_KEY = 'pong_coomerfans_proxy_url_v1';
+  const DEFAULT_COOMERFANS_PROXY_URL = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
   const PONG_ARTIST_PREFIX = '#PONG_ARTIST ';
   const PONG_VIDEO_PREFIX = '#PONG_VIDEO ';
 
@@ -392,10 +393,15 @@
 
   function getCoomerfansProxyUrl() {
     try {
-      const configured = String(window.PONG_COOMERFANS_PROXY_URL || localStorage.getItem(COOMERFANS_PROXY_URL_KEY) || '').trim();
+      const configured = String(
+        window.PONG_COOMERFANS_PROXY_URL ||
+        localStorage.getItem(COOMERFANS_PROXY_URL_KEY) ||
+        DEFAULT_COOMERFANS_PROXY_URL ||
+        ''
+      ).trim();
       return configured.replace(/\/+$/, '');
     } catch (e) {
-      return '';
+      return DEFAULT_COOMERFANS_PROXY_URL;
     }
   }
 
