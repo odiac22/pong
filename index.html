@@ -434,6 +434,7 @@ let parsedVideoUrlsCache = [];
 let parsedVideoMetadataCache = [];
 let parseCacheDirty = false;
 let isHandlingPaste = false;
+let ignoreNextPasteInput = false;
 
 const videoContainer = document.getElementById('video-container');
 const videoUrlsInput  = document.getElementById('video-urls');
@@ -528,6 +529,43 @@ function parsePastedVideoLines(text) {
   return { urls, metadata };
 }
 
+function updatePendingPasteButton() {
+  const btn = document.getElementById('paste-nav-button');
+  if (!btn) return;
+
+  if (pendingPastes.length) {
+    btn.style.opacity = '0.7';
+    btn.style.background = 'rgba(0,150,255,0.7)';
+    btn.setAttribute('data-count', pendingPastes.length + 'p');
+  } else {
+    btn.setAttribute('data-count', '0/0');
+    btn.style.opacity = '0.2';
+    btn.style.background = '';
+  }
+}
+
+function recordPastedBundle(parsedPaste) {
+  if (!parsedPaste || !parsedPaste.urls || !parsedPaste.urls.length) return false;
+
+  if (parseCacheDirty) {
+    const parsedExisting = parsePastedVideoLines(videoUrlsInput.value);
+    parsedVideoUrlsCache = parsedExisting.urls;
+    parsedVideoMetadataCache = parsedExisting.metadata;
+    _prevUrlCount = parsedVideoUrlsCache.length;
+    parseCacheDirty = false;
+  }
+
+  const startIndex = parsedVideoUrlsCache.length;
+  parsedVideoUrlsCache.push(...parsedPaste.urls);
+  parsedVideoMetadataCache.push(...(parsedPaste.metadata || parsedPaste.urls.map(() => ({}))));
+  pendingPastes.push({ startIndex, count: parsedPaste.urls.length });
+  _prevUrlCount = parsedVideoUrlsCache.length;
+  updatePendingPasteButton();
+
+  console.log('[Paste] Bundle ' + pendingPastes.length + ': +' + parsedPaste.urls.length + ' URLs at index ' + startIndex);
+  return true;
+}
+
 videoUrlsInput.addEventListener('paste', (e) => {
   const pastedText = e.clipboardData?.getData('text/plain') || '';
   const pastedParsed = parsePastedVideoLines(pastedText);
@@ -542,6 +580,7 @@ videoUrlsInput.addEventListener('paste', (e) => {
   e.stopPropagation();
 
   isHandlingPaste = true;
+  ignoreNextPasteInput = true;
 
   // If the cache was dirty but empty, try to recover any existing real links once.
   // This keeps normal typed/pasted text behavior from breaking.
@@ -550,20 +589,11 @@ videoUrlsInput.addEventListener('paste', (e) => {
     parsedVideoUrlsCache = existingParsed.urls;
     parsedVideoMetadataCache = existingParsed.metadata;
     _prevUrlCount = parsedVideoUrlsCache.length;
+    parseCacheDirty = false;
   }
 
   const startIndex = parsedVideoUrlsCache.length;
-
-  parsedVideoUrlsCache.push(...pastedUrls);
-  parsedVideoMetadataCache.push(...pastedParsed.metadata);
-
-  pendingPastes.push({
-    startIndex,
-    count: pastedUrls.length
-  });
-
-  _prevUrlCount = parsedVideoUrlsCache.length;
-  parseCacheDirty = false;
+  recordPastedBundle(pastedParsed);
 
   // Instead of inserting the huge paste, insert one small marker line.
   const pasteNumber = pendingPastes.length;
@@ -572,13 +602,6 @@ videoUrlsInput.addEventListener('paste', (e) => {
   const currentText = videoUrlsInput.value.trim();
   videoUrlsInput.value = currentText ? `${currentText}\n${marker}` : marker;
   videoUrlsInput.scrollTop = videoUrlsInput.scrollHeight;
-
-  const btn = document.getElementById('paste-nav-button');
-  if (btn) {
-    btn.style.opacity = '0.7';
-    btn.style.background = 'rgba(0,150,255,0.7)';
-    btn.setAttribute('data-count', pendingPastes.length + 'p');
-  }
 
   console.log('[Fast Paste] Bundle ' + pendingPastes.length + ': +' + pastedUrls.length + ' URLs at index ' + startIndex);
 
@@ -592,23 +615,35 @@ videoUrlsInput.addEventListener('paste', (e) => {
 
   setTimeout(() => {
     isHandlingPaste = false;
-  }, 0);
+    ignoreNextPasteInput = false;
+  }, 250);
 }, true);
 
-videoUrlsInput.addEventListener('input', () => {
-  if (isHandlingPaste) return;
+videoUrlsInput.addEventListener('input', e => {
+  if (isHandlingPaste || ignoreNextPasteInput) {
+    return;
+  }
+
+  if (e.inputType === 'insertFromPaste') {
+    const parsedCurrent = parsePastedVideoLines(videoUrlsInput.value);
+    const addedCount = parsedCurrent.urls.length - _prevUrlCount;
+
+    if (addedCount > 0) {
+      recordPastedBundle({
+        urls: parsedCurrent.urls.slice(-addedCount),
+        metadata: parsedCurrent.metadata.slice(-addedCount)
+      });
+    }
+
+    updatePendingPasteButton();
+    return;
+  }
 
   parseCacheDirty = true;
   pendingPastes = [];
   _prevUrlCount = 0;
   parsedVideoMetadataCache = [];
-
-  const btn = document.getElementById('paste-nav-button');
-  if (btn) {
-    btn.setAttribute('data-count', '0/0');
-    btn.style.opacity = '0.2';
-    btn.style.background = '';
-  }
+  updatePendingPasteButton();
 });
 
 // ─── Session persistence ──────────────────────────────────────────────────────
@@ -1904,6 +1939,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=15"></script>
+<script src="pong-sync.js?v=16"></script>
 </body>
 </html>
