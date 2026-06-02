@@ -401,7 +401,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.27</div>
+  <div class="version-number">22.28</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -424,6 +424,10 @@ let isControlsVisible = true;
 let videoMetadata = [];
 let currentBatch = 0;
 const BATCH_SIZE = 20;
+const VIDEO_LOAD_RETRY_INTERVAL_MS = 3000;
+const VIDEO_LOAD_RETRY_LIMIT = 12;
+let visibleBatchRetryTimer = null;
+let visibleBatchRetryToken = 0;
 
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
@@ -1358,8 +1362,90 @@ window.pauseOtherVideos = pauseOtherVideos;
 window.tuneVideoPreloadAround = tuneVideoPreloadAround;
 window.playVideoCleanly = playVideoCleanly;
 
+function stopVisibleBatchAutoRetry() {
+  visibleBatchRetryToken++;
+
+  if (visibleBatchRetryTimer) {
+    clearTimeout(visibleBatchRetryTimer);
+    visibleBatchRetryTimer = null;
+  }
+}
+
+function isVideoReadyForInitialPlayback(video) {
+  if (!video) return true;
+
+  const hasDuration = Number.isFinite(video.duration) && video.duration > 0;
+
+  return hasDuration || video.readyState >= 2;
+}
+
+function markVideoAutoRetryDone(video, state) {
+  const wrapper = video && video.closest('.video-wrapper');
+
+  if (!wrapper) return;
+
+  wrapper.dataset.autoRetryDone = 'true';
+  wrapper.dataset.autoRetryState = state || 'loaded';
+}
+
+function retryVisibleBatchVideoLoads(token) {
+  if (token !== visibleBatchRetryToken) return;
+
+  const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
+  let stillPending = 0;
+
+  wrappers.forEach(wrapper => {
+    const video = wrapper.querySelector('video');
+
+    if (!video || wrapper.dataset.autoRetryDone === 'true') return;
+
+    if (isVideoReadyForInitialPlayback(video)) {
+      markVideoAutoRetryDone(video, 'loaded');
+      return;
+    }
+
+    const attempts = Number(wrapper.dataset.autoRetryCount || 0);
+
+    if (attempts >= VIDEO_LOAD_RETRY_LIMIT) {
+      wrapper.dataset.autoRetryDone = 'true';
+      wrapper.dataset.autoRetryState = 'stopped';
+      return;
+    }
+
+    stillPending++;
+    wrapper.dataset.autoRetryCount = String(attempts + 1);
+    wrapper.dataset.autoRetryState = 'retrying';
+
+    try {
+      if (video.preload !== 'auto') video.preload = 'auto';
+      video.load();
+    } catch (error) {
+      console.warn('[Video retry] Could not reload video', error);
+    }
+  });
+
+  if (stillPending > 0 && token === visibleBatchRetryToken) {
+    visibleBatchRetryTimer = setTimeout(() => retryVisibleBatchVideoLoads(token), VIDEO_LOAD_RETRY_INTERVAL_MS);
+  } else {
+    visibleBatchRetryTimer = null;
+  }
+}
+
+function startVisibleBatchAutoRetry() {
+  stopVisibleBatchAutoRetry();
+
+  const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
+
+  if (!wrappers.length) return;
+
+  const token = visibleBatchRetryToken;
+
+  visibleBatchRetryTimer = setTimeout(() => retryVisibleBatchVideoLoads(token), VIDEO_LOAD_RETRY_INTERVAL_MS);
+}
+
 // ─── Video elements ───────────────────────────────────────────────────────────
 function createVideoElements() {
+  stopVisibleBatchAutoRetry();
   videoContainer.innerHTML = '';
   window.currentlyPlayingVideo = null;
   if (videoMetadata.length !== videoUrls.length) videoMetadata = Array(videoUrls.length).fill(null).map(() => ({}));
@@ -1544,7 +1630,9 @@ function createVideoElements() {
     });
     video.addEventListener('pause', () => { wrapper.classList.remove('video-playing'); if(window.currentlyPlayingVideo===video) window.currentlyPlayingVideo=null; loadingIndicator.style.display='none'; });
     video.addEventListener('waiting', () => { loadingIndicator.style.display='flex'; });
-    video.addEventListener('canplay', () => { loadingIndicator.style.display='none'; });
+    video.addEventListener('canplay', () => { markVideoAutoRetryDone(video, 'canplay'); loadingIndicator.style.display='none'; });
+    video.addEventListener('playing', () => { markVideoAutoRetryDone(video, 'playing'); });
+    video.addEventListener('loadedmetadata', () => { markVideoAutoRetryDone(video, 'metadata'); });
     video.addEventListener('playing', () => { loadingIndicator.style.display='none'; if(video.muted){video.muted=false;video.volume=1.0;audioBtn.innerHTML='🔊';audioBtn.setAttribute('data-muted','false');} });
     video.addEventListener('timeupdate', () => { if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`; });
     video.addEventListener('loadedmetadata', () => { durationText.textContent=formatTime(video.duration); videoMetadata[index]={...videoMetadata[index],duration:video.duration||0}; });
@@ -1567,6 +1655,7 @@ function createVideoElements() {
 
   if (allVideoUrls.length > BATCH_SIZE) updateNextBatchButton();
   setupVisibilityObserver();
+  startVisibleBatchAutoRetry();
 }
 
 // ─── Visibility observer ──────────────────────────────────────────────────────
