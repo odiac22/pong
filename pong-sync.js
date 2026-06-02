@@ -168,20 +168,20 @@
       .pong-repair-panel {
         position: fixed !important;
         left: 50% !important;
-        top: 12px !important;
+        top: 6px !important;
         transform: translateX(-50%) !important;
-        width: min(96vw, 720px) !important;
-        max-height: calc(100vh - 24px) !important;
+        width: min(94vw, 560px) !important;
+        max-height: min(28vh, 150px) !important;
         overflow: auto !important;
         z-index: 14000 !important;
-        border: 1px solid rgba(255,255,255,0.13) !important;
-        border-radius: 10px !important;
-        background: rgba(7,11,15,0.78) !important;
+        border: 1px solid rgba(255,255,255,0.1) !important;
+        border-radius: 8px !important;
+        background: rgba(7,11,15,0.66) !important;
         color: rgba(244,248,255,0.88) !important;
-        box-shadow: 0 18px 48px rgba(0,0,0,0.42) !important;
-        backdrop-filter: blur(16px) !important;
-        -webkit-backdrop-filter: blur(16px) !important;
-        padding: 10px !important;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.32) !important;
+        backdrop-filter: blur(12px) !important;
+        -webkit-backdrop-filter: blur(12px) !important;
+        padding: 6px !important;
         font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif !important;
         user-select: none !important;
         -webkit-user-select: none !important;
@@ -192,32 +192,32 @@
         display: flex !important;
         justify-content: space-between !important;
         align-items: center !important;
-        gap: 8px !important;
-        font-size: 12px !important;
+        gap: 5px !important;
+        font-size: 9px !important;
         font-weight: 800 !important;
-        line-height: 1.2 !important;
-        margin-bottom: 7px !important;
+        line-height: 1.05 !important;
+        margin-bottom: 4px !important;
       }
 
       .pong-repair-actions {
         display: flex !important;
         align-items: center !important;
-        gap: 5px !important;
+        gap: 3px !important;
       }
 
       .pong-repair-status {
         color: rgba(244,248,255,0.62) !important;
-        font-size: 10px !important;
-        line-height: 1.25 !important;
-        min-height: 13px !important;
+        font-size: 8px !important;
+        line-height: 1.1 !important;
+        min-height: 9px !important;
         overflow: hidden !important;
         text-overflow: ellipsis !important;
         white-space: nowrap !important;
-        margin-bottom: 7px !important;
+        margin-bottom: 4px !important;
       }
 
       .pong-repair-track {
-        height: 5px !important;
+        height: 4px !important;
         border-radius: 999px !important;
         background: rgba(255,255,255,0.12) !important;
         overflow: hidden !important;
@@ -235,21 +235,21 @@
         display: flex !important;
         justify-content: space-between !important;
         align-items: center !important;
-        gap: 8px !important;
-        margin-top: 7px !important;
+        gap: 5px !important;
+        margin-top: 4px !important;
         color: rgba(244,248,255,0.56) !important;
-        font-size: 9px !important;
+        font-size: 7px !important;
       }
 
       .pong-repair-detail {
         display: flex !important;
         justify-content: space-between !important;
         align-items: center !important;
-        gap: 8px !important;
-        margin-top: 4px !important;
+        gap: 5px !important;
+        margin-top: 2px !important;
         color: rgba(244,248,255,0.38) !important;
-        font-size: 8px !important;
-        line-height: 1.2 !important;
+        font-size: 6px !important;
+        line-height: 1.05 !important;
       }
 
       .pong-repair-detail span {
@@ -264,8 +264,8 @@
         border-radius: 999px !important;
         background: rgba(251,113,133,0.16) !important;
         color: rgba(244,248,255,0.82) !important;
-        padding: 3px 8px !important;
-        font-size: 9px !important;
+        padding: 2px 6px !important;
+        font-size: 7px !important;
         font-weight: 800 !important;
         cursor: pointer !important;
       }
@@ -289,30 +289,31 @@
       .pong-repair-log {
         display: block !important;
         width: 100% !important;
-        max-height: 96px !important;
+        max-height: 38px !important;
         overflow: auto !important;
         box-sizing: border-box !important;
-        margin: 8px 0 0 !important;
-        padding: 6px !important;
+        margin: 4px 0 0 !important;
+        padding: 3px 4px !important;
         border: 1px solid rgba(255,255,255,0.09) !important;
-        border-radius: 8px !important;
+        border-radius: 6px !important;
         background: rgba(0,0,0,0.28) !important;
         color: rgba(229,231,235,0.58) !important;
         font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace !important;
-        font-size: 8px !important;
-        line-height: 1.35 !important;
+        font-size: 6px !important;
+        line-height: 1.15 !important;
         white-space: pre-wrap !important;
       }
 
       .pong-repair-worker-note {
-        margin-top: 8px !important;
-        padding: 6px 8px !important;
-        border-radius: 8px !important;
+        display: none !important;
+        margin-top: 4px !important;
+        padding: 3px 4px !important;
+        border-radius: 6px !important;
         border: 1px solid rgba(255,255,255,0.08) !important;
         background: rgba(0,0,0,0.22) !important;
         color: rgba(229,231,235,0.48) !important;
-        font-size: 8px !important;
-        line-height: 1.25 !important;
+        font-size: 6px !important;
+        line-height: 1.1 !important;
       }
 
       .pong-video-expired-hint {
@@ -2089,8 +2090,8 @@
       : null;
   }
 
-  const REPAIR_ITEM_TIMEOUT_MS = 60000;
-  const DIRECT_REPAIR_ITEM_TIMEOUT_MS = 60000;
+  const REPAIR_ITEM_TIMEOUT_MS = 120000;
+  const DIRECT_REPAIR_ITEM_TIMEOUT_MS = 240000;
   const DIRECT_REPAIR_POST_CONCURRENCY = 20;
   const DIRECT_REPAIR_MAX_RETRIES = 2;
   let iframeRepairState = null;
@@ -2478,7 +2479,9 @@
 
   async function directRepairScrapeArtist(item) {
     const base = directRepairBaseUrl(item.url);
+    setRepairCurrentProgress(0.03);
     const firstDoc = await directRepairFetchDoc(directRepairPageUrl(base, 1));
+    setRepairCurrentProgress(0.08);
     const artistInfo = directRepairArtistInfo(base, firstDoc, item.sourceMeta || {});
     const firstPagePosts = firstDoc.querySelectorAll('div.post').length;
     const postLinks = directRepairExtractVideoPostLinks(firstDoc, base);
@@ -2488,6 +2491,7 @@
     if (firstDoc.querySelector('a[href*="page="]')) {
       let batchStart = 2;
       const batchSize = 8;
+      let pageBatchCount = 0;
 
       while (true) {
         const pages = Array.from({ length: batchSize }, (_, i) => batchStart + i);
@@ -2516,6 +2520,8 @@
         });
 
         writeRepairLog(`Direct pages ${batchStart}-${batchStart + batchSize - 1}: ${batchVideoPostCount}/${batchPostCount} video posts`);
+        pageBatchCount++;
+        setRepairCurrentProgress(Math.min(0.24, 0.1 + pageBatchCount * 0.025));
 
         if (!anyContent) break;
 
@@ -2526,6 +2532,7 @@
     const shuffledPostLinks = directRepairShuffle([...new Set(postLinks)]);
 
     writeRepairLog(`Direct fetching ${shuffledPostLinks.length} video posts`);
+    setRepairCurrentProgress(0.25);
 
     let done = 0;
     const tasks = shuffledPostLinks.map(postUrl => async () => {
@@ -2535,6 +2542,7 @@
       });
 
       done++;
+      setRepairCurrentProgress(0.25 + (shuffledPostLinks.length ? (done / shuffledPostLinks.length) * 0.7 : 0.7));
 
       if (done % 20 === 0 || done === shuffledPostLinks.length) {
         writeRepairLog(`Direct post progress: ${done}/${shuffledPostLinks.length}`);
@@ -2548,9 +2556,13 @@
   }
 
   async function directRepairScrapePost(item) {
+    setRepairCurrentProgress(0.2);
     const doc = await directRepairFetchDoc(item.url);
+    setRepairCurrentProgress(0.55);
     const artistInfo = directRepairArtistInfo(item.sourceMeta?.artistUrl || item.url, doc, item.sourceMeta || {});
-    return directRepairVideoEntriesFromPost(item.url, artistInfo);
+    const entries = await directRepairVideoEntriesFromPost(item.url, artistInfo);
+    setRepairCurrentProgress(0.9);
+    return entries;
   }
 
   async function directRepairScrapeItem(item) {
@@ -2569,6 +2581,18 @@
 
   function getRepairElapsedMs() {
     return iframeRepairState?.startedAt ? Date.now() - iframeRepairState.startedAt : 0;
+  }
+
+  function setRepairCurrentProgress(progress) {
+    if (!iframeRepairState) return;
+
+    const next = Math.max(0, Math.min(0.95, Number(progress) || 0));
+    const current = Number(iframeRepairState.currentProgress || 0);
+
+    if (next < 0.95 && Math.abs(next - current) < 0.01) return;
+
+    iframeRepairState.currentProgress = next;
+    updateRepairQueuePanel();
   }
 
   function formatRepairSeconds(ms) {
@@ -2671,7 +2695,10 @@
     const total = iframeRepairState.queue.length;
     const done = Math.min(total, Math.max(0, iframeRepairState.completed || 0));
     const current = iframeRepairState.queue[iframeRepairState.index] || null;
-    const pct = total ? Math.round((done / total) * 100) : 0;
+    const inFlightProgress = current && done < total
+      ? Math.max(0, Math.min(0.95, Number(iframeRepairState.currentProgress || 0)))
+      : 0;
+    const pct = total ? Math.round(((done + inFlightProgress) / total) * 100) : 0;
     const stats = iframeRepairState.stats || {};
     const artistTotal = Number(stats.uniqueArtists || 0);
     const savedArtistTotal = Number(stats.savedArtists || 0);
@@ -2894,6 +2921,7 @@
 
     if (!item.url) {
       state.completed = Math.max(state.completed || 0, state.index + 1);
+      state.currentProgress = 0;
       writeRepairLog(`Skip ${item.phase} ${state.index + 1}/${state.queue.length}: ${item.label} (${item.skipReason || 'No source URL'})`);
       updateRepairQueuePanel(`Skipped: ${item.label} (${item.skipReason || 'No source URL'})`);
       setTimeout(runNextIframeRepairItem, 250);
@@ -2901,6 +2929,7 @@
     }
 
     state.itemStartedAt = Date.now();
+    state.currentProgress = 0;
     writeRepairLog(`Start ${item.phase} ${state.index + 1}/${state.queue.length}: ${item.label}`);
 
     if (state.directRepairDisabled) {
@@ -2921,6 +2950,7 @@
         state.freshCount += Number(data.count || 0);
 
         state.completed = Math.max(state.completed || 0, state.index + 1);
+        state.currentProgress = 0;
         writeRepairLog(`Direct result ${item.label}: ${Number(data.count || 0)} videos in ${formatRepairSeconds(Date.now() - (state.itemStartedAt || Date.now()))}`);
         updateRepairQueuePanel(`Done: ${item.label}`);
         setTimeout(runNextIframeRepairItem, 350);
@@ -2944,6 +2974,7 @@
 
     if (!navigateRepairWorker(item)) {
       state.completed = Math.max(state.completed || 0, state.index + 1);
+      state.currentProgress = 0;
       updateRepairQueuePanel(`Skipped: ${item.label} (repair tab blocked)`);
       setTimeout(runNextIframeRepairItem, 250);
       return;
@@ -2952,6 +2983,7 @@
     state.timeoutId = setTimeout(() => {
       if (!iframeRepairState || iframeRepairState.id !== state.id) return;
       state.completed = Math.max(state.completed || 0, state.index + 1);
+      state.currentProgress = 0;
       writeRepairLog(`Timeout after ${formatRepairSeconds(REPAIR_ITEM_TIMEOUT_MS)}: ${item.label}`);
       writeRepairLog('No userscript message received; check that Tampermonkey is enabled in the repair tab browser/profile.');
       updateRepairQueuePanel(`Timed out: ${item.label}`);
@@ -2985,6 +3017,7 @@
       startedAt: Date.now(),
       itemStartedAt: 0,
       logLines: [],
+      currentProgress: 0,
       directRepairDisabled: false,
       workerWindow
     };
@@ -3040,6 +3073,7 @@
     }
 
     state.completed = Math.max(state.completed || 0, state.index + 1);
+    state.currentProgress = 0;
     writeRepairLog(`${data.ok ? 'Result' : 'Skip'} ${current.label}: ${Number(data.count || 0)} videos in ${formatRepairSeconds(Date.now() - (state.itemStartedAt || Date.now()))}`);
     updateRepairQueuePanel(data.ok ? `Done: ${current.label}` : `Skipped: ${current.label}`);
     setTimeout(runNextIframeRepairItem, 350);
