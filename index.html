@@ -191,7 +191,8 @@
       position: fixed; bottom: 48px; background: var(--ui-bg);
       color: var(--ui-text); width: 24px; height: 24px; border-radius: 999px;
       display: flex; align-items: center; justify-content: center;
-      z-index: 1000; cursor: pointer; font-size: 12px; border: 1px solid var(--ui-border);
+      z-index: 1000; cursor: pointer; font-size: 15px; font-weight: 750; line-height: 1;
+      border: 1px solid var(--ui-border);
       -webkit-tap-highlight-color: transparent; opacity: 0.42;
       transition: all 0.18s ease; box-shadow: 0 8px 22px rgba(0,0,0,0.25);
       user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: manipulation;
@@ -199,7 +200,7 @@
     }
     .control-button:hover, .control-button:active { opacity: 0.9; transform: scale(1.06); }
     .show-controls-button { left: 12px; }
-    .random-sort-button { left: 42px; }
+    .random-sort-button { left: 42px; font-size: 9px; font-weight: 850; letter-spacing: 0; }
     .duration-sort-button { left: 72px; }
     .refresh-button { left: 102px; }
     .autoplay-button { left: 132px; }
@@ -449,7 +450,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.29</div>
+  <div class="version-number">22.30</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -517,6 +518,39 @@ function parsePongJsonLine(line, prefix) {
   }
 }
 
+function compactField(value) {
+  return String(value || '').trim();
+}
+
+function compactArtistLineToMeta(line) {
+  if (!line.startsWith('#PA|')) return null;
+
+  const parts = line.slice(4).split('|');
+  const meta = {
+    type: 'artist',
+    source: compactField(parts[0]) || 'coomerfans',
+    artistKey: compactField(parts[1]),
+    artistUrl: compactField(parts[2]),
+    artistName: compactField(parts.slice(3).join('|')),
+    scrapedAt: ''
+  };
+
+  const artistDisplayName = getArtistDisplayName(meta);
+  return artistDisplayName ? { ...meta, artistDisplayName } : meta;
+}
+
+function compactVideoLineToMeta(line, activeArtist) {
+  if (!line.startsWith('#PV|')) return null;
+
+  const parts = line.slice(4).split('|');
+  return {
+    ...(activeArtist || {}),
+    type: 'video',
+    postUrl: compactField(parts[0]),
+    postIndex: Number(compactField(parts[1]) || 0)
+  };
+}
+
 function artistNameFromUrl(rawUrl) {
   if (!String(rawUrl || '').trim()) return '';
 
@@ -560,6 +594,14 @@ function parsePastedVideoLines(text) {
       return;
     }
 
+    const compactArtistMeta = compactArtistLineToMeta(line);
+
+    if (compactArtistMeta) {
+      activeArtist = compactArtistMeta;
+      pendingVideo = null;
+      return;
+    }
+
     const videoMeta = parsePongJsonLine(line, '#PONG_VIDEO ');
 
     if (videoMeta) {
@@ -567,6 +609,13 @@ function parsePastedVideoLines(text) {
         ...(activeArtist || {}),
         ...videoMeta
       };
+      return;
+    }
+
+    const compactVideoMeta = compactVideoLineToMeta(line, activeArtist);
+
+    if (compactVideoMeta) {
+      pendingVideo = compactVideoMeta;
       return;
     }
 
@@ -2016,8 +2065,8 @@ function createGearButton(){
   });
 
   mk('duration-sort-button','◷','Sort by duration',sortVideosByDuration);
-  mk('random-sort-button','⇄','Randomize',sortVideosRandomly);
-  mk('show-controls-button','◌','Toggle controls',toggleControls);
+  mk('random-sort-button','Rnd','Randomize',sortVideosRandomly);
+  mk('show-controls-button','⚙','Toggle controls',toggleControls);
 
   const apBtn = document.createElement('div');
   apBtn.className = 'control-button autoplay-button' + (window.autoplayEnabled ? ' on' : '');
@@ -2401,6 +2450,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=22"></script>
+<script src="pong-sync.js?v=23"></script>
 </body>
 </html>

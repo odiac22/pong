@@ -711,6 +711,36 @@
     }
   }
 
+  function compactField(value) {
+    return String(value || '').trim();
+  }
+
+  function parseCompactArtistLine(line) {
+    if (!line.startsWith('#PA|')) return null;
+
+    const parts = line.slice(4).split('|');
+    return {
+      type: 'artist',
+      source: compactField(parts[0]) || 'coomerfans',
+      artistKey: compactField(parts[1]),
+      artistUrl: compactField(parts[2]),
+      artistName: compactField(parts.slice(3).join('|')),
+      scrapedAt: ''
+    };
+  }
+
+  function parseCompactVideoLine(line, activeArtist) {
+    if (!line.startsWith('#PV|')) return null;
+
+    const parts = line.slice(4).split('|');
+    return {
+      ...(activeArtist || {}),
+      type: 'video',
+      postUrl: compactField(parts[0]),
+      postIndex: Number(compactField(parts[1]) || 0)
+    };
+  }
+
   function emptyPastedMetadata() {
     return {
       artist: null,
@@ -739,6 +769,15 @@
         return;
       }
 
+      const compactArtist = parseCompactArtistLine(line);
+
+      if (compactArtist) {
+        activeArtist = compactArtist;
+        result.artist = compactArtist;
+        pendingVideo = null;
+        return;
+      }
+
       const videoMeta = parsePongJsonLine(line, PONG_VIDEO_PREFIX);
 
       if (videoMeta) {
@@ -746,6 +785,13 @@
           ...(activeArtist || {}),
           ...videoMeta
         };
+        return;
+      }
+
+      const compactVideoMeta = parseCompactVideoLine(line, activeArtist);
+
+      if (compactVideoMeta) {
+        pendingVideo = compactVideoMeta;
         return;
       }
 
