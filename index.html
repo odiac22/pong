@@ -478,7 +478,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.34</div>
+  <div class="version-number">22.35</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1563,9 +1563,7 @@ function stopVisibleBatchAutoRetry() {
 function isVideoReadyForInitialPlayback(video) {
   if (!video) return true;
 
-  const hasDuration = Number.isFinite(video.duration) && video.duration > 0;
-
-  return hasDuration || video.readyState >= 2;
+  return video.readyState >= 2;
 }
 
 function getVideoReadyPercent(video) {
@@ -1919,12 +1917,14 @@ function createVideoElements() {
 
       lastTapTime = now; lastTapX = tapX;
 
+      markVideoViewed(wrapper);
       if (video.paused) playVideoCleanly(video);
       else video.pause();
     },{passive:false});
 
     tapArea.addEventListener('click', e => {
       if (e.target.closest('.video-progress-container') || e.target.tagName==='BUTTON') { e.stopPropagation(); return; }
+      markVideoViewed(wrapper);
       if (video.paused) playVideoCleanly(video); else video.pause();
     });
 
@@ -1953,7 +1953,7 @@ function createVideoElements() {
       const metadataIndex = Number(wrapper.dataset.index || index);
       durationText.textContent=formatTime(video.duration);
       videoMetadata[metadataIndex]={...videoMetadata[metadataIndex],duration:video.duration||0};
-      markVideoAutoRetryDone(video, 'metadata');
+      updateVideoReadyLoader(video);
     });
     video.addEventListener('error', () => { loadingIndicator.style.display='none'; updateVideoReadyLoader(video); });
 
@@ -2761,6 +2761,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=27"></script>
+<script src="pong-sync.js?v=28"></script>
 </body>
 </html>
