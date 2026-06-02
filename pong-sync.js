@@ -2011,6 +2011,32 @@
     }
   }
 
+  function getSavedArtistRepairSources(artist, fallbackKey) {
+    const sources = [];
+    const seenUrls = {};
+
+    function add(rawUrl, rawLabel) {
+      const url = String(rawUrl || '').trim();
+      if (!url || seenUrls[url]) return;
+
+      seenUrls[url] = true;
+      sources.push({
+        url,
+        label: rawLabel || url
+      });
+    }
+
+    Object.values(artist?.videoMeta || {}).forEach(meta => {
+      add(meta?.artistUrl, meta?.artistDisplayName || meta?.artistName);
+    });
+
+    if (!sources.length) {
+      add(artist?.artistUrl, artist?.artistDisplayName || artist?.artistName || fallbackKey);
+    }
+
+    return sources;
+  }
+
   function buildIframeRepairQueue(data) {
     const queue = [];
     const seen = {};
@@ -2024,26 +2050,42 @@
       if (!url && !extra.countMissing) return;
 
       const key = url ? `${phase}:${kind}:${url}` : `${phase}:${kind}:missing:${extra.savedKey || queue.length}`;
-      if (seen[key]) return;
+      if (seen[key]) {
+        const existing = seen[key];
 
-      seen[key] = true;
-      queue.push({
+        if (extra.savedKey && !existing.savedKeys.includes(extra.savedKey)) {
+          existing.savedKeys.push(extra.savedKey);
+        }
+
+        existing.savedCount += extra.savedCount || 1;
+        return;
+      }
+
+      const item = {
         id: `${Date.now().toString(36)}-${queue.length + 1}`,
         kind,
         url,
         phase,
         label: label || url || 'Missing source URL',
         savedKey: extra.savedKey || '',
+        savedKeys: extra.savedKey ? [extra.savedKey] : [],
         savedCount: extra.savedCount || 1,
         skipReason: extra.skipReason || ''
-      });
+      };
+
+      seen[key] = item;
+      queue.push(item);
     }
 
     savedArtists.forEach(([artistKey, artist]) => {
-      add('artist', artist?.artistUrl, artist?.artistDisplayName || artist?.artistName || artistKey, {
-        phase: 'artist',
-        savedKey: artistKey,
-        savedCount: 1
+      const sources = getSavedArtistRepairSources(artist, artistKey);
+
+      sources.forEach(source => {
+        add('artist', source.url, source.label || artist?.artistDisplayName || artist?.artistName || artistKey, {
+          phase: 'artist',
+          savedKey: artistKey,
+          savedCount: 1
+        });
       });
     });
 
@@ -2186,6 +2228,82 @@
     }
   }
 
+  function applyArtistScrapeResultsToSavedArtists(data, scrapeResults) {
+    data.savedArtists = data.savedArtists || {};
+
+    const groupedBySavedArtist = {};
+
+    (scrapeResults || []).forEach(result => {
+      const item = result?.item;
+
+      if (item?.phase !== 'artist' || !result?.text) return;
+
+      const entries = (parsePastedMetadata(result.text).orderedVideos || [])
+        .filter(entry => entry?.videoUrl);
+
+      if (!entries.length) return;
+
+      (item.savedKeys || []).forEach(savedKey => {
+        groupedBySavedArtist[savedKey] = groupedBySavedArtist[savedKey] || [];
+        groupedBySavedArtist[savedKey].push(...entries);
+      });
+    });
+
+    let repaired = 0;
+
+    Object.entries(groupedBySavedArtist).forEach(([savedKey, entries]) => {
+      const artist = data.savedArtists[savedKey];
+
+      if (!artist || !entries.length) return;
+
+      const oldVideos = Array.isArray(artist.videos) ? artist.videos : [];
+      const freshVideos = dedupeAndRefreshMediaUrls(entries.map(entry => entry.videoUrl));
+
+      if (!freshVideos.length) return;
+
+      const freshMeta = {};
+
+      entries.forEach(entry => {
+        const mediaKey = getSavedVideoKey(entry.videoUrl);
+        const meta = compactVideoMetadata(entry);
+
+        if (mediaKey && meta) {
+          freshMeta[mediaKey] = meta;
+        }
+      });
+
+      const changed = JSON.stringify(oldVideos) !== JSON.stringify(freshVideos);
+
+      artist.videos = freshVideos;
+      artist.videoMeta = {
+        ...(artist.videoMeta || {}),
+        ...freshMeta
+      };
+
+      const firstFreshMeta = entries.map(entry => compactVideoMetadata(entry)).find(Boolean);
+
+      if (firstFreshMeta) {
+        Object.assign(artist, {
+          artistName: firstFreshMeta.artistName || artist.artistName || '',
+          artistKey: firstFreshMeta.artistKey || artist.artistKey || '',
+          artistUrl: firstFreshMeta.artistUrl || artist.artistUrl || '',
+          artistDisplayName: firstFreshMeta.artistDisplayName || artist.artistDisplayName || '',
+          source: firstFreshMeta.source || artist.source || 'coomerfans',
+          scrapedAt: firstFreshMeta.scrapedAt || artist.scrapedAt || ''
+        });
+      }
+
+      if (changed) {
+        artist.updatedAt = new Date().toISOString();
+        repaired += Math.max(oldVideos.length, freshVideos.length);
+      }
+    });
+
+    return {
+      repaired
+    };
+  }
+
   async function finishIframeRepairQueue() {
     const state = iframeRepairState;
 
@@ -2198,18 +2316,19 @@
     state.completed = state.queue.length;
     updateRepairQueuePanel('Applying fresh links...');
 
-    const entries = state.texts
-      .flatMap(text => parsePastedMetadata(text).orderedVideos || [])
+    const entries = state.results
+      .flatMap(result => parsePastedMetadata(result.text).orderedVideos || [])
       .filter(item => item?.videoUrl);
 
     let repaired = state.initialRepaired || 0;
 
-    if (entries.length) {
+    if (entries.length || state.results.length) {
       const result = await updateSharedData(data => {
+        const artistApplied = applyArtistScrapeResultsToSavedArtists(data, state.results).repaired;
         const applied = repairDataWithEntries(data, entries).repaired;
         refreshSharedDataMediaUrls(data);
         return {
-          repaired: applied
+          repaired: artistApplied + applied
         };
       });
 
@@ -2289,7 +2408,7 @@
       queue,
       index: -1,
       completed: 0,
-      texts: [],
+      results: [],
       freshCount: 0,
       initialRepaired,
       stats,
@@ -2316,7 +2435,10 @@
     }
 
     if (data.ok && data.text) {
-      state.texts.push(String(data.text));
+      state.results.push({
+        item: current,
+        text: String(data.text)
+      });
       state.freshCount += Number(data.count || 0);
     }
 
