@@ -849,6 +849,18 @@
     if (direct) return direct;
 
     const mediaKey = getSavedVideoKey(rawUrl);
+    const cachedEntries = Array.isArray(window.PongLastPastedEntries)
+      ? window.PongLastPastedEntries
+      : Array.isArray(window.PongPendingPasteCache?.entries)
+        ? window.PongPendingPasteCache.entries
+        : [];
+    const cachedEntry = cachedEntries.find(entry => {
+      if (!entry?.videoUrl) return false;
+      if (String(entry.videoUrl).trim() === String(rawUrl || '').trim()) return true;
+      return mediaKey && getSavedVideoKey(entry.videoUrl) === mediaKey;
+    });
+
+    if (cachedEntry) return cachedEntry;
 
     return mediaKey ? metadata.videosByMediaKey[mediaKey] || null : null;
   }
@@ -1613,8 +1625,23 @@
       capturePastedMetadata(input.value);
     }
 
-    return (window.PongCurrentPastedMetadata?.orderedVideos || [])
-      .filter(item => item?.videoUrl);
+    const entries = [
+      ...(window.PongCurrentPastedMetadata?.orderedVideos || []),
+      ...(Array.isArray(window.PongPendingPasteCache?.entries) ? window.PongPendingPasteCache.entries : []),
+      ...(Array.isArray(window.PongLastPastedEntries) ? window.PongLastPastedEntries : [])
+    ];
+    const seen = {};
+
+    return entries.filter(item => {
+      if (!item?.videoUrl) return false;
+
+      const key = getSavedVideoKey(item.videoUrl) || item.videoUrl;
+
+      if (seen[key]) return false;
+
+      seen[key] = true;
+      return true;
+    });
   }
 
   function buildFreshEntryMaps(entries) {
