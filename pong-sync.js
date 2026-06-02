@@ -437,7 +437,7 @@
 
     const separator = proxy.includes('?') ? '&' : '?';
 
-    return `${proxy}${separator}url=${encodeURIComponent(rawUrl)}`;
+    return `${proxy}${separator}url=${encodeURIComponent(rawUrl)}&t=${Date.now()}`;
   }
 
   function loadSavedMap(key) {
@@ -2291,13 +2291,32 @@
   async function directRepairFetchText(url) {
     const fetchUrl = repairProxyFetchUrl(url);
     const usingProxy = fetchUrl !== url;
-    const res = await fetch(fetchUrl, {
-      credentials: 'omit',
-      cache: 'no-store'
-    });
+    writeRepairLog(`Fetch ${usingProxy ? 'proxy' : 'direct'}: ${fetchUrl}`);
+
+    let res;
+
+    try {
+      res = await fetch(fetchUrl, {
+        credentials: 'omit',
+        mode: 'cors'
+      });
+    } catch (error) {
+      const detail = [
+        error?.name || 'FetchError',
+        error?.message || String(error || ''),
+        navigator?.userAgent ? `ua=${navigator.userAgent}` : ''
+      ].filter(Boolean).join(' | ');
+      throw new Error(`Fetch failed before response: ${detail}`);
+    }
 
     if (!res.ok) {
-      throw new Error(`${usingProxy ? 'Proxy ' : ''}HTTP ${res.status}`);
+      let body = '';
+
+      try {
+        body = await res.text();
+      } catch (_) {}
+
+      throw new Error(`${usingProxy ? 'Proxy ' : ''}HTTP ${res.status}${body ? `: ${body.slice(0, 160)}` : ''}`);
     }
 
     return res.text();

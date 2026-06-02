@@ -6,7 +6,7 @@ const ALLOWED_HOSTS = new Set([
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': '*',
   'Access-Control-Max-Age': '86400'
 };
 
@@ -50,6 +50,20 @@ export default {
 
     try {
       const requestUrl = new URL(request.url);
+      const health = requestUrl.searchParams.get('health');
+
+      if (health === '1') {
+        return corsResponse(JSON.stringify({
+          ok: true,
+          worker: 'pong-coomerfans-proxy',
+          now: new Date().toISOString()
+        }), {
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8'
+          }
+        });
+      }
+
       const target = validateTarget(requestUrl.searchParams.get('url') || '');
 
       const upstream = await fetch(target.toString(), {
