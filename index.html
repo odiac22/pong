@@ -536,15 +536,51 @@ function updatePendingPasteButton() {
     return;
   }
 
-  if (pendingPastes.length) {
+  const pendingCount = getPendingPasteBundleCount();
+
+  if (pendingCount) {
     btn.style.opacity = '0.7';
     btn.style.background = 'rgba(0,150,255,0.7)';
-    btn.setAttribute('data-count', pendingPastes.length + 'p');
+    btn.setAttribute('data-count', pendingCount + 'p');
   } else {
     btn.setAttribute('data-count', '0/0');
     btn.style.opacity = '0.2';
     btn.style.background = '';
   }
+}
+
+function getFastPasteMarkerCounts() {
+  const value = videoUrlsInput ? videoUrlsInput.value || '' : '';
+  const counts = [];
+  const pattern = /^# Fast paste \d+:\s+(\d+)\s+video links cached\b/gm;
+  let match;
+
+  while ((match = pattern.exec(value))) {
+    const count = Number(match[1]);
+    if (Number.isFinite(count) && count > 0) counts.push(count);
+  }
+
+  return counts;
+}
+
+function buildPasteEventsFromCounts(counts, totalUrls) {
+  const events = [];
+  let startIndex = 0;
+
+  (counts || []).forEach(count => {
+    const safeCount = Math.max(0, Math.min(Number(count) || 0, Math.max(0, totalUrls - startIndex)));
+    if (!safeCount) return;
+    events.push({ startIndex, count: safeCount });
+    startIndex += safeCount;
+  });
+
+  return events;
+}
+
+function getPendingPasteBundleCount() {
+  if (pendingPastes.length) return pendingPastes.length;
+  if (parsedVideoUrlsCache.length) return getFastPasteMarkerCounts().length;
+  return 0;
 }
 
 function recordPastedBundle(parsedPaste) {
@@ -638,6 +674,11 @@ videoUrlsInput.addEventListener('input', e => {
       });
     }
 
+    updatePendingPasteButton();
+    return;
+  }
+
+  if (parsedVideoUrlsCache.length && getFastPasteMarkerCounts().length) {
     updatePendingPasteButton();
     return;
   }
@@ -1553,8 +1594,10 @@ function updatePasteNavigationButton(){
     document.body.appendChild(btn);
   }
 
-  if(pendingPastes.length){
-    btn.setAttribute('data-count', pendingPastes.length + 'p');
+  const pendingCount = getPendingPasteBundleCount();
+
+  if(pendingCount){
+    btn.setAttribute('data-count', pendingCount + 'p');
     btn.style.opacity='0.7';
     btn.style.background='rgba(0,150,255,0.7)';
     return;
@@ -1646,9 +1689,13 @@ loadVideosButton.addEventListener('click',()=>{
   currentBatch = 0;
   currentVideoIndex = 0;
 
+  const markerPasteEvents = buildPasteEventsFromCounts(getFastPasteMarkerCounts(), newUrls.length);
+
   // This fixes the paperclip/paste counter showing 0.
   if (pendingPastes.length) {
     pasteEvents = pendingPastes.slice();
+  } else if (markerPasteEvents.length) {
+    pasteEvents = markerPasteEvents;
   } else if (hasCachedPasteUrls) {
     pasteEvents = [{
       startIndex: 0,
@@ -1949,6 +1996,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=17"></script>
+<script src="pong-sync.js?v=18"></script>
 </body>
 </html>
