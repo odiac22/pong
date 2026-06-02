@@ -131,13 +131,19 @@
       border: 1px solid rgba(255,255,255,0.08); border-radius: 999px; padding: 2px 4px;
       backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     }
+    .video-ready-percent.not-ready {
+      color: rgba(255,255,255,0.92);
+      background: rgba(239,68,68,0.58);
+      border-color: rgba(248,113,113,0.68);
+      box-shadow: 0 0 12px rgba(239,68,68,0.28);
+    }
     .video-ready-percent.refreshing {
       animation: readyPercentRefresh 0.9s ease-out;
     }
     @keyframes readyPercentRefresh {
-      0% { color: rgba(255,255,255,0.66); border-color: rgba(255,255,255,0.08); transform: scale(1); }
-      35% { color: rgba(255,255,255,0.92); border-color: rgba(103,232,249,0.48); transform: scale(1.16); box-shadow: 0 0 12px rgba(103,232,249,0.34); }
-      100% { color: rgba(255,255,255,0.66); border-color: rgba(255,255,255,0.08); transform: scale(1); }
+      0% { transform: scale(1); }
+      35% { transform: scale(1.16); box-shadow: 0 0 14px rgba(239,68,68,0.42); }
+      100% { transform: scale(1); }
     }
     .video-loading-indicator {
       position: absolute; top: 50%; left: 50%;
@@ -472,7 +478,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.33</div>
+  <div class="version-number">22.34</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1622,6 +1628,7 @@ function updateVideoReadyLoader(video, forceReady = false) {
 
   if (percentText) {
     percentText.textContent = `${rounded}%`;
+    percentText.classList.toggle('not-ready', percent < 100);
   }
 
   if (percent >= 100) {
@@ -1929,11 +1936,25 @@ function createVideoElements() {
     video.addEventListener('waiting', () => { loadingIndicator.style.display='none'; updateVideoReadyLoader(video); });
     video.addEventListener('progress', () => { updateVideoReadyLoader(video); });
     video.addEventListener('canplay', () => { markVideoAutoRetryDone(video, 'canplay'); loadingIndicator.style.display='none'; });
-    video.addEventListener('playing', () => { markVideoAutoRetryDone(video, 'playing'); });
+    video.addEventListener('playing', () => {
+      markVideoAutoRetryDone(video, 'playing');
+      setTimeout(() => {
+        if (!video.paused && video.currentTime > 0.25) markVideoViewed(wrapper);
+      }, 1200);
+    });
     video.addEventListener('loadedmetadata', () => { updateVideoReadyLoader(video); });
     video.addEventListener('playing', () => { loadingIndicator.style.display='none'; if(video.muted){video.muted=false;video.volume=1.0;audioBtn.innerHTML='🔊';audioBtn.setAttribute('data-muted','false');} });
-    video.addEventListener('timeupdate', () => { if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`; });
-    video.addEventListener('loadedmetadata', () => { durationText.textContent=formatTime(video.duration); videoMetadata[index]={...videoMetadata[index],duration:video.duration||0}; markVideoAutoRetryDone(video, 'metadata'); });
+    video.addEventListener('timeupdate', () => {
+      if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`;
+      const viewThreshold = video.duration ? Math.min(1, video.duration * 0.08) : 0.75;
+      if (video.currentTime >= viewThreshold) markVideoViewed(wrapper);
+    });
+    video.addEventListener('loadedmetadata', () => {
+      const metadataIndex = Number(wrapper.dataset.index || index);
+      durationText.textContent=formatTime(video.duration);
+      videoMetadata[metadataIndex]={...videoMetadata[metadataIndex],duration:video.duration||0};
+      markVideoAutoRetryDone(video, 'metadata');
+    });
     video.addEventListener('error', () => { loadingIndicator.style.display='none'; updateVideoReadyLoader(video); });
 
     wrapper.appendChild(video);
@@ -2072,6 +2093,93 @@ function loadNextBatch(restoreIndex) {
   } else {
     videoContainer.innerHTML='<div class="loading-message">No more videos</div>';
     removeNextBatchButton();
+  }
+}
+
+function markVideoViewed(wrapper) {
+  if (!wrapper) return;
+  wrapper.dataset.viewed = 'true';
+}
+
+function isWrapperViewed(wrapper) {
+  return wrapper && wrapper.dataset.viewed === 'true';
+}
+
+function isWrapperReady(wrapper) {
+  return wrapper && wrapper.dataset.readyPlayable === 'true';
+}
+
+function moveArrayItemToEnd(items, index) {
+  if (!Array.isArray(items) || index < 0 || index >= items.length - 1) return;
+
+  const [item] = items.splice(index, 1);
+  items.push(item);
+}
+
+function renumberVisibleVideoWrappers() {
+  const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
+
+  wrappers.forEach((wrapper, index) => {
+    wrapper.dataset.index = String(index);
+
+    const label = wrapper.querySelector('.artist-label');
+    if (label) {
+      const artistName = getArtistDisplayName(videoMetadata[index]);
+      label.dataset.artistName = artistName || '';
+    }
+  });
+
+  updateBatchReadyCounter();
+}
+
+function moveSkippedVideoToBottom(wrapper) {
+  const oldIndex = Number(wrapper && wrapper.dataset.index);
+
+  if (!wrapper || !Number.isInteger(oldIndex) || oldIndex < 0 || oldIndex >= videoUrls.length - 1) return false;
+
+  const batchStartIndex = Math.max(0, (currentBatch - 1) * BATCH_SIZE);
+  const oldGlobalIndex = batchStartIndex + oldIndex;
+  const newGlobalIndex = batchStartIndex + videoUrls.length - 1;
+  const spacer = wrapper.nextElementSibling && wrapper.nextElementSibling.classList.contains('blank-space')
+    ? wrapper.nextElementSibling
+    : null;
+
+  moveArrayItemToEnd(videoUrls, oldIndex);
+  moveArrayItemToEnd(videoMetadata, oldIndex);
+
+  if (oldGlobalIndex >= 0 && oldGlobalIndex < allVideoUrls.length && newGlobalIndex < allVideoUrls.length) {
+    const [url] = allVideoUrls.splice(oldGlobalIndex, 1);
+    const [meta] = allVideoMetadata.splice(oldGlobalIndex, 1);
+    allVideoUrls.splice(newGlobalIndex, 0, url);
+    allVideoMetadata.splice(newGlobalIndex, 0, meta || {});
+  }
+
+  videoContainer.appendChild(wrapper);
+  if (spacer) videoContainer.appendChild(spacer);
+  renumberVisibleVideoWrappers();
+  saveSession();
+
+  return true;
+}
+
+function recycleSkippedVideosBelow() {
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
+
+  for (const wrapper of wrappers) {
+    const index = Number(wrapper.dataset.index || -1);
+    const rect = wrapper.getBoundingClientRect();
+    const isAboveViewport = rect.bottom < Math.max(12, viewportHeight * 0.08);
+
+    if (
+      index >= 0 &&
+      index < videoUrls.length - 1 &&
+      isAboveViewport &&
+      (!isWrapperViewed(wrapper) || !isWrapperReady(wrapper))
+    ) {
+      moveSkippedVideoToBottom(wrapper);
+      return;
+    }
   }
 }
 
@@ -2589,9 +2697,12 @@ document.addEventListener('DOMContentLoaded',()=>{
   });
 
   let scrollSaveTimer = null;
+  let skippedRecycleTimer = null;
   videoContainer.addEventListener('scroll', () => {
     window.lastScrollTime = Date.now();
     clearTimeout(scrollSaveTimer);
+    clearTimeout(skippedRecycleTimer);
+    skippedRecycleTimer = setTimeout(recycleSkippedVideosBelow, 140);
     scrollSaveTimer = setTimeout(() => {
       saveSession();
     }, 500);
@@ -2650,6 +2761,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=26"></script>
+<script src="pong-sync.js?v=27"></script>
 </body>
 </html>
