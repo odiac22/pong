@@ -47,14 +47,14 @@
     style.textContent = `
       .save-actions-panel {
         position: fixed !important;
-        left: 10px !important;
-        top: calc(50% + 92px) !important;
+        left: 12px !important;
+        top: calc(50% + 78px) !important;
         right: auto !important;
         transform: translateY(0) !important;
         z-index: 1200 !important;
         display: flex !important;
         flex-direction: column !important;
-        gap: 7px !important;
+        gap: 6px !important;
         pointer-events: auto !important;
         user-select: none !important;
         -webkit-user-select: none !important;
@@ -62,25 +62,25 @@
       }
 
       .side-save-button {
-        width: 36px !important;
-        min-height: 40px !important;
-        border: none !important;
-        border-radius: 11px !important;
-        background: rgba(30,30,30,0.78) !important;
-        color: white !important;
+        width: 30px !important;
+        min-height: 32px !important;
+        border: 1px solid rgba(255,255,255,0.13) !important;
+        border-radius: 9px !important;
+        background: rgba(7,11,15,0.46) !important;
+        color: rgba(244,248,255,0.86) !important;
         display: flex !important;
         flex-direction: column !important;
         align-items: center !important;
         justify-content: center !important;
         gap: 1px !important;
         cursor: pointer !important;
-        opacity: 0.62 !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.5) !important;
-        backdrop-filter: blur(5px) !important;
-        -webkit-backdrop-filter: blur(5px) !important;
+        opacity: 0.42 !important;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.28) !important;
+        backdrop-filter: blur(10px) !important;
+        -webkit-backdrop-filter: blur(10px) !important;
         -webkit-tap-highlight-color: transparent !important;
         touch-action: manipulation !important;
-        transition: all 0.2s ease !important;
+        transition: all 0.18s ease !important;
         padding: 2px !important;
         user-select: none !important;
         -webkit-user-select: none !important;
@@ -90,69 +90,77 @@
       .side-save-button:hover,
       .side-save-button:active {
         opacity: 1 !important;
-        transform: scale(1.08) !important;
+        transform: scale(1.05) !important;
       }
 
       .side-save-icon {
-        font-size: 14px !important;
+        font-size: 12px !important;
         line-height: 1 !important;
         user-select: none !important;
         -webkit-user-select: none !important;
+        -webkit-touch-callout: none !important;
       }
 
       .side-save-label {
-        font-size: 7px !important;
+        font-size: 6px !important;
         font-weight: 700 !important;
         line-height: 1 !important;
         user-select: none !important;
         -webkit-user-select: none !important;
+        -webkit-touch-callout: none !important;
       }
 
       .side-save-count {
         margin-top: 1px !important;
-        min-width: 14px !important;
-        height: 11px !important;
-        padding: 0 3px !important;
+        min-width: 12px !important;
+        height: 10px !important;
+        padding: 0 2px !important;
         border-radius: 999px !important;
-        background: rgba(255,64,64,0.95) !important;
+        background: rgba(103,232,249,0.78) !important;
         color: white !important;
-        font-size: 8px !important;
+        font-size: 7px !important;
         font-weight: 800 !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
         user-select: none !important;
         -webkit-user-select: none !important;
+        -webkit-touch-callout: none !important;
       }
 
       .remove-saved-button {
         position: fixed !important;
-        left: 10px !important;
-        top: calc(40% - 42px) !important;
+        left: 12px !important;
+        top: calc(50% - 84px) !important;
         transform: translateY(-50%) !important;
-        width: 30px !important;
-        height: 30px !important;
-        background: rgba(185,28,28,0.78) !important;
-        opacity: 0.55 !important;
-        font-size: 15px !important;
-        border: none !important;
-        border-radius: 50% !important;
+        width: 26px !important;
+        height: 26px !important;
+        background: rgba(251,113,133,0.16) !important;
+        opacity: 0.42 !important;
+        font-size: 13px !important;
+        border: 1px solid rgba(255,255,255,0.13) !important;
+        border-radius: 999px !important;
         z-index: 1200 !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
         cursor: pointer !important;
-        color: white !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.5) !important;
+        color: rgba(244,248,255,0.86) !important;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.28) !important;
         -webkit-tap-highlight-color: transparent !important;
         touch-action: manipulation !important;
-        transition: all 0.2s ease !important;
+        transition: all 0.18s ease !important;
+        user-select: none !important;
+        -webkit-user-select: none !important;
+        -webkit-touch-callout: none !important;
+        backdrop-filter: blur(10px) !important;
+        -webkit-backdrop-filter: blur(10px) !important;
       }
 
       .remove-saved-button:hover,
       .remove-saved-button:active {
-        opacity: 1 !important;
-        transform: translateY(-50%) scale(1.1) !important;
+        opacity: 0.88 !important;
+        transform: translateY(-50%) scale(1.06) !important;
       }
     `;
   }
@@ -1900,7 +1908,7 @@
     btn.id = 'remove-saved-button';
     btn.className = 'remove-saved-button';
     btn.type = 'button';
-    btn.innerHTML = '🗑️';
+    btn.innerHTML = '×';
     btn.title = 'Remove current saved video, or remove current saved artist bundle';
 
     btn.addEventListener('click', e => {
@@ -1931,7 +1939,7 @@
     tokenBtn.type = 'button';
     tokenBtn.title = 'Set GitHub sync token';
     tokenBtn.innerHTML = `
-      <span class="side-save-icon">🔑</span>
+      <span class="side-save-icon">⌁</span>
       <span class="side-save-label">Sync</span>
       <span class="side-save-count">GH</span>
     `;
@@ -1947,7 +1955,7 @@
     repairBtn.type = 'button';
     repairBtn.title = 'Repair saved links from pasted fresh metadata, or from stored artist/post URLs when the updated Tampermonkey script is installed on this page.';
     repairBtn.innerHTML = `
-      <span class="side-save-icon">â™»</span>
+      <span class="side-save-icon">↻</span>
       <span class="side-save-label">Repair</span>
       <span class="side-save-count">Fix</span>
     `;
