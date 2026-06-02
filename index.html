@@ -472,7 +472,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.32</div>
+  <div class="version-number">22.33</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1415,6 +1415,70 @@ function sortVideosRandomly() {
   showSortingIndicator('URLs randomized 🎲');
 }
 
+function shuffleInPlace(items) {
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [items[i], items[j]] = [items[j], items[i]];
+  }
+
+  return items;
+}
+
+function makeIndexRange(start, end) {
+  const range = [];
+
+  for (let i = start; i < end; i++) range.push(i);
+
+  return range;
+}
+
+function shuffleLoadedVideosForPlayback(urls, metadata, events) {
+  const sourceUrls = (urls || []).slice();
+  const sourceMetadata = sourceUrls.map((_, index) => (metadata && metadata[index]) || {});
+  const validEvents = (events || [])
+    .map(event => ({
+      startIndex: Number(event?.startIndex || 0),
+      count: Number(event?.count || 0)
+    }))
+    .filter(event => event.count > 0)
+    .sort((a, b) => a.startIndex - b.startIndex);
+
+  const groups = [];
+  let cursor = 0;
+
+  validEvents.forEach(event => {
+    const startIndex = Math.max(0, Math.min(sourceUrls.length, event.startIndex));
+    const endIndex = Math.max(startIndex, Math.min(sourceUrls.length, startIndex + event.count));
+
+    if (startIndex > cursor) groups.push(makeIndexRange(cursor, startIndex));
+    if (endIndex > startIndex) groups.push(makeIndexRange(startIndex, endIndex));
+
+    cursor = Math.max(cursor, endIndex);
+  });
+
+  if (cursor < sourceUrls.length) groups.push(makeIndexRange(cursor, sourceUrls.length));
+  if (!groups.length) groups.push(makeIndexRange(0, sourceUrls.length));
+
+  groups.forEach(group => shuffleInPlace(group));
+  shuffleInPlace(groups);
+
+  const order = groups.flat();
+  let nextStartIndex = 0;
+  const pasteEventsForPlayback = validEvents.length
+    ? groups.map(group => {
+        const event = { startIndex: nextStartIndex, count: group.length };
+        nextStartIndex += group.length;
+        return event;
+      })
+    : [];
+
+  return {
+    urls: order.map(index => sourceUrls[index]),
+    metadata: order.map(index => sourceMetadata[index]),
+    pasteEvents: pasteEventsForPlayback
+  };
+}
+
 function reorderAndRedisplayVideos(newOrder) {
   if (window.currentlyPlayingVideo && !window.currentlyPlayingVideo.paused) window.currentlyPlayingVideo.pause();
   videoUrls = newOrder.map(i => videoUrls[i]);
@@ -2235,6 +2299,12 @@ loadVideosButton.addEventListener('click',()=>{
     : parsePastedVideoLines(videoUrlsInput.value);
 
   const newUrls = parsedLoad.urls;
+  const pasteEventsSource = pendingPastes.length
+    ? pendingPastes
+    : hasCachedPasteUrls
+      ? [{ startIndex: 0, count: newUrls.length }]
+      : [];
+  const shuffledLoad = shuffleLoadedVideosForPlayback(newUrls, parsedLoad.metadata, pasteEventsSource);
 
   if(!newUrls.length){
     alert('No valid MP4 URLs found.');
@@ -2243,8 +2313,8 @@ loadVideosButton.addEventListener('click',()=>{
 
   document.querySelectorAll('video').forEach(v=>v.pause());
 
-  allVideoUrls = newUrls;
-  allVideoMetadata = (parsedLoad.metadata || []).map(meta => meta || {});
+  allVideoUrls = shuffledLoad.urls;
+  allVideoMetadata = shuffledLoad.metadata.map(meta => meta || {});
 
   while (allVideoMetadata.length < allVideoUrls.length) {
     allVideoMetadata.push({});
@@ -2254,16 +2324,7 @@ loadVideosButton.addEventListener('click',()=>{
   currentVideoIndex = 0;
 
   // This fixes the paperclip/paste counter showing 0.
-  if (pendingPastes.length) {
-    pasteEvents = pendingPastes.filter(event => event && event.count > 0);
-  } else if (hasCachedPasteUrls) {
-    pasteEvents = [{
-      startIndex: 0,
-      count: newUrls.length
-    }];
-  } else {
-    pasteEvents = [];
-  }
+  pasteEvents = shuffledLoad.pasteEvents;
 
   pendingPastes = [];
   currentPasteIndex = -1;
@@ -2589,6 +2650,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=25"></script>
+<script src="pong-sync.js?v=26"></script>
 </body>
 </html>
