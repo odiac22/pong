@@ -478,7 +478,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.46</div>
+  <div class="version-number">22.47</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -521,6 +521,9 @@ let mobilePasteSnapshotValue = '';
 let mobilePastePending = false;
 let lastHandledPasteText = '';
 let lastHandledPasteAt = 0;
+let pasteParseQueue = [];
+let pasteParseScheduled = false;
+let pasteParsePromises = [];
 
 const videoContainer = document.getElementById('video-container');
 const videoUrlsInput  = document.getElementById('video-urls');
@@ -834,6 +837,62 @@ function getPasteArtistLabel(parsedPaste) {
     .find(Boolean) || '';
 }
 
+function quickScanPaste(text) {
+  const source = String(text || '');
+  const lines = source.split('\n');
+  let count = 0;
+  let activeArtist = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+
+    if (!line) continue;
+
+    if (!activeArtist) {
+      const compactArtist = compactArtistLineToMeta(line);
+      if (compactArtist) {
+        activeArtist = compactArtist;
+      } else if (line.startsWith('#PONG_ARTIST ')) {
+        activeArtist = parsePongJsonLine(line, '#PONG_ARTIST ');
+      }
+    }
+
+    if (isVideoUrlLine(line)) {
+      count++;
+    }
+  }
+
+  return {
+    count,
+    artistLabel: getArtistDisplayName(activeArtist)
+  };
+}
+
+function createPendingPasteEvent(quickInfo) {
+  const event = {
+    startIndex: parsedVideoUrlsCache.length,
+    count: Number(quickInfo?.count || 0),
+    pending: true
+  };
+
+  pendingPastes.push(event);
+  syncPendingPasteCacheState();
+  updatePendingPasteButton();
+
+  console.log('[Paste] Queued event ' + pendingPastes.length + ': ~' + event.count + ' URLs');
+  return event;
+}
+
+function pasteSummaryText(event, quickInfo) {
+  const count = Number(quickInfo?.count || event?.count || 0);
+  const countText = count
+    ? `${count} video${count === 1 ? '' : 's'}`
+    : 'bundle';
+  const artistText = quickInfo?.artistLabel ? ` from ${quickInfo.artistLabel}` : '';
+
+  return `Cached paste ${pendingPastes.indexOf(event) + 1}: ${countText}${artistText}`;
+}
+
 function insertCachedPasteSummaryAtCursor(parsedPaste) {
   const urls = parsedPaste && Array.isArray(parsedPaste.urls) ? parsedPaste.urls : [];
   const artistLabel = getPasteArtistLabel(parsedPaste);
@@ -843,6 +902,91 @@ function insertCachedPasteSummaryAtCursor(parsedPaste) {
 
   insertTextAtVideoCursor(summary);
   lastVideoUrlsInputValue = videoUrlsInput.value || '';
+}
+
+function schedulePasteParseQueue() {
+  if (pasteParseScheduled) return;
+
+  pasteParseScheduled = true;
+
+  setTimeout(() => {
+    pasteParseScheduled = false;
+    runNextPasteParseJob();
+  }, 0);
+}
+
+function runNextPasteParseJob() {
+  const job = pasteParseQueue.shift();
+
+  if (!job) return;
+
+  const promise = new Promise(resolve => {
+    setTimeout(() => {
+      try {
+        const parsed = parsePastedVideoLines(job.text);
+        const urls = Array.isArray(parsed.urls) ? parsed.urls : [];
+        const metadata = Array.isArray(parsed.metadata) ? parsed.metadata : [];
+        const startIndex = parsedVideoUrlsCache.length;
+
+        if (urls.length) {
+          parsedVideoUrlsCache.push(...urls);
+          parsedVideoMetadataCache.push(...(metadata.length ? metadata : urls.map(() => ({}))));
+        }
+
+        job.event.startIndex = startIndex;
+        job.event.count = urls.length;
+        job.event.pending = false;
+        job.event.ready = true;
+
+        _prevUrlCount = parsedVideoUrlsCache.length;
+        parseCacheDirty = false;
+        syncPendingPasteCacheState();
+        updatePendingPasteButton();
+        captureOriginalPasteText(job.text);
+
+        console.log('[Paste Cache] Event ' + (pendingPastes.indexOf(job.event) + 1) + ': +' + urls.length + ' URLs at index ' + startIndex);
+      } finally {
+        resolve();
+      }
+    }, 0);
+  }).finally(() => {
+    pasteParsePromises = pasteParsePromises.filter(item => item !== promise);
+    schedulePasteParseQueue();
+  });
+
+  pasteParsePromises.push(promise);
+}
+
+async function flushPendingPasteParses() {
+  while (pasteParseQueue.length || pasteParsePromises.length) {
+    const active = pasteParsePromises.slice();
+
+    if (active.length) {
+      await Promise.all(active);
+    } else {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+}
+
+function queueCapturedPasteText(pastedText) {
+  const quickInfo = quickScanPaste(pastedText);
+  const event = createPendingPasteEvent(quickInfo);
+
+  insertTextAtVideoCursor(pasteSummaryText(event, quickInfo));
+
+  pasteParseQueue.push({
+    text: String(pastedText || ''),
+    event
+  });
+  schedulePasteParseQueue();
+
+  markPasteTextHandled(pastedText);
+  finishPasteInputState();
+
+  if (typeof showSortingIndicator === 'function') {
+    showSortingIndicator(`Cached paste ${pendingPastes.length}: ${quickInfo.count || 0} videos`);
+  }
 }
 
 function recordPasteEvent(parsedPaste) {
@@ -895,6 +1039,19 @@ function finishPasteInputState() {
 }
 
 function handleCapturedPasteText(pastedText) {
+  const quickInfo = quickScanPaste(pastedText);
+  const shouldUseFastQueue =
+    quickInfo.count > 0 ||
+    String(pastedText || '').length > 1000 ||
+    String(pastedText || '').includes('#PONG_') ||
+    String(pastedText || '').includes('#PA|') ||
+    String(pastedText || '').includes('#PV|');
+
+  if (shouldUseFastQueue) {
+    queueCapturedPasteText(pastedText);
+    return;
+  }
+
   const pastedParsed = parsePastedVideoLines(pastedText);
   const pastedUrls = pastedParsed.urls;
   const pasteEvent = recordPasteEvent(pastedParsed);
@@ -992,7 +1149,13 @@ videoUrlsInput.addEventListener('beforeinput', e => {
     return;
   }
 
-  if (!pastedText) return;
+  if (!pastedText) {
+    if (tryReadClipboardPaste()) {
+      e.preventDefault();
+      return;
+    }
+    return;
+  }
 
   e.preventDefault();
   isHandlingPaste = true;
@@ -1010,24 +1173,31 @@ videoUrlsInput.addEventListener('input', e => {
   const currentValue = videoUrlsInput.value || '';
   const snapshotValue = mobilePastePending ? mobilePasteSnapshotValue : lastVideoUrlsInputValue;
   const insertedText = getInsertedText(snapshotValue, currentValue);
-  const parsedInserted = parsePastedVideoLines(insertedText);
+  const quickInserted = quickScanPaste(insertedText);
   const looksLikeMobilePaste =
     e.inputType === 'insertFromPaste' ||
     mobilePastePending ||
-    (parsedInserted.urls.length > 0 && (insertedText.length > 120 || insertedText.includes('\n') || insertedText.includes('#PONG_')));
+    (quickInserted.count > 0 && (insertedText.length > 120 || insertedText.includes('\n') || insertedText.includes('#PONG_') || insertedText.includes('#PA|') || insertedText.includes('#PV|')));
 
   if (looksLikeMobilePaste) {
-    recordPasteEvent(parsedInserted);
+    const event = createPendingPasteEvent(quickInserted);
 
-    if (parsedInserted.urls.length) {
-      const summary = `Cached paste ${pendingPastes.length}: ${parsedInserted.urls.length} video${parsedInserted.urls.length === 1 ? '' : 's'}${getPasteArtistLabel(parsedInserted) ? ` from ${getPasteArtistLabel(parsedInserted)}` : ''}`;
-      replaceInsertedText(snapshotValue, currentValue, summary);
+    if (quickInserted.count) {
+      replaceInsertedText(snapshotValue, currentValue, pasteSummaryText(event, quickInserted));
+      pasteParseQueue.push({
+        text: String(insertedText || ''),
+        event
+      });
+      schedulePasteParseQueue();
       parseCacheDirty = false;
 
       if (typeof showSortingIndicator === 'function') {
-        showSortingIndicator(`Cached paste ${pendingPastes.length}: ${parsedInserted.urls.length} videos`);
+        showSortingIndicator(`Cached paste ${pendingPastes.length}: ${quickInserted.count} videos`);
       }
     } else {
+      event.pending = false;
+      event.ready = true;
+      syncPendingPasteCacheState();
       parseCacheDirty = true;
       lastVideoUrlsInputValue = currentValue;
 
@@ -2411,7 +2581,12 @@ function createGearButton(){
 }
 
 // ─── Load videos ──────────────────────────────────────────────────────────────
-loadVideosButton.addEventListener('click',()=>{
+loadVideosButton.addEventListener('click', async ()=>{
+  if (pasteParseQueue.length || pasteParsePromises.length) {
+    showSortingIndicator('Finishing paste cache...');
+    await flushPendingPasteParses();
+  }
+
   const hasCachedPasteUrls = parsedVideoUrlsCache.length > 0;
 
   const parsedLoad = hasCachedPasteUrls
@@ -2776,6 +2951,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=39"></script>
+<script src="pong-sync.js?v=40"></script>
 </body>
 </html>
