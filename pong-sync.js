@@ -2038,7 +2038,7 @@
       : null;
   }
 
-  const REPAIR_ITEM_TIMEOUT_MS = 15000;
+  const REPAIR_ITEM_TIMEOUT_MS = 60000;
   const DIRECT_REPAIR_ITEM_TIMEOUT_MS = 60000;
   const DIRECT_REPAIR_POST_CONCURRENCY = 20;
   const DIRECT_REPAIR_MAX_RETRIES = 2;
@@ -2831,7 +2831,10 @@
     state.itemStartedAt = Date.now();
     writeRepairLog(`Start ${item.phase} ${state.index + 1}/${state.queue.length}: ${item.label}`);
 
-    try {
+    if (state.directRepairDisabled) {
+      writeRepairLog('Direct browser scrape skipped; using userscript worker');
+    } else {
+      try {
       updateRepairQueuePanel(`Direct scrape: ${item.label}`);
       writeRepairLog(`Direct browser scrape starting: ${item.url}`);
       const data = await directRepairScrapeItem(item);
@@ -2854,11 +2857,17 @@
 
       writeRepairLog(`Direct scrape returned 0 videos for ${item.label}`);
       writeRepairLog('Falling back to visible repair tab worker');
-    } catch (e) {
-      if (!iframeRepairState || iframeRepairState.id !== state.id || !state.active) return;
+      } catch (e) {
+        if (!iframeRepairState || iframeRepairState.id !== state.id || !state.active) return;
 
-      writeRepairLog(`Direct scrape failed: ${e?.message || e}`);
-      writeRepairLog('Falling back to visible repair tab worker');
+        if (/failed to fetch|cors/i.test(String(e?.message || e))) {
+          state.directRepairDisabled = true;
+          writeRepairLog('Direct browser scrape disabled for this run after fetch/CORS failure');
+        }
+
+        writeRepairLog(`Direct scrape failed: ${e?.message || e}`);
+        writeRepairLog('Falling back to visible repair tab worker');
+      }
     }
 
     if (!navigateRepairWorker(item)) {
@@ -2904,6 +2913,7 @@
       startedAt: Date.now(),
       itemStartedAt: 0,
       logLines: [],
+      directRepairDisabled: false,
       workerWindow
     };
 
@@ -2921,9 +2931,23 @@
     const state = iframeRepairState;
     const data = event.data || {};
 
-    if (!state || !state.active || data.type !== 'PONG_REPAIR_RESULT') return;
+    if (!state || !state.active) return;
 
     const current = state.queue[state.index];
+
+    if (data.type === 'PONG_REPAIR_HELLO') {
+      if (!current || data.repairId !== current.id) {
+        writeRepairLog(`Ignored userscript hello for ${data.repairId || 'missing id'} while waiting for ${current?.id || 'none'}`);
+        return;
+      }
+
+      writeRepairLog(`Userscript detected for ${current.label}; scraping started`);
+      updateRepairQueuePanel(`Userscript scraping: ${current.label}`);
+      return;
+    }
+
+    if (data.type !== 'PONG_REPAIR_RESULT') return;
+
     if (!current || data.repairId !== current.id) {
       writeRepairLog(`Ignored repair message for ${data.repairId || 'missing id'} while waiting for ${current?.id || 'none'}`);
       return;
