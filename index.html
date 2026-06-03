@@ -478,7 +478,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.51</div>
+  <div class="version-number">22.52</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1381,17 +1381,25 @@ function updateSaveCounters() {
   if (artistCount) artistCount.textContent = Object.keys(savedArtists).length;
 }
 
-function getCurrentVideoWrapper() {
-  if (window.currentlyPlayingVideo) {
-    const playingWrapper = window.currentlyPlayingVideo.closest('.video-wrapper');
-    if (playingWrapper) return playingWrapper;
-  }
-
+function getVisibleCurrentVideoWrapper() {
   return (
     document.querySelector('.video-wrapper.most-visible') ||
     document.querySelector('.video-wrapper[data-playable="true"]') ||
     document.querySelector(`.video-wrapper[data-index="${currentVideoIndex}"]`)
   );
+}
+
+function getCurrentVideoWrapper() {
+  const visibleWrapper = getVisibleCurrentVideoWrapper();
+
+  if (visibleWrapper) return visibleWrapper;
+
+  if (window.currentlyPlayingVideo) {
+    const playingWrapper = window.currentlyPlayingVideo.closest('.video-wrapper');
+    if (playingWrapper) return playingWrapper;
+  }
+
+  return null;
 }
 
 function getCurrentVideoUrl() {
@@ -2162,7 +2170,6 @@ function createVideoElements() {
 
     video.addEventListener('play', () => {
       prepareVideoForPlayback(video);
-      markVideoPlayIntent(wrapper, video);
       setTimeout(()=>{ if(video.muted){video.muted=false;video.volume=1.0;} },100);
     });
     video.addEventListener('pause', () => { wrapper.classList.remove('video-playing'); if(window.currentlyPlayingVideo===video) window.currentlyPlayingVideo=null; loadingIndicator.style.display='none'; });
@@ -2171,20 +2178,19 @@ function createVideoElements() {
     video.addEventListener('canplay', () => { markVideoAutoRetryDone(video, 'canplay'); loadingIndicator.style.display='none'; });
     video.addEventListener('playing', () => {
       markVideoAutoRetryDone(video, 'playing');
-      markVideoPlayIntent(wrapper, video);
+      markVideoViewed(wrapper);
     });
     video.addEventListener('loadedmetadata', () => { updateVideoReadyLoader(video); });
     video.addEventListener('playing', () => { loadingIndicator.style.display='none'; if(video.muted){video.muted=false;video.volume=1.0;audioBtn.innerHTML='🔊';audioBtn.setAttribute('data-muted','false');} });
     video.addEventListener('timeupdate', () => {
       if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`;
       const viewThreshold = video.duration ? 0.01 : 0.75;
-      if (video.currentTime >= viewThreshold) markVideoViewed(wrapper);
+      if (!video.paused && video.currentTime >= viewThreshold) markVideoViewed(wrapper);
     });
     video.addEventListener('loadedmetadata', () => {
       const metadataIndex = Number(wrapper.dataset.index || index);
       durationText.textContent=formatTime(video.duration);
       videoMetadata[metadataIndex]={...videoMetadata[metadataIndex],duration:video.duration||0};
-      if (wrapper.dataset.playIntent === 'true') markVideoPlayIntent(wrapper, video);
       updateVideoReadyLoader(video);
     });
     video.addEventListener('error', () => { loadingIndicator.style.display='none'; updateVideoReadyLoader(video); });
@@ -2358,10 +2364,6 @@ function markVideoPlayIntent(wrapper, video) {
   if (!wrapper) return;
 
   wrapper.dataset.playIntent = 'true';
-
-  if (hasVideoDuration(video)) {
-    markVideoViewed(wrapper);
-  }
 }
 
 function isWrapperViewed(wrapper) {
@@ -3042,6 +3044,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=41"></script>
+<script src="pong-sync.js?v=42"></script>
 </body>
 </html>

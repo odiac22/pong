@@ -1395,7 +1395,21 @@
     }
   }
 
+  function getVisibleCurrentVideoWrapperOverride() {
+    return (
+      document.querySelector('.video-wrapper.most-visible') ||
+      document.querySelector('.video-wrapper[data-playable="true"]') ||
+      document.querySelector(`.video-wrapper[data-index="${currentVideoIndex}"]`)
+    );
+  }
+
   function getCurrentVideoWrapperOverride() {
+    const visibleWrapper = getVisibleCurrentVideoWrapperOverride();
+
+    if (visibleWrapper) {
+      return visibleWrapper;
+    }
+
     if (window.currentlyPlayingVideo) {
       const playingWrapper = window.currentlyPlayingVideo.closest('.video-wrapper');
 
@@ -1404,11 +1418,7 @@
       }
     }
 
-    return (
-      document.querySelector('.video-wrapper.most-visible') ||
-      document.querySelector('.video-wrapper[data-playable="true"]') ||
-      document.querySelector(`.video-wrapper[data-index="${currentVideoIndex}"]`)
-    );
+    return null;
   }
 
   function getCurrentVideoUrlOverride() {
@@ -1558,8 +1568,8 @@
     return added;
   }
 
-  function getCurrentGlobalVideoIndex() {
-    const wrapper = getCurrentVideoWrapperOverride();
+  function getCurrentGlobalVideoIndex(wrapperOverride) {
+    const wrapper = wrapperOverride || getCurrentVideoWrapperOverride();
 
     if (!wrapper) return -1;
 
@@ -1567,13 +1577,23 @@
 
     if (isNaN(localIndex)) return -1;
 
-    const loadedBatchIndex = Math.max(0, currentBatch - 1);
+    const hasRange = typeof activePlaybackRange === 'object' &&
+      activePlaybackRange &&
+      Number.isInteger(activePlaybackRange.start) &&
+      Number.isInteger(activePlaybackRange.end) &&
+      activePlaybackRange.end > activePlaybackRange.start;
+    const rangeOffset = hasRange
+      ? Math.max(0, Number(activePlaybackRange.currentOffset || 0))
+      : 0;
+    const batchStartIndex = hasRange
+      ? activePlaybackRange.start + rangeOffset
+      : Math.max(0, currentBatch - 1) * BATCH_SIZE;
 
-    return loadedBatchIndex * BATCH_SIZE + localIndex;
+    return batchStartIndex + localIndex;
   }
 
-  function getCurrentPasteBundleInfo() {
-    const globalIndex = getCurrentGlobalVideoIndex();
+  function getCurrentPasteBundleInfo(wrapperOverride) {
+    const globalIndex = getCurrentGlobalVideoIndex(wrapperOverride);
 
     if (globalIndex < 0) return null;
 
@@ -1626,8 +1646,8 @@
     });
   }
 
-  async function saveCurrentVideoLinkOverride() {
-    const url = getCurrentVideoUrlOverride();
+  async function saveCurrentVideoLinkOverride(capturedUrl) {
+    const url = capturedUrl || getCurrentVideoUrlOverride();
 
     if (!url) {
       showMsg('No current video found');
@@ -1656,8 +1676,8 @@
     }
   }
 
-  async function saveCurrentArtistVideosOverride() {
-    const bundleInfo = getCurrentPasteBundleInfo();
+  async function saveCurrentArtistVideosOverride(capturedBundleInfo) {
+    const bundleInfo = capturedBundleInfo || getCurrentPasteBundleInfo();
 
     if (!bundleInfo || !bundleInfo.urls || !bundleInfo.urls.length) {
       showMsg('No paperclip bundle found');
@@ -3220,9 +3240,27 @@
 
     let artistHoldTimer = null;
     let artistLongPress = false;
+    let artistSaveTarget = null;
+    let artistTouchStart = null;
+    let artistTouchMoved = false;
 
-    function startArtistHold() {
+    function captureCurrentSaveTarget() {
+      const wrapper = getCurrentVideoWrapperOverride();
+
+      return {
+        wrapper,
+        url: getCurrentVideoUrlOverride(),
+        bundleInfo: getCurrentPasteBundleInfo(wrapper)
+      };
+    }
+
+    function startArtistHold(e) {
       artistLongPress = false;
+      artistTouchMoved = false;
+      artistSaveTarget = captureCurrentSaveTarget();
+      artistTouchStart = e && e.touches && e.touches[0]
+        ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
+        : null;
       clearTimeout(artistHoldTimer);
 
       artistHoldTimer = setTimeout(() => {
@@ -3231,22 +3269,44 @@
       }, 2000);
     }
 
+    function moveArtistTouch(e) {
+      if (!artistTouchStart || !e.touches || !e.touches[0]) return;
+
+      const dx = e.touches[0].clientX - artistTouchStart.x;
+      const dy = e.touches[0].clientY - artistTouchStart.y;
+
+      if (Math.hypot(dx, dy) > 14) {
+        artistTouchMoved = true;
+        clearTimeout(artistHoldTimer);
+      }
+    }
+
     function endArtistHold(e) {
       clearTimeout(artistHoldTimer);
 
       if (e) {
-        e.preventDefault();
+        if (!artistTouchMoved) e.preventDefault();
         e.stopPropagation();
       }
 
-      if (!artistLongPress) {
-        saveCurrentArtistVideosOverride();
+      if (!artistLongPress && !artistTouchMoved) {
+        saveCurrentArtistVideosOverride(artistSaveTarget && artistSaveTarget.bundleInfo);
       }
+
+      artistSaveTarget = null;
+      artistTouchStart = null;
+      artistTouchMoved = false;
     }
 
     artistBtn.addEventListener('touchstart', startArtistHold, { passive: true });
+    artistBtn.addEventListener('touchmove', moveArtistTouch, { passive: true });
     artistBtn.addEventListener('touchend', endArtistHold);
-    artistBtn.addEventListener('touchcancel', () => clearTimeout(artistHoldTimer));
+    artistBtn.addEventListener('touchcancel', () => {
+      clearTimeout(artistHoldTimer);
+      artistSaveTarget = null;
+      artistTouchStart = null;
+      artistTouchMoved = false;
+    });
     artistBtn.addEventListener('mousedown', startArtistHold);
     artistBtn.addEventListener('mouseup', endArtistHold);
     artistBtn.addEventListener('mouseleave', () => clearTimeout(artistHoldTimer));
@@ -3264,9 +3324,17 @@
 
     let videoHoldTimer = null;
     let videoLongPress = false;
+    let videoSaveTarget = null;
+    let videoTouchStart = null;
+    let videoTouchMoved = false;
 
-    function startVideoHold() {
+    function startVideoHold(e) {
       videoLongPress = false;
+      videoTouchMoved = false;
+      videoSaveTarget = captureCurrentSaveTarget();
+      videoTouchStart = e && e.touches && e.touches[0]
+        ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
+        : null;
       clearTimeout(videoHoldTimer);
 
       videoHoldTimer = setTimeout(() => {
@@ -3275,22 +3343,44 @@
       }, 2000);
     }
 
+    function moveVideoTouch(e) {
+      if (!videoTouchStart || !e.touches || !e.touches[0]) return;
+
+      const dx = e.touches[0].clientX - videoTouchStart.x;
+      const dy = e.touches[0].clientY - videoTouchStart.y;
+
+      if (Math.hypot(dx, dy) > 14) {
+        videoTouchMoved = true;
+        clearTimeout(videoHoldTimer);
+      }
+    }
+
     function endVideoHold(e) {
       clearTimeout(videoHoldTimer);
 
       if (e) {
-        e.preventDefault();
+        if (!videoTouchMoved) e.preventDefault();
         e.stopPropagation();
       }
 
-      if (!videoLongPress) {
-        saveCurrentVideoLinkOverride();
+      if (!videoLongPress && !videoTouchMoved) {
+        saveCurrentVideoLinkOverride(videoSaveTarget && videoSaveTarget.url);
       }
+
+      videoSaveTarget = null;
+      videoTouchStart = null;
+      videoTouchMoved = false;
     }
 
     videoBtn.addEventListener('touchstart', startVideoHold, { passive: true });
+    videoBtn.addEventListener('touchmove', moveVideoTouch, { passive: true });
     videoBtn.addEventListener('touchend', endVideoHold);
-    videoBtn.addEventListener('touchcancel', () => clearTimeout(videoHoldTimer));
+    videoBtn.addEventListener('touchcancel', () => {
+      clearTimeout(videoHoldTimer);
+      videoSaveTarget = null;
+      videoTouchStart = null;
+      videoTouchMoved = false;
+    });
     videoBtn.addEventListener('mousedown', startVideoHold);
     videoBtn.addEventListener('mouseup', endVideoHold);
     videoBtn.addEventListener('mouseleave', () => clearTimeout(videoHoldTimer));
