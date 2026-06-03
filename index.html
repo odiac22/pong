@@ -26,25 +26,18 @@
     }
     #video-container { background: #000;
       width: 100%; height: 100%; position: fixed; top: 0; left: 0;
-      overflow: hidden;
+      scroll-snap-type: y mandatory; overflow-y: scroll;
       -webkit-overflow-scrolling: touch;
-      will-change: transform; overscroll-behavior: contain;
+      will-change: scroll-position; overscroll-behavior: contain;
     }
     .video-wrapper {
-      width: 100%; height: 100vh; position: absolute; inset: 0;
+      width: 100%; height: 100vh; position: relative;
+      scroll-snap-align: start; scroll-snap-stop: always;
       display: flex; align-items: center; justify-content: center;
-      will-change: transform, opacity; contain: layout size;
-      touch-action: none; -webkit-tap-highlight-color: transparent;
+      will-change: transform; contain: layout size;
+      touch-action: manipulation; -webkit-tap-highlight-color: transparent;
       cursor: pointer; overflow: hidden;
-      opacity: 0; pointer-events: none; transform: translateY(100%);
-      transition: transform 0.24s ease, opacity 0.2s ease;
     }
-    .video-wrapper.deck-active {
-      opacity: 1; pointer-events: auto; transform: translateY(0); z-index: 3;
-    }
-    .video-wrapper.deck-before { transform: translateY(-100%); z-index: 1; }
-    .video-wrapper.deck-after { transform: translateY(100%); z-index: 1; }
-    .video-wrapper.deck-no-transition { transition: none; }
     .video-wrapper.video-playing { box-shadow: inset 0 0 0 2px rgba(103,232,249,0.38); }
     .video-wrapper[data-playable="true"], .most-visible { box-shadow: inset 0 0 0 2px rgba(34,197,94,0.55); }
     .video-player {
@@ -56,7 +49,7 @@
     .tap-area {
       position: absolute; top: 0; left: 0; right: 0; bottom: 30px;
       z-index: 5; background: transparent; cursor: pointer;
-      touch-action: none; -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation; -webkit-tap-highlight-color: transparent;
       pointer-events: auto; user-select: none; -webkit-user-select: none;
     }
     .video-wrapper:not(.video-playing) .tap-area::before {
@@ -191,7 +184,7 @@
       z-index: 30; pointer-events: none; transition: opacity 0.3s ease;
     }
     .time-indicator.fade-out { opacity: 0; transition: opacity 0.5s ease; }
-    .blank-space { display: none; }
+    .blank-space { height: 2px; width: 100%; background: rgba(255,255,255,0.2); }
     .controls-overlay {
       position: fixed; bottom: 74px; left: 0; width: 100%;
       display: flex; justify-content: center; z-index: 100;
@@ -485,7 +478,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.50</div>
+  <div class="version-number">22.51</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -503,10 +496,7 @@
 let videoUrls = [];
 let allVideoUrls = [];
 let allVideoMetadata = [];
-let videoGlobalIndices = [];
 let currentVideoIndex = 0;
-let deckCurrentIndex = 0;
-let deckUserNavigated = false;
 let isControlsVisible = true;
 let videoMetadata = [];
 let currentBatch = 0;
@@ -1320,7 +1310,6 @@ function loadSession() {
     allVideoMetadata = Array.isArray(s.allVideoMetadata) ? s.allVideoMetadata : [];
     currentBatch = s.currentBatch || 0;
     currentVideoIndex = s.currentVideoIndex || 0;
-    deckCurrentIndex = currentVideoIndex || 0;
     pasteEvents = s.pasteEvents || [];
     activePlaybackRange = s.activePlaybackRange || null;
     return true;
@@ -1732,10 +1721,7 @@ function reorderAndRedisplayVideos(newOrder) {
   if (window.currentlyPlayingVideo && !window.currentlyPlayingVideo.paused) window.currentlyPlayingVideo.pause();
   videoUrls = newOrder.map(i => videoUrls[i]);
   videoMetadata = newOrder.map(i => videoMetadata[i] || {});
-  videoGlobalIndices = newOrder.map(i => videoGlobalIndices[i]).filter(index => Number.isInteger(index));
-  createVideoElements();
-  createUnwatchedVideosButton();
-  setDeckIndex(0, { immediate: true, skipRecycle: true });
+  createVideoElements(); createUnwatchedVideosButton(); videoContainer.scrollTo(0,0);
 }
 
 function getAdaptiveScrubTime(startTime, dx, duration, width) {
@@ -1884,9 +1870,6 @@ function updateVideoReadyLoader(video, forceReady = false) {
         if (loader.classList.contains('ready')) loader.style.display = 'none';
       }, 200);
     }
-
-    setTimeout(() => maybeRecycleReadyDeckSkippedVideo(wrapper), 0);
-    setTimeout(() => maybePromoteFirstReadyVideo(wrapper), 0);
   } else if (loader) {
     loader.style.display = '';
     loader.classList.remove('ready');
@@ -1989,151 +1972,6 @@ function startVisibleBatchAutoRetry() {
 }
 
 // ─── Video elements ───────────────────────────────────────────────────────────
-function getVisibleBatchWrappers() {
-  return Array.from(document.querySelectorAll('.video-wrapper'));
-}
-
-function getActiveBatchTotal() {
-  if (activePlaybackRange && Number.isInteger(activePlaybackRange.start) && Number.isInteger(activePlaybackRange.end)) {
-    return Math.max(0, activePlaybackRange.end - activePlaybackRange.start);
-  }
-
-  return allVideoUrls.length;
-}
-
-function getActiveBatchNumber() {
-  return Math.max(1, currentBatch || 1);
-}
-
-function getActiveBatchCount() {
-  return Math.max(1, Math.ceil(getActiveBatchTotal() / BATCH_SIZE));
-}
-
-function updateDeckCounter() {
-  const counter = document.getElementById('video-counter');
-  if (!counter) return;
-
-  counter.textContent = `${deckCurrentIndex + 1}/${videoUrls.length} (Batch ${getActiveBatchNumber()}/${getActiveBatchCount()})`;
-}
-
-function applyDeckClasses() {
-  const wrappers = getVisibleBatchWrappers();
-
-  wrappers.forEach(wrapper => {
-    const index = Number(wrapper.dataset.index || 0);
-    const isActive = index === deckCurrentIndex;
-
-    wrapper.classList.toggle('deck-active', isActive);
-    wrapper.classList.toggle('deck-before', index < deckCurrentIndex);
-    wrapper.classList.toggle('deck-after', index > deckCurrentIndex);
-    wrapper.classList.toggle('most-visible', isActive);
-    wrapper.setAttribute('data-playable', isActive ? 'true' : 'false');
-
-    const video = wrapper.querySelector('video');
-    if (video && !isActive && !video.paused) video.pause();
-  });
-
-  const activeWrapper = wrappers[deckCurrentIndex];
-  if (activeWrapper) tuneVideoPreloadAround(activeWrapper);
-  updateDeckCounter();
-}
-
-function recycleDeckSkippedVideo(oldIndex) {
-  const wrapper = document.querySelector(`.video-wrapper[data-index="${oldIndex}"]`);
-
-  if (!wrapper || isWrapperViewed(wrapper)) return { moved: false };
-
-  if (!isWrapperReady(wrapper)) {
-    wrapper.dataset.deckSkipped = 'true';
-    return { moved: false };
-  }
-
-  return { moved: moveSkippedVideoToBottom(wrapper) };
-}
-
-function maybeRecycleReadyDeckSkippedVideo(wrapper) {
-  if (!wrapper || wrapper.dataset.deckSkipped !== 'true') return;
-  if (wrapper.parentNode !== videoContainer) return;
-  if (isWrapperViewed(wrapper) || !isWrapperReady(wrapper)) return;
-
-  const index = Number(wrapper.dataset.index || -1);
-  if (index < 0 || index === deckCurrentIndex) return;
-
-  const moved = moveSkippedVideoToBottom(wrapper);
-  if (!moved) return;
-
-  if (index < deckCurrentIndex) deckCurrentIndex = Math.max(0, deckCurrentIndex - 1);
-  currentVideoIndex = deckCurrentIndex;
-  applyDeckClasses();
-}
-
-function maybePromoteFirstReadyVideo(wrapper) {
-  if (deckUserNavigated || !wrapper || wrapper.parentNode !== videoContainer) return;
-  if (!isWrapperReady(wrapper)) return;
-
-  const activeWrapper = document.querySelector(`.video-wrapper[data-index="${deckCurrentIndex}"]`);
-  if (!activeWrapper || isWrapperReady(activeWrapper) || activeWrapper.dataset.playIntent === 'true') return;
-
-  const readyIndex = Number(wrapper.dataset.index || -1);
-  if (readyIndex >= 0 && readyIndex !== deckCurrentIndex) {
-    setDeckIndex(readyIndex, { skipRecycle: true });
-  }
-}
-
-function setDeckIndex(nextIndex, options = {}) {
-  if (!videoUrls.length) return;
-
-  const clampedIndex = Math.max(0, Math.min(videoUrls.length - 1, Number(nextIndex) || 0));
-  const previousIndex = deckCurrentIndex;
-
-  if (!options.skipRecycle && clampedIndex !== previousIndex) {
-    const recycleResult = recycleDeckSkippedVideo(previousIndex);
-    deckCurrentIndex = recycleResult.moved && clampedIndex > previousIndex
-      ? Math.max(0, clampedIndex - 1)
-      : clampedIndex;
-  } else {
-    deckCurrentIndex = clampedIndex;
-  }
-
-  currentVideoIndex = deckCurrentIndex;
-
-  if (window.currentlyPlayingVideo && !window.currentlyPlayingVideo.paused) {
-    window.currentlyPlayingVideo.pause();
-  }
-
-  if (options.immediate) {
-    getVisibleBatchWrappers().forEach(wrapper => {
-      wrapper.classList.add('deck-no-transition');
-      setTimeout(() => wrapper.classList.remove('deck-no-transition'), 40);
-    });
-  }
-
-  applyDeckClasses();
-  saveSession();
-
-  if (window.autoplayEnabled) {
-    const activeVideo = document.querySelector(`.video-wrapper[data-index="${deckCurrentIndex}"] video`);
-    if (activeVideo && isVideoReadyForInitialPlayback(activeVideo)) playVideoCleanly(activeVideo);
-  }
-}
-
-function goToDeckOffset(offset) {
-  const nextIndex = deckCurrentIndex + offset;
-
-  if (nextIndex < 0) {
-    showSortingIndicator('First video');
-    return;
-  }
-
-  if (nextIndex >= videoUrls.length) {
-    showSortingIndicator('End of 20');
-    return;
-  }
-
-  deckUserNavigated = true;
-  setDeckIndex(nextIndex);
-}
-
 function createVideoElements() {
   stopVisibleBatchAutoRetry();
   videoContainer.innerHTML = '';
@@ -2250,30 +2088,18 @@ function createVideoElements() {
     const tapArea = document.createElement('div');
     tapArea.className = 'tap-area';
 
-    let startX=0, startY=0, startTime=0, isDragging=false, isDeckSwiping=false;
+    let startX=0, startTime=0, isDragging=false;
     let lastTapTime=0, lastTapX=0;
 
     tapArea.addEventListener('touchstart', e => {
       if (e.target.closest('.video-progress-container') || e.target.tagName==='BUTTON') return;
-      startX = e.touches[0].clientX;
-      startY = e.touches[0].clientY;
-      startTime = video.currentTime;
-      isDragging = false;
-      isDeckSwiping = false;
+      startX = e.touches[0].clientX; startTime = video.currentTime; isDragging = false;
     },{passive:true});
 
     tapArea.addEventListener('touchmove', e => {
       if (e.target.closest('.video-progress-container')) return;
       const dx = e.touches[0].clientX - startX;
-      const dy = e.touches[0].clientY - startY;
-
-      if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx) * 0.8) {
-        isDeckSwiping = true;
-        e.preventDefault();
-        return;
-      }
-
-      if (!isDeckSwiping && Math.abs(dx) > 8) {
+      if (Math.abs(dx) > 8) {
         isDragging = true;
         progressContainer.style.opacity = '1';
         const newTime = getAdaptiveScrubTime(startTime, dx, video.duration || 0, wrapper.offsetWidth);
@@ -2293,30 +2119,6 @@ function createVideoElements() {
     },{passive:false});
 
     tapArea.addEventListener('touchend', e => {
-      const endY = e.changedTouches && e.changedTouches.length ? e.changedTouches[0].clientY : startY;
-      const endX = e.changedTouches && e.changedTouches.length ? e.changedTouches[0].clientX : startX;
-      const totalDy = endY - startY;
-      const totalDx = endX - startX;
-
-      if (isDeckSwiping) {
-        isDeckSwiping = false;
-
-        if (Math.abs(totalDy) > 14) {
-          goToDeckOffset(totalDy < 0 ? 1 : -1);
-        }
-
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-
-      if (!isDragging && Math.abs(totalDy) > 18 && Math.abs(totalDy) > Math.abs(totalDx) * 0.8) {
-        goToDeckOffset(totalDy < 0 ? 1 : -1);
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-
       if (isDragging) {
         isDragging = false;
         const pt = parseFloat(wrapper.dataset.pendingTime);
@@ -2398,6 +2200,9 @@ function createVideoElements() {
     wrapper.appendChild(tapArea);
     videoContainer.appendChild(wrapper);
 
+    if (index < videoUrls.length-1) {
+      const spacer = document.createElement('div'); spacer.className='blank-space'; videoContainer.appendChild(spacer);
+    }
   });
 
   updateNextBatchButton();
@@ -2419,13 +2224,80 @@ function setupVisibilityObserver() {
     document.body.appendChild(counter);
   }
 
-  deckCurrentIndex = Math.max(0, Math.min(videoUrls.length - 1, currentVideoIndex || 0));
-  setDeckIndex(deckCurrentIndex, { immediate: true, skipRecycle: true });
+  counter.textContent = `1/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
+
+  function getVisibleRatio(wrapper) {
+    const rect = wrapper.getBoundingClientRect();
+    const visibleTop = Math.max(rect.top, 0);
+    const visibleBottom = Math.min(rect.bottom, window.innerHeight || document.documentElement.clientHeight);
+    const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+    return rect.height ? Math.max(0, Math.min(1, visibleHeight / rect.height)) : 0;
+  }
+
+  function updateMostVisibleVideo() {
+    let mostVisible = null;
+    let highestVis = 0;
+
+    wrappers.forEach(w => {
+      const ratio = getVisibleRatio(w);
+      const v = w.querySelector('video');
+
+      if (v && ratio < 0.03 && !v.paused) {
+        v.pause();
+        w.classList.remove('video-playing');
+      }
+
+      if (ratio > highestVis) {
+        highestVis = ratio;
+        mostVisible = w;
+      }
+    });
+
+    if (!mostVisible || highestVis < 0.5) return;
+
+    wrappers.forEach(w => {
+      w.classList.toggle('most-visible', w === mostVisible);
+      w.setAttribute('data-playable', w === mostVisible ? 'true' : 'false');
+    });
+
+    tuneVideoPreloadAround(mostVisible);
+    currentVideoIndex = parseInt(mostVisible.dataset.index || 0);
+    counter.textContent = `${currentVideoIndex+1}/${videoUrls.length} (Batch ${currentBatch}/${Math.ceil(allVideoUrls.length/BATCH_SIZE)})`;
+    saveSession();
+
+    const mostVisibleVideo = mostVisible.querySelector('video');
+
+    if (highestVis > 0.7) {
+      wrappers.forEach(w => {
+        if (w === mostVisible) return;
+        const v = w.querySelector('video');
+        if (v && !v.paused) v.pause();
+      });
+    }
+
+    if (window.autoplayEnabled && highestVis > 0.85 && mostVisibleVideo && mostVisibleVideo.paused) {
+      playVideoCleanly(mostVisibleVideo);
+    }
+  }
+
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      const v=entry.target.querySelector('video');
+      if(v&&!entry.isIntersecting&&entry.intersectionRatio<0.03&&!v.paused){
+        v.pause();
+        entry.target.classList.remove('video-playing');
+      }
+    });
+    updateMostVisibleVideo();
+  },{root:null,rootMargin:'0px',threshold:[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]});
+
+  wrappers.forEach(w=>observer.observe(w));
+  updateMostVisibleVideo();
 }
 
 // ─── Batching ─────────────────────────────────────────────────────────────────
 function loadNextBatch(restoreIndex) {
-  videoUrls=[]; videoMetadata=[]; videoGlobalIndices=[];
+  videoUrls=[]; videoMetadata=[];
   const hasRange = activePlaybackRange &&
     Number.isInteger(activePlaybackRange.start) &&
     Number.isInteger(activePlaybackRange.end) &&
@@ -2439,7 +2311,6 @@ function loadNextBatch(restoreIndex) {
   for(let i=start;i<end;i++) {
     videoUrls.push(allVideoUrls[i]);
     videoMetadata.push(allVideoMetadata[i] || {});
-    videoGlobalIndices.push(i);
   }
 
   if (hasRange) {
@@ -2450,9 +2321,6 @@ function loadNextBatch(restoreIndex) {
     currentBatch++;
   }
 
-  deckCurrentIndex = Math.max(0, Math.min(videoUrls.length - 1, Number(restoreIndex || 0)));
-  currentVideoIndex = deckCurrentIndex;
-  deckUserNavigated = false;
   saveSession();
 
   if (videoUrls.length>0) {
@@ -2463,9 +2331,12 @@ function loadNextBatch(restoreIndex) {
       createUnwatchedVideosButton();
 
       if (restoreIndex != null) {
-        setTimeout(() => setDeckIndex(restoreIndex, { immediate: true, skipRecycle: true }), 200);
+        setTimeout(() => {
+          const tw = document.querySelector(`.video-wrapper[data-index="${restoreIndex}"]`);
+          if (tw) tw.scrollIntoView({ behavior: 'auto', block: 'start' });
+        }, 200);
       } else {
-        setDeckIndex(0, { immediate: true, skipRecycle: true });
+        videoContainer.scrollTo(0,0);
       }
     },300);
   } else {
@@ -2521,23 +2392,42 @@ function renumberVisibleVideoWrappers() {
     }
   });
 
-  deckCurrentIndex = Math.max(0, Math.min(videoUrls.length - 1, deckCurrentIndex));
-  currentVideoIndex = deckCurrentIndex;
   updateBatchReadyCounter();
-  applyDeckClasses();
 }
 
 function moveSkippedVideoToBottom(wrapper) {
   const oldIndex = Number(wrapper && wrapper.dataset.index);
 
-  if (!wrapper || wrapper.parentNode !== videoContainer) return false;
   if (!wrapper || !Number.isInteger(oldIndex) || oldIndex < 0 || oldIndex >= videoUrls.length - 1) return false;
+
+  const hasRange = activePlaybackRange &&
+    Number.isInteger(activePlaybackRange.start) &&
+    Number.isInteger(activePlaybackRange.end) &&
+    activePlaybackRange.end > activePlaybackRange.start;
+  const rangeOffset = hasRange
+    ? Math.max(0, Number(activePlaybackRange.currentOffset || 0))
+    : 0;
+  const batchStartIndex = hasRange
+    ? activePlaybackRange.start + rangeOffset
+    : Math.max(0, (currentBatch - 1) * BATCH_SIZE);
+  const oldGlobalIndex = batchStartIndex + oldIndex;
+  const newGlobalIndex = batchStartIndex + videoUrls.length - 1;
+  const spacer = wrapper.nextElementSibling && wrapper.nextElementSibling.classList.contains('blank-space')
+    ? wrapper.nextElementSibling
+    : null;
 
   moveArrayItemToEnd(videoUrls, oldIndex);
   moveArrayItemToEnd(videoMetadata, oldIndex);
-  moveArrayItemToEnd(videoGlobalIndices, oldIndex);
+
+  if (oldGlobalIndex >= 0 && oldGlobalIndex < allVideoUrls.length && newGlobalIndex < allVideoUrls.length) {
+    const [url] = allVideoUrls.splice(oldGlobalIndex, 1);
+    const [meta] = allVideoMetadata.splice(oldGlobalIndex, 1);
+    allVideoUrls.splice(newGlobalIndex, 0, url);
+    allVideoMetadata.splice(newGlobalIndex, 0, meta || {});
+  }
 
   videoContainer.appendChild(wrapper);
+  if (spacer) videoContainer.appendChild(spacer);
   renumberVisibleVideoWrappers();
   saveSession();
 
@@ -2643,14 +2533,11 @@ function reloadUnwatchedVideos(){
 
   videoUrls=unplayed;
   videoMetadata=Array(videoUrls.length).fill(null).map(()=>({}));
-  videoGlobalIndices=videoUrls.map((_, index)=>index);
-  deckCurrentIndex=0;
-  currentVideoIndex=0;
   showSortingIndicator(`Reloading ${unplayed.length} unplayed videos`);
   videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
   setTimeout(()=>{
     createVideoElements();
-    setDeckIndex(0, { immediate: true, skipRecycle: true });
+    videoContainer.scrollTo(0,0);
   },300);
 }
 
@@ -2675,7 +2562,6 @@ function navigateToNextPasteEvent(){
     currentOffset: 0
   };
   currentBatch = 0;
-  deckCurrentIndex = 0;
   currentVideoIndex = 0;
   saveSession();
 
@@ -2815,7 +2701,6 @@ loadVideosButton.addEventListener('click', async ()=>{
 
   currentBatch = 0;
   currentVideoIndex = 0;
-  deckCurrentIndex = 0;
   activePlaybackRange = null;
 
   // This fixes the paperclip/paste counter showing 0.
