@@ -624,6 +624,25 @@
     throw lastError;
   }
 
+  function queueSmoothSave(label, workFn) {
+    showMsg(`${label} queued`);
+
+    const run = () => {
+      Promise.resolve()
+        .then(workFn)
+        .catch(e => {
+          showMsg(`${label} failed`);
+          console.error(e);
+        });
+    };
+
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(run, { timeout: 2500 });
+    } else {
+      setTimeout(run, 900);
+    }
+  }
+
   function mirrorSharedDataToLocal(data) {
     saveSavedMap(SAVED_VIDEOS_KEY, data.savedVideos || {});
     saveSavedMap(SAVED_ARTISTS_KEY, data.savedArtists || {});
@@ -1654,11 +1673,10 @@
       return;
     }
 
-    try {
+    const artistKey = extractArtistKeyOverride(url);
+
+    queueSmoothSave('Video save', async () => {
       showMsg('Saving video...');
-
-      const artistKey = extractArtistKeyOverride(url);
-
       const result = await updateSharedData(data => {
         return {
           added: addSavedVideosToData(data, [url], artistKey)
@@ -1670,10 +1688,7 @@
       } else {
         showMsg('Video already saved');
       }
-    } catch (e) {
-      showMsg('Could not save video');
-      console.error(e);
-    }
+    });
   }
 
   async function saveCurrentArtistVideosOverride(capturedBundleInfo) {
@@ -1687,9 +1702,8 @@
     const artistKey = bundleInfo.bundleKey;
     const artistVideos = dedupeAndRefreshMediaUrls(bundleInfo.urls.filter(Boolean));
 
-    try {
+    queueSmoothSave('Artist save', async () => {
       showMsg('Saving paperclip bundle...');
-
       const result = await updateSharedData(data => {
         data.savedArtists = data.savedArtists || {};
 
@@ -1730,10 +1744,7 @@
       } else {
         showMsg('Bundle already saved');
       }
-    } catch (e) {
-      showMsg('Could not save bundle');
-      console.error(e);
-    }
+    });
   }
 
   function rebuildSavedArtistsAfterRemovingEvent(removeEventIndex) {
