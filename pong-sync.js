@@ -34,6 +34,7 @@
   const VERTICAL_START_PX = 12;
   const VERTICAL_DOMINANCE_RATIO = 1.2;
   const SCRUB_PIXELS_PER_SECOND = 22;
+  const SAVE_TAP_MOVE_CANCEL_PX = 28;
 
   window.PongLoadedSavedMode = window.PongLoadedSavedMode || 'normal';
 
@@ -593,6 +594,28 @@
     };
   }
 
+  function mergeSharedDataWithLocal(data) {
+    const remote = normalizeSharedData({
+      ...(data || {}),
+      savedVideos: { ...((data && data.savedVideos) || {}) },
+      savedArtists: { ...((data && data.savedArtists) || {}) }
+    });
+    const localVideos = loadSavedMap(SAVED_VIDEOS_KEY);
+    const localArtists = loadSavedMap(SAVED_ARTISTS_KEY);
+
+    return normalizeSharedData({
+      ...remote,
+      savedVideos: {
+        ...remote.savedVideos,
+        ...localVideos
+      },
+      savedArtists: {
+        ...remote.savedArtists,
+        ...localArtists
+      }
+    });
+  }
+
   async function writeSharedDataToGitHub(data, sha) {
     const token = requireGitHubToken();
 
@@ -632,7 +655,7 @@
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const loaded = await fetchSharedDataFromGitHub({ requireWriteSha: true });
-        const data = loaded.data;
+        const data = mergeSharedDataWithLocal(loaded.data);
         const result = await mutatorFn(data) || {};
 
         await writeSharedDataToGitHub(data, loaded.sha);
@@ -652,8 +675,10 @@
     throw lastError;
   }
 
-  function queueSmoothSave(label, workFn) {
-    showMsg(`${label} queued`);
+  function queueSmoothSave(label, workFn, showQueuedMessage = true) {
+    if (showQueuedMessage) {
+      showMsg(`${label} queued`);
+    }
 
     const run = () => {
       Promise.resolve()
@@ -696,7 +721,7 @@
   async function updateSaveCountersOverride() {
     try {
       const loaded = await fetchSharedDataFromGitHub();
-      mirrorSharedDataToLocal(loaded.data);
+      mirrorSharedDataToLocal(mergeSharedDataWithLocal(loaded.data));
     } catch (e) {
       updateSaveCountersFromData();
     }
@@ -1338,10 +1363,11 @@
       showMsg('Loading saved videos...');
 
       const loaded = await fetchSharedDataFromGitHub();
-      refreshSharedDataMediaUrls(loaded.data);
-      mirrorSharedDataToLocal(loaded.data);
+      const savedData = mergeSharedDataWithLocal(loaded.data);
+      refreshSharedDataMediaUrls(savedData);
+      mirrorSharedDataToLocal(savedData);
 
-      const savedVideoItems = Object.values(loaded.data.savedVideos || {})
+      const savedVideoItems = Object.values(savedData.savedVideos || {})
         .filter(Boolean);
       const urls = savedVideoItems
         .map(item => item && item.url)
@@ -1382,10 +1408,11 @@
       showMsg('Loading saved artists...');
 
       const loaded = await fetchSharedDataFromGitHub();
-      refreshSharedDataMediaUrls(loaded.data);
-      mirrorSharedDataToLocal(loaded.data);
+      const savedData = mergeSharedDataWithLocal(loaded.data);
+      refreshSharedDataMediaUrls(savedData);
+      mirrorSharedDataToLocal(savedData);
 
-      const artistEntries = Object.values(loaded.data.savedArtists || {})
+      const artistEntries = Object.values(savedData.savedArtists || {})
         .filter(item => item && Array.isArray(item.videos) && item.videos.length);
 
       if (!artistEntries.length) {
@@ -1468,21 +1495,30 @@
     return null;
   }
 
+  function getVideoUrlFromWrapperOverride(wrapper) {
+    if (!wrapper) return null;
+
+    const index = parseInt(wrapper.dataset.index || '0', 10);
+
+    if (!isNaN(index) && videoUrls[index]) {
+      return videoUrls[index];
+    }
+
+    const video = wrapper.querySelector('video');
+
+    if (video) {
+      return video.currentSrc || video.src || null;
+    }
+
+    return null;
+  }
+
   function getCurrentVideoUrlOverride() {
     const wrapper = getCurrentVideoWrapperOverride();
 
     if (wrapper) {
-      const index = parseInt(wrapper.dataset.index || '0', 10);
-
-      if (!isNaN(index) && videoUrls[index]) {
-        return videoUrls[index];
-      }
-
-      const video = wrapper.querySelector('video');
-
-      if (video) {
-        return video.currentSrc || video.src || null;
-      }
+      const wrapperUrl = getVideoUrlFromWrapperOverride(wrapper);
+      if (wrapperUrl) return wrapperUrl;
     }
 
     if (window.currentlyPlayingVideo) {
@@ -1615,6 +1651,68 @@
     return added;
   }
 
+  function applyArtistBundleToData(data, bundleInfo, artistVideos) {
+    const artistKey = bundleInfo.bundleKey;
+    data.savedArtists = data.savedArtists || {};
+
+    const existing = data.savedArtists[artistKey];
+    const existingVideos = existing && Array.isArray(existing.videos)
+      ? dedupeAndRefreshMediaUrls(existing.videos)
+      : [];
+
+    const existingKeys = new Set(existingVideos.map(url => getSavedVideoKey(url)));
+    const newVideosOnly = artistVideos.filter(url => !existingKeys.has(getSavedVideoKey(url)));
+    const mergedVideos = dedupeAndRefreshMediaUrls([...existingVideos, ...artistVideos]);
+    const artistMeta = compactArtistMetadata(artistVideos);
+    const videoMeta = {
+      ...(existing?.videoMeta || {}),
+      ...buildVideoMetadataMap(mergedVideos)
+    };
+
+    data.savedArtists[artistKey] = {
+      artistKey,
+      source: 'paperclip-bundle',
+      ...artistMeta,
+      startIndex: bundleInfo.startIndex,
+      count: bundleInfo.count,
+      videos: mergedVideos,
+      videoMeta,
+      savedAt: existing?.savedAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    return {
+      addedBundleVideoCount: newVideosOnly.length,
+      artistVideoCount: mergedVideos.length
+    };
+  }
+
+  function saveVideoLocally(url, artistKey) {
+    const data = {
+      savedVideos: loadSavedMap(SAVED_VIDEOS_KEY),
+      savedArtists: loadSavedMap(SAVED_ARTISTS_KEY)
+    };
+    const added = addSavedVideosToData(data, [url], artistKey);
+
+    saveSavedMap(SAVED_VIDEOS_KEY, data.savedVideos);
+    updateSaveCountersFromData(data);
+
+    return added;
+  }
+
+  function saveArtistBundleLocally(bundleInfo, artistVideos) {
+    const data = {
+      savedVideos: loadSavedMap(SAVED_VIDEOS_KEY),
+      savedArtists: loadSavedMap(SAVED_ARTISTS_KEY)
+    };
+    const result = applyArtistBundleToData(data, bundleInfo, artistVideos);
+
+    saveSavedMap(SAVED_ARTISTS_KEY, data.savedArtists);
+    updateSaveCountersFromData(data);
+
+    return result;
+  }
+
   function getCurrentGlobalVideoIndex(wrapperOverride) {
     const wrapper = wrapperOverride || getCurrentVideoWrapperOverride();
 
@@ -1702,9 +1800,11 @@
     }
 
     const artistKey = extractArtistKeyOverride(url);
+    const addedLocally = saveVideoLocally(url, artistKey);
 
-    queueSmoothSave('Video save', async () => {
-      showMsg('Saving video...');
+    showMsg(addedLocally ? 'Saved video locally; syncing...' : 'Video already saved locally; syncing...');
+
+    queueSmoothSave('Video sync', async () => {
       const result = await updateSharedData(data => {
         return {
           added: addSavedVideosToData(data, [url], artistKey)
@@ -1714,9 +1814,9 @@
       if (result.result.added) {
         showMsg('Saved current video 💾');
       } else {
-        showMsg('Video already saved');
+        showMsg('Video already synced');
       }
-    });
+    }, false);
   }
 
   async function saveCurrentArtistVideosOverride(capturedBundleInfo) {
@@ -1729,50 +1829,25 @@
 
     const artistKey = bundleInfo.bundleKey;
     const artistVideos = dedupeAndRefreshMediaUrls(bundleInfo.urls.filter(Boolean));
+    const localResult = saveArtistBundleLocally(bundleInfo, artistVideos);
 
-    queueSmoothSave('Artist save', async () => {
-      showMsg('Saving paperclip bundle...');
+    showMsg(
+      localResult.addedBundleVideoCount > 0
+        ? `Saved artist locally + ${localResult.addedBundleVideoCount}; syncing...`
+        : 'Artist already saved locally; syncing...'
+    );
+
+    queueSmoothSave('Artist sync', async () => {
       const result = await updateSharedData(data => {
-        data.savedArtists = data.savedArtists || {};
-
-        const existing = data.savedArtists[artistKey];
-        const existingVideos = existing && Array.isArray(existing.videos)
-          ? dedupeAndRefreshMediaUrls(existing.videos)
-          : [];
-
-        const existingKeys = new Set(existingVideos.map(url => getSavedVideoKey(url)));
-        const newVideosOnly = artistVideos.filter(url => !existingKeys.has(getSavedVideoKey(url)));
-        const mergedVideos = dedupeAndRefreshMediaUrls([...existingVideos, ...artistVideos]);
-        const artistMeta = compactArtistMetadata(artistVideos);
-        const videoMeta = {
-          ...(existing?.videoMeta || {}),
-          ...buildVideoMetadataMap(mergedVideos)
-        };
-
-        data.savedArtists[artistKey] = {
-          artistKey,
-          source: 'paperclip-bundle',
-          ...artistMeta,
-          startIndex: bundleInfo.startIndex,
-          count: bundleInfo.count,
-          videos: mergedVideos,
-          videoMeta,
-          savedAt: existing?.savedAt || new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        };
-
-        return {
-          addedBundleVideoCount: newVideosOnly.length,
-          artistVideoCount: mergedVideos.length
-        };
+        return applyArtistBundleToData(data, bundleInfo, artistVideos);
       });
 
       if (result.result.addedBundleVideoCount > 0) {
         showMsg(`Saved bundle + ${result.result.addedBundleVideoCount} videos 👤`);
       } else {
-        showMsg('Bundle already saved');
+        showMsg('Artist already synced');
       }
-    });
+    }, false);
   }
 
   function rebuildSavedArtistsAfterRemovingEvent(removeEventIndex) {
@@ -3176,7 +3251,7 @@
       }
 
       const loaded = await fetchSharedDataFromGitHub();
-      const queueInfo = buildIframeRepairQueue(loaded.data);
+      const queueInfo = buildIframeRepairQueue(mergeSharedDataWithLocal(loaded.data));
 
       if (queueInfo.queue.length) {
         if (!getCoomerfansProxyUrl()) {
@@ -3288,7 +3363,7 @@
 
       return {
         wrapper,
-        url: getCurrentVideoUrlOverride(),
+        url: getVideoUrlFromWrapperOverride(wrapper) || getCurrentVideoUrlOverride(),
         bundleInfo: getCurrentPasteBundleInfo(wrapper)
       };
     }
@@ -3314,7 +3389,7 @@
       const dx = e.touches[0].clientX - artistTouchStart.x;
       const dy = e.touches[0].clientY - artistTouchStart.y;
 
-      if (Math.hypot(dx, dy) > 14) {
+      if (Math.hypot(dx, dy) > SAVE_TAP_MOVE_CANCEL_PX) {
         artistTouchMoved = true;
         clearTimeout(artistHoldTimer);
       }
@@ -3388,7 +3463,7 @@
       const dx = e.touches[0].clientX - videoTouchStart.x;
       const dy = e.touches[0].clientY - videoTouchStart.y;
 
-      if (Math.hypot(dx, dy) > 14) {
+      if (Math.hypot(dx, dy) > SAVE_TAP_MOVE_CANCEL_PX) {
         videoTouchMoved = true;
         clearTimeout(videoHoldTimer);
       }
