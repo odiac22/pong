@@ -18,6 +18,7 @@
   const GITHUB_TOKEN_KEY = 'pong_github_token_v1';
   const MEDIA_SIGNATURE_CACHE_KEY = 'pong_media_signature_cache_v1';
   const COOMERFANS_PROXY_URL_KEY = 'pong_coomerfans_proxy_url_v1';
+  const SAVE_COUNTS_KEY = 'pong_save_counts_v1';
   const DEFAULT_COOMERFANS_PROXY_URL = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
   const PONG_ARTIST_PREFIX = '#PONG_ARTIST ';
   const PONG_VIDEO_PREFIX = '#PONG_VIDEO ';
@@ -457,6 +458,77 @@
     } catch (e) {}
   }
 
+  function runWhenIdle(fn, timeout = 5000) {
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(fn, { timeout });
+    } else {
+      setTimeout(fn, Math.min(timeout, 1200));
+    }
+  }
+
+  function loadSaveCounts() {
+    try {
+      const counts = JSON.parse(localStorage.getItem(SAVE_COUNTS_KEY) || 'null');
+      if (!counts || typeof counts !== 'object') return null;
+
+      return {
+        videos: Math.max(0, Number(counts.videos || 0)),
+        artists: Math.max(0, Number(counts.artists || 0))
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function saveSaveCounts(counts) {
+    try {
+      localStorage.setItem(SAVE_COUNTS_KEY, JSON.stringify({
+        videos: Math.max(0, Number(counts?.videos || 0)),
+        artists: Math.max(0, Number(counts?.artists || 0)),
+        updatedAt: new Date().toISOString()
+      }));
+    } catch (e) {}
+  }
+
+  function updateSaveCounterElements(counts) {
+    const videoCount = document.getElementById('saved-video-count');
+    const artistCount = document.getElementById('saved-artist-count');
+
+    if (videoCount) {
+      videoCount.textContent = String(Math.max(0, Number(counts?.videos || 0)));
+    }
+
+    if (artistCount) {
+      artistCount.textContent = String(Math.max(0, Number(counts?.artists || 0)));
+    }
+  }
+
+  function getCountsFromSharedData(data) {
+    return {
+      videos: Object.keys(data?.savedVideos || {}).length,
+      artists: Object.keys(data?.savedArtists || {}).length
+    };
+  }
+
+  function getQuickSavedMapCount(key, pattern) {
+    try {
+      const raw = localStorage.getItem(key) || '';
+      if (!raw) return 0;
+
+      const matches = raw.match(pattern);
+      return matches ? matches.length : 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  function getQuickLocalSaveCounts() {
+    return {
+      videos: getQuickSavedMapCount(SAVED_VIDEOS_KEY, /"mediaKey"\s*:/g),
+      artists: getQuickSavedMapCount(SAVED_ARTISTS_KEY, /"videos"\s*:/g)
+    };
+  }
+
   function base64EncodeUnicode(str) {
     const bytes = new TextEncoder().encode(str);
     let binary = '';
@@ -492,7 +564,7 @@
     return headers;
   }
 
-  function normalizeSharedData(data) {
+  function normalizeSharedData(data, options = {}) {
     let normalized = data;
 
     if (!normalized || typeof normalized !== 'object' || Array.isArray(normalized)) {
@@ -501,7 +573,10 @@
 
     normalized.savedVideos = normalized.savedVideos || {};
     normalized.savedArtists = normalized.savedArtists || {};
-    refreshSharedDataMediaUrls(normalized);
+
+    if (options.refreshMedia) {
+      refreshSharedDataMediaUrls(normalized);
+    }
 
     return normalized;
   }
@@ -589,12 +664,12 @@
     }
 
     return {
-      data: normalizeSharedData(parsed),
+      data: normalizeSharedData(parsed, { refreshMedia: !!options.refreshMedia }),
       sha: file?.sha || null
     };
   }
 
-  function mergeSharedDataWithLocal(data) {
+  function mergeSharedDataWithLocal(data, options = {}) {
     const remote = normalizeSharedData({
       ...(data || {}),
       savedVideos: { ...((data && data.savedVideos) || {}) },
@@ -613,7 +688,7 @@
         ...remote.savedArtists,
         ...localArtists
       }
-    });
+    }, { refreshMedia: !!options.refreshMedia });
   }
 
   async function writeSharedDataToGitHub(data, sha) {
@@ -689,11 +764,7 @@
         });
     };
 
-    if (typeof window.requestIdleCallback === 'function') {
-      window.requestIdleCallback(run, { timeout: 2500 });
-    } else {
-      setTimeout(run, 900);
-    }
+    runWhenIdle(run, 2500);
   }
 
   function mirrorSharedDataToLocal(data) {
@@ -703,28 +774,32 @@
   }
 
   function updateSaveCountersFromData(data) {
-    const savedVideos = data?.savedVideos || loadSavedMap(SAVED_VIDEOS_KEY);
-    const savedArtists = data?.savedArtists || loadSavedMap(SAVED_ARTISTS_KEY);
-
-    const videoCount = document.getElementById('saved-video-count');
-    const artistCount = document.getElementById('saved-artist-count');
-
-    if (videoCount) {
-      videoCount.textContent = Object.keys(savedVideos).length;
+    if (data) {
+      const counts = getCountsFromSharedData(data);
+      saveSaveCounts(counts);
+      updateSaveCounterElements(counts);
+      return;
     }
 
-    if (artistCount) {
-      artistCount.textContent = Object.keys(savedArtists).length;
+    const cachedCounts = loadSaveCounts();
+
+    if (cachedCounts) {
+      updateSaveCounterElements(cachedCounts);
+      return;
+    }
+
+    const quickCounts = getQuickLocalSaveCounts();
+
+    if (quickCounts.videos || quickCounts.artists) {
+      saveSaveCounts(quickCounts);
+      updateSaveCounterElements(quickCounts);
+    } else {
+      updateSaveCounterElements({ videos: 0, artists: 0 });
     }
   }
 
   async function updateSaveCountersOverride() {
-    try {
-      const loaded = await fetchSharedDataFromGitHub();
-      mirrorSharedDataToLocal(mergeSharedDataWithLocal(loaded.data));
-    } catch (e) {
-      updateSaveCountersFromData();
-    }
+    updateSaveCountersFromData();
   }
 
   function shuffleArray(arr) {
@@ -3302,7 +3377,8 @@
     const existing = document.getElementById('save-actions-panel');
 
     if (existing) {
-      existing.remove();
+      updateSaveCountersOverride();
+      return;
     }
 
     const panel = document.createElement('div');
