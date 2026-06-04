@@ -361,6 +361,18 @@
     }
   }
 
+  function getSaveErrorMessage(error) {
+    const message = String(error?.message || error || '').trim();
+
+    if (!message) return 'unknown error';
+    if (/No GitHub token/i.test(message)) return 'missing GitHub token';
+    if (/GitHub save failed:\s*401/i.test(message)) return 'bad GitHub token';
+    if (/GitHub save failed:\s*403/i.test(message)) return 'GitHub permission denied';
+    if (/GitHub save failed:\s*409/i.test(message)) return 'GitHub changed; try again';
+
+    return message;
+  }
+
   function getGitHubToken() {
     try {
       return localStorage.getItem(GITHUB_TOKEN_KEY) || '';
@@ -449,20 +461,6 @@
       return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
     } catch (e) {
       return {};
-    }
-  }
-
-  function saveSavedMap(key, value) {
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-    } catch (e) {}
-  }
-
-  function runWhenIdle(fn, timeout = 5000) {
-    if (typeof window.requestIdleCallback === 'function') {
-      window.requestIdleCallback(fn, { timeout });
-    } else {
-      setTimeout(fn, Math.min(timeout, 1200));
     }
   }
 
@@ -669,28 +667,6 @@
     };
   }
 
-  function mergeSharedDataWithLocal(data, options = {}) {
-    const remote = normalizeSharedData({
-      ...(data || {}),
-      savedVideos: { ...((data && data.savedVideos) || {}) },
-      savedArtists: { ...((data && data.savedArtists) || {}) }
-    });
-    const localVideos = loadSavedMap(SAVED_VIDEOS_KEY);
-    const localArtists = loadSavedMap(SAVED_ARTISTS_KEY);
-
-    return normalizeSharedData({
-      ...remote,
-      savedVideos: {
-        ...remote.savedVideos,
-        ...localVideos
-      },
-      savedArtists: {
-        ...remote.savedArtists,
-        ...localArtists
-      }
-    }, { refreshMedia: !!options.refreshMedia });
-  }
-
   async function writeSharedDataToGitHub(data, sha) {
     const token = requireGitHubToken();
 
@@ -730,7 +706,7 @@
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const loaded = await fetchSharedDataFromGitHub({ requireWriteSha: true });
-        const data = mergeSharedDataWithLocal(loaded.data);
+        const data = loaded.data;
         const result = await mutatorFn(data) || {};
 
         await writeSharedDataToGitHub(data, loaded.sha);
@@ -750,26 +726,7 @@
     throw lastError;
   }
 
-  function queueSmoothSave(label, workFn, showQueuedMessage = true) {
-    if (showQueuedMessage) {
-      showMsg(`${label} queued`);
-    }
-
-    const run = () => {
-      Promise.resolve()
-        .then(workFn)
-        .catch(e => {
-          showMsg(`${label} failed`);
-          console.error(e);
-        });
-    };
-
-    runWhenIdle(run, 2500);
-  }
-
   function mirrorSharedDataToLocal(data) {
-    saveSavedMap(SAVED_VIDEOS_KEY, data.savedVideos || {});
-    saveSavedMap(SAVED_ARTISTS_KEY, data.savedArtists || {});
     updateSaveCountersFromData(data);
   }
 
@@ -1438,7 +1395,7 @@
       showMsg('Loading saved videos...');
 
       const loaded = await fetchSharedDataFromGitHub();
-      const savedData = mergeSharedDataWithLocal(loaded.data);
+      const savedData = loaded.data;
       refreshSharedDataMediaUrls(savedData);
       mirrorSharedDataToLocal(savedData);
 
@@ -1483,7 +1440,7 @@
       showMsg('Loading saved artists...');
 
       const loaded = await fetchSharedDataFromGitHub();
-      const savedData = mergeSharedDataWithLocal(loaded.data);
+      const savedData = loaded.data;
       refreshSharedDataMediaUrls(savedData);
       mirrorSharedDataToLocal(savedData);
 
@@ -1762,32 +1719,6 @@
     };
   }
 
-  function saveVideoLocally(url, artistKey) {
-    const data = {
-      savedVideos: loadSavedMap(SAVED_VIDEOS_KEY),
-      savedArtists: loadSavedMap(SAVED_ARTISTS_KEY)
-    };
-    const added = addSavedVideosToData(data, [url], artistKey);
-
-    saveSavedMap(SAVED_VIDEOS_KEY, data.savedVideos);
-    updateSaveCountersFromData(data);
-
-    return added;
-  }
-
-  function saveArtistBundleLocally(bundleInfo, artistVideos) {
-    const data = {
-      savedVideos: loadSavedMap(SAVED_VIDEOS_KEY),
-      savedArtists: loadSavedMap(SAVED_ARTISTS_KEY)
-    };
-    const result = applyArtistBundleToData(data, bundleInfo, artistVideos);
-
-    saveSavedMap(SAVED_ARTISTS_KEY, data.savedArtists);
-    updateSaveCountersFromData(data);
-
-    return result;
-  }
-
   function getCurrentGlobalVideoIndex(wrapperOverride) {
     const wrapper = wrapperOverride || getCurrentVideoWrapperOverride();
 
@@ -1875,11 +1806,9 @@
     }
 
     const artistKey = extractArtistKeyOverride(url);
-    const addedLocally = saveVideoLocally(url, artistKey);
+    showMsg('Saving video to GitHub...');
 
-    showMsg(addedLocally ? 'Saved video locally; syncing...' : 'Video already saved locally; syncing...');
-
-    queueSmoothSave('Video sync', async () => {
+    try {
       const result = await updateSharedData(data => {
         return {
           added: addSavedVideosToData(data, [url], artistKey)
@@ -1889,9 +1818,12 @@
       if (result.result.added) {
         showMsg('Saved current video 💾');
       } else {
-        showMsg('Video already synced');
+        showMsg('Video already saved');
       }
-    }, false);
+    } catch (e) {
+      showMsg(`Video save failed: ${getSaveErrorMessage(e)}`);
+      console.error(e);
+    }
   }
 
   async function saveCurrentArtistVideosOverride(capturedBundleInfo) {
@@ -1904,15 +1836,9 @@
 
     const artistKey = bundleInfo.bundleKey;
     const artistVideos = dedupeAndRefreshMediaUrls(bundleInfo.urls.filter(Boolean));
-    const localResult = saveArtistBundleLocally(bundleInfo, artistVideos);
+    showMsg('Saving artist to GitHub...');
 
-    showMsg(
-      localResult.addedBundleVideoCount > 0
-        ? `Saved artist locally + ${localResult.addedBundleVideoCount}; syncing...`
-        : 'Artist already saved locally; syncing...'
-    );
-
-    queueSmoothSave('Artist sync', async () => {
+    try {
       const result = await updateSharedData(data => {
         return applyArtistBundleToData(data, bundleInfo, artistVideos);
       });
@@ -1920,9 +1846,12 @@
       if (result.result.addedBundleVideoCount > 0) {
         showMsg(`Saved bundle + ${result.result.addedBundleVideoCount} videos 👤`);
       } else {
-        showMsg('Artist already synced');
+        showMsg('Bundle already saved');
       }
-    }, false);
+    } catch (e) {
+      showMsg(`Artist save failed: ${getSaveErrorMessage(e)}`);
+      console.error(e);
+    }
   }
 
   function rebuildSavedArtistsAfterRemovingEvent(removeEventIndex) {
@@ -3326,7 +3255,7 @@
       }
 
       const loaded = await fetchSharedDataFromGitHub();
-      const queueInfo = buildIframeRepairQueue(mergeSharedDataWithLocal(loaded.data));
+      const queueInfo = buildIframeRepairQueue(loaded.data);
 
       if (queueInfo.queue.length) {
         if (!getCoomerfansProxyUrl()) {
