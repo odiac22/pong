@@ -477,53 +477,99 @@
     return `https://api.github.com/repos/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/contents/${GITHUB_SYNC.path}`;
   }
 
-  function githubHeaders() {
-    const token = requireGitHubToken();
-
-    return {
+  function githubHeaders(options = {}) {
+    const token = options.requireToken ? requireGitHubToken() : '';
+    const headers = {
       'Accept': 'application/vnd.github+json',
-      'Authorization': `Bearer ${token}`,
       'X-GitHub-Api-Version': '2022-11-28'
     };
-  }
 
-  async function fetchSharedDataFromGitHub() {
-    const token = requireGitHubToken();
-
-    if (!token) {
-      throw new Error('No GitHub token configured');
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
     }
 
-    const res = await fetch(`${githubApiUrl()}?ref=${encodeURIComponent(GITHUB_SYNC.branch)}&t=${Date.now()}`, {
+    return headers;
+  }
+
+  function normalizeSharedData(data) {
+    let normalized = data;
+
+    if (!normalized || typeof normalized !== 'object' || Array.isArray(normalized)) {
+      normalized = emptySharedData();
+    }
+
+    normalized.savedVideos = normalized.savedVideos || {};
+    normalized.savedArtists = normalized.savedArtists || {};
+    refreshSharedDataMediaUrls(normalized);
+
+    return normalized;
+  }
+
+  async function fetchRawSharedData(rawUrl) {
+    const target = rawUrl || `https://raw.githubusercontent.com/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/${GITHUB_SYNC.branch}/${GITHUB_SYNC.path}`;
+    const rawRes = await fetch(`${target}${target.includes('?') ? '&' : '?'}t=${Date.now()}`, {
       method: 'GET',
-      headers: githubHeaders(),
       cache: 'no-store'
     });
 
-    if (res.status === 404) {
-      return {
-        data: emptySharedData(),
-        sha: null
-      };
+    if (rawRes.status === 404) {
+      return emptySharedData();
     }
 
-    if (!res.ok) {
-      throw new Error(`GitHub load failed: ${res.status}`);
+    if (!rawRes.ok) {
+      throw new Error(`GitHub raw load failed: ${rawRes.status}`);
     }
 
-    const file = await res.json();
+    try {
+      return await rawRes.json();
+    } catch (e) {
+      throw new Error('GitHub raw JSON parse failed');
+    }
+  }
 
+  async function fetchSharedDataFromGitHub(options = {}) {
+    const requireWriteSha = !!options.requireWriteSha;
+    let file = null;
     let parsed = null;
-    const inlineContent =
-      typeof file?.content === 'string' && file.content.trim()
-        ? file.content
-        : '';
+    let apiError = null;
 
-    if (inlineContent && file?.encoding === 'base64') {
-      try {
-        parsed = JSON.parse(base64DecodeUnicode(inlineContent));
-      } catch (e) {
-        parsed = null;
+    try {
+      const res = await fetch(`${githubApiUrl()}?ref=${encodeURIComponent(GITHUB_SYNC.branch)}&t=${Date.now()}`, {
+        method: 'GET',
+        headers: githubHeaders({ requireToken: requireWriteSha }),
+        cache: 'no-store'
+      });
+
+      if (res.status === 404) {
+        return {
+          data: emptySharedData(),
+          sha: null
+        };
+      }
+
+      if (!res.ok) {
+        throw new Error(`GitHub load failed: ${res.status}`);
+      }
+
+      file = await res.json();
+
+      const inlineContent =
+        typeof file?.content === 'string' && file.content.trim()
+          ? file.content
+          : '';
+
+      if (inlineContent && file?.encoding === 'base64') {
+        try {
+          parsed = JSON.parse(base64DecodeUnicode(inlineContent));
+        } catch (e) {
+          parsed = null;
+        }
+      }
+    } catch (e) {
+      apiError = e;
+
+      if (requireWriteSha) {
+        throw e;
       }
     }
 
@@ -532,36 +578,18 @@
         typeof file?.download_url === 'string' && file.download_url.trim()
           ? file.download_url
           : ''
-      ) ||
-        `https://raw.githubusercontent.com/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/${GITHUB_SYNC.branch}/${GITHUB_SYNC.path}`;
-
-      const rawRes = await fetch(`${rawUrl}${rawUrl.includes('?') ? '&' : '?'}t=${Date.now()}`, {
-        method: 'GET',
-        cache: 'no-store'
-      });
-
-      if (!rawRes.ok) {
-        throw new Error(`GitHub raw load failed: ${rawRes.status}`);
-      }
+      ) || '';
 
       try {
-        parsed = await rawRes.json();
+        parsed = await fetchRawSharedData(rawUrl);
       } catch (e) {
-        throw new Error('GitHub raw JSON parse failed');
+        throw apiError || e;
       }
     }
 
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      parsed = emptySharedData();
-    }
-
-    parsed.savedVideos = parsed.savedVideos || {};
-    parsed.savedArtists = parsed.savedArtists || {};
-    refreshSharedDataMediaUrls(parsed);
-
     return {
-      data: parsed,
-      sha: file.sha || null
+      data: normalizeSharedData(parsed),
+      sha: file?.sha || null
     };
   }
 
@@ -585,7 +613,7 @@
     const res = await fetch(githubApiUrl(), {
       method: 'PUT',
       headers: {
-        ...githubHeaders(),
+        ...githubHeaders({ requireToken: true }),
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(body)
@@ -603,7 +631,7 @@
 
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const loaded = await fetchSharedDataFromGitHub();
+        const loaded = await fetchSharedDataFromGitHub({ requireWriteSha: true });
         const data = loaded.data;
         const result = await mutatorFn(data) || {};
 
