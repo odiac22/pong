@@ -79,6 +79,11 @@
       will-change: transform; pointer-events: auto !important; -webkit-appearance: none; appearance: none;
       cursor: pointer !important; touch-action: manipulation !important;
     }
+    #video-container.deck-mode .video-player,
+    #video-container.deck-mode .tap-area,
+    #video-container.deck-mode .video-progress-container {
+      touch-action: none !important;
+    }
     .tap-area {
       position: absolute; top: 0; left: 0; right: 0; bottom: 30px;
       z-index: 5; background: transparent; cursor: pointer;
@@ -512,7 +517,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.60</div>
+  <div class="version-number">22.61</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -547,6 +552,9 @@ let deckOrder = [];
 let deckHistory = [];
 let deckCurrentIndex = -1;
 let deckRestoreIndex = null;
+let deckSwipeControllerInstalled = false;
+let deckSwipeGesture = null;
+let lastDeckSwipeAt = 0;
 
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
@@ -2279,6 +2287,125 @@ function goToPreviousDeckVideo() {
   return true;
 }
 
+function getDeckSwipePoint(event) {
+  if (event.changedTouches && event.changedTouches.length) return event.changedTouches[0];
+  if (event.touches && event.touches.length) return event.touches[0];
+  return event;
+}
+
+function isDeckSwipeBlockedTarget(target) {
+  return !!(target && target.closest && target.closest(
+    '.video-progress-container, .audio-toggle-button, .control-button, .next-batch-button, .unwatched-videos-button, .paste-nav-button, .save-video-button, .save-artist-button, .repair-button, .controls-overlay, #auth-helper, button, input, textarea'
+  ));
+}
+
+function shouldUseDeckSwipe(event) {
+  const target = event.target;
+
+  return DECK_MODE_ENABLED &&
+    videoContainer &&
+    videoContainer.classList.contains('deck-mode') &&
+    target &&
+    target.closest &&
+    target.closest('#video-container') &&
+    target.closest('.video-wrapper.deck-active') &&
+    !isDeckSwipeBlockedTarget(target);
+}
+
+function stopDeckSwipeEvent(event) {
+  if (event.cancelable) event.preventDefault();
+  event.stopPropagation();
+  if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+}
+
+function beginDeckSwipe(event, source) {
+  if (!shouldUseDeckSwipe(event)) return;
+  if (source === 'pointer' && event.pointerType && event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
+
+  const point = getDeckSwipePoint(event);
+  deckSwipeGesture = {
+    source,
+    pointerId: source === 'pointer' ? event.pointerId : null,
+    startX: point.clientX,
+    startY: point.clientY,
+    lastX: point.clientX,
+    lastY: point.clientY,
+    active: false,
+    rejected: false
+  };
+}
+
+function moveDeckSwipe(event, source) {
+  if (!deckSwipeGesture || deckSwipeGesture.source !== source || deckSwipeGesture.rejected) return;
+  if (source === 'pointer' && deckSwipeGesture.pointerId !== event.pointerId) return;
+
+  const point = getDeckSwipePoint(event);
+  const dx = point.clientX - deckSwipeGesture.startX;
+  const dy = point.clientY - deckSwipeGesture.startY;
+  const absX = Math.abs(dx);
+  const absY = Math.abs(dy);
+
+  deckSwipeGesture.lastX = point.clientX;
+  deckSwipeGesture.lastY = point.clientY;
+
+  if (!deckSwipeGesture.active) {
+    if (absX > 14 && absX > absY * 1.18) {
+      deckSwipeGesture.rejected = true;
+      return;
+    }
+
+    if (absY < 16 || absY < absX * 1.04) return;
+
+    deckSwipeGesture.active = true;
+  }
+
+  stopDeckSwipeEvent(event);
+}
+
+function endDeckSwipe(event, source) {
+  if (!deckSwipeGesture || deckSwipeGesture.source !== source) return;
+  if (source === 'pointer' && deckSwipeGesture.pointerId !== event.pointerId) return;
+
+  const point = getDeckSwipePoint(event);
+  const dy = (point.clientY || deckSwipeGesture.lastY) - deckSwipeGesture.startY;
+  const shouldNavigate = deckSwipeGesture.active && Math.abs(dy) >= 24;
+  deckSwipeGesture = null;
+
+  if (!shouldNavigate) return;
+
+  stopDeckSwipeEvent(event);
+
+  const now = Date.now();
+  if (now - lastDeckSwipeAt < 180) return;
+  lastDeckSwipeAt = now;
+
+  if (dy < 0) goToNextDeckVideo();
+  else goToPreviousDeckVideo();
+}
+
+function cancelDeckSwipe(event, source) {
+  if (!deckSwipeGesture || deckSwipeGesture.source !== source) return;
+  if (source === 'pointer' && deckSwipeGesture.pointerId !== event.pointerId) return;
+  deckSwipeGesture = null;
+}
+
+function setupDeckSwipeController() {
+  if (deckSwipeControllerInstalled) return;
+  deckSwipeControllerInstalled = true;
+
+  document.addEventListener('touchstart', event => beginDeckSwipe(event, 'touch'), { passive: true, capture: true });
+  document.addEventListener('touchmove', event => moveDeckSwipe(event, 'touch'), { passive: false, capture: true });
+  document.addEventListener('touchend', event => endDeckSwipe(event, 'touch'), { passive: false, capture: true });
+  document.addEventListener('touchcancel', event => cancelDeckSwipe(event, 'touch'), { passive: true, capture: true });
+
+  if (window.PointerEvent) {
+    document.addEventListener('pointerdown', event => beginDeckSwipe(event, 'pointer'), { passive: true, capture: true });
+    document.addEventListener('pointermove', event => moveDeckSwipe(event, 'pointer'), { passive: false, capture: true });
+    document.addEventListener('pointerup', event => endDeckSwipe(event, 'pointer'), { passive: false, capture: true });
+    document.addEventListener('pointercancel', event => cancelDeckSwipe(event, 'pointer'), { passive: true, capture: true });
+  }
+}
+
 // ─── Video elements ───────────────────────────────────────────────────────────
 function createVideoElements() {
   stopVisibleBatchAutoRetry();
@@ -3305,6 +3432,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   updatePasteNavigationButton();
   createSaveButtons();
   setupMobileAudioUnlock();
+  setupDeckSwipeController();
 
   if (loadSession()) {
     console.log(`[Session] Restoring ${allVideoUrls.length} videos, batch ${currentBatch}, index ${currentVideoIndex}`);
@@ -3406,6 +3534,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=49"></script>
+<script src="pong-sync.js?v=50"></script>
 </body>
 </html>
