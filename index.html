@@ -517,7 +517,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.63</div>
+  <div class="version-number">22.64</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1355,6 +1355,8 @@ function compactSessionVideoMetadata(meta) {
 }
 
 function saveSession() {
+  if (window.PongSuppressSessionSaveUntil && Date.now() < window.PongSuppressSessionSaveUntil) return;
+
   try {
     localStorage.setItem(SESSION_KEY, JSON.stringify({
       allVideoUrls,
@@ -1372,7 +1374,14 @@ function saveSession() {
 
 function loadSession() {
   try {
-    const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+    const rawSession = localStorage.getItem(SESSION_KEY) || '';
+
+    if (rawSession.length > 2500000) {
+      localStorage.removeItem(SESSION_KEY);
+      return false;
+    }
+
+    const s = JSON.parse(rawSession || 'null');
     if (!s || !s.allVideoUrls || !s.allVideoUrls.length) return false;
     allVideoUrls = s.allVideoUrls;
     allVideoMetadata = Array.isArray(s.allVideoMetadata)
@@ -1393,6 +1402,8 @@ function clearSession() {
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 function scheduleSessionSave(delay = 350) {
+  if (window.PongSuppressSessionSaveUntil && Date.now() < window.PongSuppressSessionSaveUntil) return;
+
   clearTimeout(sessionSaveTimer);
   sessionSaveTimer = setTimeout(() => {
     sessionSaveTimer = null;
@@ -2805,6 +2816,8 @@ function loadNextBatch(restoreIndex) {
   if (videoUrls.length>0) {
     deckRestoreIndex = restoreIndex != null ? Number(restoreIndex) : 0;
     videoContainer.innerHTML='<div class="loading-message">Loading videos...</div>';
+    const renderDelay = window.PongFastNextBatchOnce ? 0 : 300;
+    window.PongFastNextBatchOnce = false;
     setTimeout(()=>{
       createVideoElements();
       updateNextBatchButton();
@@ -2820,7 +2833,7 @@ function loadNextBatch(restoreIndex) {
       } else {
         videoContainer.scrollTo(0,0);
       }
-    },300);
+    },renderDelay);
   } else {
     videoContainer.classList.remove('deck-mode');
     videoContainer.innerHTML='<div class="loading-message">No more videos</div>';
@@ -3554,6 +3567,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=52"></script>
+<script src="pong-sync.js?v=53"></script>
 </body>
 </html>

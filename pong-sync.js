@@ -20,6 +20,8 @@
   const COOMERFANS_PROXY_URL_KEY = 'pong_coomerfans_proxy_url_v1';
   const SAVE_COUNTS_KEY = 'pong_save_counts_v1';
   const SHARED_DATA_CACHE_KEY = 'pong_shared_saved_links_cache_v1';
+  const SAVED_VIDEOS_PLAYBACK_CACHE_KEY = 'pong_saved_videos_playback_cache_v2';
+  const SAVED_ARTISTS_PLAYBACK_CACHE_KEY = 'pong_saved_artists_playback_cache_v2';
   const DEFAULT_COOMERFANS_PROXY_URL = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
   const REPAIR_CONCURRENCY_KEY = 'pong_repair_item_concurrency_v1';
   const PONG_ARTIST_PREFIX = '#PONG_ARTIST ';
@@ -945,12 +947,108 @@
     }
   }
 
+  function compactCachedMeta(meta, fallbackMeta = null) {
+    const compact = compactVideoMetadata(meta) || compactVideoMetadata(fallbackMeta) || {};
+
+    return {
+      source: compact.source || fallbackMeta?.source || 'coomerfans',
+      artistName: compact.artistName || fallbackMeta?.artistName || '',
+      artistKey: compact.artistKey || fallbackMeta?.artistKey || '',
+      artistUrl: compact.artistUrl || fallbackMeta?.artistUrl || '',
+      artistDisplayName: compact.artistDisplayName || getArtistDisplayName(fallbackMeta),
+      postUrl: compact.postUrl || '',
+      postIndex: Number(compact.postIndex || 0),
+      scrapedAt: compact.scrapedAt || fallbackMeta?.scrapedAt || '',
+      mediaKey: compact.mediaKey || ''
+    };
+  }
+
+  function buildSavedVideosPlaybackSource(data) {
+    const items = Object.values(data?.savedVideos || {})
+      .filter(item => item?.url)
+      .map(item => ({
+        url: preferFreshMediaUrl(item.url),
+        meta: compactCachedMeta(item)
+      }))
+      .filter(item => item.url);
+
+    return {
+      updatedAt: new Date().toISOString(),
+      count: items.length,
+      items
+    };
+  }
+
+  function buildSavedArtistsPlaybackSource(data) {
+    const artists = Object.values(data?.savedArtists || {})
+      .filter(artist => artist && Array.isArray(artist.videos) && artist.videos.length)
+      .map((artist, artistIndex) => {
+        const artistMeta = compactSavedArtistPlaybackMeta(artist);
+        const cleanVideos = dedupeAndRefreshMediaUrls(artist.videos.filter(Boolean));
+        const videos = cleanVideos.map(url => {
+          const mediaKey = getSavedVideoKey(url);
+          const videoMeta = mediaKey && artist.videoMeta ? artist.videoMeta[mediaKey] : null;
+
+          return {
+            url,
+            meta: compactVideoMetadata(videoMeta) || {}
+          };
+        }).filter(item => item.url);
+
+        return {
+          artistKey: artist.artistKey || `saved-artist-${artistIndex}`,
+          artistDisplayName: artistMeta.artistDisplayName || '',
+          artistMeta,
+          videos
+        };
+      })
+      .filter(artist => artist.videos.length);
+
+    return {
+      updatedAt: new Date().toISOString(),
+      count: artists.length,
+      videoCount: artists.reduce((total, artist) => total + artist.videos.length, 0),
+      artists
+    };
+  }
+
+  function writeSavedPlaybackCaches(data) {
+    if (!data || typeof data !== 'object') return;
+
+    try {
+      const videos = buildSavedVideosPlaybackSource(data);
+      const artists = buildSavedArtistsPlaybackSource(data);
+
+      window.PongSavedPlaybackMemoryCache = {
+        videos,
+        artists
+      };
+
+      localStorage.setItem(SAVED_VIDEOS_PLAYBACK_CACHE_KEY, JSON.stringify(videos));
+      localStorage.setItem(SAVED_ARTISTS_PLAYBACK_CACHE_KEY, JSON.stringify(artists));
+      localStorage.removeItem(SHARED_DATA_CACHE_KEY);
+    } catch (e) {
+      console.warn('[Pong saved] Could not write playback cache', e);
+    }
+  }
+
+  function scheduleSavedPlaybackCacheWrite(data) {
+    if (!data || typeof data !== 'object') return;
+
+    const snapshot = data;
+    const run = () => writeSavedPlaybackCaches(snapshot);
+
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(run, { timeout: 2500 });
+    } else {
+      setTimeout(run, 80);
+    }
+  }
+
   function cacheSharedData(data) {
     try {
-      localStorage.setItem(SHARED_DATA_CACHE_KEY, JSON.stringify({
-        updatedAt: new Date().toISOString(),
-        data: cloneSharedData(data)
-      }));
+      localStorage.removeItem(SHARED_DATA_CACHE_KEY);
+      scheduleSavedPlaybackCacheWrite(data);
     } catch (e) {}
   }
 
@@ -965,6 +1063,43 @@
     } catch (e) {
       return null;
     }
+  }
+
+  function loadSavedPlaybackSource(kind) {
+    const memory = window.PongSavedPlaybackMemoryCache || null;
+
+    if (kind === 'videos' && memory?.videos?.items?.length) {
+      return memory.videos;
+    }
+
+    if (kind === 'artists' && memory?.artists?.artists?.length) {
+      return memory.artists;
+    }
+
+    try {
+      const key = kind === 'videos'
+        ? SAVED_VIDEOS_PLAYBACK_CACHE_KEY
+        : SAVED_ARTISTS_PLAYBACK_CACHE_KEY;
+      const source = JSON.parse(localStorage.getItem(key) || 'null');
+
+      if (kind === 'videos' && source?.items?.length) {
+        window.PongSavedPlaybackMemoryCache = {
+          ...(window.PongSavedPlaybackMemoryCache || {}),
+          videos: source
+        };
+        return source;
+      }
+
+      if (kind === 'artists' && source?.artists?.length) {
+        window.PongSavedPlaybackMemoryCache = {
+          ...(window.PongSavedPlaybackMemoryCache || {}),
+          artists: source
+        };
+        return source;
+      }
+    } catch (e) {}
+
+    return null;
   }
 
   function mirrorSharedDataToLocal(data) {
@@ -1594,6 +1729,7 @@
     }
 
     window.PongLoadedSavedMode = mode || 'normal';
+    window.PongSuppressSessionSaveUntil = urls.length > 800 ? Date.now() + 6000 : 0;
 
     allVideoUrls = urls.slice();
     allVideoMetadata = Array.isArray(metadata) ? metadata.slice() : urls.map(() => ({}));
@@ -1611,27 +1747,25 @@
       }
     }
 
-    if (typeof scheduleSessionSave === 'function') {
+    if (urls.length <= 800 && typeof scheduleSessionSave === 'function') {
       scheduleSessionSave(900);
-    } else if (typeof saveSession === 'function') {
+    } else if (urls.length <= 800 && typeof saveSession === 'function') {
       setTimeout(() => saveSession(), 900);
     }
 
     videoContainer.innerHTML = '<div class="loading-message">Loading saved videos...</div>';
+    window.PongFastNextBatchOnce = true;
+    loadNextBatch();
 
-    setTimeout(() => {
-      loadNextBatch();
+    if (typeof hideControls === 'function') {
+      hideControls();
+    }
 
-      if (typeof hideControls === 'function') {
-        hideControls();
-      }
+    if (typeof updatePasteNavigationButton === 'function') {
+      updatePasteNavigationButton();
+    }
 
-      if (typeof updatePasteNavigationButton === 'function') {
-        updatePasteNavigationButton();
-      }
-
-      showMsg(message);
-    }, 250);
+    showMsg(message);
   }
 
   async function playSavedVideosRandomized() {
@@ -1792,6 +1926,22 @@
     };
   }
 
+  function buildSavedVideosPlaybackDataFromSource(source) {
+    const items = Array.isArray(source?.items) ? source.items.filter(item => item?.url) : [];
+
+    if (!items.length) return null;
+
+    const randomizedItems = shuffleArray(items);
+
+    return {
+      urls: randomizedItems.map(item => item.url),
+      message: `Playing ${randomizedItems.length} saved videos`,
+      pasteEvents: [],
+      mode: 'savedVideos',
+      metadata: randomizedItems.map(item => item.meta || {})
+    };
+  }
+
   function buildSavedArtistsPlaybackDataFast(savedData) {
     const data = savedData && typeof savedData === 'object' ? savedData : null;
 
@@ -1846,6 +1996,54 @@
     };
   }
 
+  function buildSavedArtistsPlaybackDataFromSource(source) {
+    const artistEntries = Array.isArray(source?.artists)
+      ? source.artists.filter(artist => Array.isArray(artist?.videos) && artist.videos.length)
+      : [];
+
+    if (!artistEntries.length) return null;
+
+    const groupedVideos = [];
+    const groupedMetadata = [];
+    const rebuiltPasteEvents = [];
+
+    shuffleArray(artistEntries).forEach((artist, artistIndex) => {
+      const cleanVideos = shuffleArray(artist.videos.filter(item => item?.url));
+
+      if (!cleanVideos.length) return;
+
+      const startIndex = groupedVideos.length;
+
+      cleanVideos.forEach(item => {
+        groupedVideos.push(item.url);
+        const itemMeta = item.meta || {};
+        const artistMeta = artist.artistMeta || {};
+        groupedMetadata.push({
+          ...artistMeta,
+          ...itemMeta,
+          artistDisplayName: getArtistDisplayName(itemMeta) || artist.artistDisplayName || artistMeta.artistDisplayName || ''
+        });
+      });
+
+      rebuiltPasteEvents.push({
+        startIndex,
+        count: cleanVideos.length,
+        artistKey: artist.artistKey || `saved-artist-${artistIndex}`,
+        source: 'saved-artist-bundle'
+      });
+    });
+
+    if (!groupedVideos.length) return null;
+
+    return {
+      urls: groupedVideos,
+      message: `Playing ${rebuiltPasteEvents.length} saved bundles`,
+      pasteEvents: rebuiltPasteEvents,
+      mode: 'savedArtists',
+      metadata: groupedMetadata
+    };
+  }
+
   function loadSavedPlaybackDataFast(playbackData) {
     loadSavedListIntoPlayer(
       playbackData.urls,
@@ -1868,22 +2066,59 @@
       });
   }
 
+  let savedPlaybackWarmPromise = null;
+
+  function warmSavedPlaybackCacheInBackground() {
+    const memory = window.PongSavedPlaybackMemoryCache || {};
+
+    if (memory.videos?.items?.length && memory.artists?.artists?.length) return savedPlaybackWarmPromise;
+    if (savedPlaybackWarmPromise) return savedPlaybackWarmPromise;
+
+    savedPlaybackWarmPromise = fetchSharedDataFromGitHub()
+      .then(loaded => {
+        writeSavedPlaybackCaches(loaded.data);
+        updateSaveCountersFromData(loaded.data);
+        console.log('[Pong saved] Warmed saved playback cache');
+        return true;
+      })
+      .catch(error => {
+        console.warn('[Pong saved] Warm cache failed', error);
+        return false;
+      })
+      .finally(() => {
+        savedPlaybackWarmPromise = null;
+      });
+
+    return savedPlaybackWarmPromise;
+  }
+
   playSavedVideosRandomized = async function playSavedVideosRandomizedFast() {
     try {
       showMsg('Loading saved videos...');
 
-      const cachedPlayback = buildSavedVideosPlaybackDataFast(loadCachedSharedData());
+      const cachedPlayback = buildSavedVideosPlaybackDataFromSource(loadSavedPlaybackSource('videos'));
       if (cachedPlayback) {
         loadSavedPlaybackDataFast(cachedPlayback);
-        refreshSavedPlaybackCacheInBackground('saved videos');
+        warmSavedPlaybackCacheInBackground();
         return;
+      }
+
+      if (savedPlaybackWarmPromise) {
+        await savedPlaybackWarmPromise;
+        const warmedPlayback = buildSavedVideosPlaybackDataFromSource(loadSavedPlaybackSource('videos'));
+
+        if (warmedPlayback) {
+          loadSavedPlaybackDataFast(warmedPlayback);
+          return;
+        }
       }
 
       const loaded = await fetchSharedDataFromGitHub();
       const savedData = loaded.data;
       mirrorSharedDataToLocal(savedData);
 
-      const playbackData = buildSavedVideosPlaybackDataFast(savedData);
+      const playbackData = buildSavedVideosPlaybackDataFromSource(buildSavedVideosPlaybackSource(savedData))
+        || buildSavedVideosPlaybackDataFast(savedData);
       if (!playbackData) {
         showMsg('No saved videos yet');
         return;
@@ -1900,18 +2135,29 @@
     try {
       showMsg('Loading saved artists...');
 
-      const cachedPlayback = buildSavedArtistsPlaybackDataFast(loadCachedSharedData());
+      const cachedPlayback = buildSavedArtistsPlaybackDataFromSource(loadSavedPlaybackSource('artists'));
       if (cachedPlayback) {
         loadSavedPlaybackDataFast(cachedPlayback);
-        refreshSavedPlaybackCacheInBackground('saved artists');
+        warmSavedPlaybackCacheInBackground();
         return;
+      }
+
+      if (savedPlaybackWarmPromise) {
+        await savedPlaybackWarmPromise;
+        const warmedPlayback = buildSavedArtistsPlaybackDataFromSource(loadSavedPlaybackSource('artists'));
+
+        if (warmedPlayback) {
+          loadSavedPlaybackDataFast(warmedPlayback);
+          return;
+        }
       }
 
       const loaded = await fetchSharedDataFromGitHub();
       const savedData = loaded.data;
       mirrorSharedDataToLocal(savedData);
 
-      const playbackData = buildSavedArtistsPlaybackDataFast(savedData);
+      const playbackData = buildSavedArtistsPlaybackDataFromSource(buildSavedArtistsPlaybackSource(savedData))
+        || buildSavedArtistsPlaybackDataFast(savedData);
       if (!playbackData) {
         showMsg('No saved artists yet');
         return;
@@ -4190,6 +4436,7 @@
       artistLongPress = false;
       artistTouchMoved = false;
       artistSaveTarget = captureCurrentSaveTarget();
+      warmSavedPlaybackCacheInBackground();
       artistTouchStart = e && e.touches && e.touches[0]
         ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
         : null;
@@ -4264,6 +4511,7 @@
       videoLongPress = false;
       videoTouchMoved = false;
       videoSaveTarget = captureCurrentSaveTarget();
+      warmSavedPlaybackCacheInBackground();
       videoTouchStart = e && e.touches && e.touches[0]
         ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
         : null;
@@ -4648,6 +4896,10 @@
   function bootPongSync() {
     injectPongSyncStyles();
 
+    try {
+      localStorage.removeItem(SHARED_DATA_CACHE_KEY);
+    } catch (e) {}
+
     setTimeout(() => {
       createSaveButtonsOverride();
       createRemoveSavedButtonOverride();
@@ -4655,6 +4907,10 @@
       startExpiredMediaHintObserver();
       attachNormalModeReset();
     }, 0);
+
+    setTimeout(() => {
+      warmSavedPlaybackCacheInBackground();
+    }, 250);
   }
 
   if (document.readyState === 'loading') {
