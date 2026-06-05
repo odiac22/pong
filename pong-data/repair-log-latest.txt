@@ -1,0 +1,203 @@
+Pong repair report
+Generated: 2026-06-05T17:12:51.461Z
+Elapsed: 210.5s
+Proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev
+Queue: 50/50
+Fresh videos: 3807
+Saved artists: 16; unique artist jobs: 21
+Saved videos: 29; repairable video jobs: 25
+Parallel: yes; item limit: 6; fetch limit: 36
+
+Item timing:
+artist 3/50 | ok | 49 videos | 4.0s | labeloiseauxo
+artist 4/50 | ok | 79 videos | 4.6s | camgirlari
+artist 5/50 | ok | 77 videos | 5.0s | sophiareesexo
+artist 6/50 | ok | 111 videos | 5.4s | wearechrisandoliviafree
+artist 9/50 | ok | 39 videos | 4.2s | kassidiekosa
+artist 1/50 | ok | 182 videos | 9.5s | anniekate78
+artist 11/50 | ok | 55 videos | 3.0s | scarlettsynclair
+artist 8/50 | ok | 127 videos | 9.5s | exclusivecc
+artist 10/50 | ok | 124 videos | 8.8s | july_juli
+artist 7/50 | ok | 403 videos | 11.7s | touch_nancydrew
+artist 12/50 | ok | 38 videos | 10.6s | sweetlilkira
+artist 2/50 | ok | 205 videos | 26.8s | desertbratt
+artist 18/50 | ok | 185 videos | 7.6s | kararays
+artist 17/50 | ok | 526 videos | 16.0s | chasingjoeylee
+artist 19/50 | ok | 54 videos | 3.7s | saritafishes
+artist 20/50 | ok | 115 videos | 6.9s | essiac
+video 22/50 | ok | 1 videos | 0.7s | desertbratt
+video 23/50 | skipped | 0 videos | 0.0s | media:11/ci/yp/2892ac-0197fe30-ea65-722d-92fe-85f2f68577e5.mp4
+video 24/50 | ok | 1 videos | 0.8s | camgirlari
+video 25/50 | ok | 2 videos | 0.8s | camgirlari
+video 26/50 | ok | 1 videos | 0.8s | wearechrisandoliviafree
+video 27/50 | ok | 1 videos | 0.9s | wearechrisandoliviafree
+video 28/50 | ok | 1 videos | 1.1s | wearechrisandoliviafree
+artist 14/50 | ok | 188 videos | 34.1s | kailithorne
+video 29/50 | ok | 1 videos | 0.9s | touch_nancydrew
+video 31/50 | skipped | 0 videos | 0.0s | media:7/mh/op/2892ac-01979852-9662-73e7-baf9-11368d0339b0.mp4
+video 32/50 | skipped | 0 videos | 0.0s | media:12/tb/oo/2892ac-01975af3-f889-70c0-842e-7edb0880287c.mp4
+video 33/50 | skipped | 0 videos | 0.0s | media:12/hp/kh/2892ac-01975af4-11a1-7d62-b4c4-1d933d3285eb.mp4
+video 30/50 | ok | 2 videos | 0.8s | touch_nancydrew
+video 34/50 | ok | 1 videos | 0.9s | trippie_bri
+video 35/50 | ok | 1 videos | 0.9s | genaaatg
+video 36/50 | ok | 1 videos | 2.9s | berorealove
+video 37/50 | ok | 1 videos | 3.1s | barbiejohnson
+video 38/50 | ok | 1 videos | 1.2s | exclusivecc
+video 39/50 | ok | 2 videos | 1.1s | exclusivecc
+video 40/50 | ok | 1 videos | 1.4s | altheaxshawn
+video 41/50 | ok | 1 videos | 1.3s | altheaxshawn
+video 42/50 | ok | 1 videos | 1.2s | july_juli
+video 43/50 | ok | 1 videos | 1.1s | rbbca
+video 44/50 | ok | 1 videos | 1.7s | rbbca
+video 45/50 | ok | 1 videos | 1.7s | novalotusxxx
+video 46/50 | ok | 1 videos | 0.9s | novalotusxxx
+video 47/50 | ok | 1 videos | 0.9s | kailithorne
+video 49/50 | ok | 1 videos | 0.9s | alys_vip
+video 48/50 | ok | 1 videos | 1.0s | lucysquirt
+video 50/50 | ok | 1 videos | 1.0s | francyloverossi
+artist 15/50 | ok | 440 videos | 56.1s | novalotusxxx
+artist 13/50 | ok | 98 videos | 61.7s | lilywright
+artist 21/50 | ok | 314 videos | 37.3s | trippie_bri
+artist 16/50 | ok | 370 videos | 70.3s | megannreign
+
+Recent log:
+[+84.6s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23814260%2F234924%2Fonlyfans&t=1780679445618
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23656733%2F234924%2Fonlyfans&t=1780679445626
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23773979%2F234924%2Fonlyfans&t=1780679445629
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23548780%2F234924%2Fonlyfans&t=1780679445636
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23455324%2F234924%2Fonlyfans&t=1780679445640
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23444371%2F234924%2Fonlyfans&t=1780679445642
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F81063683%2F234924%2Fonlyfans&t=1780679445645
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23548678%2F234924%2Fonlyfans&t=1780679445649
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F83686165%2F234924%2Fonlyfans&t=1780679445653
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23802132%2F234924%2Fonlyfans&t=1780679445688
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23862540%2F234924%2Fonlyfans&t=1780679445693
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23450689%2F234924%2Fonlyfans&t=1780679445697
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23497726%2F234924%2Fonlyfans&t=1780679445702
+[+84.7s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23760042%2F234924%2Fonlyfans&t=1780679445708
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23414829%2F234924%2Fonlyfans&t=1780679445722
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23406442%2F234924%2Fonlyfans&t=1780679445740
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23791873%2F234924%2Fonlyfans&t=1780679445745
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23478264%2F234924%2Fonlyfans&t=1780679445751
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23770166%2F234924%2Fonlyfans&t=1780679445758
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23545487%2F234924%2Fonlyfans&t=1780679445761
+[+84.8s] Direct post progress: 1780/1906
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23584877%2F234924%2Fonlyfans&t=1780679445765
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F84432930%2F234924%2Fonlyfans&t=1780679445770
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23420247%2F234924%2Fonlyfans&t=1780679445775
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23495018%2F234924%2Fonlyfans&t=1780679445777
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23494480%2F234924%2Fonlyfans&t=1780679445780
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F84617234%2F234924%2Fonlyfans&t=1780679445784
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23774090%2F234924%2Fonlyfans&t=1780679445788
+[+84.8s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23510922%2F234924%2Fonlyfans&t=1780679445791
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F91422797%2F234924%2Fonlyfans&t=1780679445839
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23490842%2F234924%2Fonlyfans&t=1780679445852
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F86566792%2F234924%2Fonlyfans&t=1780679445859
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23509058%2F234924%2Fonlyfans&t=1780679445868
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23427829%2F234924%2Fonlyfans&t=1780679445873
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23848685%2F234924%2Fonlyfans&t=1780679445878
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23446249%2F234924%2Fonlyfans&t=1780679445882
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F88475045%2F234924%2Fonlyfans&t=1780679445887
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23846791%2F234924%2Fonlyfans&t=1780679445890
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23442699%2F234924%2Fonlyfans&t=1780679445893
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23478236%2F234924%2Fonlyfans&t=1780679445896
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23509190%2F234924%2Fonlyfans&t=1780679445900
+[+84.9s] Direct post progress: 1800/1906
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23551743%2F234924%2Fonlyfans&t=1780679445905
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23754311%2F234924%2Fonlyfans&t=1780679445908
+[+84.9s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23498029%2F234924%2Fonlyfans&t=1780679445911
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23521305%2F234924%2Fonlyfans&t=1780679445920
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23490978%2F234924%2Fonlyfans&t=1780679445923
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23457037%2F234924%2Fonlyfans&t=1780679445964
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23496061%2F234924%2Fonlyfans&t=1780679445971
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23493295%2F234924%2Fonlyfans&t=1780679445982
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F85849035%2F234924%2Fonlyfans&t=1780679445988
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F90807645%2F234924%2Fonlyfans&t=1780679445995
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23433603%2F234924%2Fonlyfans&t=1780679446001
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23509390%2F234924%2Fonlyfans&t=1780679446006
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23743756%2F234924%2Fonlyfans&t=1780679446011
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23404144%2F234924%2Fonlyfans&t=1780679446014
+[+85.0s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23545403%2F234924%2Fonlyfans&t=1780679446019
+[+85.1s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23486439%2F234924%2Fonlyfans&t=1780679446035
+[+85.1s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F83046005%2F234924%2Fonlyfans&t=1780679446039
+[+85.1s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F82078080%2F234924%2Fonlyfans&t=1780679446043
+[+85.1s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23431402%2F234924%2Fonlyfans&t=1780679446051
+[+85.1s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F90337634%2F234924%2Fonlyfans&t=1780679446056
+[+85.1s] Direct post progress: 1820/1906
+[+85.1s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23484394%2F234924%2Fonlyfans&t=1780679446062
+[+85.1s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23545459%2F234924%2Fonlyfans&t=1780679446102
+[+85.1s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F88475169%2F234924%2Fonlyfans&t=1780679446109
+[+85.1s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F85513805%2F234924%2Fonlyfans&t=1780679446115
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23701192%2F234924%2Fonlyfans&t=1780679446122
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F84616952%2F234924%2Fonlyfans&t=1780679446126
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23487683%2F234924%2Fonlyfans&t=1780679446134
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23596926%2F234924%2Fonlyfans&t=1780679446139
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23419044%2F234924%2Fonlyfans&t=1780679446142
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F91010456%2F234924%2Fonlyfans&t=1780679446147
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23453244%2F234924%2Fonlyfans&t=1780679446154
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23422250%2F234924%2Fonlyfans&t=1780679446160
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F91422849%2F234924%2Fonlyfans&t=1780679446164
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23435968%2F234924%2Fonlyfans&t=1780679446170
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23789738%2F234924%2Fonlyfans&t=1780679446203
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23748271%2F234924%2Fonlyfans&t=1780679446209
+[+85.2s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23869759%2F234924%2Fonlyfans&t=1780679446214
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23490943%2F234924%2Fonlyfans&t=1780679446221
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23442659%2F234924%2Fonlyfans&t=1780679446225
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23668830%2F234924%2Fonlyfans&t=1780679446229
+[+85.3s] Direct post progress: 1840/1906
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23781597%2F234924%2Fonlyfans&t=1780679446237
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F84616968%2F234924%2Fonlyfans&t=1780679446242
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23545488%2F234924%2Fonlyfans&t=1780679446250
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23487576%2F234924%2Fonlyfans&t=1780679446263
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23772874%2F234924%2Fonlyfans&t=1780679446273
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23496309%2F234924%2Fonlyfans&t=1780679446288
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23424565%2F234924%2Fonlyfans&t=1780679446291
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23470142%2F234924%2Fonlyfans&t=1780679446309
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23596885%2F234924%2Fonlyfans&t=1780679446314
+[+85.3s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23754217%2F234924%2Fonlyfans&t=1780679446318
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23494981%2F234924%2Fonlyfans&t=1780679446322
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F86827381%2F234924%2Fonlyfans&t=1780679446329
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23695213%2F234924%2Fonlyfans&t=1780679446339
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23406466%2F234924%2Fonlyfans&t=1780679446347
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23482562%2F234924%2Fonlyfans&t=1780679446352
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23499848%2F234924%2Fonlyfans&t=1780679446355
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F85499903%2F234924%2Fonlyfans&t=1780679446358
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23482365%2F234924%2Fonlyfans&t=1780679446361
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23476365%2F234924%2Fonlyfans&t=1780679446363
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23468732%2F234924%2Fonlyfans&t=1780679446372
+[+85.4s] Direct post progress: 1860/1906
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23660520%2F234924%2Fonlyfans&t=1780679446376
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F84162635%2F234924%2Fonlyfans&t=1780679446404
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F82078034%2F234924%2Fonlyfans&t=1780679446413
+[+85.4s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23439623%2F234924%2Fonlyfans&t=1780679446418
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23445828%2F234924%2Fonlyfans&t=1780679446423
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23668833%2F234924%2Fonlyfans&t=1780679446429
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23487760%2F234924%2Fonlyfans&t=1780679446434
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23472284%2F234924%2Fonlyfans&t=1780679446447
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23448127%2F234924%2Fonlyfans&t=1780679446473
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23453325%2F234924%2Fonlyfans&t=1780679446477
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23603717%2F234924%2Fonlyfans&t=1780679446482
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23494736%2F234924%2Fonlyfans&t=1780679446487
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23507414%2F234924%2Fonlyfans&t=1780679446492
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23670024%2F234924%2Fonlyfans&t=1780679446498
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23794095%2F234924%2Fonlyfans&t=1780679446501
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F80444220%2F234924%2Fonlyfans&t=1780679446508
+[+85.5s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23754300%2F234924%2Fonlyfans&t=1780679446513
+[+85.6s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23802083%2F234924%2Fonlyfans&t=1780679446523
+[+85.6s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F84918184%2F234924%2Fonlyfans&t=1780679446526
+[+85.6s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23433251%2F234924%2Fonlyfans&t=1780679446529
+[+85.6s] Direct post progress: 1880/1906
+[+85.6s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23676001%2F234924%2Fonlyfans&t=1780679446539
+[+85.6s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23503821%2F234924%2Fonlyfans&t=1780679446547
+[+85.6s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23470152%2F234924%2Fonlyfans&t=1780679446580
+[+85.6s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F23829805%2F234924%2Fonlyfans&t=1780679446585
+[+85.6s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F82078089%2F234924%2Fonlyfans&t=1780679446589
+[+85.6s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F85231655%2F234924%2Fonlyfans&t=1780679446594
+[+85.6s] Fetch proxy: https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev?url=https%3A%2F%2Fcoomerfans.com%2Fp%2F83045939%2F234924%2Fonlyfans&t=1780679446598
+[+86.0s] Direct post progress: 1900/1906
+[+86.0s] Direct post progress: 1906/1906
+[+86.0s] Direct result megannreign: 370 videos in 70.3s
+[+86.0s] Parallel queue complete; finishing repair
+[+86.0s] Applying scraped links to saved data
+[+150.8s] Apply complete in 64.8s; repaired 3406 links
+[+150.8s] Repair finished; copy the log before closing if you want me to inspect timing
