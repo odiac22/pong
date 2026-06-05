@@ -517,7 +517,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.65</div>
+  <div class="version-number">22.66</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1937,11 +1937,12 @@ function tuneVideoPreloadAround(activeWrapper) {
     if (!v) return;
 
     const distance = activeIndex < 0 ? Infinity : Math.abs(index - activeIndex);
-    const desiredPreload = distance <= 1 ? 'auto' : 'metadata';
+    const shouldWarm = DECK_MODE_ENABLED || distance <= 1;
+    const desiredPreload = shouldWarm ? 'auto' : 'metadata';
     const lastLoadKick = Number(v.dataset.lastLoadKick || 0);
 
     if (v.preload !== desiredPreload) v.preload = desiredPreload;
-    if (distance <= 1 && v.readyState === 0 && now - lastLoadKick > 1400) {
+    if (shouldWarm && v.readyState === 0 && now - lastLoadKick > 1400) {
       v.dataset.lastLoadKick = String(now);
       v.load();
     }
@@ -2171,6 +2172,29 @@ function startVisibleBatchAutoRetry() {
   });
 
   visibleBatchRetryTimer = setTimeout(() => retryVisibleBatchVideoLoads(token), getVideoRetryDelay(0));
+}
+
+function warmCurrentBatchVideos() {
+  const videos = Array.from(document.querySelectorAll('.video-wrapper video'));
+
+  videos.forEach((video, index) => {
+    setTimeout(() => {
+      if (!video || !document.body.contains(video) || isVideoReadyForInitialPlayback(video)) return;
+
+      const lastLoadKick = Number(video.dataset.lastLoadKick || 0);
+      const now = Date.now();
+
+      try {
+        if (video.preload !== 'auto') video.preload = 'auto';
+        if (video.readyState === 0 && now - lastLoadKick > 1600) {
+          video.dataset.lastLoadKick = String(now);
+          video.load();
+        }
+      } catch (_) {}
+
+      updateVideoReadyLoader(video);
+    }, Math.min(index * 85, 1200));
+  });
 }
 
 function getDeckWrappers() {
@@ -2828,6 +2852,7 @@ function createVideoElements() {
   updateNextBatchButton();
   updateBatchReadyCounter();
   setupVisibilityObserver();
+  warmCurrentBatchVideos();
   startVisibleBatchAutoRetry();
 }
 
@@ -3080,8 +3105,9 @@ function updateNextBatchButton() {
   const remaining = hasRange
     ? Math.max(0, activePlaybackRange.end - (activePlaybackRange.start + Number(activePlaybackRange.offset || 0)))
     : Math.max(0, allVideoUrls.length - currentBatch * BATCH_SIZE);
+  const advanceSavedArtist = remaining <= 0 && shouldNextBatchAdvanceSavedArtist();
 
-  if(remaining<=0){
+  if(remaining<=0 && !advanceSavedArtist){
     if(btn)btn.remove();
     return;
   }
@@ -3093,12 +3119,19 @@ function updateNextBatchButton() {
     btn.addEventListener('click',e=>{
       e.preventDefault();
       e.stopPropagation();
+      if (shouldNextBatchAdvanceSavedArtist()) {
+        const rangeRemaining = Math.max(0, activePlaybackRange.end - (activePlaybackRange.start + Number(activePlaybackRange.offset || 0)));
+        if (rangeRemaining <= 0) {
+          navigateToNextPasteEvent();
+          return;
+        }
+      }
       loadNextBatch();
     });
     document.body.appendChild(btn);
   }
 
-  const rem=Math.min(BATCH_SIZE,remaining);
+  const rem=Math.min(BATCH_SIZE, advanceSavedArtist ? getNextPasteEventPreviewCount() : remaining);
   btn.innerHTML='▶️';
   const c=document.createElement('span');
   c.className='batch-counter';
@@ -3157,27 +3190,48 @@ function reloadUnwatchedVideos(){
 }
 
 // ─── Paste navigation ─────────────────────────────────────────────────────────
-function navigateToNextPasteEvent(){
-  if(!pasteEvents.length||!allVideoUrls.length){
-    showSortingIndicator('No paste bundles yet');
-    return;
-  }
+function setActivePlaybackRangeForPasteEvent(index) {
+  if (!pasteEvents.length || !allVideoUrls.length) return null;
 
-  currentPasteIndex=(currentPasteIndex+1)%pasteEvents.length;
-  updatePasteNavigationButton();
+  const safeIndex = ((Number(index) || 0) + pasteEvents.length) % pasteEvents.length;
+  const target = pasteEvents[safeIndex];
+  const targetGlobalIndex = Math.max(0, Math.min(allVideoUrls.length, Number(target.startIndex || 0)));
+  const targetCount = Math.max(1, Number(target.count || BATCH_SIZE));
 
-  const target=pasteEvents[currentPasteIndex];
-  const targetGlobalIndex=target.startIndex;
-  const targetCount=Math.max(1, Number(target.count || BATCH_SIZE));
-
+  currentPasteIndex = safeIndex;
   activePlaybackRange = {
-    start: Math.max(0, Math.min(allVideoUrls.length, targetGlobalIndex)),
+    start: targetGlobalIndex,
     end: Math.max(0, Math.min(allVideoUrls.length, targetGlobalIndex + targetCount)),
     offset: 0,
     currentOffset: 0
   };
   currentBatch = 0;
   currentVideoIndex = 0;
+
+  return target;
+}
+
+function getNextPasteEventPreviewCount() {
+  if (!pasteEvents.length) return 0;
+
+  const nextIndex = ((currentPasteIndex >= 0 ? currentPasteIndex + 1 : 0) + pasteEvents.length) % pasteEvents.length;
+  return Math.max(1, Number(pasteEvents[nextIndex]?.count || BATCH_SIZE));
+}
+
+function shouldNextBatchAdvanceSavedArtist() {
+  return hasActivePlaybackRange() &&
+    window.PongLoadedSavedMode === 'savedArtists' &&
+    pasteEvents.length > 1;
+}
+
+function navigateToNextPasteEvent(){
+  if(!pasteEvents.length||!allVideoUrls.length){
+    showSortingIndicator('No paste bundles yet');
+    return;
+  }
+
+  setActivePlaybackRangeForPasteEvent(currentPasteIndex + 1);
+  updatePasteNavigationButton();
   scheduleSessionSave(700);
 
   videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
@@ -3694,6 +3748,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=54"></script>
+<script src="pong-sync.js?v=55"></script>
 </body>
 </html>

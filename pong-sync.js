@@ -1737,10 +1737,15 @@
     videoMetadata = [];
     currentBatch = 0;
     currentVideoIndex = 0;
+    activePlaybackRange = null;
 
     if (Array.isArray(newPasteEvents)) {
       pasteEvents = newPasteEvents;
       currentPasteIndex = -1;
+
+      if (window.PongLoadedSavedMode === 'savedArtists' && pasteEvents.length && typeof setActivePlaybackRangeForPasteEvent === 'function') {
+        setActivePlaybackRangeForPasteEvent(0);
+      }
 
       if (typeof updatePasteNavigationButton === 'function') {
         updatePasteNavigationButton();
