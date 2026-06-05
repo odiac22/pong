@@ -19,9 +19,11 @@
   const MEDIA_SIGNATURE_CACHE_KEY = 'pong_media_signature_cache_v1';
   const COOMERFANS_PROXY_URL_KEY = 'pong_coomerfans_proxy_url_v1';
   const SAVE_COUNTS_KEY = 'pong_save_counts_v1';
+  const SHARED_DATA_CACHE_KEY = 'pong_shared_saved_links_cache_v1';
   const DEFAULT_COOMERFANS_PROXY_URL = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
   const PONG_ARTIST_PREFIX = '#PONG_ARTIST ';
   const PONG_VIDEO_PREFIX = '#PONG_VIDEO ';
+  const REPAIR_LOG_UPLOAD_PATH = 'pong-data/repair-log-latest.txt';
 
   const GITHUB_SYNC = {
     owner: 'odiac22',
@@ -576,6 +578,10 @@
     return `https://api.github.com/repos/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/contents/${GITHUB_SYNC.path}`;
   }
 
+  function githubContentsApiUrl(path) {
+    return `https://api.github.com/repos/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/contents/${path}`;
+  }
+
   function githubHeaders(options = {}) {
     const token = options.requireToken ? requireGitHubToken() : '';
     const headers = {
@@ -635,6 +641,18 @@
     let parsed = null;
     let apiError = null;
 
+    if (!requireWriteSha && options.rawFirst !== false) {
+      try {
+        parsed = await fetchRawSharedData();
+        return {
+          data: normalizeSharedData(parsed, { refreshMedia: !!options.refreshMedia }),
+          sha: null
+        };
+      } catch (e) {
+        apiError = e;
+      }
+    }
+
     try {
       const res = await fetch(`${githubApiUrl()}?ref=${encodeURIComponent(GITHUB_SYNC.branch)}&t=${Date.now()}`, {
         method: 'GET',
@@ -668,7 +686,7 @@
         }
       }
     } catch (e) {
-      apiError = e;
+      apiError = apiError || e;
 
       if (requireWriteSha) {
         throw e;
@@ -728,6 +746,59 @@
     return await res.json();
   }
 
+  async function writeTextFileToGitHub(path, text, message) {
+    const token = requireGitHubToken();
+    let sha = null;
+
+    if (!token) {
+      throw new Error('No GitHub token configured');
+    }
+
+    try {
+      const existing = await fetch(`${githubContentsApiUrl(path)}?ref=${encodeURIComponent(GITHUB_SYNC.branch)}&t=${Date.now()}`, {
+        method: 'GET',
+        headers: githubHeaders(),
+        cache: 'no-store'
+      });
+
+      if (existing.ok) {
+        const file = await existing.json();
+        sha = file?.sha || null;
+      } else if (existing.status !== 404) {
+        throw new Error(`GitHub log load failed: ${existing.status}`);
+      }
+    } catch (e) {
+      if (!/GitHub log load failed/i.test(String(e?.message || e))) {
+        console.warn('[Pong repair] Could not read existing log sha', e);
+      } else {
+        throw e;
+      }
+    }
+
+    const body = {
+      message,
+      content: base64EncodeUnicode(text),
+      branch: GITHUB_SYNC.branch
+    };
+
+    if (sha) body.sha = sha;
+
+    const res = await fetch(githubContentsApiUrl(path), {
+      method: 'PUT',
+      headers: {
+        ...githubHeaders({ requireToken: true }),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      throw new Error(`GitHub log save failed: ${res.status}`);
+    }
+
+    return await res.json();
+  }
+
   async function updateSharedData(mutatorFn) {
     let lastError = null;
 
@@ -778,7 +849,38 @@
     }
   }
 
+  function cloneSharedData(data) {
+    try {
+      return normalizeSharedData(JSON.parse(JSON.stringify(data || emptySharedData())));
+    } catch (e) {
+      return emptySharedData();
+    }
+  }
+
+  function cacheSharedData(data) {
+    try {
+      localStorage.setItem(SHARED_DATA_CACHE_KEY, JSON.stringify({
+        updatedAt: new Date().toISOString(),
+        data: cloneSharedData(data)
+      }));
+    } catch (e) {}
+  }
+
+  function loadCachedSharedData() {
+    try {
+      const cached = JSON.parse(localStorage.getItem(SHARED_DATA_CACHE_KEY) || 'null');
+      const data = cached?.data || null;
+
+      if (!data || typeof data !== 'object') return null;
+
+      return normalizeSharedData(data);
+    } catch (e) {
+      return null;
+    }
+  }
+
   function mirrorSharedDataToLocal(data) {
+    if (data) cacheSharedData(data);
     updateSaveCountersFromData(data);
   }
 
@@ -1553,6 +1655,171 @@
     }
   }
 
+  function buildSavedVideosPlaybackDataFast(savedData) {
+    const data = cloneSharedData(savedData);
+    refreshSharedDataMediaUrls(data);
+
+    const savedVideoItems = Object.values(data.savedVideos || {})
+      .filter(Boolean);
+    const urls = savedVideoItems
+      .map(item => item && item.url)
+      .filter(Boolean);
+
+    if (!urls.length) return null;
+
+    const savedVideoMetaByKey = {};
+    savedVideoItems.forEach(item => {
+      const key = getSavedVideoKey(item?.url);
+      if (key) savedVideoMetaByKey[key] = compactVideoMetadata(item) || {};
+    });
+
+    const randomizedVideos = shuffleArray(dedupeAndRefreshMediaUrls(urls));
+    const randomizedMetadata = randomizedVideos.map(url => {
+      const key = getSavedVideoKey(url);
+      return key ? savedVideoMetaByKey[key] || {} : {};
+    });
+
+    return {
+      urls: randomizedVideos,
+      message: `Playing ${randomizedVideos.length} saved videos`,
+      pasteEvents: [],
+      mode: 'savedVideos',
+      metadata: randomizedMetadata
+    };
+  }
+
+  function buildSavedArtistsPlaybackDataFast(savedData) {
+    const data = cloneSharedData(savedData);
+    refreshSharedDataMediaUrls(data);
+
+    const artistEntries = Object.values(data.savedArtists || {})
+      .filter(item => item && Array.isArray(item.videos) && item.videos.length);
+
+    if (!artistEntries.length) return null;
+
+    const randomizedArtists = shuffleArray(artistEntries);
+    const groupedVideos = [];
+    const groupedMetadata = [];
+    const rebuiltPasteEvents = [];
+
+    randomizedArtists.forEach((artist, artistIndex) => {
+      const cleanVideos = shuffleArray(dedupeAndRefreshMediaUrls(artist.videos.filter(Boolean)));
+
+      if (!cleanVideos.length) return;
+
+      const startIndex = groupedVideos.length;
+
+      cleanVideos.forEach(url => {
+        groupedVideos.push(url);
+        const mediaKey = getSavedVideoKey(url);
+        const videoMeta = mediaKey && artist.videoMeta ? artist.videoMeta[mediaKey] : null;
+        groupedMetadata.push({
+          ...(artist || {}),
+          ...(videoMeta || {}),
+          artistDisplayName: getArtistDisplayName(videoMeta) || getArtistDisplayName(artist)
+        });
+      });
+
+      rebuiltPasteEvents.push({
+        startIndex,
+        count: cleanVideos.length,
+        artistKey: artist.artistKey || `saved-artist-${artistIndex}`,
+        source: 'saved-artist-bundle'
+      });
+    });
+
+    if (!groupedVideos.length) return null;
+
+    return {
+      urls: groupedVideos,
+      message: `Playing ${rebuiltPasteEvents.length} saved bundles`,
+      pasteEvents: rebuiltPasteEvents,
+      mode: 'savedArtists',
+      metadata: groupedMetadata
+    };
+  }
+
+  function loadSavedPlaybackDataFast(playbackData) {
+    loadSavedListIntoPlayer(
+      playbackData.urls,
+      playbackData.message,
+      playbackData.pasteEvents,
+      playbackData.mode,
+      playbackData.metadata
+    );
+  }
+
+  function refreshSavedPlaybackCacheInBackground(label) {
+    fetchSharedDataFromGitHub()
+      .then(loaded => {
+        const savedData = loaded.data;
+        refreshSharedDataMediaUrls(savedData);
+        mirrorSharedDataToLocal(savedData);
+        console.log(`[Pong saved] Refreshed ${label} cache from GitHub`);
+      })
+      .catch(error => {
+        console.warn(`[Pong saved] Background ${label} refresh failed`, error);
+      });
+  }
+
+  playSavedVideosRandomized = async function playSavedVideosRandomizedFast() {
+    try {
+      showMsg('Loading saved videos...');
+
+      const cachedPlayback = buildSavedVideosPlaybackDataFast(loadCachedSharedData());
+      if (cachedPlayback) {
+        loadSavedPlaybackDataFast(cachedPlayback);
+        refreshSavedPlaybackCacheInBackground('saved videos');
+        return;
+      }
+
+      const loaded = await fetchSharedDataFromGitHub();
+      const savedData = loaded.data;
+      refreshSharedDataMediaUrls(savedData);
+      mirrorSharedDataToLocal(savedData);
+
+      const playbackData = buildSavedVideosPlaybackDataFast(savedData);
+      if (!playbackData) {
+        showMsg('No saved videos yet');
+        return;
+      }
+
+      loadSavedPlaybackDataFast(playbackData);
+    } catch (e) {
+      showMsg('Could not load saved videos');
+      console.error(e);
+    }
+  };
+
+  playSavedArtistsRandomized = async function playSavedArtistsRandomizedFast() {
+    try {
+      showMsg('Loading saved artists...');
+
+      const cachedPlayback = buildSavedArtistsPlaybackDataFast(loadCachedSharedData());
+      if (cachedPlayback) {
+        loadSavedPlaybackDataFast(cachedPlayback);
+        refreshSavedPlaybackCacheInBackground('saved artists');
+        return;
+      }
+
+      const loaded = await fetchSharedDataFromGitHub();
+      const savedData = loaded.data;
+      refreshSharedDataMediaUrls(savedData);
+      mirrorSharedDataToLocal(savedData);
+
+      const playbackData = buildSavedArtistsPlaybackDataFast(savedData);
+      if (!playbackData) {
+        showMsg('No saved artists yet');
+        return;
+      }
+
+      loadSavedPlaybackDataFast(playbackData);
+    } catch (e) {
+      showMsg('Could not load saved artists');
+      console.error(e);
+    }
+  };
+
   function getVisibleCurrentVideoWrapperOverride() {
     return (
       document.querySelector('.video-wrapper.most-visible') ||
@@ -2283,7 +2550,11 @@
   const REPAIR_ITEM_TIMEOUT_MS = 120000;
   const DIRECT_REPAIR_ITEM_TIMEOUT_MS = 240000;
   const DIRECT_REPAIR_POST_CONCURRENCY = 20;
+  const DIRECT_REPAIR_ITEM_CONCURRENCY = 6;
+  const DIRECT_REPAIR_GLOBAL_FETCH_CONCURRENCY = 36;
   const DIRECT_REPAIR_MAX_RETRIES = 2;
+  const REPAIR_LOG_UI_MAX_LINES = 140;
+  const REPAIR_LOG_COPY_MAX_LINES = 420;
   let iframeRepairState = null;
 
   function appendRepairHash(rawUrl, item) {
@@ -2479,38 +2750,73 @@
     return url.toString();
   }
 
+  function createAsyncLimiter(limit) {
+    const max = Math.max(1, Number(limit) || 1);
+    const queue = [];
+    let active = 0;
+
+    function runNext() {
+      if (active >= max || !queue.length) return;
+
+      const job = queue.shift();
+      active++;
+
+      Promise.resolve()
+        .then(job.task)
+        .then(job.resolve, job.reject)
+        .finally(() => {
+          active--;
+          runNext();
+        });
+    }
+
+    return function limitTask(task) {
+      return new Promise((resolve, reject) => {
+        queue.push({ task, resolve, reject });
+        runNext();
+      });
+    };
+  }
+
+  function runDirectRepairFetchLimited(task) {
+    const limiter = iframeRepairState?.fetchLimiter;
+    return limiter ? limiter(task) : task();
+  }
+
   async function directRepairFetchText(url) {
     const fetchUrl = repairProxyFetchUrl(url);
     const usingProxy = fetchUrl !== url;
     writeRepairLog(`Fetch ${usingProxy ? 'proxy' : 'direct'}: ${fetchUrl}`);
 
-    let res;
-
-    try {
-      res = await fetch(fetchUrl, {
-        credentials: 'omit',
-        mode: 'cors'
-      });
-    } catch (error) {
-      const detail = [
-        error?.name || 'FetchError',
-        error?.message || String(error || ''),
-        navigator?.userAgent ? `ua=${navigator.userAgent}` : ''
-      ].filter(Boolean).join(' | ');
-      throw new Error(`Fetch failed before response: ${detail}`);
-    }
-
-    if (!res.ok) {
-      let body = '';
+    return runDirectRepairFetchLimited(async () => {
+      let res;
 
       try {
-        body = await res.text();
-      } catch (_) {}
+        res = await fetch(fetchUrl, {
+          credentials: 'omit',
+          mode: 'cors'
+        });
+      } catch (error) {
+        const detail = [
+          error?.name || 'FetchError',
+          error?.message || String(error || ''),
+          navigator?.userAgent ? `ua=${navigator.userAgent}` : ''
+        ].filter(Boolean).join(' | ');
+        throw new Error(`Fetch failed before response: ${detail}`);
+      }
 
-      throw new Error(`${usingProxy ? 'Proxy ' : ''}HTTP ${res.status}${body ? `: ${body.slice(0, 160)}` : ''}`);
-    }
+      if (!res.ok) {
+        let body = '';
 
-    return res.text();
+        try {
+          body = await res.text();
+        } catch (_) {}
+
+        throw new Error(`${usingProxy ? 'Proxy ' : ''}HTTP ${res.status}${body ? `: ${body.slice(0, 160)}` : ''}`);
+      }
+
+      return res.text();
+    });
   }
 
   async function directRepairFetchDoc(url, attempt = 1) {
@@ -2800,21 +3106,78 @@
     state.logLines = state.logLines || [];
     state.logLines.push(line);
 
+    if (state.logLines.length > REPAIR_LOG_COPY_MAX_LINES) {
+      state.logLines.splice(0, state.logLines.length - REPAIR_LOG_COPY_MAX_LINES);
+    }
+
     const log = document.getElementById('pong-repair-log');
     if (log) {
-      log.textContent = state.logLines.join('\n');
+      log.textContent = state.logLines.slice(-REPAIR_LOG_UI_MAX_LINES).join('\n');
       log.scrollTop = log.scrollHeight;
     }
   }
 
+  function buildCompactRepairLog() {
+    const state = iframeRepairState;
+    if (!state) return '';
+
+    const stats = state.stats || {};
+    const reports = state.itemReports || [];
+    const lines = [
+      'Pong repair report',
+      `Generated: ${new Date().toISOString()}`,
+      `Elapsed: ${formatRepairSeconds(getRepairElapsedMs())}`,
+      `Proxy: ${getCoomerfansProxyUrl() || 'none'}`,
+      `Queue: ${state.completed || 0}/${state.queue?.length || 0}`,
+      `Fresh videos: ${state.freshCount || 0}`,
+      `Saved artists: ${stats.savedArtists || 0}; unique artist jobs: ${stats.uniqueArtists || 0}`,
+      `Saved videos: ${stats.savedVideos || 0}; repairable video jobs: ${stats.repairableVideos || 0}`,
+      `Parallel: ${state.parallel ? 'yes' : 'no'}; item limit: ${state.itemConcurrency || 1}; fetch limit: ${state.fetchConcurrency || 0}`,
+      ''
+    ];
+
+    if (reports.length) {
+      lines.push('Item timing:');
+      reports.forEach(report => {
+        lines.push([
+          `${report.phase || 'job'} ${report.index || '?'}/${report.total || '?'}`,
+          report.status || 'done',
+          `${report.count || 0} videos`,
+          `${report.seconds || '0.0s'}`,
+          report.label || ''
+        ].join(' | '));
+      });
+      lines.push('');
+    }
+
+    lines.push('Recent log:');
+    lines.push(...(state.logLines || []).slice(-REPAIR_LOG_UI_MAX_LINES));
+
+    return lines.join('\n');
+  }
+
+  async function uploadRepairLogToGitHub(text) {
+    if (!text) return null;
+
+    const result = await writeTextFileToGitHub(
+      REPAIR_LOG_UPLOAD_PATH,
+      text,
+      `Update Pong repair log ${new Date().toISOString()}`
+    );
+
+    return result?.content?.html_url || `https://github.com/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/blob/${GITHUB_SYNC.branch}/${REPAIR_LOG_UPLOAD_PATH}`;
+  }
+
   async function copyRepairLog() {
-    const text = (iframeRepairState?.logLines || []).join('\n');
+    const text = buildCompactRepairLog();
 
     if (!text) return;
 
+    let copied = false;
+
     try {
       await navigator.clipboard.writeText(text);
-      writeRepairLog('Log copied to clipboard');
+      copied = true;
     } catch (e) {
       const log = document.getElementById('pong-repair-log');
       if (log) {
@@ -2825,7 +3188,15 @@
         selection.removeAllRanges();
         selection.addRange(range);
       }
-      writeRepairLog('Clipboard copy failed; log text selected');
+    }
+
+    try {
+      const url = await uploadRepairLogToGitHub(text);
+      writeRepairLog(`${copied ? 'Compact log copied' : 'Clipboard failed; visible log selected'} and uploaded to GitHub: ${url}`);
+      showMsg('Repair log uploaded to GitHub');
+    } catch (e) {
+      writeRepairLog(`${copied ? 'Compact log copied' : 'Clipboard failed; visible log selected'}; GitHub log upload failed: ${getSaveErrorMessage(e)}`);
+      showMsg(copied ? 'Repair log copied' : 'Repair log selected');
     }
   }
 
@@ -2884,21 +3255,23 @@
 
     const total = iframeRepairState.queue.length;
     const done = Math.min(total, Math.max(0, iframeRepairState.completed || 0));
-    const current = iframeRepairState.queue[iframeRepairState.index] || null;
+    const phaseCounts = iframeRepairState.completedPhaseCounts || null;
+    const activeItems = iframeRepairState.activeItems || [];
+    const current = activeItems[0] || iframeRepairState.queue[iframeRepairState.index] || null;
     const inFlightProgress = current && done < total
-      ? Math.max(0, Math.min(0.95, Number(iframeRepairState.currentProgress || 0)))
+      ? Math.max(activeItems.length ? 0.12 : 0, Math.min(0.95, Number(iframeRepairState.currentProgress || 0)))
       : 0;
     const pct = total ? Math.round(((done + inFlightProgress) / total) * 100) : 0;
     const stats = iframeRepairState.stats || {};
     const artistTotal = Number(stats.uniqueArtists || 0);
     const savedArtistTotal = Number(stats.savedArtists || 0);
     const videoTotal = Number(stats.savedVideos || 0);
-    const artistDone = iframeRepairState.queue
-      .slice(0, done)
-      .filter(item => item.phase === 'artist').length;
-    const videoDone = iframeRepairState.queue
-      .slice(0, done)
-      .filter(item => item.phase === 'video').length;
+    const artistDone = phaseCounts
+      ? Number(phaseCounts.artist || 0)
+      : iframeRepairState.queue.slice(0, done).filter(item => item.phase === 'artist').length;
+    const videoDone = phaseCounts
+      ? Number(phaseCounts.video || 0)
+      : iframeRepairState.queue.slice(0, done).filter(item => item.phase === 'video').length;
     const currentPhaseItems = current
       ? iframeRepairState.queue.filter(item => item.phase === current.phase)
       : [];
@@ -2918,7 +3291,12 @@
     const videos = document.getElementById('pong-repair-videos');
 
     if (statusEl) {
-      statusEl.textContent = status || (current ? `${currentPrefix}: ${current.label}` : 'Preparing...');
+      const activeLabel = activeItems.length > 1
+        ? `Repairing ${activeItems.length} at once: ${activeItems.slice(0, 2).map(item => item.label).join(', ')}${activeItems.length > 2 ? '...' : ''}`
+        : current
+          ? `${currentPrefix}: ${current.label}`
+          : 'Preparing...';
+      statusEl.textContent = status || activeLabel;
     }
 
     if (fill) fill.style.width = `${pct}%`;
@@ -3083,6 +3461,128 @@
     writeRepairLog('Repair finished; copy the log before closing if you want me to inspect timing');
   }
 
+  function addRepairItemReport(item, index, status, count, startedAt, error) {
+    const state = iframeRepairState;
+    if (!state) return;
+
+    state.itemReports = state.itemReports || [];
+    state.itemReports.push({
+      index: index + 1,
+      total: state.queue?.length || 0,
+      phase: item?.phase || '',
+      label: item?.label || '',
+      status,
+      count: Math.max(0, Number(count || 0)),
+      seconds: formatRepairSeconds(Date.now() - startedAt),
+      error: error ? String(error?.message || error).slice(0, 180) : ''
+    });
+  }
+
+  function markRepairItemComplete(item) {
+    const state = iframeRepairState;
+    if (!state) return;
+
+    state.completed = Math.min(state.queue.length, (state.completed || 0) + 1);
+    state.completedPhaseCounts = state.completedPhaseCounts || { artist: 0, video: 0 };
+
+    if (item?.phase === 'artist') {
+      state.completedPhaseCounts.artist += 1;
+    } else if (item?.phase === 'video') {
+      state.completedPhaseCounts.video += 1;
+    }
+  }
+
+  async function runDirectRepairQueueItem(state, item, index) {
+    if (!state || !state.active) return;
+
+    const startedAt = Date.now();
+    state.index = index;
+    state.itemStartedAt = startedAt;
+    state.currentProgress = 0;
+
+    if (!item.url) {
+      markRepairItemComplete(item);
+      addRepairItemReport(item, index, 'skipped', 0, startedAt, item.skipReason || 'No source URL');
+      writeRepairLog(`Skip ${item.phase} ${index + 1}/${state.queue.length}: ${item.label} (${item.skipReason || 'No source URL'})`);
+      updateRepairQueuePanel(`Skipped: ${item.label}`);
+      return;
+    }
+
+    state.activeItems = state.activeItems || [];
+    state.activeItems.push(item);
+    updateRepairQueuePanel();
+    writeRepairLog(`Start ${item.phase} ${index + 1}/${state.queue.length}: ${item.label}`);
+
+    try {
+      const data = await directRepairScrapeItem(item);
+
+      if (!iframeRepairState || iframeRepairState.id !== state.id || !state.active) return;
+
+      if (data.ok && data.text && Number(data.count || 0) > 0) {
+        state.results.push({
+          item,
+          text: String(data.text)
+        });
+        state.freshCount += Number(data.count || 0);
+        addRepairItemReport(item, index, 'ok', data.count || 0, startedAt);
+        writeRepairLog(`Direct result ${item.label}: ${Number(data.count || 0)} videos in ${formatRepairSeconds(Date.now() - startedAt)}`);
+      } else {
+        addRepairItemReport(item, index, 'empty', 0, startedAt);
+        writeRepairLog(`Direct scrape returned 0 videos for ${item.label}`);
+      }
+    } catch (e) {
+      if (!iframeRepairState || iframeRepairState.id !== state.id || !state.active) return;
+      addRepairItemReport(item, index, 'failed', 0, startedAt, e);
+      writeRepairLog(`Direct scrape failed for ${item.label}: ${e?.message || e}`);
+    } finally {
+      if (!iframeRepairState || iframeRepairState.id !== state.id) return;
+
+      state.activeItems = (state.activeItems || []).filter(active => active.id !== item.id);
+      markRepairItemComplete(item);
+      state.currentProgress = 0;
+      updateRepairQueuePanel();
+    }
+  }
+
+  async function runDirectRepairQueueParallel() {
+    const state = iframeRepairState;
+    if (!state || !state.active) return;
+
+    const workerCount = Math.max(1, Math.min(DIRECT_REPAIR_ITEM_CONCURRENCY, state.queue.length));
+
+    state.parallel = true;
+    state.nextIndex = 0;
+    state.activeItems = [];
+    state.itemReports = [];
+    state.itemConcurrency = workerCount;
+    state.fetchConcurrency = DIRECT_REPAIR_GLOBAL_FETCH_CONCURRENCY;
+    state.fetchLimiter = createAsyncLimiter(DIRECT_REPAIR_GLOBAL_FETCH_CONCURRENCY);
+
+    writeRepairLog(`Parallel direct repair enabled: ${workerCount} jobs at once, ${DIRECT_REPAIR_GLOBAL_FETCH_CONCURRENCY} fetches max`);
+    updateRepairQueuePanel(`Parallel repair: ${workerCount} active slots`);
+
+    async function worker() {
+      while (state.active) {
+        const index = state.nextIndex++;
+        if (index >= state.queue.length) return;
+
+        await runDirectRepairQueueItem(state, state.queue[index], index);
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, worker));
+
+    if (!iframeRepairState || iframeRepairState.id !== state.id || !state.active) return;
+
+    writeRepairLog('Parallel queue complete; finishing repair');
+    finishIframeRepairQueue().catch(e => {
+      showMsg('Could not apply repaired links');
+      console.error(e);
+      writeRepairLog(`Repair failed while applying results: ${e?.message || e}`);
+      stopIframeRepairQueue('Repair failed');
+    });
+  }
+
   async function runNextIframeRepairItem() {
     const state = iframeRepairState;
     if (!state || !state.active) return;
@@ -3110,7 +3610,7 @@
     updateRepairQueuePanel();
 
     if (!item.url) {
-      state.completed = Math.max(state.completed || 0, state.index + 1);
+      markRepairItemComplete(item);
       state.currentProgress = 0;
       writeRepairLog(`Skip ${item.phase} ${state.index + 1}/${state.queue.length}: ${item.label} (${item.skipReason || 'No source URL'})`);
       updateRepairQueuePanel(`Skipped: ${item.label} (${item.skipReason || 'No source URL'})`);
@@ -3139,7 +3639,7 @@
         });
         state.freshCount += Number(data.count || 0);
 
-        state.completed = Math.max(state.completed || 0, state.index + 1);
+        markRepairItemComplete(item);
         state.currentProgress = 0;
         writeRepairLog(`Direct result ${item.label}: ${Number(data.count || 0)} videos in ${formatRepairSeconds(Date.now() - (state.itemStartedAt || Date.now()))}`);
         updateRepairQueuePanel(`Done: ${item.label}`);
@@ -3163,7 +3663,7 @@
     }
 
     if (!navigateRepairWorker(item)) {
-      state.completed = Math.max(state.completed || 0, state.index + 1);
+      markRepairItemComplete(item);
       state.currentProgress = 0;
       updateRepairQueuePanel(`Skipped: ${item.label} (repair tab blocked)`);
       setTimeout(runNextIframeRepairItem, 250);
@@ -3172,7 +3672,7 @@
 
     state.timeoutId = setTimeout(() => {
       if (!iframeRepairState || iframeRepairState.id !== state.id) return;
-      state.completed = Math.max(state.completed || 0, state.index + 1);
+      markRepairItemComplete(item);
       state.currentProgress = 0;
       writeRepairLog(`Timeout after ${formatRepairSeconds(REPAIR_ITEM_TIMEOUT_MS)}: ${item.label}`);
       writeRepairLog('No userscript message received; check that Tampermonkey is enabled in the repair tab browser/profile.');
@@ -3209,6 +3709,14 @@
       logLines: [],
       currentProgress: 0,
       directRepairDisabled: false,
+      parallel: false,
+      nextIndex: 0,
+      activeItems: [],
+      itemReports: [],
+      completedPhaseCounts: { artist: 0, video: 0 },
+      itemConcurrency: 1,
+      fetchConcurrency: 0,
+      fetchLimiter: null,
       workerWindow
     };
 
@@ -3219,7 +3727,19 @@
     writeRepairLog(workerWindow ? 'Visible repair tab opened' : 'Visible repair tab fallback is closed until needed');
     writeRepairLog(`${stats.savedArtists || 0} saved artists, ${stats.uniqueArtists || 0} unique artist pages`);
     writeRepairLog(`${stats.savedVideos || 0} saved videos, ${stats.repairableVideos || 0} repairable source pages`);
-    runNextIframeRepairItem();
+
+    if (getCoomerfansProxyUrl()) {
+      runDirectRepairQueueParallel().catch(e => {
+        if (!iframeRepairState) return;
+        showMsg('Could not repair saved links');
+        console.error(e);
+        writeRepairLog(`Parallel repair failed: ${e?.message || e}`);
+        stopIframeRepairQueue('Repair failed');
+      });
+    } else {
+      runNextIframeRepairItem();
+    }
+
     return true;
   }
 
@@ -3262,7 +3782,7 @@
       state.freshCount += Number(data.count || 0);
     }
 
-    state.completed = Math.max(state.completed || 0, state.index + 1);
+    markRepairItemComplete(current);
     state.currentProgress = 0;
     writeRepairLog(`${data.ok ? 'Result' : 'Skip'} ${current.label}: ${Number(data.count || 0)} videos in ${formatRepairSeconds(Date.now() - (state.itemStartedAt || Date.now()))}`);
     updateRepairQueuePanel(data.ok ? `Done: ${current.label}` : `Skipped: ${current.label}`);
