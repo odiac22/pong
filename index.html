@@ -48,16 +48,16 @@
       position: absolute; inset: 0; height: 100%;
       opacity: 0; pointer-events: none; z-index: 1;
       transform: translate3d(0, 20px, 0) scale(0.995);
-      transition: opacity 0.18s ease, transform 0.18s ease;
+      transition: opacity 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
       scroll-snap-align: none;
     }
     #video-container.deck-mode .video-wrapper.deck-active {
       opacity: 1; pointer-events: auto; z-index: 3;
       transform: translate3d(0, 0, 0) scale(1);
     }
-    #video-container.deck-mode .video-wrapper.deck-enter-up { animation: deckEnterUp 0.18s ease; }
-    #video-container.deck-mode .video-wrapper.deck-enter-down { animation: deckEnterDown 0.18s ease; }
-    #video-container.deck-mode .video-wrapper.deck-enter-ready { animation: deckEnterReady 0.18s ease; }
+    #video-container.deck-mode .video-wrapper.deck-enter-up { animation: deckEnterUp 0.22s cubic-bezier(0.2, 0.8, 0.2, 1); }
+    #video-container.deck-mode .video-wrapper.deck-enter-down { animation: deckEnterDown 0.22s cubic-bezier(0.2, 0.8, 0.2, 1); }
+    #video-container.deck-mode .video-wrapper.deck-enter-ready { animation: deckEnterReady 0.24s cubic-bezier(0.2, 0.8, 0.2, 1); }
     #video-container.deck-mode .blank-space { display: none; }
     @keyframes deckEnterUp {
       from { opacity: 0; transform: translate3d(0, 34px, 0) scale(0.992); }
@@ -517,7 +517,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.64</div>
+  <div class="version-number">22.65</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -555,6 +555,10 @@ let deckRestoreIndex = null;
 let deckSwipeControllerInstalled = false;
 let deckSwipeGesture = null;
 let lastDeckSwipeAt = 0;
+let deckNavigationLockedUntil = 0;
+let deckAutoPromotionLockedUntil = 0;
+let deckReadyPromotionTimer = null;
+let deckLastEmptyNoticeAt = 0;
 
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
@@ -1337,6 +1341,22 @@ videoUrlsInput.addEventListener('input', e => {
 
 // ─── Session persistence ──────────────────────────────────────────────────────
 const SESSION_KEY = 'pong_session_v1';
+const UPDATE_PRESERVED_PONG_KEYS = new Set([
+  'pong_github_token_v1',
+  'pong_coomerfans_proxy_url_v1',
+  'pong_save_counts_v1',
+  'pong_autoplay',
+  'pong_repair_item_concurrency_v1',
+  'pong_saved_videos_v1',
+  'pong_saved_artists_v1'
+]);
+const UPDATE_TRANSIENT_PONG_KEYS = new Set([
+  SESSION_KEY,
+  'pong_media_signature_cache_v1',
+  'pong_shared_saved_links_cache_v1',
+  'pong_saved_videos_playback_cache_v2',
+  'pong_saved_artists_playback_cache_v2'
+]);
 
 function compactSessionVideoMetadata(meta) {
   if (!meta || typeof meta !== 'object') return {};
@@ -1398,6 +1418,41 @@ function loadSession() {
 
 function clearSession() {
   try { localStorage.removeItem(SESSION_KEY); } catch(e) {}
+}
+
+async function clearPongTransientCachesForUpdate() {
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+
+      if (!key || UPDATE_PRESERVED_PONG_KEYS.has(key)) continue;
+      if (UPDATE_TRANSIENT_PONG_KEYS.has(key) || /^pong_(session|pending|parsed|shared|media|repair_log|last_)/.test(key)) {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch (_) {}
+
+  try { sessionStorage.clear(); } catch (_) {}
+
+  try {
+    if ('caches' in window) {
+      const cacheNames = await caches.keys();
+      await Promise.all(
+        cacheNames
+          .filter(name => /pong|odiac|github|localhost|app-cache/i.test(name))
+          .map(name => caches.delete(name))
+      );
+    }
+  } catch (_) {}
+
+  try {
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      registrations.forEach(registration => {
+        if (registration.update) registration.update();
+      });
+    }
+  } catch (_) {}
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -1875,6 +1930,7 @@ function pauseOtherVideos(activeVideo) {
 function tuneVideoPreloadAround(activeWrapper) {
   const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
   const activeIndex = wrappers.indexOf(activeWrapper);
+  const now = Date.now();
 
   wrappers.forEach((w, index) => {
     const v = w.querySelector('video');
@@ -1882,9 +1938,13 @@ function tuneVideoPreloadAround(activeWrapper) {
 
     const distance = activeIndex < 0 ? Infinity : Math.abs(index - activeIndex);
     const desiredPreload = distance <= 1 ? 'auto' : 'metadata';
+    const lastLoadKick = Number(v.dataset.lastLoadKick || 0);
 
     if (v.preload !== desiredPreload) v.preload = desiredPreload;
-    if (distance <= 1 && v.readyState === 0) v.load();
+    if (distance <= 1 && v.readyState === 0 && now - lastLoadKick > 1400) {
+      v.dataset.lastLoadKick = String(now);
+      v.load();
+    }
   });
 }
 
@@ -1900,8 +1960,23 @@ function prepareVideoForPlayback(video) {
 
 function playVideoCleanly(video) {
   if (!video) return Promise.resolve();
+  if (video.dataset.playRequestPending === 'true') return Promise.resolve();
+
+  video.dataset.playRequestPending = 'true';
   prepareVideoForPlayback(video);
-  return video.play().catch(() => {});
+
+  const playPromise = video.play();
+
+  if (!playPromise || typeof playPromise.catch !== 'function') {
+    video.dataset.playRequestPending = 'false';
+    return Promise.resolve();
+  }
+
+  return playPromise
+    .catch(() => {})
+    .finally(() => {
+      video.dataset.playRequestPending = 'false';
+    });
 }
 
 window.getAdaptiveScrubTime = getAdaptiveScrubTime;
@@ -2190,6 +2265,29 @@ function isDeckCurrentBusy() {
   return false;
 }
 
+function clearDeckReadyPromotion() {
+  if (deckReadyPromotionTimer) {
+    clearTimeout(deckReadyPromotionTimer);
+    deckReadyPromotionTimer = null;
+  }
+}
+
+function lockDeckNavigation(duration = 240) {
+  deckNavigationLockedUntil = Math.max(deckNavigationLockedUntil, Date.now() + duration);
+}
+
+function isDeckNavigationLocked() {
+  return Date.now() < deckNavigationLockedUntil;
+}
+
+function showDeckEmptyNotice(message) {
+  const now = Date.now();
+  if (now - deckLastEmptyNoticeAt < 1200) return;
+
+  deckLastEmptyNoticeAt = now;
+  showSortingIndicator(message);
+}
+
 function setDeckActiveIndex(index, direction = 'none', options = {}) {
   if (!DECK_MODE_ENABLED) return false;
 
@@ -2208,6 +2306,13 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   const oldWrapper = getDeckWrapper(oldIndex);
 
   if (!target || targetIndex < 0) return false;
+  if (oldIndex === targetIndex && target.classList.contains('deck-active')) {
+    tuneVideoPreloadAround(target);
+    updateBatchReadyCounter();
+    return true;
+  }
+
+  if (direction !== 'none') lockDeckNavigation(direction === 'ready' ? 280 : 240);
 
   if (oldWrapper && oldWrapper !== target && options.pushHistory !== false) {
     deckHistory.push(oldIndex);
@@ -2234,7 +2339,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
 
   if (enterClass) {
     target.classList.add(enterClass);
-    setTimeout(() => target.classList.remove(enterClass), 220);
+    setTimeout(() => target.classList.remove(enterClass), 280);
   }
 
   deckCurrentIndex = targetIndex;
@@ -2256,6 +2361,9 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
 function setupDeckMode() {
   if (!DECK_MODE_ENABLED) return false;
 
+  clearDeckReadyPromotion();
+  deckNavigationLockedUntil = 0;
+  deckAutoPromotionLockedUntil = 0;
   videoContainer.classList.add('deck-mode');
   ensureDeckOrder();
 
@@ -2280,16 +2388,31 @@ function maybePromoteReadyDeckVideo(wrapper) {
   const currentWrapper = getDeckWrapper(deckCurrentIndex);
   const canPromote = !currentWrapper || (!isWrapperReady(currentWrapper) && !isDeckCurrentBusy());
 
-  if (canPromote) {
+  if (!canPromote || Date.now() < deckAutoPromotionLockedUntil || isDeckNavigationLocked()) return;
+
+  clearDeckReadyPromotion();
+  deckReadyPromotionTimer = setTimeout(() => {
+    deckReadyPromotionTimer = null;
+
+    const target = getDeckWrapper(index);
+    const activeWrapper = getDeckWrapper(deckCurrentIndex);
+    const stillCanPromote = !activeWrapper || (!isWrapperReady(activeWrapper) && !isDeckCurrentBusy());
+
+    if (!target || !isWrapperReady(target) || isWrapperViewed(target) || index === deckCurrentIndex) return;
+    if (!stillCanPromote || Date.now() < deckAutoPromotionLockedUntil || isDeckNavigationLocked()) return;
+
     setDeckActiveIndex(index, 'ready', { pushHistory: true });
-  }
+  }, 220);
 }
 
 function goToNextDeckVideo() {
   if (!DECK_MODE_ENABLED) return false;
+  if (isDeckNavigationLocked()) return true;
 
   const currentWrapper = getDeckWrapper(deckCurrentIndex);
   const currentIndex = deckCurrentIndex;
+  clearDeckReadyPromotion();
+  deckAutoPromotionLockedUntil = Date.now() + 1000;
 
   if (currentWrapper && !isWrapperViewed(currentWrapper)) {
     moveDeckIndexToBack(currentIndex);
@@ -2297,7 +2420,7 @@ function goToNextDeckVideo() {
 
   const nextIndex = getNextDeckIndex();
   if (nextIndex == null) {
-    showSortingIndicator('No more videos in this batch');
+    showDeckEmptyNotice('No more videos in this batch');
     return true;
   }
 
@@ -2307,10 +2430,13 @@ function goToNextDeckVideo() {
 
 function goToPreviousDeckVideo() {
   if (!DECK_MODE_ENABLED) return false;
+  if (isDeckNavigationLocked()) return true;
+  clearDeckReadyPromotion();
+  deckAutoPromotionLockedUntil = Date.now() + 1000;
 
   const previousIndex = getPreviousDeckIndex();
   if (previousIndex == null) {
-    showSortingIndicator('No previous video');
+    showDeckEmptyNotice('No previous video');
     return true;
   }
 
@@ -3154,10 +3280,11 @@ function createGearButton(){
   updateBtn.innerHTML = 'Upd';
   updateBtn.title = 'Update Pong app';
   updateBtn.setAttribute('aria-label','Update Pong app');
-  updateBtn.addEventListener('click', e => {
+  updateBtn.addEventListener('click', async e => {
     e.preventDefault();
     e.stopPropagation();
     showSortingIndicator('Updating Pong...');
+    await clearPongTransientCachesForUpdate();
     setTimeout(() => {
       const url = new URL(window.location.href);
       url.searchParams.set('pongUpdate', String(Date.now()));
@@ -3567,6 +3694,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=53"></script>
+<script src="pong-sync.js?v=54"></script>
 </body>
 </html>
