@@ -517,7 +517,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.62</div>
+  <div class="version-number">22.63</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1338,11 +1338,29 @@ videoUrlsInput.addEventListener('input', e => {
 // ─── Session persistence ──────────────────────────────────────────────────────
 const SESSION_KEY = 'pong_session_v1';
 
+function compactSessionVideoMetadata(meta) {
+  if (!meta || typeof meta !== 'object') return {};
+
+  return {
+    source: meta.source || '',
+    artistName: meta.artistName || '',
+    artistKey: meta.artistKey || '',
+    artistUrl: meta.artistUrl || '',
+    artistDisplayName: meta.artistDisplayName || '',
+    postUrl: meta.postUrl || '',
+    postIndex: Number(meta.postIndex || 0),
+    scrapedAt: meta.scrapedAt || '',
+    mediaKey: meta.mediaKey || ''
+  };
+}
+
 function saveSession() {
   try {
     localStorage.setItem(SESSION_KEY, JSON.stringify({
       allVideoUrls,
-      allVideoMetadata,
+      allVideoMetadata: Array.isArray(allVideoMetadata)
+        ? allVideoMetadata.map(compactSessionVideoMetadata)
+        : [],
       currentBatch,
       currentVideoIndex,
       currentPasteIndex,
@@ -1357,7 +1375,9 @@ function loadSession() {
     const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     if (!s || !s.allVideoUrls || !s.allVideoUrls.length) return false;
     allVideoUrls = s.allVideoUrls;
-    allVideoMetadata = Array.isArray(s.allVideoMetadata) ? s.allVideoMetadata : [];
+    allVideoMetadata = Array.isArray(s.allVideoMetadata)
+      ? s.allVideoMetadata.map(compactSessionVideoMetadata)
+      : [];
     currentBatch = s.currentBatch || 0;
     currentVideoIndex = s.currentVideoIndex || 0;
     currentPasteIndex = Number.isInteger(s.currentPasteIndex) ? s.currentPasteIndex : -1;
@@ -2780,7 +2800,7 @@ function loadNextBatch(restoreIndex) {
     currentBatch++;
   }
 
-  saveSession();
+  scheduleSessionSave(700);
 
   if (videoUrls.length>0) {
     deckRestoreIndex = restoreIndex != null ? Number(restoreIndex) : 0;
@@ -3019,7 +3039,7 @@ function navigateToNextPasteEvent(){
   };
   currentBatch = 0;
   currentVideoIndex = 0;
-  saveSession();
+  scheduleSessionSave(700);
 
   videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
   setTimeout(()=>{
@@ -3534,6 +3554,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=51"></script>
+<script src="pong-sync.js?v=52"></script>
 </body>
 </html>

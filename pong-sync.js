@@ -21,6 +21,7 @@
   const SAVE_COUNTS_KEY = 'pong_save_counts_v1';
   const SHARED_DATA_CACHE_KEY = 'pong_shared_saved_links_cache_v1';
   const DEFAULT_COOMERFANS_PROXY_URL = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
+  const REPAIR_CONCURRENCY_KEY = 'pong_repair_item_concurrency_v1';
   const PONG_ARTIST_PREFIX = '#PONG_ARTIST ';
   const PONG_VIDEO_PREFIX = '#PONG_VIDEO ';
   const REPAIR_LOG_UPLOAD_PATH = 'pong-data/repair-log-latest.txt';
@@ -263,7 +264,9 @@
       }
 
       .pong-repair-stop,
-      .pong-repair-copy {
+      .pong-repair-copy,
+      .pong-repair-start,
+      .pong-repair-concurrency {
         border: 1px solid rgba(255,255,255,0.13) !important;
         border-radius: 999px !important;
         background: rgba(251,113,133,0.16) !important;
@@ -276,6 +279,31 @@
 
       .pong-repair-copy {
         background: rgba(103,232,249,0.14) !important;
+      }
+
+      .pong-repair-start {
+        background: rgba(34,197,94,0.16) !important;
+      }
+
+      .pong-repair-start:disabled {
+        opacity: 0.44 !important;
+      }
+
+      .pong-repair-concurrency {
+        width: 34px !important;
+        min-width: 34px !important;
+        padding: 2px 3px !important;
+        text-align: center !important;
+        background: rgba(255,255,255,0.08) !important;
+        outline: none !important;
+        appearance: textfield !important;
+        -moz-appearance: textfield !important;
+      }
+
+      .pong-repair-concurrency::-webkit-outer-spin-button,
+      .pong-repair-concurrency::-webkit-inner-spin-button {
+        -webkit-appearance: none !important;
+        margin: 0 !important;
       }
 
       .pong-repair-frame {
@@ -582,6 +610,25 @@
     return `https://api.github.com/repos/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/contents/${path}`;
   }
 
+  function githubTreeApiUrl() {
+    return `https://api.github.com/repos/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/git/trees/${encodeURIComponent(GITHUB_SYNC.branch)}?recursive=1`;
+  }
+
+  function sameOriginSharedDataUrl() {
+    try {
+      const current = new URL(window.location.href);
+      const basePath = current.pathname.endsWith('/')
+        ? current.pathname
+        : /\.[^/]+$/.test(current.pathname)
+          ? current.pathname.replace(/[^/]*$/, '')
+          : `${current.pathname}/`;
+
+      return `${current.origin}${basePath}${GITHUB_SYNC.path}`;
+    } catch (e) {
+      return '';
+    }
+  }
+
   function githubHeaders(options = {}) {
     const token = options.requireToken ? requireGitHubToken() : '';
     const headers = {
@@ -635,6 +682,33 @@
     }
   }
 
+  async function fetchSharedDataShaFromGitHub() {
+    const token = requireGitHubToken();
+
+    if (!token) {
+      throw new Error('No GitHub token configured');
+    }
+
+    const res = await fetch(`${githubTreeApiUrl()}&t=${Date.now()}`, {
+      method: 'GET',
+      headers: githubHeaders({ requireToken: true }),
+      cache: 'no-store'
+    });
+
+    if (!res.ok) {
+      throw new Error(`GitHub tree load failed: ${res.status}`);
+    }
+
+    const tree = await res.json();
+    const match = (tree?.tree || []).find(item => item?.path === GITHUB_SYNC.path);
+
+    if (!match?.sha) {
+      throw new Error('GitHub saved links SHA not found');
+    }
+
+    return match.sha;
+  }
+
   async function fetchSharedDataFromGitHub(options = {}) {
     const requireWriteSha = !!options.requireWriteSha;
     let file = null;
@@ -642,6 +716,20 @@
     let apiError = null;
 
     if (!requireWriteSha && options.rawFirst !== false) {
+      const pageUrl = options.pageFirst === false ? '' : sameOriginSharedDataUrl();
+
+      if (pageUrl) {
+        try {
+          parsed = await fetchRawSharedData(pageUrl);
+          return {
+            data: normalizeSharedData(parsed, { refreshMedia: !!options.refreshMedia }),
+            sha: null
+          };
+        } catch (e) {
+          apiError = e;
+        }
+      }
+
       try {
         parsed = await fetchRawSharedData();
         return {
@@ -649,7 +737,7 @@
           sha: null
         };
       } catch (e) {
-        apiError = e;
+        apiError = apiError || e;
       }
     }
 
@@ -1523,8 +1611,10 @@
       }
     }
 
-    if (typeof saveSession === 'function') {
-      saveSession();
+    if (typeof scheduleSessionSave === 'function') {
+      scheduleSessionSave(900);
+    } else if (typeof saveSession === 'function') {
+      setTimeout(() => saveSession(), 900);
     }
 
     videoContainer.innerHTML = '<div class="loading-message">Loading saved videos...</div>';
@@ -1655,9 +1745,23 @@
     }
   }
 
+  function compactSavedArtistPlaybackMeta(artist) {
+    const compact = compactVideoMetadata(artist) || {};
+
+    return {
+      source: compact.source || artist?.source || 'coomerfans',
+      artistName: compact.artistName || artist?.artistName || '',
+      artistKey: compact.artistKey || artist?.artistKey || '',
+      artistUrl: compact.artistUrl || artist?.artistUrl || '',
+      artistDisplayName: compact.artistDisplayName || getArtistDisplayName(artist),
+      scrapedAt: compact.scrapedAt || artist?.scrapedAt || ''
+    };
+  }
+
   function buildSavedVideosPlaybackDataFast(savedData) {
-    const data = cloneSharedData(savedData);
-    refreshSharedDataMediaUrls(data);
+    const data = savedData && typeof savedData === 'object' ? savedData : null;
+
+    if (!data) return null;
 
     const savedVideoItems = Object.values(data.savedVideos || {})
       .filter(Boolean);
@@ -1689,8 +1793,9 @@
   }
 
   function buildSavedArtistsPlaybackDataFast(savedData) {
-    const data = cloneSharedData(savedData);
-    refreshSharedDataMediaUrls(data);
+    const data = savedData && typeof savedData === 'object' ? savedData : null;
+
+    if (!data) return null;
 
     const artistEntries = Object.values(data.savedArtists || {})
       .filter(item => item && Array.isArray(item.videos) && item.videos.length);
@@ -1704,6 +1809,7 @@
 
     randomizedArtists.forEach((artist, artistIndex) => {
       const cleanVideos = shuffleArray(dedupeAndRefreshMediaUrls(artist.videos.filter(Boolean)));
+      const artistMeta = compactSavedArtistPlaybackMeta(artist);
 
       if (!cleanVideos.length) return;
 
@@ -1713,10 +1819,11 @@
         groupedVideos.push(url);
         const mediaKey = getSavedVideoKey(url);
         const videoMeta = mediaKey && artist.videoMeta ? artist.videoMeta[mediaKey] : null;
+        const compactVideoMeta = compactVideoMetadata(videoMeta) || {};
         groupedMetadata.push({
-          ...(artist || {}),
-          ...(videoMeta || {}),
-          artistDisplayName: getArtistDisplayName(videoMeta) || getArtistDisplayName(artist)
+          ...artistMeta,
+          ...compactVideoMeta,
+          artistDisplayName: getArtistDisplayName(compactVideoMeta) || artistMeta.artistDisplayName
         });
       });
 
@@ -1753,7 +1860,6 @@
     fetchSharedDataFromGitHub()
       .then(loaded => {
         const savedData = loaded.data;
-        refreshSharedDataMediaUrls(savedData);
         mirrorSharedDataToLocal(savedData);
         console.log(`[Pong saved] Refreshed ${label} cache from GitHub`);
       })
@@ -1775,7 +1881,6 @@
 
       const loaded = await fetchSharedDataFromGitHub();
       const savedData = loaded.data;
-      refreshSharedDataMediaUrls(savedData);
       mirrorSharedDataToLocal(savedData);
 
       const playbackData = buildSavedVideosPlaybackDataFast(savedData);
@@ -1804,7 +1909,6 @@
 
       const loaded = await fetchSharedDataFromGitHub();
       const savedData = loaded.data;
-      refreshSharedDataMediaUrls(savedData);
       mirrorSharedDataToLocal(savedData);
 
       const playbackData = buildSavedArtistsPlaybackDataFast(savedData);
@@ -2468,54 +2572,58 @@
     data.savedVideos = data.savedVideos || {};
     data.savedArtists = data.savedArtists || {};
 
-    Object.entries(data.savedVideos).forEach(([key, item]) => {
-      if (options.savedVideoKey && key !== options.savedVideoKey) return;
+    if (!options.skipSavedVideos) {
+      Object.entries(data.savedVideos).forEach(([key, item]) => {
+        if (options.savedVideoKey && key !== options.savedVideoKey) return;
 
-      const freshEntry = freshEntryForSavedUrl(item?.url || key, item, maps);
+        const freshEntry = freshEntryForSavedUrl(item?.url || key, item, maps);
 
-      if (freshEntry && applyFreshEntryToSavedVideo(item, freshEntry)) {
-        repaired++;
-      }
-    });
-
-    Object.entries(data.savedArtists).forEach(([artistKey, artist]) => {
-      if (options.artistKey && artistKey !== options.artistKey) return;
-      if (!artist || !Array.isArray(artist.videos)) return;
-
-      artist.videoMeta = artist.videoMeta || {};
-
-      const repairedVideos = artist.videos.map(oldUrl => {
-        const mediaKey = getSavedVideoKey(oldUrl);
-        const savedMeta = mediaKey ? artist.videoMeta[mediaKey] : null;
-        const freshEntry = freshEntryForSavedUrl(oldUrl, savedMeta, maps);
-
-        if (!freshEntry?.videoUrl) return oldUrl;
-
-        const bestUrl = chooseBestMediaUrl(oldUrl, freshEntry.videoUrl);
-        const freshMeta = compactVideoMetadata(freshEntry);
-
-        if (mediaKey && freshMeta) {
-          artist.videoMeta[mediaKey] = freshMeta;
-        }
-
-        if (bestUrl && bestUrl !== oldUrl) {
+        if (freshEntry && applyFreshEntryToSavedVideo(item, freshEntry)) {
           repaired++;
-          return bestUrl;
         }
-
-        return oldUrl;
       });
+    }
 
-      artist.videos = dedupeAndRefreshMediaUrls(repairedVideos);
+    if (!options.skipSavedArtists) {
+      Object.entries(data.savedArtists).forEach(([artistKey, artist]) => {
+        if (options.artistKey && artistKey !== options.artistKey) return;
+        if (!artist || !Array.isArray(artist.videos)) return;
 
-      const artistMeta = compactArtistMetadata(artist.videos);
+        artist.videoMeta = artist.videoMeta || {};
 
-      Object.assign(artist, artistMeta);
+        const repairedVideos = artist.videos.map(oldUrl => {
+          const mediaKey = getSavedVideoKey(oldUrl);
+          const savedMeta = mediaKey ? artist.videoMeta[mediaKey] : null;
+          const freshEntry = freshEntryForSavedUrl(oldUrl, savedMeta, maps);
 
-      if (repaired) {
-        artist.updatedAt = new Date().toISOString();
-      }
-    });
+          if (!freshEntry?.videoUrl) return oldUrl;
+
+          const bestUrl = chooseBestMediaUrl(oldUrl, freshEntry.videoUrl);
+          const freshMeta = compactVideoMetadata(freshEntry);
+
+          if (mediaKey && freshMeta) {
+            artist.videoMeta[mediaKey] = freshMeta;
+          }
+
+          if (bestUrl && bestUrl !== oldUrl) {
+            repaired++;
+            return bestUrl;
+          }
+
+          return oldUrl;
+        });
+
+        artist.videos = dedupeAndRefreshMediaUrls(repairedVideos);
+
+        const artistMeta = compactArtistMetadata(artist.videos);
+
+        Object.assign(artist, artistMeta);
+
+        if (repaired) {
+          artist.updatedAt = new Date().toISOString();
+        }
+      });
+    }
 
     return {
       repaired
@@ -2550,12 +2658,43 @@
   const REPAIR_ITEM_TIMEOUT_MS = 120000;
   const DIRECT_REPAIR_ITEM_TIMEOUT_MS = 240000;
   const DIRECT_REPAIR_POST_CONCURRENCY = 20;
-  const DIRECT_REPAIR_ITEM_CONCURRENCY = 6;
-  const DIRECT_REPAIR_GLOBAL_FETCH_CONCURRENCY = 36;
+  const DEFAULT_DIRECT_REPAIR_ITEM_CONCURRENCY = 6;
+  const MAX_DIRECT_REPAIR_ITEM_CONCURRENCY = 50;
+  const MAX_DIRECT_REPAIR_GLOBAL_FETCH_CONCURRENCY = 240;
   const DIRECT_REPAIR_MAX_RETRIES = 2;
   const REPAIR_LOG_UI_MAX_LINES = 140;
   const REPAIR_LOG_COPY_MAX_LINES = 420;
   let iframeRepairState = null;
+
+  function clampRepairConcurrency(value) {
+    const number = Math.round(Number(value || DEFAULT_DIRECT_REPAIR_ITEM_CONCURRENCY));
+    return Math.max(1, Math.min(MAX_DIRECT_REPAIR_ITEM_CONCURRENCY, Number.isFinite(number) ? number : DEFAULT_DIRECT_REPAIR_ITEM_CONCURRENCY));
+  }
+
+  function getRepairItemConcurrency() {
+    try {
+      return clampRepairConcurrency(localStorage.getItem(REPAIR_CONCURRENCY_KEY));
+    } catch (e) {
+      return DEFAULT_DIRECT_REPAIR_ITEM_CONCURRENCY;
+    }
+  }
+
+  function saveRepairItemConcurrency(value) {
+    const concurrency = clampRepairConcurrency(value);
+
+    try {
+      localStorage.setItem(REPAIR_CONCURRENCY_KEY, String(concurrency));
+    } catch (e) {}
+
+    return concurrency;
+  }
+
+  function getRepairFetchConcurrency(itemConcurrency) {
+    return Math.max(
+      6,
+      Math.min(MAX_DIRECT_REPAIR_GLOBAL_FETCH_CONCURRENCY, clampRepairConcurrency(itemConcurrency) * 6)
+    );
+  }
 
   function appendRepairHash(rawUrl, item) {
     try {
@@ -2690,6 +2829,8 @@
       <div class="pong-repair-title">
         <span>Repairing saved links</span>
         <div class="pong-repair-actions">
+          <input id="pong-repair-concurrency" class="pong-repair-concurrency" type="number" min="1" max="${MAX_DIRECT_REPAIR_ITEM_CONCURRENCY}" step="1" value="${getRepairItemConcurrency()}" title="Repair jobs at once">
+          <button id="pong-repair-start" class="pong-repair-start" type="button">Start</button>
           <button id="pong-repair-copy-log" class="pong-repair-copy" type="button">Copy log</button>
           <button id="pong-repair-stop" class="pong-repair-stop" type="button">Stop</button>
         </div>
@@ -2710,6 +2851,30 @@
     `;
 
     document.body.appendChild(panel);
+
+    const concurrency = document.getElementById('pong-repair-concurrency');
+    if (concurrency) {
+      concurrency.addEventListener('change', () => {
+        const value = saveRepairItemConcurrency(concurrency.value);
+        concurrency.value = String(value);
+
+        if (iframeRepairState && !iframeRepairState.started) {
+          iframeRepairState.itemConcurrency = value;
+          iframeRepairState.fetchConcurrency = getRepairFetchConcurrency(value);
+          writeRepairLog(`Repair slots set to ${value}; fetch limit ${iframeRepairState.fetchConcurrency}`);
+          updateRepairQueuePanel('Ready. Press Start to repair.');
+        }
+      });
+    }
+
+    const start = document.getElementById('pong-repair-start');
+    if (start) {
+      start.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        startIframeRepairExecution();
+      });
+    }
 
     const stop = document.getElementById('pong-repair-stop');
     if (stop) {
@@ -3410,6 +3575,38 @@
     };
   }
 
+  function applyRepairQueueResultsToData(data, state) {
+    const results = state?.results || [];
+    const videoEntries = results
+      .filter(result => result?.item?.phase === 'video')
+      .flatMap(result => parsePastedMetadata(result.text).orderedVideos || [])
+      .filter(item => item?.videoUrl);
+    const artistApplied = applyArtistScrapeResultsToSavedArtists(data, results).repaired;
+    const savedVideoApplied = repairDataWithEntries(data, videoEntries, { skipSavedArtists: true }).repaired;
+
+    return {
+      repaired: artistApplied + savedVideoApplied,
+      videoEntries
+    };
+  }
+
+  async function writeRepairResultsToGitHubFromBaseData(state) {
+    const data = cloneSharedData(state?.baseData || emptySharedData());
+    const applied = applyRepairQueueResultsToData(data, state);
+
+    if (!applied.repaired && !(state?.results || []).length) {
+      return {
+        repaired: 0
+      };
+    }
+
+    const sha = await fetchSharedDataShaFromGitHub();
+    await writeSharedDataToGitHub(data, sha);
+    mirrorSharedDataToLocal(data);
+
+    return applied;
+  }
+
   async function finishIframeRepairQueue() {
     const state = iframeRepairState;
 
@@ -3424,23 +3621,27 @@
     const applyStartedAt = Date.now();
     updateRepairQueuePanel('Applying fresh links...');
 
-    const entries = state.results
-      .flatMap(result => parsePastedMetadata(result.text).orderedVideos || [])
-      .filter(item => item?.videoUrl);
-
     let repaired = state.initialRepaired || 0;
 
-    if (entries.length || state.results.length) {
-      const result = await updateSharedData(data => {
-        const artistApplied = applyArtistScrapeResultsToSavedArtists(data, state.results).repaired;
-        const applied = repairDataWithEntries(data, entries).repaired;
-        refreshSharedDataMediaUrls(data);
-        return {
-          repaired: artistApplied + applied
-        };
-      });
+    if (state.results.length) {
+      let appliedResult = null;
 
-      repaired += result.result.repaired || 0;
+      if (state.baseData) {
+        try {
+          appliedResult = await writeRepairResultsToGitHubFromBaseData(state);
+        } catch (e) {
+          writeRepairLog(`Fast apply failed; retrying safe apply: ${e?.message || e}`);
+        }
+      } else {
+        writeRepairLog('No base saved data was available; using safe apply');
+      }
+
+      if (!appliedResult) {
+        const result = await updateSharedData(data => applyRepairQueueResultsToData(data, state));
+        appliedResult = result.result;
+      }
+
+      repaired += appliedResult?.repaired || 0;
     }
 
     writeRepairLog(`Apply complete in ${formatRepairSeconds(Date.now() - applyStartedAt)}; repaired ${repaired} links`);
@@ -3548,17 +3749,19 @@
     const state = iframeRepairState;
     if (!state || !state.active) return;
 
-    const workerCount = Math.max(1, Math.min(DIRECT_REPAIR_ITEM_CONCURRENCY, state.queue.length));
+    const configuredConcurrency = clampRepairConcurrency(state.itemConcurrency || getRepairItemConcurrency());
+    const fetchConcurrency = getRepairFetchConcurrency(configuredConcurrency);
+    const workerCount = Math.max(1, Math.min(configuredConcurrency, state.queue.length));
 
     state.parallel = true;
     state.nextIndex = 0;
     state.activeItems = [];
     state.itemReports = [];
     state.itemConcurrency = workerCount;
-    state.fetchConcurrency = DIRECT_REPAIR_GLOBAL_FETCH_CONCURRENCY;
-    state.fetchLimiter = createAsyncLimiter(DIRECT_REPAIR_GLOBAL_FETCH_CONCURRENCY);
+    state.fetchConcurrency = fetchConcurrency;
+    state.fetchLimiter = createAsyncLimiter(fetchConcurrency);
 
-    writeRepairLog(`Parallel direct repair enabled: ${workerCount} jobs at once, ${DIRECT_REPAIR_GLOBAL_FETCH_CONCURRENCY} fetches max`);
+    writeRepairLog(`Parallel direct repair enabled: ${workerCount} jobs at once, ${fetchConcurrency} fetches max`);
     updateRepairQueuePanel(`Parallel repair: ${workerCount} active slots`);
 
     async function worker() {
@@ -3681,7 +3884,52 @@
     }, REPAIR_ITEM_TIMEOUT_MS);
   }
 
-  function startIframeRepairQueue(queueInfo, initialRepaired = 0, workerWindow = null) {
+  function setRepairStartButtonState(isRunning) {
+    const start = document.getElementById('pong-repair-start');
+    const concurrency = document.getElementById('pong-repair-concurrency');
+
+    if (start) {
+      start.disabled = !!isRunning;
+      start.textContent = isRunning ? 'Busy' : 'Start';
+    }
+
+    if (concurrency) {
+      concurrency.disabled = !!isRunning;
+    }
+  }
+
+  function startIframeRepairExecution() {
+    const state = iframeRepairState;
+
+    if (!state || state.started) return;
+
+    const concurrencyInput = document.getElementById('pong-repair-concurrency');
+    const itemConcurrency = saveRepairItemConcurrency(concurrencyInput?.value || state.itemConcurrency);
+
+    if (concurrencyInput) concurrencyInput.value = String(itemConcurrency);
+
+    state.active = true;
+    state.started = true;
+    state.itemConcurrency = itemConcurrency;
+    state.fetchConcurrency = getRepairFetchConcurrency(itemConcurrency);
+    setRepairStartButtonState(true);
+
+    writeRepairLog(`Repair started with ${state.itemConcurrency} slots and ${state.fetchConcurrency} fetches max`);
+
+    if (getCoomerfansProxyUrl()) {
+      runDirectRepairQueueParallel().catch(e => {
+        if (!iframeRepairState) return;
+        showMsg('Could not repair saved links');
+        console.error(e);
+        writeRepairLog(`Parallel repair failed: ${e?.message || e}`);
+        stopIframeRepairQueue('Repair failed');
+      });
+    } else {
+      runNextIframeRepairItem();
+    }
+  }
+
+  function startIframeRepairQueue(queueInfo, initialRepaired = 0, workerWindow = null, baseData = null) {
     const queue = Array.isArray(queueInfo) ? queueInfo : queueInfo?.queue || [];
     const stats = Array.isArray(queueInfo) ? {} : queueInfo?.stats || {};
 
@@ -3695,7 +3943,8 @@
 
     iframeRepairState = {
       id: Date.now().toString(36),
-      active: true,
+      active: false,
+      started: false,
       queue,
       index: -1,
       completed: 0,
@@ -3714,31 +3963,22 @@
       activeItems: [],
       itemReports: [],
       completedPhaseCounts: { artist: 0, video: 0 },
-      itemConcurrency: 1,
-      fetchConcurrency: 0,
+      itemConcurrency: getRepairItemConcurrency(),
+      fetchConcurrency: getRepairFetchConcurrency(getRepairItemConcurrency()),
       fetchLimiter: null,
+      baseData: baseData ? cloneSharedData(baseData) : null,
       workerWindow
     };
 
-    updateRepairQueuePanel('Starting repair...');
+    updateRepairQueuePanel('Ready. Press Start to repair.');
     writeRepairLog(`Queue created: ${queue.length} jobs`);
     writeRepairLog('Direct browser scrape enabled');
     writeRepairLog(getCoomerfansProxyUrl() ? `Repair proxy: ${getCoomerfansProxyUrl()}` : 'Repair proxy not configured; direct fetch will likely fail');
+    writeRepairLog(`Repair slots ready: ${iframeRepairState.itemConcurrency}; fetch limit ${iframeRepairState.fetchConcurrency}`);
     writeRepairLog(workerWindow ? 'Visible repair tab opened' : 'Visible repair tab fallback is closed until needed');
     writeRepairLog(`${stats.savedArtists || 0} saved artists, ${stats.uniqueArtists || 0} unique artist pages`);
     writeRepairLog(`${stats.savedVideos || 0} saved videos, ${stats.repairableVideos || 0} repairable source pages`);
-
-    if (getCoomerfansProxyUrl()) {
-      runDirectRepairQueueParallel().catch(e => {
-        if (!iframeRepairState) return;
-        showMsg('Could not repair saved links');
-        console.error(e);
-        writeRepairLog(`Parallel repair failed: ${e?.message || e}`);
-        stopIframeRepairQueue('Repair failed');
-      });
-    } else {
-      runNextIframeRepairItem();
-    }
+    setRepairStartButtonState(false);
 
     return true;
   }
@@ -3834,7 +4074,8 @@
           setCoomerfansProxyUrl();
         }
 
-        startIframeRepairQueue(queueInfo, pastedRepaired, workerWindow);
+        startIframeRepairQueue(queueInfo, pastedRepaired, workerWindow, loaded.data);
+        showMsg('Repair queue ready');
         return;
       }
 
