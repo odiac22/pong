@@ -366,6 +366,7 @@
 
     if (!message) return 'unknown error';
     if (/No GitHub token/i.test(message)) return 'missing GitHub token';
+    if (/GitHub load failed:\s*401/i.test(message)) return 'bad GitHub token';
     if (/GitHub save failed:\s*401/i.test(message)) return 'bad GitHub token';
     if (/GitHub save failed:\s*403/i.test(message)) return 'GitHub permission denied';
     if (/GitHub save failed:\s*409/i.test(message)) return 'GitHub changed; try again';
@@ -373,9 +374,33 @@
     return message;
   }
 
+  function isGitHubAuthError(error) {
+    return /GitHub (?:load|save) failed:\s*(?:401|403)/i.test(String(error?.message || error || ''));
+  }
+
+  function normalizeGitHubToken(rawToken) {
+    let token = String(rawToken || '').trim();
+
+    token = token
+      .replace(/^Authorization\s*:\s*/i, '')
+      .replace(/^Bearer\s+/i, '')
+      .replace(/^token\s+/i, '')
+      .replace(/^['"]|['"]$/g, '')
+      .trim();
+
+    return token;
+  }
+
   function getGitHubToken() {
     try {
-      return localStorage.getItem(GITHUB_TOKEN_KEY) || '';
+      const rawToken = localStorage.getItem(GITHUB_TOKEN_KEY) || '';
+      const token = normalizeGitHubToken(rawToken);
+
+      if (rawToken && rawToken !== token) {
+        localStorage.setItem(GITHUB_TOKEN_KEY, token);
+      }
+
+      return token;
     } catch (e) {
       return '';
     }
@@ -388,10 +413,13 @@
     if (token === null) return;
 
     try {
-      localStorage.setItem(GITHUB_TOKEN_KEY, token.trim());
-      showMsg(token.trim() ? 'GitHub token saved' : 'GitHub token cleared');
+      const normalized = normalizeGitHubToken(token);
+      localStorage.setItem(GITHUB_TOKEN_KEY, normalized);
+      showMsg(normalized ? 'GitHub token saved' : 'GitHub token cleared');
+      return normalized;
     } catch (e) {
       showMsg('Could not save token');
+      return '';
     }
   }
 
@@ -610,7 +638,7 @@
     try {
       const res = await fetch(`${githubApiUrl()}?ref=${encodeURIComponent(GITHUB_SYNC.branch)}&t=${Date.now()}`, {
         method: 'GET',
-        headers: githubHeaders({ requireToken: requireWriteSha }),
+        headers: githubHeaders(),
         cache: 'no-store'
       });
 
@@ -719,11 +747,35 @@
         };
       } catch (e) {
         lastError = e;
+
+        if (isGitHubAuthError(e)) {
+          throw e;
+        }
+
         await new Promise(r => setTimeout(r, 400 + attempt * 400));
       }
     }
 
     throw lastError;
+  }
+
+  async function updateSharedDataWithTokenRetry(mutatorFn) {
+    try {
+      return await updateSharedData(mutatorFn);
+    } catch (e) {
+      if (!isGitHubAuthError(e)) {
+        throw e;
+      }
+
+      showMsg('GitHub token needs update');
+      const token = setGitHubToken();
+
+      if (!token) {
+        throw e;
+      }
+
+      return await updateSharedData(mutatorFn);
+    }
   }
 
   function mirrorSharedDataToLocal(data) {
@@ -1809,7 +1861,7 @@
     showMsg('Saving video to GitHub...');
 
     try {
-      const result = await updateSharedData(data => {
+      const result = await updateSharedDataWithTokenRetry(data => {
         return {
           added: addSavedVideosToData(data, [url], artistKey)
         };
@@ -1839,7 +1891,7 @@
     showMsg('Saving artist to GitHub...');
 
     try {
-      const result = await updateSharedData(data => {
+      const result = await updateSharedDataWithTokenRetry(data => {
         return applyArtistBundleToData(data, bundleInfo, artistVideos);
       });
 
