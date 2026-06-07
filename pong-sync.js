@@ -1147,12 +1147,37 @@
     return copy;
   }
 
-  function toUrl(rawUrl) {
+  const parsedUrlCache = new Map();
+  let mediaSignatureCacheMemory = null;
+  let mediaSignatureCacheSaveTimer = null;
+  let pastedMetadataIndexCache = null;
+  const PARSED_URL_CACHE_LIMIT = 6000;
+
+  function memoizedUrl(rawUrl) {
+    const key = String(rawUrl || '').trim();
+
+    if (!key) return null;
+    if (parsedUrlCache.has(key)) return parsedUrlCache.get(key);
+
+    let parsed = null;
+
     try {
-      return new URL(String(rawUrl || '').trim(), window.location.href);
+      parsed = new URL(key, window.location.href);
     } catch (e) {
-      return null;
+      parsed = null;
     }
+
+    parsedUrlCache.set(key, parsed);
+
+    if (parsedUrlCache.size > PARSED_URL_CACHE_LIMIT) {
+      parsedUrlCache.delete(parsedUrlCache.keys().next().value);
+    }
+
+    return parsed;
+  }
+
+  function toUrl(rawUrl) {
+    return memoizedUrl(rawUrl);
   }
 
   function getMediaUrlKey(rawUrl) {
@@ -1205,19 +1230,58 @@
   }
 
   function loadMediaSignatureCache() {
+    if (mediaSignatureCacheMemory && typeof mediaSignatureCacheMemory === 'object') {
+      return mediaSignatureCacheMemory;
+    }
+
     try {
       const data = JSON.parse(localStorage.getItem(MEDIA_SIGNATURE_CACHE_KEY) || '{}');
-      return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+      mediaSignatureCacheMemory = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+      return mediaSignatureCacheMemory;
     } catch (e) {
-      return {};
+      mediaSignatureCacheMemory = {};
+      return mediaSignatureCacheMemory;
     }
   }
 
-  function saveMediaSignatureCache(cache) {
+  function pruneMediaSignatureCache(cache) {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+
+    Object.keys(cache || {}).forEach(key => {
+      const entry = cache[key];
+      const expiresAt = Number(entry?.expiresAt || 0);
+
+      if (!entry || !entry.url || (expiresAt && expiresAt <= nowSeconds)) {
+        delete cache[key];
+      }
+    });
+
+    return cache;
+  }
+
+  function flushMediaSignatureCache() {
+    if (!mediaSignatureCacheMemory || typeof mediaSignatureCacheMemory !== 'object') return;
+
+    if (mediaSignatureCacheSaveTimer) {
+      clearTimeout(mediaSignatureCacheSaveTimer);
+      mediaSignatureCacheSaveTimer = null;
+    }
+
     try {
-      localStorage.setItem(MEDIA_SIGNATURE_CACHE_KEY, JSON.stringify(cache));
+      localStorage.setItem(MEDIA_SIGNATURE_CACHE_KEY, JSON.stringify(pruneMediaSignatureCache(mediaSignatureCacheMemory)));
     } catch (e) {}
   }
+
+  function saveMediaSignatureCache(cache) {
+    mediaSignatureCacheMemory = pruneMediaSignatureCache(cache || {});
+
+    if (mediaSignatureCacheSaveTimer) return;
+
+    mediaSignatureCacheSaveTimer = setTimeout(flushMediaSignatureCache, 350);
+  }
+
+  window.addEventListener('pagehide', flushMediaSignatureCache);
+  window.addEventListener('beforeunload', flushMediaSignatureCache);
 
   function rememberFreshMediaUrls(urls) {
     if (!Array.isArray(urls) || !urls.length) return 0;
@@ -1601,31 +1665,99 @@
     rememberFreshMediaUrls(urls);
 
     window.PongCurrentPastedMetadata = mergePastedMetadata(window.PongCurrentPastedMetadata, parsed);
+    pastedMetadataIndexCache = null;
 
     return window.PongCurrentPastedMetadata;
   }
 
-  function getPastedMetadataForUrl(rawUrl) {
-    const metadata = window.PongCurrentPastedMetadata || emptyPastedMetadata();
-    const direct = metadata.videosByUrl[String(rawUrl || '').trim()];
-
-    if (direct) return direct;
-
-    const mediaKey = getSavedVideoKey(rawUrl);
-    const cachedEntries = Array.isArray(window.PongLastPastedEntries)
+  function getCachedPasteEntries() {
+    return Array.isArray(window.PongLastPastedEntries)
       ? window.PongLastPastedEntries
       : Array.isArray(window.PongPendingPasteCache?.entries)
         ? window.PongPendingPasteCache.entries
         : [];
-    const cachedEntry = cachedEntries.find(entry => {
-      if (!entry?.videoUrl) return false;
-      if (String(entry.videoUrl).trim() === String(rawUrl || '').trim()) return true;
-      return mediaKey && getSavedVideoKey(entry.videoUrl) === mediaKey;
+  }
+
+  function getPastedMetadataIndex() {
+    const metadata = window.PongCurrentPastedMetadata || emptyPastedMetadata();
+    const cachedEntries = getCachedPasteEntries();
+
+    if (
+      pastedMetadataIndexCache &&
+      pastedMetadataIndexCache.metadata === metadata &&
+      pastedMetadataIndexCache.entries === cachedEntries &&
+      pastedMetadataIndexCache.orderedLength === (metadata.orderedVideos || []).length &&
+      pastedMetadataIndexCache.entriesLength === cachedEntries.length
+    ) {
+      return pastedMetadataIndexCache;
+    }
+
+    const metadataByUrl = new Map();
+    const metadataByMediaKey = new Map();
+    const cachedByUrl = new Map();
+    const cachedByMediaKey = new Map();
+
+    Object.entries(metadata.videosByUrl || {}).forEach(([url, meta]) => {
+      metadataByUrl.set(String(url || '').trim(), meta);
     });
+
+    Object.entries(metadata.videosByMediaKey || {}).forEach(([mediaKey, meta]) => {
+      if (mediaKey) metadataByMediaKey.set(mediaKey, meta);
+    });
+
+    cachedEntries.forEach(entry => {
+      if (!entry?.videoUrl) return;
+
+      const trimmed = String(entry.videoUrl || '').trim();
+      const mediaKey = entry.mediaKey || getSavedVideoKey(trimmed);
+
+      if (trimmed && !cachedByUrl.has(trimmed)) cachedByUrl.set(trimmed, entry);
+      if (mediaKey && !cachedByMediaKey.has(mediaKey)) cachedByMediaKey.set(mediaKey, entry);
+    });
+
+    pastedMetadataIndexCache = {
+      metadata,
+      entries: cachedEntries,
+      orderedLength: (metadata.orderedVideos || []).length,
+      entriesLength: cachedEntries.length,
+      metadataByUrl,
+      metadataByMediaKey,
+      cachedByUrl,
+      cachedByMediaKey
+    };
+
+    return pastedMetadataIndexCache;
+  }
+
+  function buildLoadedMetadataLookup() {
+    const map = new Map();
+
+    if (!Array.isArray(allVideoUrls) || !Array.isArray(allVideoMetadata)) return map;
+
+    allVideoUrls.forEach((url, index) => {
+      const mediaKey = getSavedVideoKey(url);
+
+      if (mediaKey && !map.has(mediaKey)) {
+        map.set(mediaKey, allVideoMetadata[index] || null);
+      }
+    });
+
+    return map;
+  }
+
+  function getPastedMetadataForUrl(rawUrl, lookup) {
+    const index = lookup || getPastedMetadataIndex();
+    const trimmed = String(rawUrl || '').trim();
+    const direct = index.metadataByUrl.get(trimmed);
+
+    if (direct) return direct;
+
+    const mediaKey = getSavedVideoKey(rawUrl);
+    const cachedEntry = index.cachedByUrl.get(trimmed) || (mediaKey ? index.cachedByMediaKey.get(mediaKey) : null);
 
     if (cachedEntry) return cachedEntry;
 
-    return mediaKey ? metadata.videosByMediaKey[mediaKey] || null : null;
+    return mediaKey ? index.metadataByMediaKey.get(mediaKey) || null : null;
   }
 
   function artistNameFromUrl(rawUrl) {
@@ -1654,10 +1786,13 @@
     return displayName;
   }
 
-  function getLoadedMetadataForUrl(rawUrl) {
+  function getLoadedMetadataForUrl(rawUrl, lookup) {
     const mediaKey = getSavedVideoKey(rawUrl);
 
-    if (!mediaKey || !Array.isArray(allVideoUrls) || !Array.isArray(allVideoMetadata)) return null;
+    if (!mediaKey) return null;
+
+    if (lookup) return lookup.get(mediaKey) || null;
+    if (!Array.isArray(allVideoUrls) || !Array.isArray(allVideoMetadata)) return null;
 
     const index = allVideoUrls.findIndex(url => getSavedVideoKey(url) === mediaKey);
 
@@ -1680,10 +1815,10 @@
     };
   }
 
-  function compactArtistMetadata(videos) {
+  function compactArtistMetadata(videos, lookups) {
     const metadata = window.PongCurrentPastedMetadata || emptyPastedMetadata();
     const firstVideoMeta = (videos || [])
-      .map(url => getPastedMetadataForUrl(url) || getLoadedMetadataForUrl(url))
+      .map(url => getPastedMetadataForUrl(url, lookups?.pasted) || getLoadedMetadataForUrl(url, lookups?.loaded))
       .find(Boolean);
     const artist = metadata.artist || firstVideoMeta || null;
 
@@ -1699,12 +1834,14 @@
     };
   }
 
-  function buildVideoMetadataMap(urls) {
+  function buildVideoMetadataMap(urls, lookups) {
     const map = {};
+    const pastedLookup = lookups?.pasted || getPastedMetadataIndex();
+    const loadedLookup = lookups?.loaded || buildLoadedMetadataLookup();
 
     (urls || []).forEach(url => {
       const mediaKey = getSavedVideoKey(url);
-      const meta = compactVideoMetadata(getPastedMetadataForUrl(url) || getLoadedMetadataForUrl(url));
+      const meta = compactVideoMetadata(getPastedMetadataForUrl(url, pastedLookup) || getLoadedMetadataForUrl(url, loadedLookup));
 
       if (mediaKey && meta) {
         map[mediaKey] = meta;
@@ -2308,6 +2445,7 @@
     rememberFreshMediaUrls(urls);
 
     let added = 0;
+    const pastedLookup = getPastedMetadataIndex();
 
     urls.forEach(url => {
       if (!url) return;
@@ -2319,7 +2457,7 @@
       if (!key) return;
 
       if (!data.savedVideos[key]) {
-        const pastedMeta = compactVideoMetadata(getPastedMetadataForUrl(rawUrl));
+        const pastedMeta = compactVideoMetadata(getPastedMetadataForUrl(rawUrl, pastedLookup));
         data.savedVideos[key] = {
           url: playableUrl,
           mediaKey: key,
@@ -2346,7 +2484,7 @@
           existing.artistKey = artistKey;
         }
 
-        const pastedMeta = compactVideoMetadata(getPastedMetadataForUrl(rawUrl));
+        const pastedMeta = compactVideoMetadata(getPastedMetadataForUrl(rawUrl, pastedLookup));
 
         if (pastedMeta) {
           Object.assign(existing, pastedMeta);
@@ -2362,17 +2500,44 @@
     data.savedArtists = data.savedArtists || {};
 
     const existing = data.savedArtists[artistKey];
-    const existingVideos = existing && Array.isArray(existing.videos)
-      ? dedupeAndRefreshMediaUrls(existing.videos)
-      : [];
+    const existingVideos = existing && Array.isArray(existing.videos) ? existing.videos.filter(Boolean) : [];
+    const byMediaKey = new Map();
+    const orderedKeys = [];
 
-    const existingKeys = new Set(existingVideos.map(url => getSavedVideoKey(url)));
-    const newVideosOnly = artistVideos.filter(url => !existingKeys.has(getSavedVideoKey(url)));
-    const mergedVideos = dedupeAndRefreshMediaUrls([...existingVideos, ...artistVideos]);
-    const artistMeta = compactArtistMetadata(artistVideos);
+    rememberFreshMediaUrls([...existingVideos, ...artistVideos]);
+
+    existingVideos.forEach(url => {
+      const refreshed = preferFreshMediaUrl(url);
+      const mediaKey = getSavedVideoKey(refreshed);
+
+      if (!mediaKey) return;
+      if (!byMediaKey.has(mediaKey)) orderedKeys.push(mediaKey);
+      byMediaKey.set(mediaKey, chooseBestMediaUrl(byMediaKey.get(mediaKey), refreshed));
+    });
+
+    let addedBundleVideoCount = 0;
+
+    artistVideos.forEach(url => {
+      const refreshed = preferFreshMediaUrl(url);
+      const mediaKey = getSavedVideoKey(refreshed);
+
+      if (!mediaKey) return;
+      if (!byMediaKey.has(mediaKey)) {
+        orderedKeys.push(mediaKey);
+        addedBundleVideoCount++;
+      }
+      byMediaKey.set(mediaKey, chooseBestMediaUrl(byMediaKey.get(mediaKey), refreshed));
+    });
+
+    const mergedVideos = orderedKeys.map(key => byMediaKey.get(key)).filter(Boolean);
+    const lookups = {
+      pasted: getPastedMetadataIndex(),
+      loaded: buildLoadedMetadataLookup()
+    };
+    const artistMeta = compactArtistMetadata(artistVideos, lookups);
     const videoMeta = {
       ...(existing?.videoMeta || {}),
-      ...buildVideoMetadataMap(mergedVideos)
+      ...buildVideoMetadataMap(mergedVideos, lookups)
     };
 
     data.savedArtists[artistKey] = {
@@ -2388,7 +2553,7 @@
     };
 
     return {
-      addedBundleVideoCount: newVideosOnly.length,
+      addedBundleVideoCount,
       artistVideoCount: mergedVideos.length
     };
   }
@@ -4913,9 +5078,13 @@
       attachNormalModeReset();
     }, 0);
 
-    setTimeout(() => {
-      warmSavedPlaybackCacheInBackground();
-    }, 250);
+    const warmSavedCaches = () => warmSavedPlaybackCacheInBackground();
+
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(warmSavedCaches, { timeout: 3000 });
+    } else {
+      setTimeout(warmSavedCaches, 1600);
+    }
   }
 
   if (document.readyState === 'loading') {
