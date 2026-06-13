@@ -235,13 +235,21 @@
       -webkit-backdrop-filter: blur(14px); box-shadow: 0 10px 32px rgba(0,0,0,0.28);
       border: 1px solid var(--ui-border);
     }
-    .url-input textarea {
+    .url-input textarea,
+    .url-input input[type="url"] {
       width: 100%; padding: 7px 8px; border-radius: 7px; border: 1px solid rgba(255,255,255,0.12);
       background: rgba(255,255,255,0.055); color: var(--ui-text); margin-bottom: 7px;
-      height: 42px; resize: none; font-size: 12px; box-sizing: border-box;
+      font-size: 12px; box-sizing: border-box;
       -webkit-user-select: text; user-select: text; touch-action: manipulation; outline: none;
     }
-    .url-input textarea:focus { border-color: rgba(103,232,249,0.65); background: rgba(255,255,255,0.08); }
+    .url-input textarea {
+      height: 42px; resize: none;
+    }
+    .url-input input[type="url"] {
+      height: 34px;
+    }
+    .url-input textarea:focus,
+    .url-input input[type="url"]:focus { border-color: rgba(103,232,249,0.65); background: rgba(255,255,255,0.08); }
     .button-container { display: flex; gap: 7px; }
     .url-input button {
       flex: 1; padding: 7px 8px; border-radius: 7px; color: var(--ui-text);
@@ -518,12 +526,13 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.68</div>
+  <div class="version-number">22.69</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
     <div class="url-input">
       <textarea id="video-urls" placeholder="Paste video links here (one per line)" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="done"></textarea>
+      <input id="erome-url" type="url" placeholder="Erome artist or album URL" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="go">
       <div class="button-container">
         <button id="load-videos">Load Videos</button>
         <button id="open-erome">Open Erome</button>
@@ -3415,12 +3424,41 @@ loadVideosButton.addEventListener('click', async ()=>{
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 const DEFAULT_AUTH_URL = 'https://coomerfans.com/';
 const DEFAULT_EROME_URL = 'https://www.erome.com/';
+const eromeUrlInput = document.getElementById('erome-url');
+
+function normalizeEromeLaunchUrl(rawValue) {
+  const raw = String(rawValue || '').trim();
+
+  if (!raw) return '';
+
+  const embedded = raw.match(/(?:https?:\/\/)?(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?/i);
+  const candidate = embedded ? embedded[0] : raw;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)
+    ? candidate
+    : /^[\w.-]+$/i.test(candidate)
+      ? `https://www.erome.com/${candidate}`
+      : `https://${candidate}`;
+
+  try {
+    const url = new URL(withScheme);
+    const host = url.hostname.replace(/^www\./, '').toLowerCase();
+
+    if (host !== 'erome.com') return '';
+
+    return url.href;
+  } catch (_) {
+    return '';
+  }
+}
 
 function getEromeLaunchUrl() {
-  const text = videoUrlsInput ? String(videoUrlsInput.value || '') : '';
-  const match = text.match(/https?:\/\/(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?/i);
+  const fromEromeInput = normalizeEromeLaunchUrl(eromeUrlInput ? eromeUrlInput.value : '');
 
-  if (match) return match[0];
+  if (fromEromeInput) return fromEromeInput;
+
+  const fromVideoInput = normalizeEromeLaunchUrl(videoUrlsInput ? videoUrlsInput.value : '');
+
+  if (fromVideoInput) return fromVideoInput;
 
   return DEFAULT_EROME_URL;
 }
@@ -3472,6 +3510,13 @@ document.getElementById('auth-button').addEventListener('click',()=>{
 
 document.getElementById('open-erome').addEventListener('click',()=>{
   openEromeBrowser();
+});
+
+eromeUrlInput?.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    openEromeBrowser();
+  }
 });
 
 document.getElementById('auth-open-url').addEventListener('click',()=>{
@@ -3779,6 +3824,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=57"></script>
+<script src="pong-sync.js?v=58"></script>
 </body>
 </html>
