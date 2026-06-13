@@ -251,6 +251,7 @@
       user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
     }
     #load-videos { background: rgba(103,232,249,0.22); }
+    #open-erome { background: rgba(34,197,94,0.20); }
     #auth-button { background: rgba(167,139,250,0.20); }
     .url-input button:hover, .url-input button:active { transform: translateY(-1px); background: rgba(255,255,255,0.12); }
     .control-button {
@@ -517,7 +518,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.67</div>
+  <div class="version-number">22.68</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -525,6 +526,7 @@
       <textarea id="video-urls" placeholder="Paste video links here (one per line)" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="done"></textarea>
       <div class="button-container">
         <button id="load-videos">Load Videos</button>
+        <button id="open-erome">Open Erome</button>
         <button id="auth-button">Auth URL</button>
       </div>
     </div>
@@ -3412,6 +3414,31 @@ loadVideosButton.addEventListener('click', async ()=>{
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 const DEFAULT_AUTH_URL = 'https://coomerfans.com/';
+const DEFAULT_EROME_URL = 'https://www.erome.com/';
+
+function getEromeLaunchUrl() {
+  const text = videoUrlsInput ? String(videoUrlsInput.value || '') : '';
+  const match = text.match(/https?:\/\/(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?/i);
+
+  if (match) return match[0];
+
+  return DEFAULT_EROME_URL;
+}
+
+function openEromeBrowser() {
+  const url = getEromeLaunchUrl();
+
+  try {
+    const opened = window.open(url, '_blank');
+
+    if (opened) {
+      try { opened.opener = null; } catch (_) {}
+      return;
+    }
+  } catch (_) {}
+
+  window.location.href = url;
+}
 
 function normalizeAuthUrl(rawUrl) {
   const trimmed = String(rawUrl || '').trim();
@@ -3441,6 +3468,10 @@ function openAuthBrowser(rawUrl) {
 
 document.getElementById('auth-button').addEventListener('click',()=>{
   openAuthBrowser(document.getElementById('auth-url-input')?.value || DEFAULT_AUTH_URL);
+});
+
+document.getElementById('open-erome').addEventListener('click',()=>{
+  openEromeBrowser();
 });
 
 document.getElementById('auth-open-url').addEventListener('click',()=>{
@@ -3748,6 +3779,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=56"></script>
+<script src="pong-sync.js?v=57"></script>
 </body>
 </html>
