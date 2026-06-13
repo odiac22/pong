@@ -526,7 +526,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.69</div>
+  <div class="version-number">22.70</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3463,8 +3463,25 @@ function getEromeLaunchUrl() {
   return DEFAULT_EROME_URL;
 }
 
+function getAndroidFirefoxIntentUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const path = `${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
+    const scheme = parsed.protocol.replace(':', '') || 'https';
+
+    return `intent://${path}#Intent;scheme=${scheme};package=org.mozilla.firefox;S.browser_fallback_url=${encodeURIComponent(url)};end`;
+  } catch (_) {
+    return url;
+  }
+}
+
 function openEromeBrowser() {
   const url = getEromeLaunchUrl();
+
+  if (/Android/i.test(navigator.userAgent || '')) {
+    window.location.href = getAndroidFirefoxIntentUrl(url);
+    return;
+  }
 
   try {
     const opened = window.open(url, '_blank');
@@ -3824,6 +3841,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=58"></script>
+<script src="pong-sync.js?v=59"></script>
 </body>
 </html>
