@@ -24,7 +24,9 @@ const EROME_HEADERS = {
   'User-Agent': BROWSER_UA,
 };
 
-const MAX_ALBUMS_PER_PROFILE = 15; // cap subrequests on a profile scrape
+const MAX_ALBUMS_PER_PROFILE = 60; // GoodTaste112 currently needs 36 albums.
+const ALBUM_FETCH_CONCURRENCY = 4;
+const MAX_FETCH_RETRIES = 2;
 
 function isEromeHost(hostname) {
   return /(^|\.)erome\.com$/i.test(hostname);
@@ -41,26 +43,125 @@ function corsHeaders(extra) {
   };
 }
 
+function decodeHtmlText(text) {
+  return String(text || '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
+}
+
+function cleanTitle(text) {
+  return decodeHtmlText(String(text || '').replace(/<[^>]*>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeHtml(html) {
+  return String(html || '')
+    .replace(/\\\//g, '/')
+    .replace(/\\u0026/g, '&')
+    .replace(/\\u003d/g, '=')
+    .replace(/&amp;/gi, '&');
+}
+
 function extractMp4s(html) {
   const set = new Set();
-  const re = /https:\/\/[a-z0-9.-]*erome\.com\/[^\s"'\\<>]+?\.mp4/gi;
+  const re = /(?:https?:)?\/\/[a-z0-9.-]*erome\.com\/[^\s"'\\<>]+?\.mp4(?:\?[^ \s"'\\<>]*)?/gi;
   let m;
-  while ((m = re.exec(html)) !== null) set.add(m[0]);
+  const normalized = normalizeHtml(html);
+
+  while ((m = re.exec(normalized)) !== null) {
+    const raw = m[0].startsWith('//') ? 'https:' + m[0] : m[0];
+    set.add(raw);
+  }
+
   return [...set];
+}
+
+function absolutizeEromeUrl(raw) {
+  try {
+    return new URL(raw, 'https://www.erome.com/').href.replace(/\/$/, '');
+  } catch (_) {
+    return '';
+  }
+}
+
+function extractAlbumEntries(html) {
+  const entries = [];
+  const set = new Set();
+  const normalized = String(html || '');
+
+  function add(rawUrl, rawTitle) {
+    const url = absolutizeEromeUrl(rawUrl);
+    if (!url || set.has(url)) return;
+
+    set.add(url);
+    entries.push({
+      url,
+      title: cleanTitle(rawTitle || ''),
+    });
+  }
+
+  const specific =
+    /<a\b[^>]*class=["'][^"']*album-(?:link|title)[^"']*["'][^>]*href=["']([^"']*\/a\/[A-Za-z0-9_-]+\/?)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+
+  while ((m = specific.exec(normalized)) !== null) {
+    add(m[1], m[2]);
+  }
+
+  const fallback = /href=["']([^"']*\/a\/[A-Za-z0-9_-]+\/?)["']/gi;
+
+  while ((m = fallback.exec(normalized)) !== null) {
+    add(m[1], '');
+  }
+
+  return entries;
 }
 
 function extractAlbumUrls(html) {
-  const set = new Set();
-  const re = /\/a\/([A-Za-z0-9]+)/g;
-  let m;
-  while ((m = re.exec(html)) !== null) set.add('https://www.erome.com/a/' + m[1]);
-  return [...set];
+  return extractAlbumEntries(html).map(album => album.url);
 }
 
-async function fetchText(url) {
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchText(url, attempt = 1) {
   const resp = await fetch(url, { headers: EROME_HEADERS, redirect: 'follow' });
+
+  if ((resp.status === 429 || resp.status >= 500) && attempt <= MAX_FETCH_RETRIES) {
+    await sleep(350 * attempt);
+    return fetchText(url, attempt + 1);
+  }
+
   if (!resp.ok) return '';
   return await resp.text();
+}
+
+async function pool(items, limit, task) {
+  const results = new Array(items.length);
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const i = index++;
+
+      try {
+        results[i] = await task(items[i], i);
+      } catch (_) {
+        results[i] = null;
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker)
+  );
+
+  return results;
 }
 
 async function handleScrape(target) {
@@ -74,18 +175,52 @@ async function handleScrape(target) {
 
   // Direct MP4s on this page (album page case).
   let videos = extractMp4s(html);
-  const albums = extractAlbumUrls(html);
+  const albumEntries = extractAlbumEntries(html);
+  const albums = albumEntries.map(album => album.url);
+  let albumGroups = [];
 
   // Profile / listing page: no direct videos, but album links. Expand them.
-  if (!videos.length && albums.length) {
-    const chosen = albums.slice(0, MAX_ALBUMS_PER_PROFILE);
-    const lists = await Promise.all(chosen.map(a => fetchText(a).then(extractMp4s)));
+  if (!videos.length && albumEntries.length) {
+    const chosen = albumEntries.slice(0, MAX_ALBUMS_PER_PROFILE);
+    const groups = await pool(chosen, ALBUM_FETCH_CONCURRENCY, async album => {
+      const albumHtml = await fetchText(album.url);
+      const albumVideos = extractMp4s(albumHtml);
+
+      return {
+        url: album.url,
+        title: album.title,
+        count: albumVideos.length,
+        videos: albumVideos,
+      };
+    });
+
+    albumGroups = groups.filter(group => group && group.videos.length);
+
     const merged = new Set();
-    for (const list of lists) for (const v of list) merged.add(v);
+
+    for (const group of albumGroups) {
+      for (const v of group.videos) merged.add(v);
+    }
+
     videos = [...merged];
+  } else if (videos.length) {
+    albumGroups = [{
+      url: target.href.replace(/\/$/, ''),
+      title,
+      count: videos.length,
+      videos,
+    }];
   }
 
-  return json({ count: videos.length, title, videos, albums }, 200);
+  return json({
+    count: videos.length,
+    title,
+    videos,
+    albums,
+    albumCount: albums.length,
+    scrapedAlbumCount: albumGroups.length,
+    albumGroups,
+  }, 200);
 }
 
 async function handleVideo(request, target) {
