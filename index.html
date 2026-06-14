@@ -621,7 +621,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.81</div>
+  <div class="version-number">22.82</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4134,9 +4134,9 @@ function activateFirstEromeBatch() {
   }, 500);
 }
 
-const EROME_ALBUM_SCRAPE_CONCURRENCY = 18;
+const EROME_ALBUM_SCRAPE_CONCURRENCY = 32;
 const EROME_PROFILE_PAGE_CONCURRENCY = 8;
-const EROME_FETCH_TIMEOUT_MS = 45000;
+const EROME_FETCH_TIMEOUT_MS = 10000;
 
 async function fetchEromeJson(proxyBase, endpoint, targetUrl, options = {}) {
   const maxAttempts = Math.max(1, Number(options.attempts || 2));
@@ -4151,7 +4151,12 @@ async function fetchEromeJson(proxyBase, endpoint, targetUrl, options = {}) {
       : null;
 
     try {
-      const res = await fetch(proxyBase + endpoint + '?u=' + encodeURIComponent(targetUrl), {
+      const requestUrl = new URL(proxyBase + endpoint);
+
+      requestUrl.searchParams.set('u', targetUrl);
+      if (options.fast) requestUrl.searchParams.set('fast', '1');
+
+      const res = await fetch(requestUrl.toString(), {
         signal: controller ? controller.signal : undefined
       });
       if (!res.ok) throw new Error('scrape HTTP ' + res.status);
@@ -4355,7 +4360,11 @@ async function loadEromeAsCards() {
         updateDiscoveryProgress(i, target, page, pageCount, 'loading');
 
         try {
-          const pageData = await fetchEromeAlbumListData(base, pageUrl, { attempts: 2 });
+          const pageData = await fetchEromeAlbumListData(base, pageUrl, {
+            attempts: 1,
+            timeoutMs: EROME_FETCH_TIMEOUT_MS,
+            fast: true
+          });
 
           (pageData.albums || []).forEach(album => addAlbumToQueue(album, target, sourceTitle));
         } catch (pageErr) {
@@ -4395,8 +4404,9 @@ async function loadEromeAsCards() {
   await eromePool(albumQueue, EROME_ALBUM_SCRAPE_CONCURRENCY, async album => {
     try {
       const data = await fetchEromeScrapeData(base, album.url, {
-        attempts: 2,
-        timeoutMs: EROME_FETCH_TIMEOUT_MS
+        attempts: 1,
+        timeoutMs: EROME_FETCH_TIMEOUT_MS,
+        fast: true
       });
       const groups = buildEromeImportGroups(data, album.url).map(group => ({
         ...group,
@@ -4849,6 +4859,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=70"></script>
+<script src="pong-sync.js?v=71"></script>
 </body>
 </html>

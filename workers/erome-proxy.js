@@ -29,6 +29,8 @@ const EROME_HEADERS = {
 const ALBUM_FETCH_CONCURRENCY = 3;
 const MAX_FETCH_RETRIES = 4;
 const FETCH_TIMEOUT_MS = 15000;
+const FAST_FETCH_RETRIES = 0;
+const FAST_FETCH_TIMEOUT_MS = 7000;
 
 function isEromeHost(hostname) {
   return /(^|\.)erome\.com$/i.test(hostname);
@@ -148,10 +150,16 @@ function retryDelay(attempt) {
   return Math.min(5000, 500 * Math.pow(2, Math.max(0, attempt - 1)));
 }
 
-async function fetchText(url, attempt = 1) {
+async function fetchText(url, options = {}, attempt = 1) {
   let resp;
+  const maxRetries = Number.isFinite(Number(options.maxRetries))
+    ? Math.max(0, Number(options.maxRetries))
+    : MAX_FETCH_RETRIES;
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+    ? Math.max(1000, Number(options.timeoutMs))
+    : FETCH_TIMEOUT_MS;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     resp = await fetch(url, {
@@ -162,9 +170,9 @@ async function fetchText(url, attempt = 1) {
   } catch (_) {
     clearTimeout(timeoutId);
 
-    if (attempt <= MAX_FETCH_RETRIES) {
+    if (attempt <= maxRetries) {
       await sleep(retryDelay(attempt));
-      return fetchText(url, attempt + 1);
+      return fetchText(url, options, attempt + 1);
     }
 
     return '';
@@ -172,17 +180,17 @@ async function fetchText(url, attempt = 1) {
 
   clearTimeout(timeoutId);
 
-  if (!resp.ok && resp.status !== 404 && attempt <= MAX_FETCH_RETRIES) {
+  if (!resp.ok && resp.status !== 404 && attempt <= maxRetries) {
     await sleep(retryDelay(attempt));
-    return fetchText(url, attempt + 1);
+    return fetchText(url, options, attempt + 1);
   }
 
   if (!resp.ok) return '';
   return await resp.text();
 }
 
-async function handleAlbums(target) {
-  const html = await fetchText(target.href);
+async function handleAlbums(target, options = {}) {
+  const html = await fetchText(target.href, options);
   if (!html) {
     return json({
       error: 'Could not load Erome page',
@@ -228,8 +236,8 @@ async function pool(items, limit, task) {
   return results;
 }
 
-async function handleScrape(target) {
-  const html = await fetchText(target.href);
+async function handleScrape(target, options = {}) {
+  const html = await fetchText(target.href, options);
   if (!html) {
     return json({ error: 'Could not load Erome page', count: 0, videos: [] }, 502);
   }
@@ -249,7 +257,7 @@ async function handleScrape(target) {
   // Profile / listing page: no direct videos, but album links. Expand them.
   if (!videos.length && albumEntries.length) {
     const albumResults = await pool(albumEntries, ALBUM_FETCH_CONCURRENCY, async album => {
-      const albumHtml = await fetchText(album.url);
+      const albumHtml = await fetchText(album.url, options);
 
       if (!albumHtml) {
         return {
@@ -364,12 +372,19 @@ export default {
       return json({ error: 'only https://*.erome.com targets are allowed' }, 403);
     }
 
+    const scrapeOptions = url.searchParams.get('fast') === '1'
+      ? {
+          maxRetries: FAST_FETCH_RETRIES,
+          timeoutMs: FAST_FETCH_TIMEOUT_MS,
+        }
+      : {};
+
     if (url.pathname.startsWith('/albums')) {
-      return handleAlbums(target);
+      return handleAlbums(target, scrapeOptions);
     }
 
     if (url.pathname.startsWith('/scrape')) {
-      return handleScrape(target);
+      return handleScrape(target, scrapeOptions);
     }
     return handleVideo(request, target);
   },
