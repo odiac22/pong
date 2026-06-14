@@ -260,6 +260,7 @@
     }
     #load-videos { background: rgba(103,232,249,0.22); }
     #open-erome { background: rgba(34,197,94,0.20); }
+    #saved-erome { background: rgba(251,191,36,0.18); }
     #auth-button { background: rgba(167,139,250,0.20); }
     .url-input button:hover, .url-input button:active { transform: translateY(-1px); background: rgba(255,255,255,0.12); }
     .control-button {
@@ -432,6 +433,31 @@
       background: linear-gradient(90deg, rgba(103,232,249,0.95), rgba(34,197,94,0.9));
       transition: width 0.22s ease;
     }
+    #saved-erome-menu {
+      display: none; position: fixed; left: 50%; bottom: 124px; transform: translateX(-50%);
+      width: min(420px, calc(100vw - 28px)); max-height: 46vh; overflow-y: auto;
+      z-index: 10030; background: rgba(7, 11, 15, 0.92); color: var(--ui-text);
+      border: 1px solid var(--ui-border); border-radius: 10px; padding: 8px;
+      box-shadow: 0 14px 36px rgba(0,0,0,0.42);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    }
+    .saved-erome-empty {
+      color: var(--ui-muted); font-size: 12px; padding: 8px 6px;
+    }
+    .saved-erome-item {
+      display: block; width: 100%; text-align: left; margin: 0 0 6px; padding: 8px;
+      border-radius: 8px; border: 1px solid rgba(255,255,255,0.09);
+      background: rgba(255,255,255,0.06); color: var(--ui-text);
+      font-size: 12px; cursor: pointer;
+    }
+    .saved-erome-item:active { background: rgba(255,255,255,0.12); }
+    .saved-erome-label {
+      display: block; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .saved-erome-url {
+      display: block; margin-top: 2px; color: var(--ui-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      font-size: 10px;
+    }
     #erome-close {
       background: rgba(251,113,133,0.18); color: var(--ui-text); border: 1px solid var(--ui-border);
       padding: 7px 14px; border-radius: 999px; margin-top: 0; cursor: pointer;
@@ -595,7 +621,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.80</div>
+  <div class="version-number">22.81</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -605,6 +631,7 @@
       <div class="button-container">
         <button id="load-videos">Load Videos</button>
         <button id="open-erome">Open Erome</button>
+        <button id="saved-erome">Saved Erome</button>
         <button id="auth-button">Auth URL</button>
       </div>
     </div>
@@ -3739,6 +3766,9 @@ const eromeHelper = document.getElementById('erome-helper');
 const eromeIframeContainer = document.getElementById('erome-iframe-container');
 const eromeHelperUrlInput = document.getElementById('erome-helper-url');
 let eromeProgressHideTimer = null;
+const SAVED_EROME_ARTISTS_KEY = 'pong_saved_erome_artists_v1';
+let lastEromeArtistRecords = {};
+let savedEromeMenuEl = null;
 
 function ensureEromeProgressEl() {
   let el = document.getElementById('erome-scrape-progress');
@@ -3807,6 +3837,197 @@ function closeEromeHelper() {
   if (!eromeHelper) return;
   eromeHelper.style.display = 'none';
   if (eromeIframeContainer) eromeIframeContainer.innerHTML = '';
+}
+
+function loadSavedEromeArtists() {
+  try {
+    const raw = localStorage.getItem(SAVED_EROME_ARTISTS_KEY) || '{}';
+    const parsed = JSON.parse(raw);
+
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveSavedEromeArtists(saved) {
+  try {
+    localStorage.setItem(SAVED_EROME_ARTISTS_KEY, JSON.stringify(saved || {}));
+  } catch (e) {
+    showSortingIndicator('Saved Erome list is full');
+  }
+}
+
+function normalizeEromeProfileSaveUrl(rawUrl) {
+  const normalized = normalizeEromeLaunchUrl(rawUrl);
+
+  if (!normalized) return '';
+
+  try {
+    const url = new URL(normalized, window.location.href);
+    url.hash = '';
+    return url.href.replace(/\/$/, '');
+  } catch (e) {
+    return normalized;
+  }
+}
+
+function escapeHtmlText(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function getLastEromeRecordForUrl(rawUrl) {
+  const url = normalizeEromeProfileSaveUrl(rawUrl);
+
+  if (!url) return null;
+
+  return lastEromeArtistRecords[url] || null;
+}
+
+function upsertSavedEromeArtist(rawUrl, record = {}) {
+  const url = normalizeEromeProfileSaveUrl(rawUrl);
+
+  if (!url) return null;
+
+  const saved = loadSavedEromeArtists();
+  const existing = saved[url] || {};
+  const albums = Array.isArray(record.albums)
+    ? record.albums
+        .map(album => ({
+          url: normalizeEromeProfileSaveUrl(album?.url || album),
+          title: String(album?.title || '').trim()
+        }))
+        .filter(album => album.url)
+    : existing.albums || [];
+
+  saved[url] = {
+    url,
+    label: record.label || existing.label || getEromeTargetLabel(url),
+    albumCount: albums.length || Number(existing.albumCount || 0),
+    albums,
+    savedAt: existing.savedAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  saveSavedEromeArtists(saved);
+  return saved[url];
+}
+
+function rememberEromeArtistRecordsFromAlbums(albumQueue) {
+  const grouped = {};
+
+  (albumQueue || []).forEach(album => {
+    const sourceUrl = normalizeEromeProfileSaveUrl(album.sourceUrl || album.url);
+
+    if (!sourceUrl) return;
+
+    if (!grouped[sourceUrl]) {
+      grouped[sourceUrl] = {
+        url: sourceUrl,
+        label: album.sourceTitle || getEromeTargetLabel(sourceUrl),
+        albums: []
+      };
+    }
+
+    grouped[sourceUrl].albums.push({
+      url: album.url,
+      title: album.title || getEromeTargetLabel(album.url)
+    });
+  });
+
+  lastEromeArtistRecords = grouped;
+
+  const saved = loadSavedEromeArtists();
+  let changed = false;
+
+  Object.values(grouped).forEach(record => {
+    if (saved[record.url]) {
+      upsertSavedEromeArtist(record.url, record);
+      changed = true;
+    }
+  });
+
+  if (changed) renderSavedEromeMenu();
+}
+
+function saveCurrentEromeArtistsLocally() {
+  const targets = getEromeScrapeTargets();
+  const list = targets.length ? targets : [getEromeLaunchUrl()].filter(Boolean);
+  let savedCount = 0;
+
+  list.forEach(target => {
+    const record = getLastEromeRecordForUrl(target) || {
+      url: target,
+      label: getEromeTargetLabel(target),
+      albums: []
+    };
+
+    if (upsertSavedEromeArtist(target, record)) savedCount++;
+  });
+
+  renderSavedEromeMenu();
+  showSortingIndicator(savedCount ? `Saved ${savedCount} Erome page${savedCount === 1 ? '' : 's'}` : 'No Erome page to save');
+}
+
+function ensureSavedEromeMenu() {
+  if (savedEromeMenuEl) return savedEromeMenuEl;
+
+  savedEromeMenuEl = document.createElement('div');
+  savedEromeMenuEl.id = 'saved-erome-menu';
+  document.body.appendChild(savedEromeMenuEl);
+  return savedEromeMenuEl;
+}
+
+function renderSavedEromeMenu() {
+  const menu = ensureSavedEromeMenu();
+  const saved = loadSavedEromeArtists();
+  const records = Object.values(saved)
+    .filter(record => record?.url)
+    .sort((a, b) => String(b.updatedAt || b.savedAt || '').localeCompare(String(a.updatedAt || a.savedAt || '')));
+
+  if (!records.length) {
+    menu.innerHTML = '<div class="saved-erome-empty">Hold Saved Erome to save the current page.</div>';
+    return menu;
+  }
+
+  menu.innerHTML = '';
+  records.forEach(record => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'saved-erome-item';
+    const label = record.label || getEromeTargetLabel(record.url);
+    const albumText = record.albumCount ? ` - ${record.albumCount} albums` : '';
+    btn.innerHTML = `
+      <span class="saved-erome-label">${escapeHtmlText(label + albumText)}</span>
+      <span class="saved-erome-url">${escapeHtmlText(record.url)}</span>
+    `;
+    btn.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (eromeUrlInput) eromeUrlInput.value = record.url;
+      window.PongSavedEromeAlbumQueueOverride = {
+        targetUrl: record.url,
+        label: record.label || getEromeTargetLabel(record.url),
+        albums: Array.isArray(record.albums) ? record.albums : []
+      };
+      menu.style.display = 'none';
+      loadEromeAsCards();
+    });
+    menu.appendChild(btn);
+  });
+
+  return menu;
+}
+
+function toggleSavedEromeMenu() {
+  const menu = renderSavedEromeMenu();
+  menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
 }
 
 function openEromeBrowser() {
@@ -3913,7 +4134,8 @@ function activateFirstEromeBatch() {
   }, 500);
 }
 
-const EROME_ALBUM_SCRAPE_CONCURRENCY = 5;
+const EROME_ALBUM_SCRAPE_CONCURRENCY = 18;
+const EROME_PROFILE_PAGE_CONCURRENCY = 8;
 const EROME_FETCH_TIMEOUT_MS = 45000;
 
 async function fetchEromeJson(proxyBase, endpoint, targetUrl, options = {}) {
@@ -4086,12 +4308,28 @@ async function loadEromeAsCards() {
   for (let i = 0; i < targets.length; i++) {
     const target = targets[i];
     const albumTarget = isEromeAlbumLaunchUrl(target);
+    const targetSaveUrl = normalizeEromeProfileSaveUrl(target);
+    const savedOverride = window.PongSavedEromeAlbumQueueOverride;
+    const savedOverrideMatches = savedOverride &&
+      targetSaveUrl &&
+      normalizeEromeProfileSaveUrl(savedOverride.targetUrl || '') === targetSaveUrl &&
+      Array.isArray(savedOverride.albums) &&
+      savedOverride.albums.length;
     let pageCount = 1;
     const albumsBeforeTarget = albumQueue.length;
 
     updateDiscoveryProgress(i, target, 1, pageCount, 'starting');
 
     try {
+      if (savedOverrideMatches) {
+        savedOverride.albums.forEach(album => {
+          addAlbumToQueue(album, targetSaveUrl, savedOverride.label || getEromeTargetLabel(targetSaveUrl));
+        });
+        completedPages++;
+        updateDiscoveryProgress(i, target, 1, pageCount, 'saved list');
+        continue;
+      }
+
       if (albumTarget) {
         addAlbumToQueue(target, target, getEromeTargetLabel(target));
         completedPages++;
@@ -4109,7 +4347,9 @@ async function loadEromeAsCards() {
       completedPages++;
       updateDiscoveryProgress(i, target, 1, pageCount);
 
-      for (let page = 2; page <= pageCount; page++) {
+      const remainingPages = Array.from({ length: Math.max(0, pageCount - 1) }, (_, pageIndex) => pageIndex + 2);
+
+      await eromePool(remainingPages, EROME_PROFILE_PAGE_CONCURRENCY, async page => {
         const pageUrl = eromeProfilePageUrl(target, page);
 
         updateDiscoveryProgress(i, target, page, pageCount, 'loading');
@@ -4125,7 +4365,7 @@ async function loadEromeAsCards() {
           completedPages++;
           updateDiscoveryProgress(i, target, page, pageCount);
         }
-      }
+      });
 
       if (albumQueue.length === albumsBeforeTarget && pageCount <= 1) {
         failures.push(target);
@@ -4146,6 +4386,8 @@ async function loadEromeAsCards() {
     alert('No albums found on those Erome pages.');
     return;
   }
+
+  rememberEromeArtistRecordsFromAlbums(albumQueue);
 
   showSortingIndicator(`Found ${albumQueue.length} Erome albums. Scraping videos...`);
   updateAlbumProgress(albumQueue[0], 'starting');
@@ -4239,6 +4481,40 @@ document.getElementById('auth-button').addEventListener('click',()=>{
 document.getElementById('open-erome').addEventListener('click',()=>{
   loadEromeAsCards();
 });
+
+const savedEromeButton = document.getElementById('saved-erome');
+let savedEromeHoldTimer = null;
+let savedEromeLongPress = false;
+
+function startSavedEromeHold(e) {
+  savedEromeLongPress = false;
+  clearTimeout(savedEromeHoldTimer);
+
+  savedEromeHoldTimer = setTimeout(() => {
+    savedEromeLongPress = true;
+    saveCurrentEromeArtistsLocally();
+  }, 850);
+}
+
+function endSavedEromeHold(e) {
+  clearTimeout(savedEromeHoldTimer);
+
+  if (e) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  if (!savedEromeLongPress) {
+    toggleSavedEromeMenu();
+  }
+}
+
+savedEromeButton?.addEventListener('touchstart', startSavedEromeHold, { passive: true });
+savedEromeButton?.addEventListener('touchend', endSavedEromeHold);
+savedEromeButton?.addEventListener('touchcancel', () => clearTimeout(savedEromeHoldTimer));
+savedEromeButton?.addEventListener('mousedown', startSavedEromeHold);
+savedEromeButton?.addEventListener('mouseup', endSavedEromeHold);
+savedEromeButton?.addEventListener('mouseleave', () => clearTimeout(savedEromeHoldTimer));
 
 eromeUrlInput?.addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -4573,6 +4849,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=69"></script>
+<script src="pong-sync.js?v=70"></script>
 </body>
 </html>
