@@ -565,13 +565,13 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.74</div>
+  <div class="version-number">22.75</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
     <div class="url-input">
       <textarea id="video-urls" placeholder="Paste video links here (one per line)" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="done"></textarea>
-      <input id="erome-url" type="url" placeholder="Erome artist or album URL" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="go">
+      <textarea id="erome-url" placeholder="Erome artist/album URLs" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="go"></textarea>
       <div class="button-container">
         <button id="load-videos">Load Videos</button>
         <button id="open-erome">Open Erome</button>
@@ -3490,12 +3490,67 @@ function normalizeEromeLaunchUrl(rawValue) {
   }
 }
 
+function collectEromeLaunchUrls(rawValue, allowBareNames = true) {
+  const raw = String(rawValue || '');
+  const found = [];
+  const seen = new Set();
+
+  function add(candidate) {
+    const cleaned = String(candidate || '')
+      .trim()
+      .replace(/^[\s"'(<\[]+/, '')
+      .replace(/[\s"')>\],;]+$/, '');
+    const url = normalizeEromeLaunchUrl(cleaned);
+
+    if (!url || seen.has(url)) return;
+
+    seen.add(url);
+    found.push(url);
+  }
+
+  const linkRe = /(?:https?:\/\/)?(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?/gi;
+  let match;
+
+  while ((match = linkRe.exec(raw)) !== null) {
+    add(match[0]);
+  }
+
+  raw.split(/[\s,;]+/).forEach(token => {
+    const cleaned = String(token || '').trim();
+
+    if (!cleaned) return;
+
+    if (/erome\.com/i.test(cleaned)) {
+      add(cleaned);
+    } else if (allowBareNames && /^(?:a\/)?[\w.-]+$/i.test(cleaned)) {
+      add(cleaned.startsWith('a/') ? `https://www.erome.com/${cleaned}` : cleaned);
+    }
+  });
+
+  return found;
+}
+
+function getEromeScrapeTargets() {
+  const helperVisible = eromeHelper && eromeHelper.style.display !== 'none';
+  const fromHelper = helperVisible
+    ? collectEromeLaunchUrls(eromeHelperUrlInput ? eromeHelperUrlInput.value : '')
+    : [];
+
+  if (fromHelper.length) return fromHelper;
+
+  const fromEromeInput = collectEromeLaunchUrls(eromeUrlInput ? eromeUrlInput.value : '');
+
+  if (fromEromeInput.length) return fromEromeInput;
+
+  return collectEromeLaunchUrls(videoUrlsInput ? videoUrlsInput.value : '', false);
+}
+
 function getEromeLaunchUrl() {
-  const fromEromeInput = normalizeEromeLaunchUrl(eromeUrlInput ? eromeUrlInput.value : '');
+  const fromEromeInput = collectEromeLaunchUrls(eromeUrlInput ? eromeUrlInput.value : '')[0] || '';
 
   if (fromEromeInput) return fromEromeInput;
 
-  const fromVideoInput = normalizeEromeLaunchUrl(videoUrlsInput ? videoUrlsInput.value : '');
+  const fromVideoInput = collectEromeLaunchUrls(videoUrlsInput ? videoUrlsInput.value : '', false)[0] || '';
 
   if (fromVideoInput) return fromVideoInput;
 
@@ -3538,24 +3593,27 @@ function openEromeBrowser() {
 }
 
 function buildEromeImportGroups(data, fallbackUrl) {
+  const sourceTitle = data?.title || artistNameFromUrl(fallbackUrl) || 'Erome';
   const rawGroups = Array.isArray(data?.albumGroups) && data.albumGroups.length
     ? data.albumGroups
     : [{
         url: fallbackUrl,
-        title: data?.title || 'Erome',
+        title: sourceTitle,
         videos: Array.isArray(data?.videos) ? data.videos : []
       }];
 
   return rawGroups
     .map((group, index) => ({
       url: group?.url || fallbackUrl,
-      title: group?.title || data?.title || `Erome batch ${index + 1}`,
+      title: group?.title || sourceTitle || `Erome batch ${index + 1}`,
+      sourceUrl: fallbackUrl,
+      sourceTitle,
       videos: Array.isArray(group?.videos) ? group.videos.filter(Boolean) : []
     }))
     .filter(group => group.videos.length);
 }
 
-function cacheEromeCardImport(groups, proxyBase, sourceUrl, sourceTitle) {
+function cacheEromeCardImport(groups, proxyBase) {
   const urls = [];
   const metadata = [];
   const events = [];
@@ -3563,6 +3621,8 @@ function cacheEromeCardImport(groups, proxyBase, sourceUrl, sourceTitle) {
 
   groups.forEach((group, groupIndex) => {
     const startIndex = urls.length;
+    const groupSourceUrl = group.sourceUrl || group.url || '';
+    const groupSourceTitle = group.sourceTitle || artistNameFromUrl(groupSourceUrl) || 'Erome';
 
     group.videos.forEach((rawUrl, videoIndex) => {
       const proxiedUrl = proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
@@ -3571,11 +3631,11 @@ function cacheEromeCardImport(groups, proxyBase, sourceUrl, sourceTitle) {
       metadata.push({
         type: 'video',
         source: 'erome',
-        artistName: sourceTitle || 'Erome',
-        artistDisplayName: group.title || sourceTitle || 'Erome',
-        artistKey: sourceUrl,
-        artistUrl: sourceUrl,
-        postUrl: group.url || sourceUrl,
+        artistName: groupSourceTitle,
+        artistDisplayName: group.title || groupSourceTitle,
+        artistKey: groupSourceUrl,
+        artistUrl: groupSourceUrl,
+        postUrl: group.url || groupSourceUrl,
         postIndex: videoIndex,
         scrapedAt,
         mediaKey: `erome:${groupIndex}:${videoIndex}`
@@ -3624,8 +3684,12 @@ function activateFirstEromeBatch() {
 }
 
 async function loadEromeAsCards() {
-  const target = normalizeEromeLaunchUrl(eromeHelperUrlInput ? eromeHelperUrlInput.value : '')
-    || getEromeLaunchUrl();
+  const targets = getEromeScrapeTargets();
+
+  if (!targets.length) {
+    alert('Paste one or more Erome artist or album URLs first.');
+    return;
+  }
 
   if (!EROME_PROXY_BASE) {
     alert('Pong cards for Erome need the proxy Worker.\n\n'
@@ -3636,26 +3700,50 @@ async function loadEromeAsCards() {
   }
 
   const base = EROME_PROXY_BASE.replace(/\/+$/, '');
-  showSortingIndicator('Scraping Erome…');
+  const allGroups = [];
+  const failures = [];
+  showSortingIndicator('Scraping Erome...');
+
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i];
+
+    showSortingIndicator('Scraping Erome ' + (i + 1) + '/' + targets.length + '...');
+
+    try {
+      const res = await fetch(base + '/scrape?u=' + encodeURIComponent(target));
+      if (!res.ok) throw new Error('scrape HTTP ' + res.status);
+
+      const data = await res.json();
+      const groups = buildEromeImportGroups(data, target);
+
+      if (groups.length) {
+        allGroups.push(...groups);
+      } else {
+        failures.push(target);
+      }
+    } catch (err) {
+      failures.push(target);
+      console.warn('Erome scrape failed:', target, err);
+    }
+  }
+
+  const totalVideos = allGroups.reduce((sum, group) => sum + group.videos.length, 0);
+
+  if (!totalVideos) {
+    alert('No videos found on those Erome pages.');
+    return;
+  }
 
   try {
-    const res = await fetch(base + '/scrape?u=' + encodeURIComponent(target));
-    if (!res.ok) throw new Error('scrape HTTP ' + res.status);
-    const data = await res.json();
-    const groups = buildEromeImportGroups(data, target);
-    const totalVideos = groups.reduce((sum, group) => sum + group.videos.length, 0);
-
-    if (!totalVideos) {
-      alert('No videos found on that Erome page.');
-      return;
-    }
-
     // Route each raw MP4 through the proxy. The ".mp4" before "?" keeps the
     // existing isVideoUrlLine() matcher happy.
-    const imported = cacheEromeCardImport(groups, base, target, data.title || 'Erome');
+    const imported = cacheEromeCardImport(allGroups, base);
 
     closeEromeHelper();
-    showSortingIndicator('Loaded ' + imported.urls.length + ' Erome videos in ' + imported.events.length + ' batches');
+    showSortingIndicator(
+      'Loaded ' + imported.urls.length + ' Erome videos in ' + imported.events.length + ' batches'
+      + (failures.length ? ' (' + failures.length + ' page failed)' : '')
+    );
     loadVideosButton.click();
     activateFirstEromeBatch();
   } catch (err) {
@@ -3694,13 +3782,13 @@ document.getElementById('auth-button').addEventListener('click',()=>{
 });
 
 document.getElementById('open-erome').addEventListener('click',()=>{
-  openEromeBrowser();
+  loadEromeAsCards();
 });
 
 eromeUrlInput?.addEventListener('keydown', e => {
-  if (e.key === 'Enter') {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
-    openEromeBrowser();
+    loadEromeAsCards();
   }
 });
 
@@ -4030,6 +4118,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=63"></script>
+<script src="pong-sync.js?v=64"></script>
 </body>
 </html>

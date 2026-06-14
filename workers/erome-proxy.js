@@ -24,9 +24,8 @@ const EROME_HEADERS = {
   'User-Agent': BROWSER_UA,
 };
 
-const MAX_ALBUMS_PER_PROFILE = 60; // GoodTaste112 currently needs 36 albums.
-const ALBUM_FETCH_CONCURRENCY = 4;
-const MAX_FETCH_RETRIES = 2;
+const ALBUM_FETCH_CONCURRENCY = 3;
+const MAX_FETCH_RETRIES = 4;
 
 function isEromeHost(hostname) {
   return /(^|\.)erome\.com$/i.test(hostname);
@@ -129,11 +128,26 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function fetchText(url, attempt = 1) {
-  const resp = await fetch(url, { headers: EROME_HEADERS, redirect: 'follow' });
+function retryDelay(attempt) {
+  return Math.min(5000, 500 * Math.pow(2, Math.max(0, attempt - 1)));
+}
 
-  if ((resp.status === 429 || resp.status >= 500) && attempt <= MAX_FETCH_RETRIES) {
-    await sleep(350 * attempt);
+async function fetchText(url, attempt = 1) {
+  let resp;
+
+  try {
+    resp = await fetch(url, { headers: EROME_HEADERS, redirect: 'follow' });
+  } catch (_) {
+    if (attempt <= MAX_FETCH_RETRIES) {
+      await sleep(retryDelay(attempt));
+      return fetchText(url, attempt + 1);
+    }
+
+    return '';
+  }
+
+  if (!resp.ok && resp.status !== 404 && attempt <= MAX_FETCH_RETRIES) {
+    await sleep(retryDelay(attempt));
     return fetchText(url, attempt + 1);
   }
 
@@ -181,8 +195,7 @@ async function handleScrape(target) {
 
   // Profile / listing page: no direct videos, but album links. Expand them.
   if (!videos.length && albumEntries.length) {
-    const chosen = albumEntries.slice(0, MAX_ALBUMS_PER_PROFILE);
-    const groups = await pool(chosen, ALBUM_FETCH_CONCURRENCY, async album => {
+    const groups = await pool(albumEntries, ALBUM_FETCH_CONCURRENCY, async album => {
       const albumHtml = await fetchText(album.url);
       const albumVideos = extractMp4s(albumHtml);
 
