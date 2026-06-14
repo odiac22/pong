@@ -621,7 +621,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.82</div>
+  <div class="version-number">22.83</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -651,6 +651,8 @@ let currentLoadedRangeStart = 0;
 let currentLoadedRangeEnd = 0;
 let currentLoadedRangeIsFull = false;
 const BATCH_SIZE = 20;
+let currentRenderBatchSize = BATCH_SIZE;
+let eromeBatchAutoAdvance = false;
 const VIDEO_LOAD_RETRY_DELAYS_MS = [3000, 5000, 7000, 10000, 15000, 20000];
 const VIDEO_LOAD_RETRY_POLL_MS = 1000;
 let visibleBatchRetryTimer = null;
@@ -1500,7 +1502,9 @@ function saveSession() {
       activePlaybackRange,
       currentLoadedRangeStart,
       currentLoadedRangeEnd,
-      currentLoadedRangeIsFull
+      currentLoadedRangeIsFull,
+      currentRenderBatchSize,
+      eromeBatchAutoAdvance
     }));
   } catch(e) {}
 }
@@ -1525,6 +1529,8 @@ function loadSession() {
     currentPasteIndex = Number.isInteger(s.currentPasteIndex) ? s.currentPasteIndex : -1;
     pasteEvents = s.pasteEvents || [];
     activePlaybackRange = s.activePlaybackRange || null;
+    setCurrentRenderBatchSize(s.currentRenderBatchSize || BATCH_SIZE);
+    eromeBatchAutoAdvance = s.eromeBatchAutoAdvance === true;
     setCurrentLoadedRange(
       Number(s.currentLoadedRangeStart || 0),
       Number(s.currentLoadedRangeEnd || 0),
@@ -1602,6 +1608,29 @@ function getActiveRangeTotal() {
     : allVideoUrls.length;
 }
 
+function getCurrentBatchSize() {
+  const size = Number(currentRenderBatchSize || BATCH_SIZE);
+
+  return Math.max(1, Number.isFinite(size) ? Math.round(size) : BATCH_SIZE);
+}
+
+function setCurrentRenderBatchSize(size) {
+  const next = Math.max(1, Number.isFinite(Number(size)) ? Math.round(Number(size)) : BATCH_SIZE);
+
+  currentRenderBatchSize = next;
+  window.PongCurrentRenderBatchSize = next;
+}
+
+function setEromeTwentyCardMode(enabled) {
+  eromeBatchAutoAdvance = enabled === true;
+  window.PongEromeBatchAutoAdvance = eromeBatchAutoAdvance;
+
+  if (eromeBatchAutoAdvance) {
+    setCurrentRenderBatchSize(BATCH_SIZE);
+    window.PongLoadAllVideosOnce = false;
+  }
+}
+
 function setCurrentLoadedRange(start, end, isFull) {
   currentLoadedRangeStart = Math.max(0, Number(start || 0));
   currentLoadedRangeEnd = Math.max(currentLoadedRangeStart, Number(end || currentLoadedRangeStart));
@@ -1622,6 +1651,28 @@ function getCurrentLoadedGlobalVideoIndex() {
   if (isNaN(localIndex)) return -1;
 
   return currentLoadedRangeStart + localIndex;
+}
+
+function loadNextEromeBatchIfAvailable() {
+  if (!eromeBatchAutoAdvance || !videoUrls.length || !allVideoUrls.length) return false;
+
+  const hasRange = hasActivePlaybackRange();
+  const loadedEnd = Number.isFinite(currentLoadedRangeEnd)
+    ? currentLoadedRangeEnd
+    : hasRange
+      ? activePlaybackRange.start + Number(activePlaybackRange.offset || 0)
+      : currentBatch * getCurrentBatchSize();
+  const rangeEnd = hasRange
+    ? Math.min(activePlaybackRange.end, allVideoUrls.length)
+    : allVideoUrls.length;
+
+  if (loadedEnd >= rangeEnd) return false;
+
+  showSortingIndicator('Loading next 20 Erome cards...');
+  window.PongFastNextBatchOnce = true;
+  loadNextBatch(0);
+
+  return true;
 }
 
 function getPasteEventIndexForGlobalVideo(globalIndex) {
@@ -1652,7 +1703,9 @@ function getCounterBatchText() {
     return `Batch ${bundleNumber}/${pasteEvents.length}`;
   }
 
-  return `Batch ${Math.max(1, currentBatch)}/${Math.max(1, Math.ceil(allVideoUrls.length / BATCH_SIZE))}`;
+  const batchSize = getCurrentBatchSize();
+
+  return `Batch ${Math.max(1, currentBatch)}/${Math.max(1, Math.ceil(allVideoUrls.length / batchSize))}`;
 }
 
 function getVideoCounterText(localIndex) {
@@ -2636,6 +2689,8 @@ function goToNextDeckVideo() {
 
   const nextIndex = getNextDeckIndex();
   if (nextIndex == null) {
+    if (loadNextEromeBatchIfAvailable()) return true;
+
     showDeckEmptyNotice('No more videos in this batch');
     return true;
   }
@@ -3135,13 +3190,15 @@ function setupVisibilityObserver() {
 function loadNextBatch(restoreIndex) {
   videoUrls=[]; videoMetadata=[];
   const hasRange = hasActivePlaybackRange();
+  const batchSize = getCurrentBatchSize();
   const rangeStart = hasRange ? activePlaybackRange.start : 0;
   const rangeEnd = hasRange ? Math.min(activePlaybackRange.end, allVideoUrls.length) : allVideoUrls.length;
-  const offset = hasRange ? Math.max(0, Number(activePlaybackRange.offset || 0)) : currentBatch * BATCH_SIZE;
+  const offset = hasRange ? Math.max(0, Number(activePlaybackRange.offset || 0)) : currentBatch * batchSize;
   const start = Math.min(rangeEnd, rangeStart + offset);
-  const loadFullRange = hasRange && activePlaybackRange.loadAll === true;
-  const loadFullDeck = !hasRange && window.PongLoadAllVideosOnce === true;
-  const end=(loadFullRange || loadFullDeck) ? rangeEnd : Math.min(start+BATCH_SIZE,rangeEnd);
+  const allowFullLoad = !eromeBatchAutoAdvance;
+  const loadFullRange = allowFullLoad && hasRange && activePlaybackRange.loadAll === true;
+  const loadFullDeck = allowFullLoad && !hasRange && window.PongLoadAllVideosOnce === true;
+  const end=(loadFullRange || loadFullDeck) ? rangeEnd : Math.min(start+batchSize,rangeEnd);
 
   setCurrentLoadedRange(start, end, loadFullRange || loadFullDeck);
   window.PongLoadAllVideosOnce = false;
@@ -3156,7 +3213,7 @@ function loadNextBatch(restoreIndex) {
     activePlaybackRange.offset = loadFullRange
       ? Math.max(0, rangeEnd - rangeStart)
       : Math.max(0, offset + (end - start));
-    currentBatch = Math.max(1, Math.ceil(activePlaybackRange.offset / BATCH_SIZE));
+    currentBatch = Math.max(1, Math.ceil(activePlaybackRange.offset / batchSize));
   } else {
     currentBatch++;
   }
@@ -3248,7 +3305,7 @@ function moveSkippedVideoToBottom(wrapper) {
     : 0;
   const batchStartIndex = hasRange
     ? activePlaybackRange.start + rangeOffset
-    : Math.max(0, (currentBatch - 1) * BATCH_SIZE);
+    : Math.max(0, (currentBatch - 1) * getCurrentBatchSize());
   const oldGlobalIndex = batchStartIndex + oldIndex;
   const newGlobalIndex = batchStartIndex + videoUrls.length - 1;
   const spacer = wrapper.nextElementSibling && wrapper.nextElementSibling.classList.contains('blank-space')
@@ -3301,11 +3358,12 @@ function recycleSkippedVideosBelow() {
 function updateNextBatchButton() {
   let btn=document.getElementById('next-batch-button');
   const hasRange = hasActivePlaybackRange();
+  const batchSize = getCurrentBatchSize();
   const loadedEnd = Number.isFinite(currentLoadedRangeEnd)
     ? currentLoadedRangeEnd
     : hasRange
       ? activePlaybackRange.start + Number(activePlaybackRange.offset || 0)
-      : currentBatch * BATCH_SIZE;
+      : currentBatch * batchSize;
   const remaining = hasRange
     ? Math.max(0, activePlaybackRange.end - loadedEnd)
     : Math.max(0, allVideoUrls.length - loadedEnd);
@@ -3338,7 +3396,7 @@ function updateNextBatchButton() {
     document.body.appendChild(btn);
   }
 
-  const rem=Math.min(BATCH_SIZE, advanceSavedArtist ? getNextPasteEventPreviewCount() : remaining);
+  const rem=Math.min(batchSize, advanceSavedArtist ? getNextPasteEventPreviewCount() : remaining);
   btn.innerHTML='▶️';
   const c=document.createElement('span');
   c.className='batch-counter';
@@ -3593,6 +3651,13 @@ loadVideosButton.addEventListener('click', async ()=>{
 
   allVideoUrls = shuffledLoad.urls;
   allVideoMetadata = shuffledLoad.metadata.map(meta => meta || {});
+  const shouldUseEromeTwentyCardMode = window.PongEromeAutoAdvanceOnce === true;
+  window.PongEromeAutoAdvanceOnce = false;
+  setEromeTwentyCardMode(shouldUseEromeTwentyCardMode);
+  if (!shouldUseEromeTwentyCardMode) {
+    setCurrentRenderBatchSize(BATCH_SIZE);
+  }
+  window.PongLoadedSavedMode = shouldUseEromeTwentyCardMode ? 'erome' : 'normal';
 
   while (allVideoMetadata.length < allVideoUrls.length) {
     allVideoMetadata.push({});
@@ -3889,6 +3954,149 @@ function getLastEromeRecordForUrl(rawUrl) {
   return lastEromeArtistRecords[url] || null;
 }
 
+function compactSavedEromeAlbums(albums) {
+  const seen = new Set();
+  const out = [];
+
+  (albums || []).forEach(album => {
+    const url = normalizeEromeProfileSaveUrl(album?.url || album);
+
+    if (!url || seen.has(url)) return;
+
+    seen.add(url);
+    out.push({
+      url,
+      title: String(album?.title || getEromeTargetLabel(url)).trim()
+    });
+  });
+
+  return out;
+}
+
+function compactSavedEromeVideoGroups(groups) {
+  const seen = new Set();
+  const out = [];
+
+  (groups || []).forEach(group => {
+    const url = normalizeEromeProfileSaveUrl(group?.url || group?.postUrl || '');
+    const sourceUrl = normalizeEromeProfileSaveUrl(group?.sourceUrl || group?.artistUrl || group?.artistKey || url);
+    const videos = (Array.isArray(group?.videos) ? group.videos : [])
+      .map(video => String(video || '').trim())
+      .filter(Boolean);
+
+    if (!url || !videos.length) return;
+
+    const key = `${sourceUrl || url}|${url}`;
+    const existing = seen.has(key)
+      ? out.find(item => `${item.sourceUrl || item.url}|${item.url}` === key)
+      : null;
+
+    if (existing) {
+      const existingVideos = new Set(existing.videos);
+
+      videos.forEach(video => {
+        if (!existingVideos.has(video)) {
+          existingVideos.add(video);
+          existing.videos.push(video);
+        }
+      });
+      return;
+    }
+
+    seen.add(key);
+    out.push({
+      url,
+      title: String(group?.title || getEromeTargetLabel(url)).trim(),
+      sourceUrl: sourceUrl || url,
+      sourceTitle: String(group?.sourceTitle || getEromeTargetLabel(sourceUrl || url)).trim(),
+      videos
+    });
+  });
+
+  return out;
+}
+
+function countSavedEromeVideos(groups) {
+  return (groups || []).reduce((sum, group) => {
+    return sum + (Array.isArray(group?.videos) ? group.videos.length : 0);
+  }, 0);
+}
+
+function albumsFromSavedEromeVideoGroups(groups) {
+  return compactSavedEromeAlbums(
+    (groups || []).map(group => ({
+      url: group?.url,
+      title: group?.title
+    }))
+  );
+}
+
+function rawEromeUrlFromPlayableUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl, window.location.href);
+    const embedded = url.searchParams.get('u');
+
+    return embedded || rawUrl;
+  } catch (e) {
+    return rawUrl;
+  }
+}
+
+function buildCurrentLoadedEromeRecords() {
+  const grouped = {};
+
+  (allVideoUrls || []).forEach((playableUrl, index) => {
+    const meta = allVideoMetadata[index] || {};
+
+    if (meta.source !== 'erome') return;
+
+    const sourceUrl = normalizeEromeProfileSaveUrl(meta.artistUrl || meta.artistKey || meta.postUrl || '');
+    const albumUrl = normalizeEromeProfileSaveUrl(meta.postUrl || sourceUrl);
+    const rawVideoUrl = rawEromeUrlFromPlayableUrl(playableUrl);
+
+    if (!sourceUrl || !albumUrl || !rawVideoUrl) return;
+
+    if (!grouped[sourceUrl]) {
+      grouped[sourceUrl] = {
+        url: sourceUrl,
+        label: sourceUrl,
+        albums: [],
+        videoGroups: []
+      };
+    }
+
+    let group = grouped[sourceUrl].videoGroups.find(item => item.url === albumUrl);
+
+    if (!group) {
+      group = {
+        url: albumUrl,
+        title: meta.artistDisplayName || meta.bundleLabel || getEromeTargetLabel(albumUrl),
+        sourceUrl,
+        sourceTitle: meta.artistName || getEromeTargetLabel(sourceUrl),
+        videos: []
+      };
+      grouped[sourceUrl].videoGroups.push(group);
+      grouped[sourceUrl].albums.push({
+        url: albumUrl,
+        title: group.title
+      });
+    }
+
+    if (!group.videos.includes(rawVideoUrl)) {
+      group.videos.push(rawVideoUrl);
+    }
+  });
+
+  Object.values(grouped).forEach(record => {
+    record.albums = compactSavedEromeAlbums(record.albums);
+    record.videoGroups = compactSavedEromeVideoGroups(record.videoGroups);
+    record.albumCount = record.albums.length;
+    record.videoCount = countSavedEromeVideos(record.videoGroups);
+  });
+
+  return grouped;
+}
+
 function upsertSavedEromeArtist(rawUrl, record = {}) {
   const url = normalizeEromeProfileSaveUrl(rawUrl);
 
@@ -3896,20 +4104,26 @@ function upsertSavedEromeArtist(rawUrl, record = {}) {
 
   const saved = loadSavedEromeArtists();
   const existing = saved[url] || {};
-  const albums = Array.isArray(record.albums)
-    ? record.albums
-        .map(album => ({
-          url: normalizeEromeProfileSaveUrl(album?.url || album),
-          title: String(album?.title || '').trim()
-        }))
-        .filter(album => album.url)
-    : existing.albums || [];
+  const incomingVideoGroups = compactSavedEromeVideoGroups(record.videoGroups);
+  const existingVideoGroups = compactSavedEromeVideoGroups(existing.videoGroups);
+  const videoGroups = incomingVideoGroups.length ? incomingVideoGroups : existingVideoGroups;
+  const incomingAlbums = compactSavedEromeAlbums(record.albums);
+  const albums = incomingAlbums.length
+    ? incomingAlbums
+    : videoGroups.length
+      ? albumsFromSavedEromeVideoGroups(videoGroups)
+      : compactSavedEromeAlbums(existing.albums);
+  const videoCount = videoGroups.length
+    ? countSavedEromeVideos(videoGroups)
+    : Number(existing.videoCount || 0);
 
   saved[url] = {
     url,
-    label: record.label || existing.label || getEromeTargetLabel(url),
+    label: url,
     albumCount: albums.length || Number(existing.albumCount || 0),
     albums,
+    videoCount,
+    videoGroups,
     savedAt: existing.savedAt || new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -3929,7 +4143,7 @@ function rememberEromeArtistRecordsFromAlbums(albumQueue) {
     if (!grouped[sourceUrl]) {
       grouped[sourceUrl] = {
         url: sourceUrl,
-        label: album.sourceTitle || getEromeTargetLabel(sourceUrl),
+        label: sourceUrl,
         albums: []
       };
     }
@@ -3955,9 +4169,82 @@ function rememberEromeArtistRecordsFromAlbums(albumQueue) {
   if (changed) renderSavedEromeMenu();
 }
 
+function rememberEromeArtistRecordsFromVideoGroups(groups) {
+  const grouped = { ...lastEromeArtistRecords };
+
+  compactSavedEromeVideoGroups(groups).forEach(group => {
+    const sourceUrl = normalizeEromeProfileSaveUrl(group.sourceUrl || group.url);
+
+    if (!sourceUrl) return;
+
+    const existing = grouped[sourceUrl] || {
+      url: sourceUrl,
+      label: sourceUrl,
+      albums: [],
+      videoGroups: []
+    };
+
+    const albums = compactSavedEromeAlbums(existing.albums);
+    const videoGroups = compactSavedEromeVideoGroups(existing.videoGroups);
+
+    if (!albums.some(album => album.url === group.url)) {
+      albums.push({
+        url: group.url,
+        title: group.title || getEromeTargetLabel(group.url)
+      });
+    }
+
+    const existingGroupIndex = videoGroups.findIndex(item => item.url === group.url);
+
+    if (existingGroupIndex >= 0) {
+      videoGroups[existingGroupIndex] = group;
+    } else {
+      videoGroups.push(group);
+    }
+
+    grouped[sourceUrl] = {
+      ...existing,
+      url: sourceUrl,
+      label: sourceUrl,
+      albums: compactSavedEromeAlbums(albums),
+      albumCount: compactSavedEromeAlbums(albums).length,
+      videoGroups: compactSavedEromeVideoGroups(videoGroups),
+      videoCount: countSavedEromeVideos(videoGroups)
+    };
+  });
+
+  lastEromeArtistRecords = grouped;
+
+  const saved = loadSavedEromeArtists();
+  let changed = false;
+
+  Object.values(grouped).forEach(record => {
+    if (saved[record.url]) {
+      upsertSavedEromeArtist(record.url, record);
+      changed = true;
+    }
+  });
+
+  if (changed) renderSavedEromeMenu();
+}
+
 function saveCurrentEromeArtistsLocally() {
+  const loadedRecords = buildCurrentLoadedEromeRecords();
+
+  if (Object.keys(loadedRecords).length) {
+    lastEromeArtistRecords = {
+      ...lastEromeArtistRecords,
+      ...loadedRecords
+    };
+  }
+
   const targets = getEromeScrapeTargets();
-  const list = targets.length ? targets : [getEromeLaunchUrl()].filter(Boolean);
+  const loadedRecordUrls = Object.keys(loadedRecords);
+  const list = targets.length
+    ? targets
+    : loadedRecordUrls.length
+      ? loadedRecordUrls
+      : [getEromeLaunchUrl()].filter(Boolean);
   let savedCount = 0;
 
   list.forEach(target => {
@@ -3983,6 +4270,32 @@ function ensureSavedEromeMenu() {
   return savedEromeMenuEl;
 }
 
+function loadSavedEromeRecordAsCards(record) {
+  const groups = compactSavedEromeVideoGroups(record?.videoGroups);
+
+  if (!groups.length) return false;
+
+  if (!EROME_PROXY_BASE) {
+    alert('Saved Erome cards need the proxy Worker.');
+    return true;
+  }
+
+  const base = EROME_PROXY_BASE.replace(/\/+$/, '');
+  const imported = cacheEromeCardImport(groups, base);
+
+  closeEromeHelper();
+  setEromeTwentyCardMode(true);
+  window.PongEromeAutoAdvanceOnce = true;
+  window.PongLoadAllVideosOnce = false;
+  loadVideosButton.click();
+
+  showSortingIndicator(
+    `Loaded saved Erome ${imported.urls.length} videos from ${record.url || 'saved page'}`
+  );
+
+  return true;
+}
+
 function renderSavedEromeMenu() {
   const menu = ensureSavedEromeMenu();
   const saved = loadSavedEromeArtists();
@@ -4000,20 +4313,31 @@ function renderSavedEromeMenu() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'saved-erome-item';
-    const label = record.label || getEromeTargetLabel(record.url);
-    const albumText = record.albumCount ? ` - ${record.albumCount} albums` : '';
+    const label = record.url;
+    const videoCount = Number(record.videoCount || countSavedEromeVideos(record.videoGroups));
+    const albumCount = Number(record.albumCount || compactSavedEromeAlbums(record.albums).length);
+    const detail = videoCount
+      ? `${videoCount} saved videos`
+      : albumCount
+        ? `${albumCount} saved albums`
+        : 'tap to load';
     btn.innerHTML = `
-      <span class="saved-erome-label">${escapeHtmlText(label + albumText)}</span>
-      <span class="saved-erome-url">${escapeHtmlText(record.url)}</span>
+      <span class="saved-erome-label">${escapeHtmlText(label)}</span>
+      <span class="saved-erome-url">${escapeHtmlText(detail)}</span>
     `;
     btn.addEventListener('click', e => {
       e.preventDefault();
       e.stopPropagation();
 
       if (eromeUrlInput) eromeUrlInput.value = record.url;
+      if (loadSavedEromeRecordAsCards(record)) {
+        menu.style.display = 'none';
+        return;
+      }
+
       window.PongSavedEromeAlbumQueueOverride = {
         targetUrl: record.url,
-        label: record.label || getEromeTargetLabel(record.url),
+        label: record.url,
         albums: Array.isArray(record.albums) ? record.albums : []
       };
       menu.style.display = 'none';
@@ -4096,7 +4420,7 @@ function cacheEromeCardImport(groups, proxyBase) {
         postUrl: group.url || groupSourceUrl,
         artistDisplayName: groupSourceTitle,
         bundleLabel: group.title || groupSourceTitle,
-        loadAll: true,
+        loadAll: false,
         ready: true,
         pending: false
       });
@@ -4435,6 +4759,7 @@ async function loadEromeAsCards() {
   try {
     // Route each raw MP4 through the proxy. The ".mp4" before "?" keeps the
     // existing isVideoUrlLine() matcher happy.
+    rememberEromeArtistRecordsFromVideoGroups(allGroups);
     const imported = cacheEromeCardImport(allGroups, base);
 
     closeEromeHelper();
@@ -4450,7 +4775,9 @@ async function loadEromeAsCards() {
       videos: imported.urls.length
     });
     hideEromeProgress(1400);
-    window.PongLoadAllVideosOnce = true;
+    setEromeTwentyCardMode(true);
+    window.PongEromeAutoAdvanceOnce = true;
+    window.PongLoadAllVideosOnce = false;
     loadVideosButton.click();
   } catch (err) {
     hideEromeProgress();
@@ -4762,12 +5089,13 @@ document.addEventListener('DOMContentLoaded',()=>{
   if (loadSession()) {
     console.log(`[Session] Restoring ${allVideoUrls.length} videos, batch ${currentBatch}, index ${currentVideoIndex}`);
     const savedBatch = currentBatch;
-    const savedIndex = currentVideoIndex % BATCH_SIZE;
+    const restoreBatchSize = getCurrentBatchSize();
+    const savedIndex = currentVideoIndex % restoreBatchSize;
     if (activePlaybackRange) {
       activePlaybackRange.offset = Math.max(0, Number(
         Number.isFinite(activePlaybackRange.currentOffset)
           ? activePlaybackRange.currentOffset
-          : Number(activePlaybackRange.offset || 0) - BATCH_SIZE
+          : Number(activePlaybackRange.offset || 0) - restoreBatchSize
       ));
       currentBatch = Math.max(0, savedBatch - 1);
     } else {
@@ -4859,6 +5187,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=71"></script>
+<script src="pong-sync.js?v=72"></script>
 </body>
 </html>
