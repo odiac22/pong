@@ -387,6 +387,31 @@
       font-size: 11px; font-weight: 700;
       user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
     }
+    #erome-helper {
+      display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.82); z-index: 10000;
+    }
+    #erome-helper-url {
+      flex: 1; min-width: 0; border-radius: 7px; border: 1px solid var(--ui-border);
+      background: rgba(255,255,255,0.07); color: var(--ui-text); padding: 7px 8px;
+      font-size: 12px; outline: none;
+    }
+    #erome-helper-url:focus { border-color: rgba(103,232,249,0.65); }
+    #erome-helper-open, #erome-helper-cards {
+      border: 1px solid var(--ui-border); border-radius: 7px; color: var(--ui-text);
+      padding: 7px 10px; font-size: 11px; font-weight: 700; cursor: pointer;
+      user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+    }
+    #erome-helper-open { background: rgba(103,232,249,0.18); }
+    #erome-helper-cards { background: rgba(34,197,94,0.22); }
+    #erome-iframe-container { width: 100%; flex: 1; overflow: auto; margin: 0 0 8px; border-radius: 8px; background: #05070a; }
+    #erome-iframe-container iframe { width: 100%; height: 100%; border: none; }
+    #erome-close {
+      background: rgba(251,113,133,0.18); color: var(--ui-text); border: 1px solid var(--ui-border);
+      padding: 7px 14px; border-radius: 999px; margin-top: 0; cursor: pointer;
+      font-size: 11px; font-weight: 700;
+      user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+    }
     body.scrubbing-active { overflow: hidden; touch-action: none; }
 
     /* Pong splash overlay */
@@ -521,12 +546,26 @@
     </div>
   </div>
 
+  <div id="erome-helper">
+    <div class="auth-inner">
+      <h3>Erome</h3>
+      <p>Watch in-app, or tap Cards to rip the album into the Pong player (needs proxy).</p>
+      <div class="auth-url-row">
+        <input id="erome-helper-url" type="url" placeholder="Erome album or artist URL" spellcheck="false" autocomplete="off">
+        <button id="erome-helper-open" type="button">Open</button>
+        <button id="erome-helper-cards" type="button">Cards</button>
+      </div>
+      <div id="erome-iframe-container"></div>
+      <div><button id="erome-close">Close</button></div>
+    </div>
+  </div>
+
   <div id="pong-overlay">
     <canvas id="pong-canvas"></canvas>
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.71</div>
+  <div class="version-number">22.73</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2487,7 +2526,7 @@ function getDeckSwipePoint(event) {
 
 function isDeckSwipeBlockedTarget(target) {
   return !!(target && target.closest && target.closest(
-    '.video-progress-container, .audio-toggle-button, .control-button, .next-batch-button, .unwatched-videos-button, .paste-nav-button, .save-video-button, .save-artist-button, .repair-button, .controls-overlay, #auth-helper, button, input, textarea'
+    '.video-progress-container, .audio-toggle-button, .control-button, .next-batch-button, .unwatched-videos-button, .paste-nav-button, .save-video-button, .save-artist-button, .repair-button, .controls-overlay, #auth-helper, #erome-helper, button, input, textarea'
   ));
 }
 
@@ -3463,24 +3502,83 @@ function getEromeLaunchUrl() {
   return DEFAULT_EROME_URL;
 }
 
-function openEromeBrowser() {
-  const url = getEromeLaunchUrl();
+// ── Erome proxy (Cloudflare Worker) ────────────────────────────────────────
+// Raw Erome MP4s 403 unless the request carries an erome.com Referer, which a
+// browser will not let JS forge. The Worker in workers/erome-proxy.js re-issues
+// the request with that header and streams the bytes back. Deploy it, then set
+// EROME_PROXY_BASE to its URL to unlock the "Cards" button. The in-app iframe
+// browser ("Open") works WITHOUT the proxy — Erome runs in its own context.
+const EROME_PROXY_BASE = 'https://pong-erome-proxy.odiac22-pong-repair.workers.dev';
 
-  if (/Android/i.test(navigator.userAgent || '')) {
-    window.location.href = url;
+const eromeHelper = document.getElementById('erome-helper');
+const eromeIframeContainer = document.getElementById('erome-iframe-container');
+const eromeHelperUrlInput = document.getElementById('erome-helper-url');
+
+function showEromeIframe(url) {
+  if (!eromeHelper || !eromeIframeContainer) { window.location.href = url; return; }
+  if (eromeHelperUrlInput) eromeHelperUrlInput.value = url;
+  eromeHelper.style.display = 'block';
+  eromeIframeContainer.innerHTML = '';
+  const ifr = document.createElement('iframe');
+  ifr.src = url;
+  ifr.setAttribute('allow', 'autoplay; fullscreen; encrypted-media; picture-in-picture');
+  ifr.setAttribute('allowfullscreen', '');
+  ifr.referrerPolicy = 'no-referrer-when-downgrade';
+  eromeIframeContainer.appendChild(ifr);
+}
+
+function closeEromeHelper() {
+  if (!eromeHelper) return;
+  eromeHelper.style.display = 'none';
+  if (eromeIframeContainer) eromeIframeContainer.innerHTML = '';
+}
+
+function openEromeBrowser() {
+  showEromeIframe(getEromeLaunchUrl());
+}
+
+async function loadEromeAsCards() {
+  const target = normalizeEromeLaunchUrl(eromeHelperUrlInput ? eromeHelperUrlInput.value : '')
+    || getEromeLaunchUrl();
+
+  if (!EROME_PROXY_BASE) {
+    alert('Pong cards for Erome need the proxy Worker.\n\n'
+      + '1. Deploy workers/erome-proxy.js (wrangler deploy)\n'
+      + '2. Set EROME_PROXY_BASE in index.html to your worker URL\n\n'
+      + 'Until then, use "Open" to watch Erome inside the app.');
     return;
   }
 
-  try {
-    const opened = window.open(url, '_blank');
+  const base = EROME_PROXY_BASE.replace(/\/+$/, '');
+  showSortingIndicator('Scraping Erome…');
 
-    if (opened) {
-      try { opened.opener = null; } catch (_) {}
+  try {
+    const res = await fetch(base + '/scrape?u=' + encodeURIComponent(target));
+    if (!res.ok) throw new Error('scrape HTTP ' + res.status);
+    const data = await res.json();
+    const videos = Array.isArray(data.videos) ? data.videos : [];
+
+    if (!videos.length) {
+      alert('No videos found on that Erome page.');
       return;
     }
-  } catch (_) {}
 
-  window.location.href = url;
+    // Route each raw MP4 through the proxy. The ".mp4" before "?" keeps the
+    // existing isVideoUrlLine() matcher happy.
+    const proxied = videos.map(v => base + '/erome.mp4?u=' + encodeURIComponent(v));
+
+    if (videoUrlsInput) videoUrlsInput.value = proxied.join('\n');
+    parsedVideoUrlsCache = [];
+    parsedVideoMetadataCache = [];
+    parseCacheDirty = false;
+    pendingPastes = [];
+
+    closeEromeHelper();
+    showSortingIndicator('Loaded ' + proxied.length + ' Erome videos');
+    loadVideosButton.click();
+  } catch (err) {
+    alert('Erome scrape failed: ' + (err && err.message ? err.message : err));
+  }
 }
 
 function normalizeAuthUrl(rawUrl) {
@@ -3521,6 +3619,27 @@ eromeUrlInput?.addEventListener('keydown', e => {
   if (e.key === 'Enter') {
     e.preventDefault();
     openEromeBrowser();
+  }
+});
+
+document.getElementById('erome-helper-open')?.addEventListener('click', () => {
+  const url = normalizeEromeLaunchUrl(eromeHelperUrlInput ? eromeHelperUrlInput.value : '') || DEFAULT_EROME_URL;
+  showEromeIframe(url);
+});
+
+document.getElementById('erome-helper-cards')?.addEventListener('click', () => {
+  loadEromeAsCards();
+});
+
+document.getElementById('erome-close')?.addEventListener('click', () => {
+  closeEromeHelper();
+});
+
+eromeHelperUrlInput?.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const url = normalizeEromeLaunchUrl(eromeHelperUrlInput.value) || DEFAULT_EROME_URL;
+    showEromeIframe(url);
   }
 });
 
@@ -3829,6 +3948,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=60"></script>
+<script src="pong-sync.js?v=62"></script>
 </body>
 </html>

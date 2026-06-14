@@ -1,3 +1,3 @@
-name = "pong-coomerfans-proxy"
-main = "workers/coomerfans-proxy.js"
+name = "pong-erome-proxy"
+main = "workers/erome-proxy.js"
 compatibility_date = "2026-06-02"
