@@ -114,6 +114,10 @@
         font-size: 6px !important;
         font-weight: 700 !important;
         line-height: 1 !important;
+        max-width: 26px !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
         user-select: none !important;
         -webkit-user-select: none !important;
         -webkit-touch-callout: none !important;
@@ -1999,7 +2003,13 @@
           startIndex,
           count: cleanVideos.length,
           artistKey: artist.artistKey || `saved-artist-${artistIndex}`,
-          source: 'saved-artist-bundle'
+          bundleKey: artist.artistKey || `saved-artist-${artistIndex}`,
+          source: artist.source || 'saved-artist-bundle',
+          artistUrl: artist.artistUrl || '',
+          postUrl: artist.postUrl || '',
+          artistDisplayName: artist.artistDisplayName || artist.artistName || '',
+          bundleLabel: artist.bundleLabel || artist.artistDisplayName || artist.artistName || '',
+          loadAll: artist.source === 'erome'
         });
       });
 
@@ -2123,7 +2133,13 @@
         startIndex,
         count: cleanVideos.length,
         artistKey: artist.artistKey || `saved-artist-${artistIndex}`,
-        source: 'saved-artist-bundle'
+        bundleKey: artist.artistKey || `saved-artist-${artistIndex}`,
+        source: artist.source || 'saved-artist-bundle',
+        artistUrl: artist.artistUrl || '',
+        postUrl: artist.postUrl || '',
+        artistDisplayName: artist.artistDisplayName || artist.artistName || '',
+        bundleLabel: artist.bundleLabel || artist.artistDisplayName || artist.artistName || '',
+        loadAll: artist.source === 'erome'
       });
     });
 
@@ -2171,7 +2187,13 @@
         startIndex,
         count: cleanVideos.length,
         artistKey: artist.artistKey || `saved-artist-${artistIndex}`,
-        source: 'saved-artist-bundle'
+        bundleKey: artist.artistKey || `saved-artist-${artistIndex}`,
+        source: artistMeta.source || 'saved-artist-bundle',
+        artistUrl: artistMeta.artistUrl || '',
+        postUrl: artist.postUrl || '',
+        artistDisplayName: artist.artistDisplayName || artistMeta.artistDisplayName || artistMeta.artistName || '',
+        bundleLabel: artist.bundleLabel || artist.artistDisplayName || artistMeta.artistDisplayName || artistMeta.artistName || '',
+        loadAll: artistMeta.source === 'erome'
       });
     });
 
@@ -2542,8 +2564,12 @@
 
     data.savedArtists[artistKey] = {
       artistKey,
-      source: 'paperclip-bundle',
+      source: bundleInfo.source || artistMeta.source || 'paperclip-bundle',
       ...artistMeta,
+      artistUrl: bundleInfo.artistUrl || artistMeta.artistUrl || '',
+      postUrl: bundleInfo.postUrl || artistMeta.postUrl || '',
+      artistDisplayName: bundleInfo.artistDisplayName || artistMeta.artistDisplayName || '',
+      bundleLabel: bundleInfo.bundleLabel || artistMeta.artistDisplayName || '',
       startIndex: bundleInfo.startIndex,
       count: bundleInfo.count,
       videos: mergedVideos,
@@ -2575,9 +2601,16 @@
     const rangeOffset = hasRange
       ? Math.max(0, Number(activePlaybackRange.currentOffset || 0))
       : 0;
-    const batchStartIndex = hasRange
-      ? activePlaybackRange.start + rangeOffset
-      : Math.max(0, currentBatch - 1) * BATCH_SIZE;
+    const loadedRangeStart = typeof currentLoadedRangeStart !== 'undefined' && Number.isFinite(currentLoadedRangeStart)
+      ? currentLoadedRangeStart
+      : typeof window.PongCurrentLoadedRangeStart === 'number' && Number.isFinite(window.PongCurrentLoadedRangeStart)
+        ? window.PongCurrentLoadedRangeStart
+        : null;
+    const batchStartIndex = loadedRangeStart !== null
+      ? loadedRangeStart
+      : hasRange
+        ? activePlaybackRange.start + rangeOffset
+        : Math.max(0, currentBatch - 1) * BATCH_SIZE;
 
     return batchStartIndex + localIndex;
   }
@@ -2614,11 +2647,74 @@
     const urls = allVideoUrls.slice(startIndex, startIndex + count).filter(Boolean);
 
     return {
-      bundleKey: bundle.artistKey || bundle.bundleKey || `paste-bundle:${startIndex}:${count}`,
+      bundleKey: bundle.bundleKey || bundle.artistKey || `paste-bundle:${startIndex}:${count}`,
+      artistKey: bundle.artistKey || '',
+      source: bundle.source || '',
+      artistUrl: bundle.artistUrl || '',
+      postUrl: bundle.postUrl || '',
+      artistDisplayName: bundle.artistDisplayName || '',
+      bundleLabel: bundle.bundleLabel || '',
       startIndex,
       count,
       urls
     };
+  }
+
+  function compactSideButtonLabel(rawText) {
+    const clean = String(rawText || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!clean) return 'Artist';
+
+    return clean.length > 8 ? clean.slice(0, 8) : clean;
+  }
+
+  function getCurrentArtistSaveLabel(wrapperOverride) {
+    const wrapper = wrapperOverride || getCurrentVideoWrapperOverride();
+    const bundleInfo = getCurrentPasteBundleInfo(wrapper);
+
+    if (bundleInfo) {
+      const bundleLabel =
+        bundleInfo.artistDisplayName ||
+        artistNameFromUrl(bundleInfo.artistUrl) ||
+        bundleInfo.bundleLabel ||
+        artistNameFromUrl(bundleInfo.postUrl);
+
+      if (bundleLabel) return bundleLabel;
+    }
+
+    const globalIndex = getCurrentGlobalVideoIndex(wrapper);
+    const meta = globalIndex >= 0 && Array.isArray(allVideoMetadata)
+      ? allVideoMetadata[globalIndex] || null
+      : null;
+
+    return (
+      meta?.artistName ||
+      artistNameFromUrl(meta?.artistUrl || '') ||
+      getArtistDisplayName(meta) ||
+      'Artist'
+    );
+  }
+
+  function updateCurrentArtistSaveLabel() {
+    const label = document.getElementById('save-current-artist-label');
+    const button = document.getElementById('save-current-artist-button');
+
+    if (!label || !button) return;
+
+    const fullLabel = getCurrentArtistSaveLabel();
+
+    label.textContent = compactSideButtonLabel(fullLabel);
+    button.title = `Press to save current album bundle (${fullLabel || 'Artist'}). Hold 2 seconds to play saved bundles randomized.`;
+  }
+
+  function ensureCurrentArtistSaveLabelUpdater() {
+    if (!window.PongArtistSaveLabelTimer) {
+      window.PongArtistSaveLabelTimer = setInterval(updateCurrentArtistSaveLabel, 700);
+    }
+
+    updateCurrentArtistSaveLabel();
   }
 
   function getCurrentPasteEventIndex() {
@@ -4535,13 +4631,18 @@
     const existing = document.getElementById('save-actions-panel');
 
     if (existing) {
-      updateSaveCountersOverride();
-      return;
-    }
+      if (existing.dataset.pongSyncPanel === 'true') {
+        updateSaveCountersOverride();
+        ensureCurrentArtistSaveLabelUpdater();
+        return;
+      }
 
+      existing.remove();
+    }
     const panel = document.createElement('div');
     panel.id = 'save-actions-panel';
     panel.className = 'save-actions-panel';
+    panel.dataset.pongSyncPanel = 'true';
 
     const tokenBtn = document.createElement('button');
     tokenBtn.id = 'github-token-button';
@@ -4582,7 +4683,7 @@
     artistBtn.title = 'Press to save current paperclip bundle. Hold 2 seconds to play saved bundles randomized.';
     artistBtn.innerHTML = `
       <span class="side-save-icon">👤</span>
-      <span class="side-save-label">Artist</span>
+      <span id="save-current-artist-label" class="side-save-label">Artist</span>
       <span id="saved-artist-count" class="side-save-count">0</span>
     `;
 
@@ -4594,6 +4695,7 @@
 
     function captureCurrentSaveTarget() {
       const wrapper = getCurrentVideoWrapperOverride();
+      updateCurrentArtistSaveLabel();
 
       return {
         wrapper,
@@ -4742,6 +4844,7 @@
     document.body.appendChild(panel);
 
     updateSaveCountersOverride();
+    ensureCurrentArtistSaveLabelUpdater();
   }
 
   function showSeekFlash(wrapper, side) {

@@ -530,6 +530,10 @@
   font-size: 6px;
   font-weight: 700;
   line-height: 1;
+  max-width: 26px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -591,7 +595,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.77</div>
+  <div class="version-number">22.78</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -616,6 +620,9 @@ let isControlsVisible = true;
 let videoMetadata = [];
 let currentBatch = 0;
 let activePlaybackRange = null;
+let currentLoadedRangeStart = 0;
+let currentLoadedRangeEnd = 0;
+let currentLoadedRangeIsFull = false;
 const BATCH_SIZE = 20;
 const VIDEO_LOAD_RETRY_DELAYS_MS = [3000, 5000, 7000, 10000, 15000, 20000];
 const VIDEO_LOAD_RETRY_POLL_MS = 1000;
@@ -1463,7 +1470,10 @@ function saveSession() {
       currentVideoIndex,
       currentPasteIndex,
       pasteEvents,
-      activePlaybackRange
+      activePlaybackRange,
+      currentLoadedRangeStart,
+      currentLoadedRangeEnd,
+      currentLoadedRangeIsFull
     }));
   } catch(e) {}
 }
@@ -1488,6 +1498,16 @@ function loadSession() {
     currentPasteIndex = Number.isInteger(s.currentPasteIndex) ? s.currentPasteIndex : -1;
     pasteEvents = s.pasteEvents || [];
     activePlaybackRange = s.activePlaybackRange || null;
+    setCurrentLoadedRange(
+      Number(s.currentLoadedRangeStart || 0),
+      Number(s.currentLoadedRangeEnd || 0),
+      s.currentLoadedRangeIsFull === true
+    );
+
+    if (currentLoadedRangeIsFull && !activePlaybackRange) {
+      window.PongLoadAllVideosOnce = true;
+    }
+
     return true;
   } catch(e) { return false; }
 }
@@ -1553,6 +1573,49 @@ function getActiveRangeTotal() {
   return hasActivePlaybackRange()
     ? Math.max(0, activePlaybackRange.end - activePlaybackRange.start)
     : allVideoUrls.length;
+}
+
+function setCurrentLoadedRange(start, end, isFull) {
+  currentLoadedRangeStart = Math.max(0, Number(start || 0));
+  currentLoadedRangeEnd = Math.max(currentLoadedRangeStart, Number(end || currentLoadedRangeStart));
+  currentLoadedRangeIsFull = !!isFull;
+
+  window.PongCurrentLoadedRangeStart = currentLoadedRangeStart;
+  window.PongCurrentLoadedRangeEnd = currentLoadedRangeEnd;
+  window.PongCurrentLoadedRangeIsFull = currentLoadedRangeIsFull;
+}
+
+function getCurrentLoadedGlobalVideoIndex() {
+  const wrapper = getCurrentVideoWrapper();
+
+  if (!wrapper) return -1;
+
+  const localIndex = parseInt(wrapper.dataset.index || '0', 10);
+
+  if (isNaN(localIndex)) return -1;
+
+  return currentLoadedRangeStart + localIndex;
+}
+
+function getPasteEventIndexForGlobalVideo(globalIndex) {
+  if (!Array.isArray(pasteEvents) || !pasteEvents.length || globalIndex < 0) return -1;
+
+  return pasteEvents.findIndex(item => {
+    if (!item) return false;
+
+    const start = Number(item.startIndex);
+    const count = Number(item.count);
+
+    return globalIndex >= start && globalIndex < start + count;
+  });
+}
+
+function syncCurrentPasteIndexFromVisibleVideo() {
+  const eventIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
+
+  if (eventIndex >= 0) currentPasteIndex = eventIndex;
+
+  return eventIndex;
 }
 
 function getCounterBatchText() {
@@ -1849,7 +1912,7 @@ function createSaveButtons() {
   artistBtn.type = 'button';
   artistBtn.innerHTML = `
     <span class="side-save-icon">👤</span>
-    <span class="side-save-label">Artist</span>
+    <span id="save-current-artist-label" class="side-save-label">Artist</span>
     <span id="saved-artist-count" class="side-save-count">0</span>
   `;
   artistBtn.addEventListener('click', e => {
@@ -3049,7 +3112,12 @@ function loadNextBatch(restoreIndex) {
   const rangeEnd = hasRange ? Math.min(activePlaybackRange.end, allVideoUrls.length) : allVideoUrls.length;
   const offset = hasRange ? Math.max(0, Number(activePlaybackRange.offset || 0)) : currentBatch * BATCH_SIZE;
   const start = Math.min(rangeEnd, rangeStart + offset);
-  const end=Math.min(start+BATCH_SIZE,rangeEnd);
+  const loadFullRange = hasRange && activePlaybackRange.loadAll === true;
+  const loadFullDeck = !hasRange && window.PongLoadAllVideosOnce === true;
+  const end=(loadFullRange || loadFullDeck) ? rangeEnd : Math.min(start+BATCH_SIZE,rangeEnd);
+
+  setCurrentLoadedRange(start, end, loadFullRange || loadFullDeck);
+  window.PongLoadAllVideosOnce = false;
 
   for(let i=start;i<end;i++) {
     videoUrls.push(allVideoUrls[i]);
@@ -3058,7 +3126,9 @@ function loadNextBatch(restoreIndex) {
 
   if (hasRange) {
     activePlaybackRange.currentOffset = offset;
-    activePlaybackRange.offset = Math.max(0, offset + (end - start));
+    activePlaybackRange.offset = loadFullRange
+      ? Math.max(0, rangeEnd - rangeStart)
+      : Math.max(0, offset + (end - start));
     currentBatch = Math.max(1, Math.ceil(activePlaybackRange.offset / BATCH_SIZE));
   } else {
     currentBatch++;
@@ -3204,9 +3274,14 @@ function recycleSkippedVideosBelow() {
 function updateNextBatchButton() {
   let btn=document.getElementById('next-batch-button');
   const hasRange = hasActivePlaybackRange();
+  const loadedEnd = Number.isFinite(currentLoadedRangeEnd)
+    ? currentLoadedRangeEnd
+    : hasRange
+      ? activePlaybackRange.start + Number(activePlaybackRange.offset || 0)
+      : currentBatch * BATCH_SIZE;
   const remaining = hasRange
-    ? Math.max(0, activePlaybackRange.end - (activePlaybackRange.start + Number(activePlaybackRange.offset || 0)))
-    : Math.max(0, allVideoUrls.length - currentBatch * BATCH_SIZE);
+    ? Math.max(0, activePlaybackRange.end - loadedEnd)
+    : Math.max(0, allVideoUrls.length - loadedEnd);
   const advanceSavedArtist = remaining <= 0 && shouldNextBatchAdvanceSavedArtist();
 
   if(remaining<=0 && !advanceSavedArtist){
@@ -3222,7 +3297,10 @@ function updateNextBatchButton() {
       e.preventDefault();
       e.stopPropagation();
       if (shouldNextBatchAdvanceSavedArtist()) {
-        const rangeRemaining = Math.max(0, activePlaybackRange.end - (activePlaybackRange.start + Number(activePlaybackRange.offset || 0)));
+        const activeLoadedEnd = Number.isFinite(currentLoadedRangeEnd)
+          ? currentLoadedRangeEnd
+          : activePlaybackRange.start + Number(activePlaybackRange.offset || 0);
+        const rangeRemaining = Math.max(0, activePlaybackRange.end - activeLoadedEnd);
         if (rangeRemaining <= 0) {
           navigateToNextPasteEvent();
           return;
@@ -3305,7 +3383,8 @@ function setActivePlaybackRangeForPasteEvent(index) {
     start: targetGlobalIndex,
     end: Math.max(0, Math.min(allVideoUrls.length, targetGlobalIndex + targetCount)),
     offset: 0,
-    currentOffset: 0
+    currentOffset: 0,
+    loadAll: target.loadAll === true
   };
   currentBatch = 0;
   currentVideoIndex = 0;
@@ -3330,6 +3409,10 @@ function navigateToNextPasteEvent(){
   if(!pasteEvents.length||!allVideoUrls.length){
     showSortingIndicator('No paste bundles yet');
     return;
+  }
+
+  if (!hasActivePlaybackRange()) {
+    syncCurrentPasteIndexFromVisibleVideo();
   }
 
   setActivePlaybackRangeForPasteEvent(currentPasteIndex + 1);
@@ -3790,6 +3873,9 @@ function cacheEromeCardImport(groups, proxyBase) {
         source: 'erome',
         artistUrl: groupSourceUrl,
         postUrl: group.url || groupSourceUrl,
+        artistDisplayName: groupSourceTitle,
+        bundleLabel: group.title || groupSourceTitle,
+        loadAll: true,
         ready: true,
         pending: false
       });
@@ -4007,8 +4093,8 @@ async function loadEromeAsCards() {
       videos: imported.urls.length
     });
     hideEromeProgress(1400);
+    window.PongLoadAllVideosOnce = true;
     loadVideosButton.click();
-    activateFirstEromeBatch();
   } catch (err) {
     hideEromeProgress();
     alert('Erome scrape failed: ' + (err && err.message ? err.message : err));
@@ -4382,6 +4468,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=66"></script>
+<script src="pong-sync.js?v=67"></script>
 </body>
 </html>
