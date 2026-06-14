@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.87</div>
+  <div class="version-number">22.88</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -663,6 +663,7 @@ let currentLoadedRangeIsFull = false;
 const BATCH_SIZE = 20;
 let currentRenderBatchSize = BATCH_SIZE;
 let eromeBatchAutoAdvance = false;
+let eromeSlidingRenderPending = false;
 const VIDEO_LOAD_RETRY_DELAYS_MS = [3000, 5000, 7000, 10000, 15000, 20000];
 const VIDEO_LOAD_RETRY_POLL_MS = 1000;
 let visibleBatchRetryTimer = null;
@@ -1660,29 +1661,141 @@ function getCurrentLoadedGlobalVideoIndex() {
 
   if (isNaN(localIndex)) return -1;
 
-  return currentLoadedRangeStart + localIndex;
+  return getVideoGlobalIndexForLocalIndex(localIndex);
 }
 
-function loadNextEromeBatchIfAvailable() {
-  if (!eromeBatchAutoAdvance || !videoUrls.length || !allVideoUrls.length) return false;
+function getVideoGlobalIndexForLocalIndex(localIndex) {
+  const index = Number(localIndex);
 
-  const hasRange = hasActivePlaybackRange();
-  const loadedEnd = Number.isFinite(currentLoadedRangeEnd)
-    ? currentLoadedRangeEnd
-    : hasRange
-      ? activePlaybackRange.start + Number(activePlaybackRange.offset || 0)
-      : currentBatch * getCurrentBatchSize();
-  const rangeEnd = hasRange
+  if (!Number.isInteger(index) || index < 0) return -1;
+
+  const metaIndex = Number(videoMetadata[index]?.globalIndex);
+
+  if (Number.isInteger(metaIndex) && metaIndex >= 0) return metaIndex;
+
+  return currentLoadedRangeStart + index;
+}
+
+function getVideoMetadataForGlobalIndex(globalIndex) {
+  const index = Number(globalIndex);
+  const safeIndex = Number.isInteger(index) && index >= 0 ? index : -1;
+  const meta = safeIndex >= 0
+    ? allVideoMetadata[safeIndex] || {}
+    : {};
+
+  return {
+    ...meta,
+    globalIndex: safeIndex
+  };
+}
+
+function getEromePlaybackRangeBounds() {
+  const rangeStart = hasActivePlaybackRange() ? activePlaybackRange.start : 0;
+  const rangeEnd = hasActivePlaybackRange()
     ? Math.min(activePlaybackRange.end, allVideoUrls.length)
     : allVideoUrls.length;
 
-  if (loadedEnd >= rangeEnd) return false;
+  return {
+    start: Math.max(0, rangeStart),
+    end: Math.max(rangeStart, rangeEnd)
+  };
+}
 
-  showSortingIndicator('Loading next 20 Erome cards...');
-  window.PongFastNextBatchOnce = true;
-  loadNextBatch(0);
+function renderEromeSlidingWindow(activeLocalIndex, removeLocalIndex) {
+  if (!eromeBatchAutoAdvance || !videoUrls.length || !allVideoUrls.length) return false;
+
+  const bounds = getEromePlaybackRangeBounds();
+  const batchSize = getCurrentBatchSize();
+  const windowSize = Math.min(batchSize, Math.max(0, bounds.end - bounds.start));
+  const appendGlobalIndex = Math.max(bounds.start, Number(currentLoadedRangeEnd || 0));
+  const removeIndex = Number(removeLocalIndex);
+  const activeIndex = Number(activeLocalIndex);
+
+  if (!windowSize || appendGlobalIndex >= bounds.end || eromeSlidingRenderPending) return false;
+  if (!Number.isInteger(removeIndex) || removeIndex < 0 || removeIndex >= videoUrls.length) return false;
+  if (!Number.isInteger(activeIndex) || activeIndex < 0 || activeIndex >= videoUrls.length) return false;
+  if (removeIndex === activeIndex) return false;
+
+  const nextUrl = allVideoUrls[appendGlobalIndex];
+
+  if (!nextUrl) return false;
+
+  const nextUrls = videoUrls.slice();
+  const nextMetadata = videoMetadata.slice();
+  const restoreIndex = Math.max(
+    0,
+    Math.min(videoUrls.length - 2, activeIndex - (removeIndex < activeIndex ? 1 : 0))
+  );
+  const nextLoadedEnd = appendGlobalIndex + 1;
+  const logicalStart = Math.max(bounds.start, nextLoadedEnd - windowSize);
+
+  nextUrls.splice(removeIndex, 1);
+  nextMetadata.splice(removeIndex, 1);
+  nextUrls.push(nextUrl);
+  nextMetadata.push(getVideoMetadataForGlobalIndex(appendGlobalIndex));
+
+  videoUrls = nextUrls;
+  videoMetadata = nextMetadata;
+  setCurrentLoadedRange(logicalStart, nextLoadedEnd, false);
+
+  if (hasActivePlaybackRange()) {
+    activePlaybackRange.currentOffset = Math.max(0, logicalStart - bounds.start);
+    activePlaybackRange.offset = Math.max(0, nextLoadedEnd - bounds.start);
+    currentBatch = Math.max(1, Math.ceil(activePlaybackRange.offset / batchSize));
+  } else {
+    currentBatch = Math.max(1, Math.ceil(nextLoadedEnd / batchSize));
+  }
+
+  eromeSlidingRenderPending = true;
+  deckRestoreIndex = restoreIndex;
+  videoContainer.innerHTML = '<div class="loading-message">Loading next video...</div>';
+
+  setTimeout(() => {
+    try {
+      createVideoElements();
+      updateNextBatchButton();
+      createUnwatchedVideosButton();
+
+      if (DECK_MODE_ENABLED) {
+        setDeckActiveIndex(restoreIndex, 'none', { pushHistory: false });
+      }
+    } catch (error) {
+      console.warn('[Erome queue] Could not render next card', error);
+    } finally {
+      eromeSlidingRenderPending = false;
+      scheduleSessionSave(500);
+    }
+  }, 60);
 
   return true;
+}
+
+function scheduleEromeSlidingWindowAdvance(activeLocalIndex, oldWrapper) {
+  if (!eromeBatchAutoAdvance || eromeSlidingRenderPending || !oldWrapper || !isWrapperViewed(oldWrapper)) return;
+  if (!Number.isInteger(Number(activeLocalIndex))) return;
+
+  const removeLocalIndex = getDeckIndex(oldWrapper);
+
+  if (!Number.isInteger(removeLocalIndex) || removeLocalIndex < 0) return;
+  if (removeLocalIndex === Number(activeLocalIndex)) return;
+
+  setTimeout(() => {
+    renderEromeSlidingWindow(Number(activeLocalIndex), removeLocalIndex);
+  }, 320);
+}
+
+function loadNextEromeBatchIfAvailable() {
+  const activeWrapper = getCurrentVideoWrapper();
+  const activeLocalIndex = getDeckIndex(activeWrapper);
+  const removeWrapper = getDeckWrappers().find(wrapper => (
+    wrapper !== activeWrapper &&
+    isWrapperViewed(wrapper)
+  ));
+  const removeLocalIndex = getDeckIndex(removeWrapper);
+
+  if (renderEromeSlidingWindow(activeLocalIndex, removeLocalIndex)) return true;
+
+  return false;
 }
 
 function getPasteEventIndexForGlobalVideo(globalIndex) {
@@ -2600,6 +2713,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   const targetIndex = getDeckIndex(target);
   const oldIndex = deckCurrentIndex;
   const oldWrapper = getDeckWrapper(oldIndex);
+  const oldWasViewed = isWrapperViewed(oldWrapper);
 
   if (!target || targetIndex < 0) return false;
   if (oldIndex === targetIndex && target.classList.contains('deck-active')) {
@@ -2649,6 +2763,10 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   const video = target.querySelector('video');
   if (window.autoplayEnabled && isWrapperReady(target) && video && video.paused) {
     playVideoCleanly(video);
+  }
+
+  if (oldIndex !== targetIndex && oldWasViewed) {
+    scheduleEromeSlidingWindowAdvance(targetIndex, oldWrapper);
   }
 
   return true;
@@ -3236,7 +3354,7 @@ function loadNextBatch(restoreIndex) {
 
   for(let i=start;i<end;i++) {
     videoUrls.push(allVideoUrls[i]);
-    videoMetadata.push(allVideoMetadata[i] || {});
+    videoMetadata.push(getVideoMetadataForGlobalIndex(i));
   }
 
   if (hasRange) {
@@ -3388,6 +3506,12 @@ function recycleSkippedVideosBelow() {
 
 function updateNextBatchButton() {
   let btn=document.getElementById('next-batch-button');
+
+  if (eromeBatchAutoAdvance) {
+    if(btn)btn.remove();
+    return;
+  }
+
   const hasRange = hasActivePlaybackRange();
   const batchSize = getCurrentBatchSize();
   const loadedEnd = Number.isFinite(currentLoadedRangeEnd)
@@ -5644,6 +5768,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=76"></script>
+<script src="pong-sync.js?v=77"></script>
 </body>
 </html>
