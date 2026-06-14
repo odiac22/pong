@@ -595,7 +595,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.79</div>
+  <div class="version-number">22.80</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4099,17 +4099,33 @@ async function loadEromeAsCards() {
         continue;
       }
 
-      const firstUrl = target;
+      const firstUrl = eromeProfilePageUrl(target, 1);
       const firstData = await fetchEromeAlbumListData(base, firstUrl, { attempts: 3 });
       const sourceTitle = firstData?.title || getEromeTargetLabel(target);
 
-      // Scrape the exact profile page the user pasted. Erome profile pagination
-      // can point to hundreds of extra albums and makes known pages like
-      // GoodTaste112 balloon far beyond the expected pasted-page count.
-      pageCount = 1;
+      pageCount = Math.max(1, Number(firstData.profilePageCount || 1));
+      totalPages += Math.max(0, pageCount - 1);
       (firstData.albums || []).forEach(album => addAlbumToQueue(album, target, sourceTitle));
       completedPages++;
       updateDiscoveryProgress(i, target, 1, pageCount);
+
+      for (let page = 2; page <= pageCount; page++) {
+        const pageUrl = eromeProfilePageUrl(target, page);
+
+        updateDiscoveryProgress(i, target, page, pageCount, 'loading');
+
+        try {
+          const pageData = await fetchEromeAlbumListData(base, pageUrl, { attempts: 2 });
+
+          (pageData.albums || []).forEach(album => addAlbumToQueue(album, target, sourceTitle));
+        } catch (pageErr) {
+          failures.push(pageUrl);
+          console.warn('Erome album discovery page failed:', pageUrl, pageErr);
+        } finally {
+          completedPages++;
+          updateDiscoveryProgress(i, target, page, pageCount);
+        }
+      }
 
       if (albumQueue.length === albumsBeforeTarget && pageCount <= 1) {
         failures.push(target);
@@ -4557,6 +4573,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=68"></script>
+<script src="pong-sync.js?v=69"></script>
 </body>
 </html>
