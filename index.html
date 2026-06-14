@@ -595,7 +595,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.78</div>
+  <div class="version-number">22.79</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3913,24 +3913,28 @@ function activateFirstEromeBatch() {
   }, 500);
 }
 
-async function fetchEromeScrapeData(proxyBase, targetUrl, options = {}) {
-  const maxAttempts = options.profilePage ? 3 : 2;
+const EROME_ALBUM_SCRAPE_CONCURRENCY = 5;
+const EROME_FETCH_TIMEOUT_MS = 45000;
+
+async function fetchEromeJson(proxyBase, endpoint, targetUrl, options = {}) {
+  const maxAttempts = Math.max(1, Number(options.attempts || 2));
   let lastError = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = typeof AbortController !== 'undefined'
+      ? new AbortController()
+      : null;
+    const timeoutId = controller
+      ? setTimeout(() => controller.abort(), Number(options.timeoutMs || EROME_FETCH_TIMEOUT_MS))
+      : null;
+
     try {
-      const res = await fetch(proxyBase + '/scrape?u=' + encodeURIComponent(targetUrl));
+      const res = await fetch(proxyBase + endpoint + '?u=' + encodeURIComponent(targetUrl), {
+        signal: controller ? controller.signal : undefined
+      });
       if (!res.ok) throw new Error('scrape HTTP ' + res.status);
 
-      const data = await res.json();
-      const failedAlbumCount = Number(data.failedAlbumCount || 0);
-
-      if (options.profilePage && failedAlbumCount > 0 && attempt < maxAttempts) {
-        await sleep(450 * attempt);
-        continue;
-      }
-
-      return data;
+      return await res.json();
     } catch (err) {
       lastError = err;
 
@@ -3938,10 +3942,44 @@ async function fetchEromeScrapeData(proxyBase, targetUrl, options = {}) {
         await sleep(450 * attempt);
         continue;
       }
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
     }
   }
 
   throw lastError || new Error('Erome scrape failed');
+}
+
+async function fetchEromeScrapeData(proxyBase, targetUrl, options = {}) {
+  return fetchEromeJson(proxyBase, '/scrape', targetUrl, options);
+}
+
+async function fetchEromeAlbumListData(proxyBase, targetUrl, options = {}) {
+  return fetchEromeJson(proxyBase, '/albums', targetUrl, options);
+}
+
+async function eromePool(items, limit, task) {
+  const results = new Array(items.length);
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const currentIndex = index++;
+
+      try {
+        results[currentIndex] = await task(items[currentIndex], currentIndex);
+      } catch (err) {
+        console.warn('Erome album task failed:', items[currentIndex], err);
+        results[currentIndex] = null;
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker)
+  );
+
+  return results;
 }
 
 async function loadEromeAsCards() {
@@ -3963,11 +4001,29 @@ async function loadEromeAsCards() {
   const base = EROME_PROXY_BASE.replace(/\/+$/, '');
   const allGroups = [];
   const failures = [];
+  const albumQueue = [];
+  const seenAlbumUrls = new Set();
   const seenGroupUrls = new Set();
   const seenVideoUrls = new Set();
   let completedPages = 0;
   let totalPages = targets.length;
+  let completedAlbums = 0;
   let totalVideos = 0;
+
+  function addAlbumToQueue(rawAlbum, sourceUrl, sourceTitle) {
+    const rawUrl = typeof rawAlbum === 'string' ? rawAlbum : rawAlbum?.url;
+    const albumUrl = normalizeEromeLaunchUrl(rawUrl);
+
+    if (!albumUrl || !isEromeAlbumLaunchUrl(albumUrl) || seenAlbumUrls.has(albumUrl)) return;
+
+    seenAlbumUrls.add(albumUrl);
+    albumQueue.push({
+      url: albumUrl,
+      title: (typeof rawAlbum === 'object' && rawAlbum?.title) || getEromeTargetLabel(albumUrl),
+      sourceUrl,
+      sourceTitle: sourceTitle || getEromeTargetLabel(sourceUrl)
+    });
+  }
 
   function addScrapedGroups(groups) {
     (groups || []).forEach(group => {
@@ -3995,19 +4051,28 @@ async function loadEromeAsCards() {
     });
   }
 
-  function updateScrapeProgress(targetIndex, target, page, pageCount, note) {
+  function updateDiscoveryProgress(targetIndex, target, page, pageCount, note) {
     const artistText = `artist ${targetIndex + 1}/${targets.length}`;
     const pageText = pageCount > 1 ? `page ${page}/${pageCount}` : 'single page';
     const label = getEromeTargetLabel(target);
 
     updateEromeProgress({
       title: 'Scraping Erome',
-      detail: `${artistText} - ${label} - ${pageText}${note ? ` - ${note}` : ''}`,
+      detail: `${artistText} - ${label} - finding albums - ${pageText}${note ? ` - ${note}` : ''} - ${albumQueue.length} albums`,
       completed: completedPages,
       total: totalPages,
       videos: totalVideos
     });
-    showSortingIndicator(`Scraping Erome ${artistText}, ${pageText}...`);
+  }
+
+  function updateAlbumProgress(album, note) {
+    updateEromeProgress({
+      title: 'Scraping Erome Albums',
+      detail: `album ${completedAlbums}/${Math.max(1, albumQueue.length)} - ${album?.title || getEromeTargetLabel(album?.url || '')}${note ? ` - ${note}` : ''}`,
+      completed: completedAlbums,
+      total: Math.max(1, albumQueue.length),
+      videos: totalVideos
+    });
   }
 
   updateEromeProgress({
@@ -4022,35 +4087,31 @@ async function loadEromeAsCards() {
     const target = targets[i];
     const albumTarget = isEromeAlbumLaunchUrl(target);
     let pageCount = 1;
+    const albumsBeforeTarget = albumQueue.length;
 
-    updateScrapeProgress(i, target, 1, pageCount, 'starting');
+    updateDiscoveryProgress(i, target, 1, pageCount, 'starting');
 
     try {
-      const firstUrl = albumTarget ? target : eromeProfilePageUrl(target, 1);
-      const firstData = await fetchEromeScrapeData(base, firstUrl, { profilePage: !albumTarget });
-      const firstGroups = buildEromeImportGroups(firstData, target);
-
-      pageCount = albumTarget
-        ? 1
-        : Math.max(1, Number(firstData.profilePageCount || 1));
-      totalPages += Math.max(0, pageCount - 1);
-      addScrapedGroups(firstGroups);
-      completedPages++;
-      updateScrapeProgress(i, target, 1, pageCount);
-
-      for (let page = 2; page <= pageCount; page++) {
-        updateScrapeProgress(i, target, page, pageCount, 'loading');
-
-        const pageUrl = eromeProfilePageUrl(target, page);
-        const pageData = await fetchEromeScrapeData(base, pageUrl, { profilePage: true });
-        const pageGroups = buildEromeImportGroups(pageData, target);
-
-        addScrapedGroups(pageGroups);
+      if (albumTarget) {
+        addAlbumToQueue(target, target, getEromeTargetLabel(target));
         completedPages++;
-        updateScrapeProgress(i, target, page, pageCount);
+        updateDiscoveryProgress(i, target, 1, pageCount, 'queued');
+        continue;
       }
 
-      if (!firstGroups.length && pageCount <= 1) {
+      const firstUrl = target;
+      const firstData = await fetchEromeAlbumListData(base, firstUrl, { attempts: 3 });
+      const sourceTitle = firstData?.title || getEromeTargetLabel(target);
+
+      // Scrape the exact profile page the user pasted. Erome profile pagination
+      // can point to hundreds of extra albums and makes known pages like
+      // GoodTaste112 balloon far beyond the expected pasted-page count.
+      pageCount = 1;
+      (firstData.albums || []).forEach(album => addAlbumToQueue(album, target, sourceTitle));
+      completedPages++;
+      updateDiscoveryProgress(i, target, 1, pageCount);
+
+      if (albumQueue.length === albumsBeforeTarget && pageCount <= 1) {
         failures.push(target);
       }
     } catch (err) {
@@ -4058,16 +4119,44 @@ async function loadEromeAsCards() {
         completedPages++;
       }
 
-      if (allGroups.length) {
-        updateScrapeProgress(i, target, pageCount, pageCount, 'failed');
-      } else {
-        updateScrapeProgress(i, target, pageCount, pageCount, 'failed');
-      }
-
+      updateDiscoveryProgress(i, target, pageCount, pageCount, 'failed');
       failures.push(target);
       console.warn('Erome scrape failed:', target, err);
     }
   }
+
+  if (!albumQueue.length) {
+    hideEromeProgress();
+    alert('No albums found on those Erome pages.');
+    return;
+  }
+
+  showSortingIndicator(`Found ${albumQueue.length} Erome albums. Scraping videos...`);
+  updateAlbumProgress(albumQueue[0], 'starting');
+
+  await eromePool(albumQueue, EROME_ALBUM_SCRAPE_CONCURRENCY, async album => {
+    try {
+      const data = await fetchEromeScrapeData(base, album.url, {
+        attempts: 2,
+        timeoutMs: EROME_FETCH_TIMEOUT_MS
+      });
+      const groups = buildEromeImportGroups(data, album.url).map(group => ({
+        ...group,
+        url: group.url || album.url,
+        title: group.title || album.title,
+        sourceUrl: album.sourceUrl || album.url,
+        sourceTitle: album.sourceTitle || getEromeTargetLabel(album.sourceUrl || album.url)
+      }));
+
+      addScrapedGroups(groups);
+    } catch (err) {
+      failures.push(album.url);
+      console.warn('Erome album scrape failed:', album.url, err);
+    } finally {
+      completedAlbums++;
+      updateAlbumProgress(album);
+    }
+  });
 
   if (!totalVideos) {
     hideEromeProgress();
@@ -4088,8 +4177,8 @@ async function loadEromeAsCards() {
     updateEromeProgress({
       title: 'Erome Loaded',
       detail: `${imported.events.length} batches ready`,
-      completed: totalPages,
-      total: totalPages,
+      completed: albumQueue.length,
+      total: albumQueue.length,
       videos: imported.urls.length
     });
     hideEromeProgress(1400);
@@ -4468,6 +4557,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=67"></script>
+<script src="pong-sync.js?v=68"></script>
 </body>
 </html>

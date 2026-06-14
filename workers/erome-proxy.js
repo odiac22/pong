@@ -9,6 +9,8 @@
 // Endpoints:
 //   GET /scrape?u=<erome album OR profile URL>
 //       -> JSON { count, title, videos: [<raw mp4 url>...], albums: [...] }
+//   GET /albums?u=<erome profile URL>
+//       -> JSON { title, albums: [{ url, title }], albumCount, profilePageCount }
 //   GET /<anything>.mp4?u=<raw erome mp4 url>
 //       -> the video bytes, Range-aware (200 or 206), CORS-open
 //
@@ -26,6 +28,7 @@ const EROME_HEADERS = {
 
 const ALBUM_FETCH_CONCURRENCY = 3;
 const MAX_FETCH_RETRIES = 4;
+const FETCH_TIMEOUT_MS = 15000;
 
 function isEromeHost(hostname) {
   return /(^|\.)erome\.com$/i.test(hostname);
@@ -147,10 +150,18 @@ function retryDelay(attempt) {
 
 async function fetchText(url, attempt = 1) {
   let resp;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
-    resp = await fetch(url, { headers: EROME_HEADERS, redirect: 'follow' });
+    resp = await fetch(url, {
+      headers: EROME_HEADERS,
+      redirect: 'follow',
+      signal: controller.signal,
+    });
   } catch (_) {
+    clearTimeout(timeoutId);
+
     if (attempt <= MAX_FETCH_RETRIES) {
       await sleep(retryDelay(attempt));
       return fetchText(url, attempt + 1);
@@ -159,6 +170,8 @@ async function fetchText(url, attempt = 1) {
     return '';
   }
 
+  clearTimeout(timeoutId);
+
   if (!resp.ok && resp.status !== 404 && attempt <= MAX_FETCH_RETRIES) {
     await sleep(retryDelay(attempt));
     return fetchText(url, attempt + 1);
@@ -166,6 +179,30 @@ async function fetchText(url, attempt = 1) {
 
   if (!resp.ok) return '';
   return await resp.text();
+}
+
+async function handleAlbums(target) {
+  const html = await fetchText(target.href);
+  if (!html) {
+    return json({
+      error: 'Could not load Erome page',
+      title: '',
+      albums: [],
+      albumCount: 0,
+      profilePageCount: 1,
+    }, 502);
+  }
+
+  const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
+  const title = titleMatch ? titleMatch[1].trim() : '';
+  const albums = extractAlbumEntries(html);
+
+  return json({
+    title,
+    albums,
+    albumCount: albums.length,
+    profilePageCount: extractProfilePageCount(html),
+  }, 200);
 }
 
 async function pool(items, limit, task) {
@@ -325,6 +362,10 @@ export default {
 
     if (target.protocol !== 'https:' || !isEromeHost(target.hostname)) {
       return json({ error: 'only https://*.erome.com targets are allowed' }, 403);
+    }
+
+    if (url.pathname.startsWith('/albums')) {
+      return handleAlbums(target);
     }
 
     if (url.pathname.startsWith('/scrape')) {
