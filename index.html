@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.85</div>
+  <div class="version-number">22.86</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4680,8 +4680,6 @@ function activateFirstEromeBatch() {
 const EROME_ALBUM_SCRAPE_CONCURRENCY = 32;
 const EROME_PROFILE_PAGE_CONCURRENCY = 8;
 const EROME_FETCH_TIMEOUT_MS = 10000;
-const EROME_DISCOVERY_RETRY_ROUNDS = 20;
-const EROME_ALBUM_RETRY_ROUNDS = 25;
 
 async function fetchEromeJson(proxyBase, endpoint, targetUrl, options = {}) {
   const maxAttempts = Math.max(1, Number(options.attempts || 2));
@@ -4754,33 +4752,23 @@ async function eromePool(items, limit, task) {
   return results;
 }
 
-async function eromeRetryPool(items, limit, rounds, task, onRetryRound) {
-  let pending = (items || []).slice();
-  let round = 1;
+async function eromeRetryOnce(items, limit, task, onRetryStart) {
+  const pending = (items || []).slice();
+  const failed = [];
 
-  while (pending.length && round <= Math.max(1, rounds)) {
-    const failed = [];
+  if (!pending.length) return failed;
 
-    if (round > 1 && typeof onRetryRound === 'function') {
-      onRetryRound(round, pending);
-    }
-
-    await eromePool(pending, limit, async item => {
-      const ok = await task(item, round);
-
-      if (!ok) failed.push(item);
-    });
-
-    pending = failed;
-
-    if (pending.length && round < rounds) {
-      await sleep(Math.min(5000, 450 * round));
-    }
-
-    round++;
+  if (typeof onRetryStart === 'function') {
+    onRetryStart(pending);
   }
 
-  return pending;
+  await eromePool(pending, limit, async item => {
+    const ok = await task(item);
+
+    if (!ok) failed.push(item);
+  });
+
+  return failed;
 }
 
 async function loadEromeAsCards() {
@@ -4987,129 +4975,15 @@ async function loadEromeAsCards() {
     }
   }
 
-  if (firstPageRetryQueue.length) {
-    const failedFirstPages = await eromeRetryPool(
-      firstPageRetryQueue,
-      EROME_PROFILE_PAGE_CONCURRENCY,
-      EROME_DISCOVERY_RETRY_ROUNDS,
-      async (item, round) => {
-        const firstUrl = eromeProfilePageUrl(item.target, 1);
-
-        updateDiscoveryProgress(item.targetIndex, item.target, 1, 1, `retry ${round}`);
-
-        try {
-          const firstData = await fetchEromeAlbumListData(base, firstUrl, {
-            attempts: round > 1 ? 2 : 1,
-            timeoutMs: EROME_FETCH_TIMEOUT_MS,
-            fast: round > 1
-          });
-          const sourceTitle = firstData?.title || getEromeTargetLabel(item.target);
-          const pageCount = Math.max(1, Number(firstData.profilePageCount || 1));
-
-          totalPages += Math.max(0, pageCount - 1);
-          (firstData.albums || []).forEach(album => addAlbumToQueue(album, item.target, sourceTitle));
-          markDiscoveryPageCompleted(item.target, 1);
-          updateDiscoveryProgress(item.targetIndex, item.target, 1, pageCount, 'retried');
-
-          Array.from({ length: Math.max(0, pageCount - 1) }, (_, pageIndex) => pageIndex + 2)
-            .forEach(page => {
-              discoveryRetryQueue.push({
-                targetIndex: item.targetIndex,
-                target: item.target,
-                page,
-                pageCount,
-                sourceTitle
-              });
-            });
-
-          return true;
-        } catch (err) {
-          console.warn('Erome first page retry failed:', item.target, err);
-          return false;
-        }
-      },
-      (round, pending) => {
-        updateEromeProgress({
-          title: 'Retrying Bad Erome Pages',
-          detail: `retry ${round} - ${pending.length} artist first pages`,
-          completed: completedPages,
-          total: totalPages,
-          videos: totalVideos
-        });
-      }
-    );
-
-    failedFirstPages.forEach(item => {
-      markDiscoveryPageCompleted(item.target, 1);
-      failures.push(item.target);
-      updateDiscoveryProgress(item.targetIndex, item.target, 1, 1, 'failed after retries');
-    });
-  }
-
-  if (discoveryRetryQueue.length) {
-    const failedDiscoveryPages = await eromeRetryPool(
-      discoveryRetryQueue,
-      EROME_PROFILE_PAGE_CONCURRENCY,
-      EROME_DISCOVERY_RETRY_ROUNDS,
-      async (item, round) => {
-        const pageUrl = eromeProfilePageUrl(item.target, item.page);
-
-        updateDiscoveryProgress(item.targetIndex, item.target, item.page, item.pageCount, `retry ${round}`);
-
-        try {
-          const pageData = await fetchEromeAlbumListData(base, pageUrl, {
-            attempts: round > 1 ? 2 : 1,
-            timeoutMs: EROME_FETCH_TIMEOUT_MS,
-            fast: true
-          });
-
-          (pageData.albums || []).forEach(album => addAlbumToQueue(album, item.target, item.sourceTitle));
-          markDiscoveryPageCompleted(item.target, item.page);
-          updateDiscoveryProgress(item.targetIndex, item.target, item.page, item.pageCount, 'retried');
-          return true;
-        } catch (pageErr) {
-          console.warn('Erome end retry page failed:', pageUrl, pageErr);
-          return false;
-        }
-      },
-      (round, pending) => {
-        updateEromeProgress({
-          title: 'Retrying Bad Erome Pages',
-          detail: `retry ${round} - ${pending.length} pages still missing`,
-          completed: completedPages,
-          total: totalPages,
-          videos: totalVideos
-        });
-      }
-    );
-
-    failedDiscoveryPages.forEach(item => {
-      const pageUrl = eromeProfilePageUrl(item.target, item.page);
-
-      markDiscoveryPageCompleted(item.target, item.page);
-      failures.push(pageUrl);
-      updateDiscoveryProgress(item.targetIndex, item.target, item.page, item.pageCount, 'failed after retries');
-    });
-  }
-
-  if (!albumQueue.length) {
-    hideEromeProgress();
-    alert('No albums found on those Erome pages.');
-    return;
-  }
-
-  rememberEromeArtistRecordsFromAlbums(albumQueue);
-
-  showSortingIndicator(`Found ${albumQueue.length} Erome albums. Scraping videos...`);
-  updateAlbumProgress(albumQueue[0], 'starting');
-
   const completedAlbumUrls = new Set();
-  const failedAlbums = await eromeRetryPool(albumQueue, EROME_ALBUM_SCRAPE_CONCURRENCY, EROME_ALBUM_RETRY_ROUNDS, async (album, round) => {
+  const failedAlbums = [];
+
+  async function scrapeEromeAlbumOnce(album, note) {
     try {
-      updateAlbumProgress(album, round > 1 ? `retry ${round}` : 'loading');
+      updateAlbumProgress(album, note || 'loading');
 
       const data = await fetchEromeScrapeData(base, album.url, {
-        attempts: round > 1 ? 2 : 1,
+        attempts: 1,
         timeoutMs: EROME_FETCH_TIMEOUT_MS,
         fast: true
       });
@@ -5134,25 +5008,183 @@ async function loadEromeAsCards() {
       console.warn('Erome album scrape failed:', album.url, err);
       return false;
     }
-  }, (round, pending) => {
+  }
+
+  if (albumQueue.length) {
+    rememberEromeArtistRecordsFromAlbums(albumQueue);
+
+    showSortingIndicator(`Found ${albumQueue.length} Erome albums. Scraping videos...`);
+    updateAlbumProgress(albumQueue[0], 'starting');
+
+    await eromePool(albumQueue, EROME_ALBUM_SCRAPE_CONCURRENCY, async album => {
+      const ok = await scrapeEromeAlbumOnce(album, 'loading');
+
+      if (!ok) failedAlbums.push(album);
+    });
+  }
+
+  const albumCountBeforeFinalRetry = albumQueue.length;
+  const finalRetryNeeded = firstPageRetryQueue.length || discoveryRetryQueue.length || failedAlbums.length;
+
+  if (finalRetryNeeded) {
     updateEromeProgress({
-      title: 'Retrying Bad Erome Albums',
-      detail: `retry ${round} - ${pending.length} albums still missing`,
+      title: 'Final Erome Retry',
+      detail: 'Retrying failed pages and albums once',
       completed: completedAlbums,
       total: Math.max(1, albumQueue.length),
       videos: totalVideos
     });
+  }
+
+  if (firstPageRetryQueue.length) {
+    const failedFirstPages = await eromeRetryOnce(
+      firstPageRetryQueue,
+      EROME_PROFILE_PAGE_CONCURRENCY,
+      async item => {
+        const firstUrl = eromeProfilePageUrl(item.target, 1);
+
+        updateDiscoveryProgress(item.targetIndex, item.target, 1, 1, 'final retry');
+
+        try {
+          const firstData = await fetchEromeAlbumListData(base, firstUrl, {
+            attempts: 1,
+            timeoutMs: EROME_FETCH_TIMEOUT_MS,
+            fast: true
+          });
+          const sourceTitle = firstData?.title || getEromeTargetLabel(item.target);
+          const pageCount = Math.max(1, Number(firstData.profilePageCount || 1));
+
+          totalPages += Math.max(0, pageCount - 1);
+          (firstData.albums || []).forEach(album => addAlbumToQueue(album, item.target, sourceTitle));
+          markDiscoveryPageCompleted(item.target, 1);
+          updateDiscoveryProgress(item.targetIndex, item.target, 1, pageCount, 'final retry ok');
+
+          Array.from({ length: Math.max(0, pageCount - 1) }, (_, pageIndex) => pageIndex + 2)
+            .forEach(page => {
+              discoveryRetryQueue.push({
+                targetIndex: item.targetIndex,
+                target: item.target,
+                page,
+                pageCount,
+                sourceTitle
+              });
+            });
+
+          return true;
+        } catch (err) {
+          console.warn('Erome first page final retry failed:', item.target, err);
+          return false;
+        }
+      },
+      pending => {
+        updateEromeProgress({
+          title: 'Final Erome Retry',
+          detail: `${pending.length} artist first pages`,
+          completed: completedPages,
+          total: totalPages,
+          videos: totalVideos
+        });
+      }
+    );
+
+    failedFirstPages.forEach(item => {
+      markDiscoveryPageCompleted(item.target, 1);
+      failures.push(item.target);
+      updateDiscoveryProgress(item.targetIndex, item.target, 1, 1, 'failed final retry');
+    });
+  }
+
+  if (discoveryRetryQueue.length) {
+    const failedDiscoveryPages = await eromeRetryOnce(
+      discoveryRetryQueue,
+      EROME_PROFILE_PAGE_CONCURRENCY,
+      async item => {
+        const pageUrl = eromeProfilePageUrl(item.target, item.page);
+
+        updateDiscoveryProgress(item.targetIndex, item.target, item.page, item.pageCount, 'final retry');
+
+        try {
+          const pageData = await fetchEromeAlbumListData(base, pageUrl, {
+            attempts: 1,
+            timeoutMs: EROME_FETCH_TIMEOUT_MS,
+            fast: true
+          });
+
+          (pageData.albums || []).forEach(album => addAlbumToQueue(album, item.target, item.sourceTitle));
+          markDiscoveryPageCompleted(item.target, item.page);
+          updateDiscoveryProgress(item.targetIndex, item.target, item.page, item.pageCount, 'final retry ok');
+          return true;
+        } catch (pageErr) {
+          console.warn('Erome final retry page failed:', pageUrl, pageErr);
+          return false;
+        }
+      },
+      pending => {
+        updateEromeProgress({
+          title: 'Final Erome Retry',
+          detail: `${pending.length} profile pages`,
+          completed: completedPages,
+          total: totalPages,
+          videos: totalVideos
+        });
+      }
+    );
+
+    failedDiscoveryPages.forEach(item => {
+      const pageUrl = eromeProfilePageUrl(item.target, item.page);
+
+      markDiscoveryPageCompleted(item.target, item.page);
+      failures.push(pageUrl);
+      updateDiscoveryProgress(item.targetIndex, item.target, item.page, item.pageCount, 'failed final retry');
+    });
+  }
+
+  const finalAlbumRetrySeen = new Set();
+  const finalAlbumRetryQueue = [];
+
+  failedAlbums.concat(albumQueue.slice(albumCountBeforeFinalRetry)).forEach(album => {
+    if (!album?.url || completedAlbumUrls.has(album.url) || finalAlbumRetrySeen.has(album.url)) return;
+
+    finalAlbumRetrySeen.add(album.url);
+    finalAlbumRetryQueue.push(album);
   });
 
-  failedAlbums.forEach(album => {
-    if (!completedAlbumUrls.has(album.url)) {
-      completedAlbumUrls.add(album.url);
-      completedAlbums++;
-      updateAlbumProgress(album);
-    }
+  if (finalAlbumRetryQueue.length) {
+    const failedFinalAlbums = await eromeRetryOnce(
+      finalAlbumRetryQueue,
+      EROME_ALBUM_SCRAPE_CONCURRENCY,
+      album => scrapeEromeAlbumOnce(album, 'final retry'),
+      pending => {
+        updateEromeProgress({
+          title: 'Final Erome Retry',
+          detail: `${pending.length} albums`,
+          completed: completedAlbums,
+          total: Math.max(1, albumQueue.length),
+          videos: totalVideos
+        });
+      }
+    );
 
-    failures.push(album.url);
-  });
+    failedFinalAlbums.forEach(album => {
+      if (!completedAlbumUrls.has(album.url)) {
+        completedAlbumUrls.add(album.url);
+        completedAlbums++;
+        updateAlbumProgress(album, 'failed final retry');
+      }
+
+      failures.push(album.url);
+    });
+  }
+
+  if (!albumQueue.length) {
+    hideEromeProgress();
+    alert('No albums found on those Erome pages.');
+    return;
+  }
+
+  if (albumQueue.length > albumCountBeforeFinalRetry) {
+    rememberEromeArtistRecordsFromAlbums(albumQueue);
+  }
 
   if (!totalVideos) {
     hideEromeProgress();
@@ -5591,6 +5623,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=74"></script>
+<script src="pong-sync.js?v=75"></script>
 </body>
 </html>
