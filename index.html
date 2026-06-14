@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.86</div>
+  <div class="version-number">22.87</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2160,14 +2160,31 @@ function reorderAndRedisplayVideos(newOrder) {
   if (!DECK_MODE_ENABLED) videoContainer.scrollTo(0,0);
 }
 
-function getAdaptiveScrubTime(startTime, dx, duration, width) {
+function isEromeScrubContext(options = {}) {
+  const meta = options.metadata || {};
+  const source = String(meta.source || options.source || '').toLowerCase();
+  const candidateUrl = String(
+    options.videoUrl ||
+    options.url ||
+    options.video?.currentSrc ||
+    options.video?.src ||
+    ''
+  );
+
+  return source === 'erome' ||
+    /(?:erome\.mp4\?u=|erome\.com|v\d+\.erome\.com)/i.test(candidateUrl);
+}
+
+function getAdaptiveScrubTime(startTime, dx, duration, width, options = {}) {
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
   const safeWidth = Math.max(240, width || window.innerWidth || 360);
 
   if (!safeDuration) return Math.max(0, startTime + dx / 22);
 
   const dragRatio = dx / safeWidth;
-  const secondsPerScreen = Math.min(Math.max(safeDuration * 0.18, 24), 210);
+  const secondsPerScreen = isEromeScrubContext(options)
+    ? Math.min(Math.max(safeDuration, 90), 900)
+    : Math.min(Math.max(safeDuration * 0.18, 24), 210);
   return Math.max(0, Math.min(safeDuration, startTime + dragRatio * secondsPerScreen));
 }
 
@@ -2990,7 +3007,11 @@ function createVideoElements() {
       if (!isDeckSwipe && absX > 8 && absX > absY * 1.05) {
         isDragging = true;
         progressContainer.style.opacity = '1';
-        const newTime = getAdaptiveScrubTime(startTime, dx, video.duration || 0, wrapper.offsetWidth);
+        const newTime = getAdaptiveScrubTime(startTime, dx, video.duration || 0, wrapper.offsetWidth, {
+          metadata: videoMetadata[index],
+          videoUrl: url,
+          video
+        });
         wrapper.dataset.pendingTime = newTime;
         if (video.duration && !isNaN(newTime)) {
           let pf = wrapper.querySelector('.preview-fill');
@@ -5623,6 +5644,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=75"></script>
+<script src="pong-sync.js?v=76"></script>
 </body>
 </html>

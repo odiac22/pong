@@ -4953,9 +4953,17 @@
       e.preventDefault();
 
       const duration = video.duration || 0;
+      const metadataIndex = Number(wrapper.dataset.index || 0);
+      const scrubMetadata = typeof videoMetadata !== 'undefined'
+        ? videoMetadata[metadataIndex]
+        : null;
       const newTime =
         typeof window.getAdaptiveScrubTime === 'function'
-          ? window.getAdaptiveScrubTime(state.startTime, dx, duration, wrapper.offsetWidth)
+          ? window.getAdaptiveScrubTime(state.startTime, dx, duration, wrapper.offsetWidth, {
+              metadata: scrubMetadata,
+              videoUrl: video.currentSrc || video.src,
+              video
+            })
           : Math.max(0, Math.min(duration, state.startTime + dx / SCRUB_PIXELS_PER_SECOND));
 
       wrapper.dataset.pendingTime = newTime;
