@@ -124,6 +124,19 @@ function extractAlbumUrls(html) {
   return extractAlbumEntries(html).map(album => album.url);
 }
 
+function extractProfilePageCount(html) {
+  let maxPage = 1;
+  const re = /[?&]page=(\d+)/gi;
+  let m;
+
+  while ((m = re.exec(String(html || ''))) !== null) {
+    const page = Number(m[1] || 0);
+    if (Number.isFinite(page) && page > maxPage) maxPage = page;
+  }
+
+  return maxPage;
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -191,12 +204,26 @@ async function handleScrape(target) {
   let videos = extractMp4s(html);
   const albumEntries = extractAlbumEntries(html);
   const albums = albumEntries.map(album => album.url);
+  const profilePageCount = extractProfilePageCount(html);
   let albumGroups = [];
+  let failedAlbumCount = 0;
+  let emptyAlbumCount = 0;
 
   // Profile / listing page: no direct videos, but album links. Expand them.
   if (!videos.length && albumEntries.length) {
-    const groups = await pool(albumEntries, ALBUM_FETCH_CONCURRENCY, async album => {
+    const albumResults = await pool(albumEntries, ALBUM_FETCH_CONCURRENCY, async album => {
       const albumHtml = await fetchText(album.url);
+
+      if (!albumHtml) {
+        return {
+          url: album.url,
+          title: album.title,
+          count: 0,
+          videos: [],
+          failed: true,
+        };
+      }
+
       const albumVideos = extractMp4s(albumHtml);
 
       return {
@@ -207,7 +234,11 @@ async function handleScrape(target) {
       };
     });
 
-    albumGroups = groups.filter(group => group && group.videos.length);
+    const groups = albumResults.filter(Boolean);
+
+    failedAlbumCount = groups.filter(group => group.failed).length;
+    emptyAlbumCount = groups.filter(group => !group.failed && !group.videos.length).length;
+    albumGroups = groups.filter(group => !group.failed && group.videos.length);
 
     const merged = new Set();
 
@@ -232,6 +263,9 @@ async function handleScrape(target) {
     albums,
     albumCount: albums.length,
     scrapedAlbumCount: albumGroups.length,
+    failedAlbumCount,
+    emptyAlbumCount,
+    profilePageCount,
     albumGroups,
   }, 200);
 }

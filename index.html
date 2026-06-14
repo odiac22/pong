@@ -406,6 +406,32 @@
     #erome-helper-cards { background: rgba(34,197,94,0.22); }
     #erome-iframe-container { width: 100%; flex: 1; overflow: auto; margin: 0 0 8px; border-radius: 8px; background: #05070a; }
     #erome-iframe-container iframe { width: 100%; height: 100%; border: none; }
+    #erome-scrape-progress {
+      display: none; position: fixed; left: 50%; bottom: 156px; transform: translateX(-50%);
+      width: min(380px, calc(100vw - 28px)); z-index: 10020;
+      background: rgba(7, 11, 15, 0.86); border: 1px solid var(--ui-border);
+      border-radius: 10px; padding: 10px; box-sizing: border-box;
+      box-shadow: 0 14px 36px rgba(0,0,0,0.42);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      color: var(--ui-text); pointer-events: none;
+    }
+    .erome-progress-title {
+      display: flex; justify-content: space-between; gap: 10px;
+      font-size: 12px; font-weight: 750; margin-bottom: 6px;
+    }
+    .erome-progress-detail {
+      font-size: 11px; color: var(--ui-muted); margin-bottom: 8px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .erome-progress-track {
+      height: 7px; border-radius: 999px; overflow: hidden;
+      background: rgba(255,255,255,0.12);
+    }
+    .erome-progress-fill {
+      width: 0%; height: 100%; border-radius: inherit;
+      background: linear-gradient(90deg, rgba(103,232,249,0.95), rgba(34,197,94,0.9));
+      transition: width 0.22s ease;
+    }
     #erome-close {
       background: rgba(251,113,133,0.18); color: var(--ui-text); border: 1px solid var(--ui-border);
       padding: 7px 14px; border-radius: 999px; margin-top: 0; cursor: pointer;
@@ -565,7 +591,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.76</div>
+  <div class="version-number">22.77</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3583,6 +3609,41 @@ function getEromeLaunchUrl() {
   return DEFAULT_EROME_URL;
 }
 
+function isEromeAlbumLaunchUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl, window.location.href);
+    return /^\/a\/[\w-]+\/?$/i.test(url.pathname);
+  } catch (e) {
+    return false;
+  }
+}
+
+function eromeProfilePageUrl(rawUrl, page) {
+  try {
+    const url = new URL(rawUrl, window.location.href);
+
+    if (page > 1) url.searchParams.set('page', String(page));
+    else url.searchParams.delete('page');
+
+    url.hash = '';
+    return url.href;
+  } catch (e) {
+    return rawUrl;
+  }
+}
+
+function getEromeTargetLabel(rawUrl) {
+  try {
+    const url = new URL(rawUrl, window.location.href);
+    const parts = url.pathname.split('/').filter(Boolean);
+
+    if (parts[0] === 'a') return `album ${parts[1] || ''}`.trim();
+    return parts[0] || url.hostname;
+  } catch (e) {
+    return 'Erome';
+  }
+}
+
 // ── Erome proxy (Cloudflare Worker) ────────────────────────────────────────
 // Raw Erome MP4s 403 unless the request carries an erome.com Referer, which a
 // browser will not let JS forge. The Worker in workers/erome-proxy.js re-issues
@@ -3594,6 +3655,57 @@ const EROME_PROXY_BASE = 'https://pong-erome-proxy.odiac22-pong-repair.workers.d
 const eromeHelper = document.getElementById('erome-helper');
 const eromeIframeContainer = document.getElementById('erome-iframe-container');
 const eromeHelperUrlInput = document.getElementById('erome-helper-url');
+let eromeProgressHideTimer = null;
+
+function ensureEromeProgressEl() {
+  let el = document.getElementById('erome-scrape-progress');
+
+  if (el) return el;
+
+  el = document.createElement('div');
+  el.id = 'erome-scrape-progress';
+  el.innerHTML = `
+    <div class="erome-progress-title">
+      <span id="erome-progress-title">Scraping Erome</span>
+      <span id="erome-progress-percent">0%</span>
+    </div>
+    <div id="erome-progress-detail" class="erome-progress-detail">Preparing...</div>
+    <div class="erome-progress-track">
+      <div id="erome-progress-fill" class="erome-progress-fill"></div>
+    </div>
+  `;
+  document.body.appendChild(el);
+  return el;
+}
+
+function updateEromeProgress({ title, detail, completed, total, videos }) {
+  const el = ensureEromeProgressEl();
+  const safeTotal = Math.max(1, Number(total || 1));
+  const safeCompleted = Math.max(0, Math.min(safeTotal, Number(completed || 0)));
+  const percent = Math.max(2, Math.min(100, Math.round((safeCompleted / safeTotal) * 100)));
+  const titleEl = document.getElementById('erome-progress-title');
+  const percentEl = document.getElementById('erome-progress-percent');
+  const detailEl = document.getElementById('erome-progress-detail');
+  const fillEl = document.getElementById('erome-progress-fill');
+
+  clearTimeout(eromeProgressHideTimer);
+
+  el.style.display = 'block';
+  if (titleEl) titleEl.textContent = title || 'Scraping Erome';
+  if (percentEl) percentEl.textContent = `${percent}%`;
+  if (detailEl) {
+    detailEl.textContent = `${detail || 'Working...'}${Number.isFinite(videos) ? ` - ${videos} videos` : ''}`;
+  }
+  if (fillEl) fillEl.style.width = `${percent}%`;
+}
+
+function hideEromeProgress(delay = 900) {
+  clearTimeout(eromeProgressHideTimer);
+  eromeProgressHideTimer = setTimeout(() => {
+    const el = document.getElementById('erome-scrape-progress');
+    if (el) el.style.display = 'none';
+  }, delay);
+}
 
 function showEromeIframe(url) {
   if (!eromeHelper || !eromeIframeContainer) { window.location.href = url; return; }
@@ -3715,6 +3827,37 @@ function activateFirstEromeBatch() {
   }, 500);
 }
 
+async function fetchEromeScrapeData(proxyBase, targetUrl, options = {}) {
+  const maxAttempts = options.profilePage ? 3 : 2;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(proxyBase + '/scrape?u=' + encodeURIComponent(targetUrl));
+      if (!res.ok) throw new Error('scrape HTTP ' + res.status);
+
+      const data = await res.json();
+      const failedAlbumCount = Number(data.failedAlbumCount || 0);
+
+      if (options.profilePage && failedAlbumCount > 0 && attempt < maxAttempts) {
+        await sleep(450 * attempt);
+        continue;
+      }
+
+      return data;
+    } catch (err) {
+      lastError = err;
+
+      if (attempt < maxAttempts) {
+        await sleep(450 * attempt);
+        continue;
+      }
+    }
+  }
+
+  throw lastError || new Error('Erome scrape failed');
+}
+
 async function loadEromeAsCards() {
   const targets = getEromeScrapeTargets();
 
@@ -3734,34 +3877,114 @@ async function loadEromeAsCards() {
   const base = EROME_PROXY_BASE.replace(/\/+$/, '');
   const allGroups = [];
   const failures = [];
-  showSortingIndicator('Scraping Erome...');
+  const seenGroupUrls = new Set();
+  const seenVideoUrls = new Set();
+  let completedPages = 0;
+  let totalPages = targets.length;
+  let totalVideos = 0;
+
+  function addScrapedGroups(groups) {
+    (groups || []).forEach(group => {
+      const groupKey = group.url || `${group.sourceUrl || 'erome'}:${allGroups.length}`;
+
+      if (groupKey && seenGroupUrls.has(groupKey)) return;
+
+      const videos = [];
+
+      (group.videos || []).forEach(videoUrl => {
+        if (!videoUrl || seenVideoUrls.has(videoUrl)) return;
+
+        seenVideoUrls.add(videoUrl);
+        videos.push(videoUrl);
+      });
+
+      if (!videos.length) return;
+
+      if (groupKey) seenGroupUrls.add(groupKey);
+      allGroups.push({
+        ...group,
+        videos
+      });
+      totalVideos += videos.length;
+    });
+  }
+
+  function updateScrapeProgress(targetIndex, target, page, pageCount, note) {
+    const artistText = `artist ${targetIndex + 1}/${targets.length}`;
+    const pageText = pageCount > 1 ? `page ${page}/${pageCount}` : 'single page';
+    const label = getEromeTargetLabel(target);
+
+    updateEromeProgress({
+      title: 'Scraping Erome',
+      detail: `${artistText} - ${label} - ${pageText}${note ? ` - ${note}` : ''}`,
+      completed: completedPages,
+      total: totalPages,
+      videos: totalVideos
+    });
+    showSortingIndicator(`Scraping Erome ${artistText}, ${pageText}...`);
+  }
+
+  updateEromeProgress({
+    title: 'Scraping Erome',
+    detail: `0/${targets.length} artists queued`,
+    completed: 0,
+    total: totalPages,
+    videos: 0
+  });
 
   for (let i = 0; i < targets.length; i++) {
     const target = targets[i];
+    const albumTarget = isEromeAlbumLaunchUrl(target);
+    let pageCount = 1;
 
-    showSortingIndicator('Scraping Erome ' + (i + 1) + '/' + targets.length + '...');
+    updateScrapeProgress(i, target, 1, pageCount, 'starting');
 
     try {
-      const res = await fetch(base + '/scrape?u=' + encodeURIComponent(target));
-      if (!res.ok) throw new Error('scrape HTTP ' + res.status);
+      const firstUrl = albumTarget ? target : eromeProfilePageUrl(target, 1);
+      const firstData = await fetchEromeScrapeData(base, firstUrl, { profilePage: !albumTarget });
+      const firstGroups = buildEromeImportGroups(firstData, target);
 
-      const data = await res.json();
-      const groups = buildEromeImportGroups(data, target);
+      pageCount = albumTarget
+        ? 1
+        : Math.max(1, Number(firstData.profilePageCount || 1));
+      totalPages += Math.max(0, pageCount - 1);
+      addScrapedGroups(firstGroups);
+      completedPages++;
+      updateScrapeProgress(i, target, 1, pageCount);
 
-      if (groups.length) {
-        allGroups.push(...groups);
-      } else {
+      for (let page = 2; page <= pageCount; page++) {
+        updateScrapeProgress(i, target, page, pageCount, 'loading');
+
+        const pageUrl = eromeProfilePageUrl(target, page);
+        const pageData = await fetchEromeScrapeData(base, pageUrl, { profilePage: true });
+        const pageGroups = buildEromeImportGroups(pageData, target);
+
+        addScrapedGroups(pageGroups);
+        completedPages++;
+        updateScrapeProgress(i, target, page, pageCount);
+      }
+
+      if (!firstGroups.length && pageCount <= 1) {
         failures.push(target);
       }
     } catch (err) {
+      if (completedPages < totalPages) {
+        completedPages++;
+      }
+
+      if (allGroups.length) {
+        updateScrapeProgress(i, target, pageCount, pageCount, 'failed');
+      } else {
+        updateScrapeProgress(i, target, pageCount, pageCount, 'failed');
+      }
+
       failures.push(target);
       console.warn('Erome scrape failed:', target, err);
     }
   }
 
-  const totalVideos = allGroups.reduce((sum, group) => sum + group.videos.length, 0);
-
   if (!totalVideos) {
+    hideEromeProgress();
     alert('No videos found on those Erome pages.');
     return;
   }
@@ -3776,9 +3999,18 @@ async function loadEromeAsCards() {
       'Loaded ' + imported.urls.length + ' Erome videos in ' + imported.events.length + ' batches'
       + (failures.length ? ' (' + failures.length + ' page failed)' : '')
     );
+    updateEromeProgress({
+      title: 'Erome Loaded',
+      detail: `${imported.events.length} batches ready`,
+      completed: totalPages,
+      total: totalPages,
+      videos: imported.urls.length
+    });
+    hideEromeProgress(1400);
     loadVideosButton.click();
     activateFirstEromeBatch();
   } catch (err) {
+    hideEromeProgress();
     alert('Erome scrape failed: ' + (err && err.message ? err.message : err));
   }
 }
@@ -4150,6 +4382,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=65"></script>
+<script src="pong-sync.js?v=66"></script>
 </body>
 </html>
