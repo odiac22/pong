@@ -565,7 +565,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.75</div>
+  <div class="version-number">22.76</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1900,11 +1900,21 @@ function makeIndexRange(start, end) {
   return range;
 }
 
+function eromeMediaKey(rawUrl) {
+  try {
+    const url = new URL(rawUrl, window.location.href);
+    return `erome:${url.hostname.toLowerCase()}${decodeURIComponent(url.pathname || '')}`;
+  } catch (e) {
+    return `erome:${String(rawUrl || '').trim()}`;
+  }
+}
+
 function shuffleLoadedVideosForPlayback(urls, metadata, events) {
   const sourceUrls = (urls || []).slice();
   const sourceMetadata = sourceUrls.map((_, index) => (metadata && metadata[index]) || {});
   const validEvents = (events || [])
     .map(event => ({
+      ...event,
       startIndex: Number(event?.startIndex || 0),
       count: Number(event?.count || 0)
     }))
@@ -1918,24 +1928,40 @@ function shuffleLoadedVideosForPlayback(urls, metadata, events) {
     const startIndex = Math.max(0, Math.min(sourceUrls.length, event.startIndex));
     const endIndex = Math.max(startIndex, Math.min(sourceUrls.length, startIndex + event.count));
 
-    if (startIndex > cursor) groups.push(makeIndexRange(cursor, startIndex));
-    if (endIndex > startIndex) groups.push(makeIndexRange(startIndex, endIndex));
+    if (startIndex > cursor) groups.push({
+      indexes: makeIndexRange(cursor, startIndex),
+      event: null
+    });
+    if (endIndex > startIndex) groups.push({
+      indexes: makeIndexRange(startIndex, endIndex),
+      event
+    });
 
     cursor = Math.max(cursor, endIndex);
   });
 
-  if (cursor < sourceUrls.length) groups.push(makeIndexRange(cursor, sourceUrls.length));
-  if (!groups.length) groups.push(makeIndexRange(0, sourceUrls.length));
+  if (cursor < sourceUrls.length) groups.push({
+    indexes: makeIndexRange(cursor, sourceUrls.length),
+    event: null
+  });
+  if (!groups.length) groups.push({
+    indexes: makeIndexRange(0, sourceUrls.length),
+    event: null
+  });
 
-  groups.forEach(group => shuffleInPlace(group));
+  groups.forEach(group => shuffleInPlace(group.indexes));
   shuffleInPlace(groups);
 
-  const order = groups.flat();
+  const order = groups.flatMap(group => group.indexes);
   let nextStartIndex = 0;
   const pasteEventsForPlayback = validEvents.length
     ? groups.map(group => {
-        const event = { startIndex: nextStartIndex, count: group.length };
-        nextStartIndex += group.length;
+        const event = {
+          ...(group.event || {}),
+          startIndex: nextStartIndex,
+          count: group.indexes.length
+        };
+        nextStartIndex += group.indexes.length;
         return event;
       })
     : [];
@@ -3626,6 +3652,7 @@ function cacheEromeCardImport(groups, proxyBase) {
 
     group.videos.forEach((rawUrl, videoIndex) => {
       const proxiedUrl = proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
+      const mediaKey = eromeMediaKey(rawUrl);
 
       urls.push(proxiedUrl);
       metadata.push({
@@ -3638,7 +3665,7 @@ function cacheEromeCardImport(groups, proxyBase) {
         postUrl: group.url || groupSourceUrl,
         postIndex: videoIndex,
         scrapedAt,
-        mediaKey: `erome:${groupIndex}:${videoIndex}`
+        mediaKey
       });
     });
 
@@ -3646,6 +3673,11 @@ function cacheEromeCardImport(groups, proxyBase) {
       events.push({
         startIndex,
         count: urls.length - startIndex,
+        artistKey: groupSourceUrl,
+        bundleKey: `erome-bundle:${group.url || groupSourceUrl || groupIndex}`,
+        source: 'erome',
+        artistUrl: groupSourceUrl,
+        postUrl: group.url || groupSourceUrl,
         ready: true,
         pending: false
       });
@@ -4118,6 +4150,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=64"></script>
+<script src="pong-sync.js?v=65"></script>
 </body>
 </html>
