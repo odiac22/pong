@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.90</div>
+  <div class="version-number">22.91</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1776,16 +1776,129 @@ function renderEromeSlidingWindow(activeLocalIndex, removeLocalIndex, direction 
   return true;
 }
 
+function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
+  if (!eromeBatchAutoAdvance || !videoUrls.length || !allVideoUrls.length) return false;
+
+  const bounds = getEromePlaybackRangeBounds();
+  const batchSize = getCurrentBatchSize();
+  const appendGlobalIndex = Math.max(bounds.start, Number(currentLoadedRangeEnd || 0));
+  const removeIndex = Number(removeLocalIndex);
+
+  if (appendGlobalIndex >= bounds.end) return false;
+  if (!Number.isInteger(removeIndex) || removeIndex < 0 || removeIndex >= videoUrls.length) return false;
+
+  const wrapper = getDeckWrapper(removeIndex);
+  const video = wrapper && wrapper.querySelector('video');
+  const nextUrl = allVideoUrls[appendGlobalIndex];
+
+  if (!wrapper || !video || !nextUrl) return false;
+
+  const nextLoadedEnd = appendGlobalIndex + 1;
+  const windowSize = Math.min(batchSize, Math.max(0, bounds.end - bounds.start));
+  const logicalStart = Math.max(bounds.start, nextLoadedEnd - windowSize);
+  const nextMetadata = getVideoMetadataForGlobalIndex(appendGlobalIndex);
+
+  videoUrls[removeIndex] = nextUrl;
+  videoMetadata[removeIndex] = nextMetadata;
+  setCurrentLoadedRange(logicalStart, nextLoadedEnd, false);
+
+  if (hasActivePlaybackRange()) {
+    activePlaybackRange.currentOffset = Math.max(0, logicalStart - bounds.start);
+    activePlaybackRange.offset = Math.max(0, nextLoadedEnd - bounds.start);
+    currentBatch = Math.max(1, Math.ceil(activePlaybackRange.offset / batchSize));
+  } else {
+    currentBatch = Math.max(1, Math.ceil(nextLoadedEnd / batchSize));
+  }
+
+  try {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+  } catch (_) {}
+
+  delete wrapper.dataset.viewed;
+  delete wrapper.dataset.playIntent;
+  wrapper.dataset.readyPlayable = 'false';
+  wrapper.dataset.autoRetryStartedAt = String(Date.now());
+  wrapper.dataset.autoRetryNextAt = String(Date.now() + getVideoRetryDelay(0));
+  wrapper.dataset.autoRetryDone = 'false';
+  wrapper.dataset.autoRetryCount = '0';
+  wrapper.dataset.autoRetryState = 'queued';
+  wrapper.classList.remove('video-playing', 'deck-active', 'most-visible');
+  wrapper.setAttribute('data-playable', 'false');
+  wrapper.style.setProperty('--ready-pct', 0);
+
+  const progressFill = wrapper.querySelector('.video-progress-fill');
+  const previewFill = wrapper.querySelector('.preview-fill');
+  const timeIndicator = wrapper.querySelector('.time-indicator');
+  const durationText = wrapper.querySelector('.video-duration');
+  const readyLoader = wrapper.querySelector('.video-ready-loader');
+  const percentText = wrapper.querySelector('.video-ready-percent');
+  const artistLabel = wrapper.querySelector('.artist-label');
+
+  if (progressFill) progressFill.style.width = '0%';
+  if (previewFill) previewFill.remove();
+  if (timeIndicator) timeIndicator.style.display = 'none';
+  if (durationText) durationText.textContent = '0:00';
+  if (readyLoader) {
+    readyLoader.style.display = '';
+    readyLoader.classList.remove('ready');
+  }
+  if (percentText) {
+    percentText.textContent = '0%';
+    percentText.classList.add('not-ready');
+  }
+  if (artistLabel) {
+    const artistName = getArtistDisplayName(nextMetadata);
+    artistLabel.dataset.artistName = artistName || '';
+    artistLabel.textContent = artistName ? `${artistName}  0/${videoUrls.length}` : `0/${videoUrls.length}`;
+    artistLabel.style.display = videoUrls.length ? '' : 'none';
+  }
+
+  video.src = nextUrl;
+  video.preload = 'metadata';
+  video.muted = true;
+  video.volume = 0;
+  video.dataset.lastLoadKick = '0';
+  try {
+    video.load();
+  } catch (_) {}
+
+  const audioBtn = wrapper.querySelector('.audio-toggle-button');
+  if (audioBtn) {
+    audioBtn.innerHTML = '🔇';
+    audioBtn.setAttribute('data-muted', 'true');
+  }
+
+  const spacer = wrapper.nextElementSibling && wrapper.nextElementSibling.classList.contains('blank-space')
+    ? wrapper.nextElementSibling
+    : null;
+  videoContainer.appendChild(wrapper);
+  if (spacer) videoContainer.appendChild(spacer);
+  moveDeckIndexToBack(removeIndex);
+  updateBatchReadyCounter();
+  tuneVideoPreloadAround(getDeckWrapper(deckCurrentIndex));
+  scheduleSessionSave(500);
+
+  return true;
+}
+
 function loadNextEromeBatchIfAvailable() {
   const activeWrapper = getCurrentVideoWrapper();
-  const activeLocalIndex = getDeckIndex(activeWrapper);
   const removeWrapper = getDeckWrappers().find(wrapper => (
     wrapper !== activeWrapper &&
     isWrapperViewed(wrapper)
   ));
   const removeLocalIndex = getDeckIndex(removeWrapper);
 
-  if (renderEromeSlidingWindow(activeLocalIndex, removeLocalIndex, 'up')) return true;
+  if (recycleNextEromeVideoIntoWrapper(removeLocalIndex)) {
+    const nextIndex = getNextDeckIndex();
+    if (nextIndex != null) setDeckActiveIndex(nextIndex, 'up', {
+      pushHistory: true,
+      skipEromeRecycle: true
+    });
+    return true;
+  }
 
   return false;
 }
@@ -2705,6 +2818,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   const targetIndex = getDeckIndex(target);
   const oldIndex = deckCurrentIndex;
   const oldWrapper = getDeckWrapper(oldIndex);
+  const oldWasViewed = isWrapperViewed(oldWrapper);
 
   if (!target || targetIndex < 0) return false;
   if (oldIndex === targetIndex && target.classList.contains('deck-active')) {
@@ -2754,6 +2868,10 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   const video = target.querySelector('video');
   if (window.autoplayEnabled && isWrapperReady(target) && video && video.paused) {
     playVideoCleanly(video);
+  }
+
+  if (oldIndex !== targetIndex && oldWasViewed && options.skipEromeRecycle !== true) {
+    recycleNextEromeVideoIntoWrapper(oldIndex);
   }
 
   return true;
@@ -2824,15 +2942,6 @@ function goToNextDeckVideo() {
     if (loadNextEromeBatchIfAvailable()) return true;
 
     showDeckEmptyNotice('No more videos in this batch');
-    return true;
-  }
-
-  if (
-    eromeBatchAutoAdvance &&
-    currentWrapper &&
-    isWrapperViewed(currentWrapper) &&
-    renderEromeSlidingWindow(nextIndex, currentIndex, 'up')
-  ) {
     return true;
   }
 
@@ -5768,6 +5877,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=79"></script>
+<script src="pong-sync.js?v=80"></script>
 </body>
 </html>
