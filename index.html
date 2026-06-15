@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.88</div>
+  <div class="version-number">22.89</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1615,8 +1615,16 @@ function hasActivePlaybackRange() {
 
 function getActiveRangeTotal() {
   return hasActivePlaybackRange()
-    ? Math.max(0, activePlaybackRange.end - activePlaybackRange.start)
+    ? Math.max(0, getPlaybackRangeEnd(true) - activePlaybackRange.start)
     : allVideoUrls.length;
+}
+
+function getPlaybackRangeEnd(hasRange = hasActivePlaybackRange()) {
+  if (!hasRange) return allVideoUrls.length;
+
+  return eromeBatchAutoAdvance
+    ? allVideoUrls.length
+    : Math.min(activePlaybackRange.end, allVideoUrls.length);
 }
 
 function getCurrentBatchSize() {
@@ -1691,9 +1699,7 @@ function getVideoMetadataForGlobalIndex(globalIndex) {
 
 function getEromePlaybackRangeBounds() {
   const rangeStart = hasActivePlaybackRange() ? activePlaybackRange.start : 0;
-  const rangeEnd = hasActivePlaybackRange()
-    ? Math.min(activePlaybackRange.end, allVideoUrls.length)
-    : allVideoUrls.length;
+  const rangeEnd = getPlaybackRangeEnd(hasActivePlaybackRange());
 
   return {
     start: Math.max(0, rangeStart),
@@ -3341,7 +3347,7 @@ function loadNextBatch(restoreIndex) {
   const hasRange = hasActivePlaybackRange();
   const batchSize = getCurrentBatchSize();
   const rangeStart = hasRange ? activePlaybackRange.start : 0;
-  const rangeEnd = hasRange ? Math.min(activePlaybackRange.end, allVideoUrls.length) : allVideoUrls.length;
+  const rangeEnd = getPlaybackRangeEnd(hasRange);
   const offset = hasRange ? Math.max(0, Number(activePlaybackRange.offset || 0)) : currentBatch * batchSize;
   const start = Math.min(rangeEnd, rangeStart + offset);
   const allowFullLoad = !eromeBatchAutoAdvance;
@@ -3651,9 +3657,7 @@ function navigateToNextPasteEvent(){
     return;
   }
 
-  if (!hasActivePlaybackRange()) {
-    syncCurrentPasteIndexFromVisibleVideo();
-  }
+  syncCurrentPasteIndexFromVisibleVideo();
 
   setActivePlaybackRangeForPasteEvent(currentPasteIndex + 1);
   updatePasteNavigationButton();
@@ -5768,6 +5772,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=77"></script>
+<script src="pong-sync.js?v=78"></script>
 </body>
 </html>
