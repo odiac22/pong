@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.89</div>
+  <div class="version-number">22.90</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1707,7 +1707,7 @@ function getEromePlaybackRangeBounds() {
   };
 }
 
-function renderEromeSlidingWindow(activeLocalIndex, removeLocalIndex) {
+function renderEromeSlidingWindow(activeLocalIndex, removeLocalIndex, direction = 'none') {
   if (!eromeBatchAutoAdvance || !videoUrls.length || !allVideoUrls.length) return false;
 
   const bounds = getEromePlaybackRangeBounds();
@@ -1763,7 +1763,7 @@ function renderEromeSlidingWindow(activeLocalIndex, removeLocalIndex) {
       createUnwatchedVideosButton();
 
       if (DECK_MODE_ENABLED) {
-        setDeckActiveIndex(restoreIndex, 'none', { pushHistory: false });
+        setDeckActiveIndex(restoreIndex, direction, { pushHistory: false });
       }
     } catch (error) {
       console.warn('[Erome queue] Could not render next card', error);
@@ -1776,20 +1776,6 @@ function renderEromeSlidingWindow(activeLocalIndex, removeLocalIndex) {
   return true;
 }
 
-function scheduleEromeSlidingWindowAdvance(activeLocalIndex, oldWrapper) {
-  if (!eromeBatchAutoAdvance || eromeSlidingRenderPending || !oldWrapper || !isWrapperViewed(oldWrapper)) return;
-  if (!Number.isInteger(Number(activeLocalIndex))) return;
-
-  const removeLocalIndex = getDeckIndex(oldWrapper);
-
-  if (!Number.isInteger(removeLocalIndex) || removeLocalIndex < 0) return;
-  if (removeLocalIndex === Number(activeLocalIndex)) return;
-
-  setTimeout(() => {
-    renderEromeSlidingWindow(Number(activeLocalIndex), removeLocalIndex);
-  }, 320);
-}
-
 function loadNextEromeBatchIfAvailable() {
   const activeWrapper = getCurrentVideoWrapper();
   const activeLocalIndex = getDeckIndex(activeWrapper);
@@ -1799,7 +1785,7 @@ function loadNextEromeBatchIfAvailable() {
   ));
   const removeLocalIndex = getDeckIndex(removeWrapper);
 
-  if (renderEromeSlidingWindow(activeLocalIndex, removeLocalIndex)) return true;
+  if (renderEromeSlidingWindow(activeLocalIndex, removeLocalIndex, 'up')) return true;
 
   return false;
 }
@@ -2719,7 +2705,6 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   const targetIndex = getDeckIndex(target);
   const oldIndex = deckCurrentIndex;
   const oldWrapper = getDeckWrapper(oldIndex);
-  const oldWasViewed = isWrapperViewed(oldWrapper);
 
   if (!target || targetIndex < 0) return false;
   if (oldIndex === targetIndex && target.classList.contains('deck-active')) {
@@ -2769,10 +2754,6 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   const video = target.querySelector('video');
   if (window.autoplayEnabled && isWrapperReady(target) && video && video.paused) {
     playVideoCleanly(video);
-  }
-
-  if (oldIndex !== targetIndex && oldWasViewed) {
-    scheduleEromeSlidingWindowAdvance(targetIndex, oldWrapper);
   }
 
   return true;
@@ -2843,6 +2824,15 @@ function goToNextDeckVideo() {
     if (loadNextEromeBatchIfAvailable()) return true;
 
     showDeckEmptyNotice('No more videos in this batch');
+    return true;
+  }
+
+  if (
+    eromeBatchAutoAdvance &&
+    currentWrapper &&
+    isWrapperViewed(currentWrapper) &&
+    renderEromeSlidingWindow(nextIndex, currentIndex, 'up')
+  ) {
     return true;
   }
 
@@ -3215,7 +3205,13 @@ function createVideoElements() {
     video.addEventListener('pause', () => { wrapper.classList.remove('video-playing'); if(window.currentlyPlayingVideo===video) window.currentlyPlayingVideo=null; loadingIndicator.style.display='none'; });
     video.addEventListener('waiting', () => { loadingIndicator.style.display='none'; updateVideoReadyLoader(video); });
     video.addEventListener('progress', () => { updateVideoReadyLoader(video); });
-    video.addEventListener('canplay', () => { markVideoAutoRetryDone(video, 'canplay'); loadingIndicator.style.display='none'; });
+    video.addEventListener('canplay', () => {
+      markVideoAutoRetryDone(video, 'canplay');
+      loadingIndicator.style.display='none';
+      if (DECK_MODE_ENABLED && window.autoplayEnabled && wrapper.classList.contains('deck-active') && video.paused) {
+        playVideoCleanly(video);
+      }
+    });
     video.addEventListener('playing', () => {
       markVideoAutoRetryDone(video, 'playing');
       markVideoViewed(wrapper);
@@ -5772,6 +5768,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=78"></script>
+<script src="pong-sync.js?v=79"></script>
 </body>
 </html>
