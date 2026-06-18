@@ -408,24 +408,24 @@
     #erome-iframe-container { width: 100%; flex: 1; overflow: auto; margin: 0 0 8px; border-radius: 8px; background: #05070a; }
     #erome-iframe-container iframe { width: 100%; height: 100%; border: none; }
     #erome-scrape-progress {
-      display: none; position: fixed; left: 50%; bottom: 156px; transform: translateX(-50%);
-      width: min(380px, calc(100vw - 28px)); z-index: 10020;
-      background: rgba(7, 11, 15, 0.86); border: 1px solid var(--ui-border);
-      border-radius: 10px; padding: 10px; box-sizing: border-box;
-      box-shadow: 0 14px 36px rgba(0,0,0,0.42);
-      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      display: none; position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+      width: min(460px, calc(100vw - 24px)); z-index: 10020;
+      background: rgba(7, 11, 15, 0.54); border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 8px; padding: 6px 8px; box-sizing: border-box;
+      box-shadow: 0 8px 22px rgba(0,0,0,0.24);
+      backdrop-filter: blur(9px); -webkit-backdrop-filter: blur(9px);
       color: var(--ui-text); pointer-events: none;
     }
     .erome-progress-title {
       display: flex; justify-content: space-between; gap: 10px;
-      font-size: 12px; font-weight: 750; margin-bottom: 6px;
+      font-size: 10px; font-weight: 750; margin-bottom: 3px;
     }
     .erome-progress-detail {
-      font-size: 11px; color: var(--ui-muted); margin-bottom: 8px;
+      font-size: 9px; color: rgba(226,232,240,0.72); margin-bottom: 4px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .erome-progress-track {
-      height: 7px; border-radius: 999px; overflow: hidden;
+      height: 3px; border-radius: 999px; overflow: hidden;
       background: rgba(255,255,255,0.12);
     }
     .erome-progress-fill {
@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.91</div>
+  <div class="version-number">22.92</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1883,13 +1883,31 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   return true;
 }
 
+function findEromeRecycleCandidate(excludeIndexes = []) {
+  if (!eromeBatchAutoAdvance) return -1;
+
+  const exclude = new Set(
+    excludeIndexes
+      .map(index => Number(index))
+      .filter(index => Number.isInteger(index) && index >= 0)
+  );
+
+  const wrappers = getDeckWrappers();
+
+  for (const wrapper of wrappers) {
+    const index = getDeckIndex(wrapper);
+
+    if (exclude.has(index)) continue;
+    if (isWrapperViewed(wrapper)) return index;
+  }
+
+  return -1;
+}
+
 function loadNextEromeBatchIfAvailable() {
   const activeWrapper = getCurrentVideoWrapper();
-  const removeWrapper = getDeckWrappers().find(wrapper => (
-    wrapper !== activeWrapper &&
-    isWrapperViewed(wrapper)
-  ));
-  const removeLocalIndex = getDeckIndex(removeWrapper);
+  const activeIndex = getDeckIndex(activeWrapper);
+  const removeLocalIndex = findEromeRecycleCandidate([activeIndex]);
 
   if (recycleNextEromeVideoIntoWrapper(removeLocalIndex)) {
     const nextIndex = getNextDeckIndex();
@@ -2871,7 +2889,9 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   }
 
   if (oldIndex !== targetIndex && oldWasViewed && options.skipEromeRecycle !== true) {
-    recycleNextEromeVideoIntoWrapper(oldIndex);
+    const recycleIndex = findEromeRecycleCandidate([oldIndex, targetIndex]);
+
+    recycleNextEromeVideoIntoWrapper(recycleIndex);
   }
 
   return true;
@@ -4852,14 +4872,14 @@ function buildEromeImportGroups(data, fallbackUrl) {
     .filter(group => group.videos.length);
 }
 
-function cacheEromeCardImport(groups, proxyBase) {
+function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
   const urls = [];
   const metadata = [];
   const events = [];
   const scrapedAt = new Date().toISOString();
 
   groups.forEach((group, groupIndex) => {
-    const startIndex = urls.length;
+    const groupStartIndex = urls.length;
     const groupSourceUrl = group.sourceUrl || group.url || '';
     const groupSourceTitle = group.sourceTitle || artistNameFromUrl(groupSourceUrl) || 'Erome';
 
@@ -4882,10 +4902,12 @@ function cacheEromeCardImport(groups, proxyBase) {
       });
     });
 
-    if (urls.length > startIndex) {
+    if (urls.length > groupStartIndex) {
+      const eventStartIndex = Number(globalStartIndex || 0) + groupStartIndex;
+
       events.push({
-        startIndex,
-        count: urls.length - startIndex,
+        startIndex: eventStartIndex,
+        count: urls.length - groupStartIndex,
         artistKey: groupSourceUrl,
         bundleKey: `erome-bundle:${group.url || groupSourceUrl || groupIndex}`,
         source: 'erome',
@@ -4899,6 +4921,13 @@ function cacheEromeCardImport(groups, proxyBase) {
       });
     }
   });
+
+  return { urls, metadata, events };
+}
+
+function cacheEromeCardImport(groups, proxyBase) {
+  const payload = buildEromeCardImportPayload(groups, proxyBase, 0);
+  const { urls, metadata, events } = payload;
 
   parsedVideoUrlsCache = urls;
   parsedVideoMetadataCache = metadata;
@@ -4914,7 +4943,23 @@ function cacheEromeCardImport(groups, proxyBase) {
       : '';
   }
 
-  return { urls, metadata, events };
+  return payload;
+}
+
+function appendEromeGroupsToCurrentCards(groups, proxyBase) {
+  const startIndex = allVideoUrls.length;
+  const payload = buildEromeCardImportPayload(groups, proxyBase, startIndex);
+
+  if (!payload.urls.length) return payload;
+
+  allVideoUrls.push(...payload.urls);
+  allVideoMetadata.push(...payload.metadata);
+  pasteEvents.push(...payload.events);
+  window.PongLoadedSavedMode = 'erome';
+  updatePasteNavigationButton();
+  scheduleSessionSave(700);
+
+  return payload;
 }
 
 function activateFirstEromeBatch() {
@@ -4931,9 +4976,9 @@ function activateFirstEromeBatch() {
   }, 500);
 }
 
-const EROME_ALBUM_SCRAPE_CONCURRENCY = 32;
-const EROME_PROFILE_PAGE_CONCURRENCY = 8;
-const EROME_FETCH_TIMEOUT_MS = 10000;
+const EROME_ALBUM_SCRAPE_CONCURRENCY = 6;
+const EROME_PROFILE_PAGE_CONCURRENCY = 3;
+const EROME_FETCH_TIMEOUT_MS = 18000;
 
 async function fetchEromeJson(proxyBase, endpoint, targetUrl, options = {}) {
   const maxAttempts = Math.max(1, Number(options.attempts || 2));
@@ -5055,6 +5100,8 @@ async function loadEromeAsCards() {
   let totalPages = targets.length;
   let completedAlbums = 0;
   let totalVideos = 0;
+  let eromeCardsStarted = false;
+  let importedGroupCount = 0;
 
   function addAlbumToQueue(rawAlbum, sourceUrl, sourceTitle) {
     const rawUrl = typeof rawAlbum === 'string' ? rawAlbum : rawAlbum?.url;
@@ -5119,6 +5166,52 @@ async function loadEromeAsCards() {
       total: Math.max(1, albumQueue.length),
       videos: totalVideos
     });
+  }
+
+  function publishScrapedGroups(note = 'loading', force = false) {
+    if (!allGroups.length || importedGroupCount >= allGroups.length) {
+      return { urls: [], metadata: [], events: [] };
+    }
+
+    if (!force && !eromeCardsStarted && totalVideos < BATCH_SIZE && completedAlbums < albumQueue.length) {
+      return { urls: [], metadata: [], events: [] };
+    }
+
+    let imported;
+
+    rememberEromeArtistRecordsFromVideoGroups(allGroups);
+
+    if (!eromeCardsStarted) {
+      imported = cacheEromeCardImport(allGroups, base);
+      importedGroupCount = allGroups.length;
+      eromeCardsStarted = true;
+
+      closeEromeHelper();
+      setEromeTwentyCardMode(true);
+      window.PongEromeAutoAdvanceOnce = true;
+      window.PongLoadAllVideosOnce = false;
+      loadVideosButton.click();
+      showSortingIndicator(`Loaded first ${imported.urls.length} Erome videos. Continuing in background...`);
+    } else {
+      const newGroups = allGroups.slice(importedGroupCount);
+
+      imported = appendEromeGroupsToCurrentCards(newGroups, base);
+      importedGroupCount = allGroups.length;
+
+      if (imported.urls.length) {
+        showSortingIndicator(`Added ${imported.urls.length} more Erome videos`);
+      }
+    }
+
+    updateEromeProgress({
+      title: 'Erome Background Load',
+      detail: `${allVideoUrls.length || totalVideos} videos available - ${completedAlbums}/${Math.max(1, albumQueue.length)} albums ${note}`,
+      completed: completedAlbums,
+      total: Math.max(1, albumQueue.length),
+      videos: allVideoUrls.length || totalVideos
+    });
+
+    return imported;
   }
 
   function discoveryPageKey(target, page) {
@@ -5256,6 +5349,7 @@ async function loadEromeAsCards() {
         completedAlbums++;
       }
 
+      publishScrapedGroups('loaded');
       updateAlbumProgress(album);
       return true;
     } catch (err) {
@@ -5447,28 +5541,22 @@ async function loadEromeAsCards() {
   }
 
   try {
-    // Route each raw MP4 through the proxy. The ".mp4" before "?" keeps the
-    // existing isVideoUrlLine() matcher happy.
-    rememberEromeArtistRecordsFromVideoGroups(allGroups);
-    const imported = cacheEromeCardImport(allGroups, base);
+    const imported = publishScrapedGroups('complete', true);
+    const loadedVideoCount = allVideoUrls.length || imported.urls.length || totalVideos;
+    const loadedBatchCount = pasteEvents.length || imported.events.length || allGroups.length;
 
-    closeEromeHelper();
     showSortingIndicator(
-      'Loaded ' + imported.urls.length + ' Erome videos in ' + imported.events.length + ' batches'
+      'Loaded ' + loadedVideoCount + ' Erome videos in ' + loadedBatchCount + ' batches'
       + (failures.length ? ' (' + failures.length + ' page failed)' : '')
     );
     updateEromeProgress({
       title: 'Erome Loaded',
-      detail: `${imported.events.length} batches ready`,
+      detail: `${loadedBatchCount} batches ready`,
       completed: albumQueue.length,
       total: albumQueue.length,
-      videos: imported.urls.length
+      videos: loadedVideoCount
     });
     hideEromeProgress(1400);
-    setEromeTwentyCardMode(true);
-    window.PongEromeAutoAdvanceOnce = true;
-    window.PongLoadAllVideosOnce = false;
-    loadVideosButton.click();
   } catch (err) {
     hideEromeProgress();
     alert('Erome scrape failed: ' + (err && err.message ? err.message : err));
@@ -5877,6 +5965,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=80"></script>
+<script src="pong-sync.js?v=81"></script>
 </body>
 </html>
