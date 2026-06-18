@@ -408,8 +408,8 @@
     #erome-iframe-container { width: 100%; flex: 1; overflow: auto; margin: 0 0 8px; border-radius: 8px; background: #05070a; }
     #erome-iframe-container iframe { width: 100%; height: 100%; border: none; }
     #erome-scrape-progress {
-      display: none; position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
-      width: min(460px, calc(100vw - 24px)); z-index: 10020;
+      display: none; position: fixed; right: 12px; bottom: 82px; transform: none;
+      width: clamp(138px, 24vw, 220px); z-index: 10020;
       background: rgba(7, 11, 15, 0.54); border: 1px solid rgba(255,255,255,0.10);
       border-radius: 8px; padding: 6px 8px; box-sizing: border-box;
       box-shadow: 0 8px 22px rgba(0,0,0,0.24);
@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.92</div>
+  <div class="version-number">22.93</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4976,9 +4976,10 @@ function activateFirstEromeBatch() {
   }, 500);
 }
 
-const EROME_ALBUM_SCRAPE_CONCURRENCY = 6;
-const EROME_PROFILE_PAGE_CONCURRENCY = 3;
-const EROME_FETCH_TIMEOUT_MS = 18000;
+const EROME_ALBUM_SCRAPE_CONCURRENCY = 12;
+const EROME_PROFILE_PAGE_CONCURRENCY = 5;
+const EROME_FETCH_TIMEOUT_MS = 8000;
+const EROME_FINAL_RETRY_TIMEOUT_MS = 16000;
 
 async function fetchEromeJson(proxyBase, endpoint, targetUrl, options = {}) {
   const maxAttempts = Math.max(1, Number(options.attempts || 2));
@@ -5197,10 +5198,6 @@ async function loadEromeAsCards() {
 
       imported = appendEromeGroupsToCurrentCards(newGroups, base);
       importedGroupCount = allGroups.length;
-
-      if (imported.urls.length) {
-        showSortingIndicator(`Added ${imported.urls.length} more Erome videos`);
-      }
     }
 
     updateEromeProgress({
@@ -5269,7 +5266,11 @@ async function loadEromeAsCards() {
       }
 
       const firstUrl = eromeProfilePageUrl(target, 1);
-      const firstData = await fetchEromeAlbumListData(base, firstUrl, { attempts: 3 });
+      const firstData = await fetchEromeAlbumListData(base, firstUrl, {
+        attempts: 2,
+        timeoutMs: EROME_FETCH_TIMEOUT_MS,
+        fast: true
+      });
       const sourceTitle = firstData?.title || getEromeTargetLabel(target);
 
       pageCount = Math.max(1, Number(firstData.profilePageCount || 1));
@@ -5331,8 +5332,8 @@ async function loadEromeAsCards() {
 
       const data = await fetchEromeScrapeData(base, album.url, {
         attempts: 1,
-        timeoutMs: EROME_FETCH_TIMEOUT_MS,
-        fast: true
+        timeoutMs: note === 'final retry' ? EROME_FINAL_RETRY_TIMEOUT_MS : EROME_FETCH_TIMEOUT_MS,
+        fast: note !== 'final retry'
       });
       const groups = buildEromeImportGroups(data, album.url).map(group => ({
         ...group,
@@ -5396,8 +5397,8 @@ async function loadEromeAsCards() {
         try {
           const firstData = await fetchEromeAlbumListData(base, firstUrl, {
             attempts: 1,
-            timeoutMs: EROME_FETCH_TIMEOUT_MS,
-            fast: true
+            timeoutMs: EROME_FINAL_RETRY_TIMEOUT_MS,
+            fast: false
           });
           const sourceTitle = firstData?.title || getEromeTargetLabel(item.target);
           const pageCount = Math.max(1, Number(firstData.profilePageCount || 1));
@@ -5454,8 +5455,8 @@ async function loadEromeAsCards() {
         try {
           const pageData = await fetchEromeAlbumListData(base, pageUrl, {
             attempts: 1,
-            timeoutMs: EROME_FETCH_TIMEOUT_MS,
-            fast: true
+            timeoutMs: EROME_FINAL_RETRY_TIMEOUT_MS,
+            fast: false
           });
 
           (pageData.albums || []).forEach(album => addAlbumToQueue(album, item.target, item.sourceTitle));
@@ -5965,6 +5966,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=81"></script>
+<script src="pong-sync.js?v=82"></script>
 </body>
 </html>
