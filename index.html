@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.94</div>
+  <div class="version-number">22.95</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2877,6 +2877,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
 
   deckCurrentIndex = targetIndex;
   currentVideoIndex = targetIndex;
+  if (eromeBatchAutoAdvance) syncCurrentPasteIndexFromVisibleVideo();
   ensureVideoCounter().textContent = getVideoCounterText(currentVideoIndex);
   tuneVideoPreloadAround(target);
   updateBatchReadyCounter();
@@ -4992,8 +4993,10 @@ function activateFirstEromeBatch() {
 
 const EROME_ALBUM_SCRAPE_CONCURRENCY = 8;
 const EROME_INITIAL_ALBUM_BATCH_SIZE = 4;
-const EROME_BACKGROUND_ALBUM_CONCURRENCY = 1;
-const EROME_BACKGROUND_ALBUM_DELAY_MS = 900;
+const EROME_READY_ALBUM_BUFFER_TARGET = 5;
+const EROME_BACKGROUND_ALBUM_CONCURRENCY = 3;
+const EROME_BACKGROUND_LOW_BUFFER_DELAY_MS = 120;
+const EROME_BACKGROUND_READY_BUFFER_DELAY_MS = 2200;
 const EROME_PROFILE_PAGE_CONCURRENCY = 5;
 const EROME_BACKGROUND_PROFILE_CONCURRENCY = 2;
 const EROME_FETCH_TIMEOUT_MS = 8000;
@@ -5089,13 +5092,26 @@ async function eromeRetryOnce(items, limit, task, onRetryStart) {
   return failed;
 }
 
-async function waitForEromeBackgroundScrapeSlot() {
-  await sleep(EROME_BACKGROUND_ALBUM_DELAY_MS);
+function getEromeReadyAlbumBufferCount() {
+  if (!eromeBatchAutoAdvance || !Array.isArray(pasteEvents) || !pasteEvents.length) return 0;
 
+  const syncedIndex = syncCurrentPasteIndexFromVisibleVideo();
+  const activeIndex = syncedIndex >= 0
+    ? syncedIndex
+    : Math.max(0, Number(currentPasteIndex || 0));
+
+  return Math.max(0, pasteEvents.length - activeIndex - 1);
+}
+
+async function waitForEromeBackgroundScrapeSlot() {
+  const readyAlbums = getEromeReadyAlbumBufferCount();
+  const needsBuffer = readyAlbums < EROME_READY_ALBUM_BUFFER_TARGET;
   const activeVideo = window.currentlyPlayingVideo;
 
-  if (activeVideo && !activeVideo.paused) {
-    await sleep(EROME_BACKGROUND_ALBUM_DELAY_MS);
+  await sleep(needsBuffer ? EROME_BACKGROUND_LOW_BUFFER_DELAY_MS : EROME_BACKGROUND_READY_BUFFER_DELAY_MS);
+
+  if (!needsBuffer && activeVideo && !activeVideo.paused) {
+    await sleep(EROME_BACKGROUND_READY_BUFFER_DELAY_MS);
   }
 }
 
@@ -5230,7 +5246,7 @@ async function loadEromeAsCards() {
 
     updateEromeProgress({
       title: 'Erome Background Load',
-      detail: `${allVideoUrls.length || totalVideos} videos available - ${completedAlbums}/${Math.max(1, albumQueue.length)} albums ${note}`,
+      detail: `${allVideoUrls.length || totalVideos} videos available - ${getEromeReadyAlbumBufferCount()}/${EROME_READY_ALBUM_BUFFER_TARGET} ready albums - ${completedAlbums}/${Math.max(1, albumQueue.length)} albums ${note}`,
       completed: completedAlbums,
       total: Math.max(1, albumQueue.length),
       videos: allVideoUrls.length || totalVideos
@@ -5412,7 +5428,7 @@ async function loadEromeAsCards() {
     if (backgroundAlbums.length) {
       updateEromeProgress({
         title: 'Erome Background Load',
-        detail: `${backgroundAlbums.length} albums left - player priority mode`,
+        detail: `${backgroundAlbums.length} albums left - keeping ${EROME_READY_ALBUM_BUFFER_TARGET} ready`,
         completed: completedAlbums,
         total: Math.max(1, albumQueue.length),
         videos: totalVideos
@@ -6027,6 +6043,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=83"></script>
+<script src="pong-sync.js?v=84"></script>
 </body>
 </html>
