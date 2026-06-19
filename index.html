@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.95</div>
+  <div class="version-number">22.96</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -673,6 +673,8 @@ let scrollThumbSuppressedUntil = 0;
 const DECK_MODE_ENABLED = true;
 let deckOrder = [];
 let deckHistory = [];
+const DECK_HISTORY_LIMIT = 80;
+const EROME_SESSION_SAVE_MIN_DELAY_MS = 6000;
 let deckCurrentIndex = -1;
 let deckRestoreIndex = null;
 let deckSwipeControllerInstalled = false;
@@ -1599,11 +1601,17 @@ async function clearPongTransientCachesForUpdate() {
 function scheduleSessionSave(delay = 350) {
   if (window.PongSuppressSessionSaveUntil && Date.now() < window.PongSuppressSessionSaveUntil) return;
 
+  const requestedDelay = Number(delay);
+  const safeDelay = Number.isFinite(requestedDelay) ? Math.max(0, requestedDelay) : 350;
+  const effectiveDelay = (eromeBatchAutoAdvance || window.PongLoadedSavedMode === 'erome')
+    ? Math.max(safeDelay, EROME_SESSION_SAVE_MIN_DELAY_MS)
+    : safeDelay;
+
   clearTimeout(sessionSaveTimer);
   sessionSaveTimer = setTimeout(() => {
     sessionSaveTimer = null;
     saveSession();
-  }, delay);
+  }, effectiveDelay);
 }
 
 function hasActivePlaybackRange() {
@@ -2849,6 +2857,9 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
 
   if (oldWrapper && oldWrapper !== target && options.pushHistory !== false) {
     deckHistory.push(oldIndex);
+    if (deckHistory.length > DECK_HISTORY_LIMIT) {
+      deckHistory.splice(0, deckHistory.length - DECK_HISTORY_LIMIT);
+    }
     const oldVideo = oldWrapper.querySelector('video');
     if (oldVideo && !oldVideo.paused) oldVideo.pause();
     oldWrapper.classList.remove('video-playing');
@@ -4766,7 +4777,7 @@ async function getBestSavedEromeRecord(record) {
 
 async function loadSavedEromeRecordAsCards(record) {
   const fullRecord = await getBestSavedEromeRecord(record);
-  const groups = compactSavedEromeVideoGroups(fullRecord?.videoGroups);
+  const groups = shuffleEromeGroupsForPlayback(fullRecord?.videoGroups);
 
   if (!groups.length) {
     showSortingIndicator('Saved Erome has no cached videos. Run Open Erome, wait for videos, then hold Saved Erome.');
@@ -4885,6 +4896,17 @@ function buildEromeImportGroups(data, fallbackUrl) {
       videos: Array.isArray(group?.videos) ? group.videos.filter(Boolean) : []
     }))
     .filter(group => group.videos.length);
+}
+
+function shuffleEromeGroupsForPlayback(groups) {
+  const shuffledGroups = compactSavedEromeVideoGroups(groups)
+    .map(group => ({
+      ...group,
+      videos: shuffleInPlace((group.videos || []).slice())
+    }))
+    .filter(group => group.videos.length);
+
+  return shuffleInPlace(shuffledGroups);
 }
 
 function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
@@ -6043,6 +6065,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=84"></script>
+<script src="pong-sync.js?v=85"></script>
 </body>
 </html>
