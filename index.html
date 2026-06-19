@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.96</div>
+  <div class="version-number">22.97</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -673,6 +673,7 @@ let scrollThumbSuppressedUntil = 0;
 const DECK_MODE_ENABLED = true;
 let deckOrder = [];
 let deckHistory = [];
+let deckForwardHistory = [];
 const DECK_HISTORY_LIMIT = 80;
 const EROME_SESSION_SAVE_MIN_DELAY_MS = 6000;
 let deckCurrentIndex = -1;
@@ -2765,6 +2766,17 @@ function moveDeckIndexToBack(index) {
   deckOrder.push(index);
 }
 
+function pushDeckHistoryIndex(stack, index) {
+  const safeIndex = Number(index);
+
+  if (!Number.isInteger(safeIndex) || safeIndex < 0) return;
+
+  stack.push(safeIndex);
+  if (stack.length > DECK_HISTORY_LIMIT) {
+    stack.splice(0, stack.length - DECK_HISTORY_LIMIT);
+  }
+}
+
 function getNextDeckIndex() {
   ensureDeckOrder();
 
@@ -2780,6 +2792,15 @@ function getNextDeckIndex() {
     return !isWrapperReady(wrapper) && !isWrapperViewed(wrapper);
   });
   if (unreadyUnseen != null) return unreadyUnseen;
+
+  return null;
+}
+
+function getForwardDeckIndex() {
+  while (deckForwardHistory.length) {
+    const forwardIndex = deckForwardHistory.pop();
+    if (getDeckWrapper(forwardIndex)) return forwardIndex;
+  }
 
   return null;
 }
@@ -2856,10 +2877,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   if (direction !== 'none') lockDeckNavigation(direction === 'ready' ? 280 : 240);
 
   if (oldWrapper && oldWrapper !== target && options.pushHistory !== false) {
-    deckHistory.push(oldIndex);
-    if (deckHistory.length > DECK_HISTORY_LIMIT) {
-      deckHistory.splice(0, deckHistory.length - DECK_HISTORY_LIMIT);
-    }
+    pushDeckHistoryIndex(deckHistory, oldIndex);
     const oldVideo = oldWrapper.querySelector('video');
     if (oldVideo && !oldVideo.paused) oldVideo.pause();
     oldWrapper.classList.remove('video-playing');
@@ -2965,6 +2983,15 @@ function goToNextDeckVideo() {
   clearDeckReadyPromotion();
   deckAutoPromotionLockedUntil = Date.now() + 1000;
 
+  const forwardIndex = getForwardDeckIndex();
+  if (forwardIndex != null) {
+    setDeckActiveIndex(forwardIndex, 'up', {
+      pushHistory: true,
+      skipEromeRecycle: true
+    });
+    return true;
+  }
+
   if (currentWrapper && !isWrapperViewed(currentWrapper)) {
     moveDeckIndexToBack(currentIndex);
   }
@@ -2993,7 +3020,11 @@ function goToPreviousDeckVideo() {
     return true;
   }
 
-  setDeckActiveIndex(previousIndex, 'down', { pushHistory: false });
+  pushDeckHistoryIndex(deckForwardHistory, deckCurrentIndex);
+  setDeckActiveIndex(previousIndex, 'down', {
+    pushHistory: false,
+    skipEromeRecycle: true
+  });
   return true;
 }
 
@@ -3123,6 +3154,7 @@ function createVideoElements() {
   videoContainer.classList.toggle('deck-mode', DECK_MODE_ENABLED);
   deckOrder = [];
   deckHistory = [];
+  deckForwardHistory = [];
   deckCurrentIndex = -1;
   window.currentlyPlayingVideo = null;
   if (videoMetadata.length !== videoUrls.length) videoMetadata = Array(videoUrls.length).fill(null).map(() => ({}));
@@ -6065,6 +6097,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=85"></script>
+<script src="pong-sync.js?v=86"></script>
 </body>
 </html>
