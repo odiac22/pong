@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.99</div>
+  <div class="version-number">23.00</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4188,11 +4188,12 @@ function ensureEromeProgressEl() {
   return el;
 }
 
-function updateEromeProgress({ title, detail, completed, total, videos }) {
+function updateEromeProgress({ title, detail, completed, total, videos, force }) {
   const now = Date.now();
   const progressTitle = String(title || '');
 
   if (
+    !force &&
     eromeProgressLastPaintAt &&
     now - eromeProgressLastPaintAt < 900 &&
     !/Loaded|Final/i.test(progressTitle)
@@ -4915,7 +4916,18 @@ function persistSavedEromeRefresh(targetUrl, baseRecord, albums, videoGroups) {
 function startSavedEromeBackgroundRefresh(record) {
   const targetUrl = normalizeEromeProfileSaveUrl(record?.url || '');
 
-  if (!targetUrl || !EROME_PROXY_BASE || savedEromeRefreshJobs.has(targetUrl)) return;
+  if (!targetUrl || !EROME_PROXY_BASE) return;
+
+  updateEromeProgress({
+    title: 'Saved Erome Scraper',
+    detail: `${getEromeTargetLabel(targetUrl)} - checking saved links and searching for new albums`,
+    completed: 0,
+    total: 1,
+    videos: countSavedEromeVideos(record?.videoGroups),
+    force: true
+  });
+
+  if (savedEromeRefreshJobs.has(targetUrl)) return;
 
   savedEromeRefreshJobs.add(targetUrl);
 
@@ -4937,7 +4949,8 @@ async function refreshSavedEromeRecordInBackground(record) {
   const storedRecord = await getBestSavedEromeRecord(record);
   let savedGroups = compactSavedEromeVideoGroups(storedRecord?.videoGroups);
   let existingVideoKeys = getSavedEromeVideoKeySet(savedGroups);
-  const albums = compactSavedEromeAlbums(storedRecord?.albums);
+  const storedAlbums = compactSavedEromeAlbums(storedRecord?.albums);
+  const albums = [];
   const albumQueue = [];
   const seenAlbumUrls = new Set();
   const failedAlbums = [];
@@ -4965,22 +4978,28 @@ async function refreshSavedEromeRecordInBackground(record) {
     albumQueue.push(album);
   }
 
-  function updateSavedRefreshProgress(phase, detail, completed, total, videos) {
+  function updateSavedRefreshProgress(phase, detail, completed, total, videos, force = false) {
     updateEromeProgress({
       title: phase || 'Saved Erome Refresh',
       detail,
       completed,
       total,
-      videos
+      videos,
+      force
     });
   }
 
+  storedAlbums.forEach(album => {
+    addAlbum(album, targetUrl, getEromeTargetLabel(targetUrl));
+  });
+
   updateSavedRefreshProgress(
-    'Saved Erome Refresh',
-    `${getEromeTargetLabel(targetUrl)} - checking for new albums`,
+    'Saved Erome Scraper',
+    `${getEromeTargetLabel(targetUrl)} - ${albumQueue.length} saved albums queued - checking for new albums`,
     0,
     1,
-    0
+    countSavedEromeVideos(savedGroups),
+    true
   );
 
   if (isEromeAlbumLaunchUrl(targetUrl)) {
@@ -5000,7 +5019,7 @@ async function refreshSavedEromeRecordInBackground(record) {
       completedPages = 1;
 
       updateSavedRefreshProgress(
-        'Saved Erome Refresh',
+        'Saved Erome Scraper',
         `${getEromeTargetLabel(targetUrl)} - page 1/${totalPages} - ${albumQueue.length} albums queued`,
         completedPages,
         totalPages,
@@ -5021,7 +5040,7 @@ async function refreshSavedEromeRecordInBackground(record) {
           (pageData.albums || []).forEach(album => addAlbum(album, targetUrl, sourceTitle));
           completedPages++;
           updateSavedRefreshProgress(
-            'Saved Erome Refresh',
+            'Saved Erome Scraper',
             `${getEromeTargetLabel(targetUrl)} - page ${page}/${totalPages} - ${albumQueue.length} albums queued`,
             completedPages,
             totalPages,
@@ -5056,7 +5075,7 @@ async function refreshSavedEromeRecordInBackground(record) {
         },
         pending => {
           updateSavedRefreshProgress(
-            'Saved Erome Refresh',
+            'Saved Erome Scraper',
             `${getEromeTargetLabel(targetUrl)} - retrying ${pending.length} pages`,
             completedPages,
             totalPages,
@@ -5074,11 +5093,12 @@ async function refreshSavedEromeRecordInBackground(record) {
   if (!albumQueue.length) {
     persistSavedEromeRefresh(targetUrl, storedRecord, albums, savedGroups);
     updateSavedRefreshProgress(
-      'Saved Erome Refresh',
+      'Saved Erome Scraper',
       `${getEromeTargetLabel(targetUrl)} - no new albums found`,
       1,
       1,
-      0
+      0,
+      true
     );
     hideEromeProgress(1200);
     return;
@@ -5089,8 +5109,8 @@ async function refreshSavedEromeRecordInBackground(record) {
   async function scrapeSavedAlbum(album, note) {
     try {
       updateSavedRefreshProgress(
-        'Saved Erome Background Load',
-        `${getEromeTargetLabel(targetUrl)} - album ${completedAlbums + 1}/${albumQueue.length}${note ? ` - ${note}` : ''}`,
+        'Saved Erome Scraper',
+        `${getEromeTargetLabel(targetUrl)} - scraping/storing album ${completedAlbums + 1}/${albumQueue.length}${note ? ` - ${note}` : ''}`,
         completedAlbums,
         Math.max(1, albumQueue.length),
         newVideoCount
@@ -5125,7 +5145,7 @@ async function refreshSavedEromeRecordInBackground(record) {
 
       completedAlbums++;
       updateSavedRefreshProgress(
-        'Saved Erome Background Load',
+        'Saved Erome Scraper',
         `${getEromeTargetLabel(targetUrl)} - ${newVideoCount} new videos saved`,
         completedAlbums,
         Math.max(1, albumQueue.length),
@@ -5151,7 +5171,7 @@ async function refreshSavedEromeRecordInBackground(record) {
       album => scrapeSavedAlbum(album, 'final retry'),
       pending => {
         updateSavedRefreshProgress(
-          'Saved Erome Background Load',
+          'Saved Erome Scraper',
           `${getEromeTargetLabel(targetUrl)} - retrying ${pending.length} albums`,
           completedAlbums,
           Math.max(1, albumQueue.length),
@@ -5169,7 +5189,8 @@ async function refreshSavedEromeRecordInBackground(record) {
       : `${getEromeTargetLabel(targetUrl)} - no new videos`,
     Math.max(1, albumQueue.length),
     Math.max(1, albumQueue.length),
-    newVideoCount
+    newVideoCount,
+    true
   );
   hideEromeProgress(1400);
 }
@@ -6436,6 +6457,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=88"></script>
+<script src="pong-sync.js?v=89"></script>
 </body>
 </html>
