@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.98</div>
+  <div class="version-number">22.99</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4165,6 +4165,7 @@ const SAVED_EROME_DB_NAME = 'pong_erome_local_cache_v1';
 const SAVED_EROME_DB_STORE = 'artists';
 let lastEromeArtistRecords = {};
 let savedEromeMenuEl = null;
+const savedEromeRefreshJobs = new Set();
 
 function ensureEromeProgressEl() {
   let el = document.getElementById('erome-scrape-progress');
@@ -4827,18 +4828,350 @@ async function loadSavedEromeRecordAsCards(record) {
 
   const base = EROME_PROXY_BASE.replace(/\/+$/, '');
   const imported = cacheEromeCardImport(groups, base);
+  const activeSavedRefreshUrl = normalizeEromeProfileSaveUrl(fullRecord?.url || '');
 
   closeEromeHelper();
   setEromeTwentyCardMode(true);
   window.PongEromeAutoAdvanceOnce = true;
   window.PongLoadAllVideosOnce = false;
+  window.PongActiveSavedEromeRefreshUrl = activeSavedRefreshUrl;
   loadVideosButton.click();
 
   showSortingIndicator(
     `Loaded saved Erome ${imported.urls.length} videos from ${fullRecord.url || 'saved page'}`
   );
 
+  startSavedEromeBackgroundRefresh(fullRecord);
+
   return true;
+}
+
+function savedEromeVideoKey(rawUrl) {
+  return String(rawEromeUrlFromPlayableUrl(rawUrl) || rawUrl || '').trim();
+}
+
+function getSavedEromeVideoKeySet(groups) {
+  const keys = new Set();
+
+  compactSavedEromeVideoGroups(groups).forEach(group => {
+    (group.videos || []).forEach(video => {
+      const key = savedEromeVideoKey(video);
+
+      if (key) keys.add(key);
+    });
+  });
+
+  return keys;
+}
+
+function filterNewSavedEromeGroups(groups, existingVideoKeys) {
+  return compactSavedEromeVideoGroups(groups)
+    .map(group => {
+      const videos = [];
+
+      (group.videos || []).forEach(video => {
+        const key = savedEromeVideoKey(video);
+
+        if (!key || existingVideoKeys.has(key)) return;
+
+        existingVideoKeys.add(key);
+        videos.push(video);
+      });
+
+      return {
+        ...group,
+        videos
+      };
+    })
+    .filter(group => group.videos.length);
+}
+
+function persistSavedEromeRefresh(targetUrl, baseRecord, albums, videoGroups) {
+  const mergedGroups = compactSavedEromeVideoGroups(videoGroups);
+  const mergedAlbums = compactSavedEromeAlbums([
+    ...(baseRecord?.albums || []),
+    ...(albums || []),
+    ...albumsFromSavedEromeVideoGroups(mergedGroups)
+  ]);
+
+  const savedRecord = upsertSavedEromeArtist(targetUrl, {
+    ...(baseRecord || {}),
+    url: targetUrl,
+    label: targetUrl,
+    albums: mergedAlbums,
+    albumCount: mergedAlbums.length,
+    videoGroups: mergedGroups,
+    videoCount: countSavedEromeVideos(mergedGroups)
+  });
+
+  if (savedRecord) {
+    lastEromeArtistRecords[targetUrl] = savedRecord;
+    renderSavedEromeMenu();
+  }
+
+  return savedRecord;
+}
+
+function startSavedEromeBackgroundRefresh(record) {
+  const targetUrl = normalizeEromeProfileSaveUrl(record?.url || '');
+
+  if (!targetUrl || !EROME_PROXY_BASE || savedEromeRefreshJobs.has(targetUrl)) return;
+
+  savedEromeRefreshJobs.add(targetUrl);
+
+  refreshSavedEromeRecordInBackground(record)
+    .catch(err => {
+      console.warn('Saved Erome background refresh failed:', targetUrl, err);
+    })
+    .finally(() => {
+      savedEromeRefreshJobs.delete(targetUrl);
+    });
+}
+
+async function refreshSavedEromeRecordInBackground(record) {
+  const targetUrl = normalizeEromeProfileSaveUrl(record?.url || '');
+
+  if (!targetUrl || !EROME_PROXY_BASE) return;
+
+  const base = EROME_PROXY_BASE.replace(/\/+$/, '');
+  const storedRecord = await getBestSavedEromeRecord(record);
+  let savedGroups = compactSavedEromeVideoGroups(storedRecord?.videoGroups);
+  let existingVideoKeys = getSavedEromeVideoKeySet(savedGroups);
+  const albums = compactSavedEromeAlbums(storedRecord?.albums);
+  const albumQueue = [];
+  const seenAlbumUrls = new Set();
+  const failedAlbums = [];
+  let completedPages = 0;
+  let totalPages = 1;
+  let completedAlbums = 0;
+  let newVideoCount = 0;
+
+  function addAlbum(rawAlbum, sourceUrl, sourceTitle) {
+    const rawUrl = typeof rawAlbum === 'string' ? rawAlbum : rawAlbum?.url;
+    const albumUrl = normalizeEromeLaunchUrl(rawUrl);
+
+    if (!albumUrl || !isEromeAlbumLaunchUrl(albumUrl) || seenAlbumUrls.has(albumUrl)) return;
+
+    seenAlbumUrls.add(albumUrl);
+
+    const album = {
+      url: albumUrl,
+      title: (typeof rawAlbum === 'object' && rawAlbum?.title) || getEromeTargetLabel(albumUrl),
+      sourceUrl,
+      sourceTitle: sourceTitle || getEromeTargetLabel(sourceUrl)
+    };
+
+    albums.push(album);
+    albumQueue.push(album);
+  }
+
+  function updateSavedRefreshProgress(phase, detail, completed, total, videos) {
+    updateEromeProgress({
+      title: phase || 'Saved Erome Refresh',
+      detail,
+      completed,
+      total,
+      videos
+    });
+  }
+
+  updateSavedRefreshProgress(
+    'Saved Erome Refresh',
+    `${getEromeTargetLabel(targetUrl)} - checking for new albums`,
+    0,
+    1,
+    0
+  );
+
+  if (isEromeAlbumLaunchUrl(targetUrl)) {
+    addAlbum(targetUrl, targetUrl, getEromeTargetLabel(targetUrl));
+    completedPages = 1;
+  } else {
+    try {
+      const firstData = await fetchEromeAlbumListData(base, eromeProfilePageUrl(targetUrl, 1), {
+        attempts: 2,
+        timeoutMs: EROME_FETCH_TIMEOUT_MS,
+        fast: true
+      });
+      const sourceTitle = firstData?.title || getEromeTargetLabel(targetUrl);
+
+      totalPages = Math.max(1, Number(firstData.profilePageCount || 1));
+      (firstData.albums || []).forEach(album => addAlbum(album, targetUrl, sourceTitle));
+      completedPages = 1;
+
+      updateSavedRefreshProgress(
+        'Saved Erome Refresh',
+        `${getEromeTargetLabel(targetUrl)} - page 1/${totalPages} - ${albumQueue.length} albums queued`,
+        completedPages,
+        totalPages,
+        newVideoCount
+      );
+
+      const pages = Array.from({ length: Math.max(0, totalPages - 1) }, (_, index) => index + 2);
+      const failedPages = [];
+
+      await eromePool(pages, EROME_PROFILE_PAGE_CONCURRENCY, async page => {
+        try {
+          const pageData = await fetchEromeAlbumListData(base, eromeProfilePageUrl(targetUrl, page), {
+            attempts: 1,
+            timeoutMs: EROME_FETCH_TIMEOUT_MS,
+            fast: true
+          });
+
+          (pageData.albums || []).forEach(album => addAlbum(album, targetUrl, sourceTitle));
+          completedPages++;
+          updateSavedRefreshProgress(
+            'Saved Erome Refresh',
+            `${getEromeTargetLabel(targetUrl)} - page ${page}/${totalPages} - ${albumQueue.length} albums queued`,
+            completedPages,
+            totalPages,
+            newVideoCount
+          );
+          return true;
+        } catch (err) {
+          failedPages.push(page);
+          console.warn('Saved Erome refresh page failed:', targetUrl, page, err);
+          return false;
+        }
+      });
+
+      await eromeRetryOnce(
+        failedPages,
+        EROME_BACKGROUND_PROFILE_CONCURRENCY,
+        async page => {
+          try {
+            const pageData = await fetchEromeAlbumListData(base, eromeProfilePageUrl(targetUrl, page), {
+              attempts: 1,
+              timeoutMs: EROME_FINAL_RETRY_TIMEOUT_MS,
+              fast: false
+            });
+
+            (pageData.albums || []).forEach(album => addAlbum(album, targetUrl, sourceTitle));
+            completedPages++;
+            return true;
+          } catch (err) {
+            console.warn('Saved Erome refresh page retry failed:', targetUrl, page, err);
+            return false;
+          }
+        },
+        pending => {
+          updateSavedRefreshProgress(
+            'Saved Erome Refresh',
+            `${getEromeTargetLabel(targetUrl)} - retrying ${pending.length} pages`,
+            completedPages,
+            totalPages,
+            newVideoCount
+          );
+        }
+      );
+    } catch (err) {
+      console.warn('Saved Erome refresh discovery failed:', targetUrl, err);
+      hideEromeProgress(1200);
+      return;
+    }
+  }
+
+  if (!albumQueue.length) {
+    persistSavedEromeRefresh(targetUrl, storedRecord, albums, savedGroups);
+    updateSavedRefreshProgress(
+      'Saved Erome Refresh',
+      `${getEromeTargetLabel(targetUrl)} - no new albums found`,
+      1,
+      1,
+      0
+    );
+    hideEromeProgress(1200);
+    return;
+  }
+
+  persistSavedEromeRefresh(targetUrl, storedRecord, albums, savedGroups);
+
+  async function scrapeSavedAlbum(album, note) {
+    try {
+      updateSavedRefreshProgress(
+        'Saved Erome Background Load',
+        `${getEromeTargetLabel(targetUrl)} - album ${completedAlbums + 1}/${albumQueue.length}${note ? ` - ${note}` : ''}`,
+        completedAlbums,
+        Math.max(1, albumQueue.length),
+        newVideoCount
+      );
+
+      await waitForEromeBackgroundScrapeSlot();
+
+      const data = await fetchEromeScrapeData(base, album.url, {
+        attempts: 1,
+        timeoutMs: note === 'final retry' ? EROME_FINAL_RETRY_TIMEOUT_MS : EROME_FETCH_TIMEOUT_MS,
+        fast: note !== 'final retry'
+      });
+      const groups = buildEromeImportGroups(data, album.url).map(group => ({
+        ...group,
+        url: group.url || album.url,
+        title: group.title || album.title,
+        sourceUrl: album.sourceUrl || targetUrl,
+        sourceTitle: album.sourceTitle || getEromeTargetLabel(targetUrl)
+      }));
+      const newGroups = filterNewSavedEromeGroups(groups, existingVideoKeys);
+
+      if (newGroups.length) {
+        const added = countSavedEromeVideos(newGroups);
+
+        newVideoCount += added;
+        savedGroups = compactSavedEromeVideoGroups([...savedGroups, ...newGroups]);
+        if (window.PongActiveSavedEromeRefreshUrl === targetUrl && window.PongLoadedSavedMode === 'erome') {
+          appendEromeGroupsToCurrentCards(newGroups, base);
+        }
+        persistSavedEromeRefresh(targetUrl, storedRecord, albums, savedGroups);
+      }
+
+      completedAlbums++;
+      updateSavedRefreshProgress(
+        'Saved Erome Background Load',
+        `${getEromeTargetLabel(targetUrl)} - ${newVideoCount} new videos saved`,
+        completedAlbums,
+        Math.max(1, albumQueue.length),
+        newVideoCount
+      );
+      return true;
+    } catch (err) {
+      console.warn('Saved Erome refresh album failed:', album.url, err);
+      return false;
+    }
+  }
+
+  await eromePool(albumQueue, EROME_BACKGROUND_ALBUM_CONCURRENCY, async album => {
+    const ok = await scrapeSavedAlbum(album, 'background');
+
+    if (!ok) failedAlbums.push(album);
+  });
+
+  if (failedAlbums.length) {
+    await eromeRetryOnce(
+      failedAlbums,
+      EROME_BACKGROUND_ALBUM_CONCURRENCY,
+      album => scrapeSavedAlbum(album, 'final retry'),
+      pending => {
+        updateSavedRefreshProgress(
+          'Saved Erome Background Load',
+          `${getEromeTargetLabel(targetUrl)} - retrying ${pending.length} albums`,
+          completedAlbums,
+          Math.max(1, albumQueue.length),
+          newVideoCount
+        );
+      }
+    );
+  }
+
+  persistSavedEromeRefresh(targetUrl, storedRecord, albums, savedGroups);
+  updateSavedRefreshProgress(
+    'Saved Erome Updated',
+    newVideoCount
+      ? `${getEromeTargetLabel(targetUrl)} - added ${newVideoCount} new videos`
+      : `${getEromeTargetLabel(targetUrl)} - no new videos`,
+    Math.max(1, albumQueue.length),
+    Math.max(1, albumQueue.length),
+    newVideoCount
+  );
+  hideEromeProgress(1400);
 }
 
 function renderSavedEromeMenu() {
@@ -5174,6 +5507,8 @@ async function waitForEromeBackgroundScrapeSlot() {
 }
 
 async function loadEromeAsCards() {
+  window.PongActiveSavedEromeRefreshUrl = '';
+
   const targets = getEromeScrapeTargets();
 
   if (!targets.length) {
@@ -6101,6 +6436,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=87"></script>
+<script src="pong-sync.js?v=88"></script>
 </body>
 </html>
