@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">22.97</div>
+  <div class="version-number">22.98</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4729,11 +4729,15 @@ async function saveCurrentEromeArtistsLocally() {
 
   const targets = getEromeScrapeTargets();
   const loadedRecordUrls = Object.keys(loadedRecords);
-  const list = targets.length
-    ? targets
-    : loadedRecordUrls.length
-      ? loadedRecordUrls
-      : [getEromeLaunchUrl()].filter(Boolean);
+  const list = [...new Set(
+    [
+      ...targets,
+      ...loadedRecordUrls,
+      ...(targets.length || loadedRecordUrls.length ? [] : [getEromeLaunchUrl()])
+    ]
+      .map(url => normalizeEromeProfileSaveUrl(url))
+      .filter(Boolean)
+  )];
   let savedCount = 0;
   let savedVideos = 0;
   let skippedCount = 0;
@@ -6097,6 +6101,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=86"></script>
+<script src="pong-sync.js?v=87"></script>
 </body>
 </html>
