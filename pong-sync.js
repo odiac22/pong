@@ -1138,6 +1138,14 @@
 
   async function updateSaveCountersOverride() {
     updateSaveCountersFromData();
+
+    try {
+      const loaded = await fetchSharedDataFromGitHub();
+      updateSaveCountersFromData(loaded.data);
+      scheduleSavedPlaybackCacheWrite(loaded.data);
+    } catch (error) {
+      console.warn('[Pong saved] Could not refresh save counters from shared data', error);
+    }
   }
 
   function shuffleArray(arr) {
@@ -2715,15 +2723,11 @@
 
     const fullLabel = getCurrentArtistSaveLabel();
 
-    label.textContent = compactSideButtonLabel(fullLabel);
+    label.textContent = 'Artist';
     button.title = `Press to save current album bundle (${fullLabel || 'Artist'}). Hold 2 seconds to play saved bundles randomized.`;
   }
 
   function ensureCurrentArtistSaveLabelUpdater() {
-    if (!window.PongArtistSaveLabelTimer) {
-      window.PongArtistSaveLabelTimer = setInterval(updateCurrentArtistSaveLabel, 700);
-    }
-
     updateCurrentArtistSaveLabel();
   }
 
@@ -2788,20 +2792,14 @@
 
     try {
       const result = await updateSharedDataWithTokenRetry(data => {
-        const bundleResult = applyArtistBundleToData(data, bundleInfo, artistVideos);
-        const addedSavedVideoCount = addSavedVideosToData(data, artistVideos, artistKey);
-
-        return {
-          ...bundleResult,
-          addedSavedVideoCount
-        };
+        return applyArtistBundleToData(data, bundleInfo, artistVideos);
       });
 
       updateSaveCountersFromData(result.data);
       scheduleSavedPlaybackCacheWrite(result.data);
 
-      if (result.result.addedBundleVideoCount > 0 || result.result.addedSavedVideoCount > 0) {
-        showMsg(`Saved bundle + ${result.result.addedBundleVideoCount} videos, ${result.result.addedSavedVideoCount} saved links 👤`);
+      if (result.result.addedBundleVideoCount > 0) {
+        showMsg(`Saved bundle + ${result.result.addedBundleVideoCount} videos 👤`);
       } else {
         showMsg('Bundle already saved');
       }
