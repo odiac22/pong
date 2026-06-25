@@ -1879,6 +1879,7 @@
     currentBatch = 0;
     currentVideoIndex = 0;
     activePlaybackRange = null;
+    if (typeof viewedVideoKeys !== 'undefined') viewedVideoKeys = new Set();
 
     const hasSavedBundles = Array.isArray(newPasteEvents) && newPasteEvents.length > 0;
     const shouldUseSlidingPlayback = urls.length > BATCH_SIZE || hasSavedBundles;

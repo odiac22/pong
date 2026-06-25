@@ -326,6 +326,13 @@
       padding: 1px 5px; border-radius: 10px; font-size: 9px;
       white-space: nowrap; pointer-events: none;
     }
+    .paste-nav-button::before {
+      content: attr(data-unviewed); position: absolute; top: -17px; left: 50%;
+      transform: translateX(-50%); background: rgba(8,12,16,0.58); color: rgba(255,255,255,0.74);
+      padding: 1px 5px; border-radius: 10px; font-size: 9px;
+      white-space: nowrap; pointer-events: none;
+    }
+    .paste-nav-button[data-unviewed=""]::before { display: none; }
     .paste-nav-button:hover, .paste-nav-button:active { opacity: 0.85; transform: translateY(-50%) scale(1.06); }
     .sorting-indicator {
       position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
@@ -631,7 +638,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.01</div>
+  <div class="version-number">23.02</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -686,6 +693,7 @@ let deckNavigationLockedUntil = 0;
 let deckAutoPromotionLockedUntil = 0;
 let deckReadyPromotionTimer = null;
 let deckLastEmptyNoticeAt = 0;
+let viewedVideoKeys = new Set();
 
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
@@ -1520,7 +1528,8 @@ function saveSession() {
       currentLoadedRangeIsFull,
       currentRenderBatchSize,
       eromeBatchAutoAdvance,
-      slidingPlaybackRespectsRange
+      slidingPlaybackRespectsRange,
+      viewedVideoKeys: [...viewedVideoKeys]
     }));
   } catch(e) {}
 }
@@ -1549,6 +1558,7 @@ function loadSession() {
     eromeBatchAutoAdvance = s.eromeBatchAutoAdvance === true;
     slidingPlaybackRespectsRange = s.slidingPlaybackRespectsRange === true;
     window.PongSlidingPlaybackRespectsRange = slidingPlaybackRespectsRange;
+    viewedVideoKeys = new Set(Array.isArray(s.viewedVideoKeys) ? s.viewedVideoKeys.map(String) : []);
     setCurrentLoadedRange(
       Number(s.currentLoadedRangeStart || 0),
       Number(s.currentLoadedRangeEnd || 0),
@@ -1973,7 +1983,57 @@ function getCounterBatchText() {
 }
 
 function getVideoCounterText(localIndex) {
-  return `${Math.max(0, localIndex) + 1}/${videoUrls.length} (${getCounterBatchText()})`;
+  const globalIndex = getVideoGlobalIndexForLocalIndex(localIndex);
+  const hasRange = hasActivePlaybackRange();
+  const rangeStart = hasRange ? activePlaybackRange.start : 0;
+  const rangeEnd = hasRange ? getPlaybackRangeEnd(true) : allVideoUrls.length;
+  const total = Math.max(0, rangeEnd - rangeStart) || videoUrls.length;
+  const position = globalIndex >= rangeStart && globalIndex < rangeEnd
+    ? globalIndex - rangeStart + 1
+    : Math.max(0, localIndex) + 1;
+
+  return `${Math.max(1, position)}/${Math.max(1, total)} (${getCounterBatchText()})`;
+}
+
+function getViewedVideoKeyForGlobalIndex(globalIndex) {
+  const index = Number(globalIndex);
+
+  return Number.isInteger(index) && index >= 0 ? String(index) : '';
+}
+
+function getCurrentViewedCounterBounds() {
+  if (hasActivePlaybackRange()) {
+    return {
+      start: Math.max(0, Number(activePlaybackRange.start || 0)),
+      end: Math.max(0, Math.min(allVideoUrls.length, getPlaybackRangeEnd(true)))
+    };
+  }
+
+  return {
+    start: 0,
+    end: allVideoUrls.length || videoUrls.length || 0
+  };
+}
+
+function getUnviewedVideoCount() {
+  const bounds = getCurrentViewedCounterBounds();
+  let remaining = 0;
+
+  for (let index = bounds.start; index < bounds.end; index++) {
+    if (!viewedVideoKeys.has(getViewedVideoKeyForGlobalIndex(index))) remaining++;
+  }
+
+  return remaining;
+}
+
+function updateViewedRemainingCounter() {
+  const btn = document.getElementById('paste-nav-button');
+
+  if (!btn) return;
+
+  const remaining = getUnviewedVideoCount();
+
+  btn.setAttribute('data-unviewed', allVideoUrls.length || videoUrls.length ? String(remaining) : '');
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -2880,6 +2940,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   if (oldIndex === targetIndex && target.classList.contains('deck-active')) {
     tuneVideoPreloadAround(target);
     updateBatchReadyCounter();
+    updateViewedRemainingCounter();
     return true;
   }
 
@@ -2919,6 +2980,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   ensureVideoCounter().textContent = getVideoCounterText(currentVideoIndex);
   tuneVideoPreloadAround(target);
   updateBatchReadyCounter();
+  updateViewedRemainingCounter();
 
   if (oldIndex !== targetIndex) scheduleSessionSave(450);
 
@@ -3583,7 +3645,19 @@ function loadNextBatch(restoreIndex) {
 
 function markVideoViewed(wrapper) {
   if (!wrapper) return;
+
+  const localIndex = Number(wrapper.dataset.index);
+  const globalIndex = getVideoGlobalIndexForLocalIndex(localIndex);
+  const key = getViewedVideoKeyForGlobalIndex(globalIndex);
+  const wasViewed = wrapper.dataset.viewed === 'true' && (!key || viewedVideoKeys.has(key));
+
   wrapper.dataset.viewed = 'true';
+
+  if (key) viewedVideoKeys.add(key);
+  if (!wasViewed) {
+    updateViewedRemainingCounter();
+    scheduleSessionSave(900);
+  }
 }
 
 function hasVideoDuration(video) {
@@ -3853,6 +3927,7 @@ function resetPasteEvents(){
   pendingPastes=[];
   syncPendingPasteCacheState();
   currentPasteIndex=-1;
+  viewedVideoKeys = new Set();
   updatePasteNavigationButton();
 }
 
@@ -3878,6 +3953,7 @@ function updatePasteNavigationButton(){
     btn.setAttribute('data-count', pendingCount + 'p');
     btn.style.opacity='0.74';
     btn.style.background='rgba(103,232,249,0.22)';
+    updateViewedRemainingCounter();
     return;
   }
 
@@ -3891,6 +3967,8 @@ function updatePasteNavigationButton(){
     btn.style.opacity='0.74';
     btn.style.background='rgba(103,232,249,0.22)';
   }
+
+  updateViewedRemainingCounter();
 }
 
 // ─── Control buttons ──────────────────────────────────────────────────────────
@@ -3988,6 +4066,7 @@ loadVideosButton.addEventListener('click', async ()=>{
 
   allVideoUrls = shuffledLoad.urls;
   allVideoMetadata = shuffledLoad.metadata.map(meta => meta || {});
+  viewedVideoKeys = new Set();
   const shouldUseEromeTwentyCardMode = window.PongEromeAutoAdvanceOnce === true;
   const shouldUseRegularSlidingMode = !shouldUseEromeTwentyCardMode &&
     (newUrls.length > BATCH_SIZE || shuffledLoad.pasteEvents.length > 0);
@@ -4029,6 +4108,7 @@ loadVideosButton.addEventListener('click', async ()=>{
   syncPendingPasteCacheState();
 
   updatePasteNavigationButton();
+  updateViewedRemainingCounter();
   loadNextBatch();
   videoUrlsInput.value='';
   setTimeout(hideControls,1000);
@@ -6476,6 +6556,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=90"></script>
+<script src="pong-sync.js?v=91"></script>
 </body>
 </html>
