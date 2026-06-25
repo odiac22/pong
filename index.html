@@ -638,7 +638,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.03</div>
+  <div class="version-number">23.04</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1905,6 +1905,7 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   if (spacer) videoContainer.appendChild(spacer);
   moveDeckIndexToBack(removeIndex);
   updateBatchReadyCounter();
+  updateViewedRemainingCounter();
   tuneVideoPreloadAround(getDeckWrapper(deckCurrentIndex));
   scheduleSessionSave(500);
 
@@ -2016,14 +2017,9 @@ function getCurrentViewedCounterBounds() {
 }
 
 function getUnviewedVideoCount() {
-  const bounds = getCurrentViewedCounterBounds();
-  let remaining = 0;
+  const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
 
-  for (let index = bounds.start; index < bounds.end; index++) {
-    if (!viewedVideoKeys.has(getViewedVideoKeyForGlobalIndex(index))) remaining++;
-  }
-
-  return remaining;
+  return wrappers.filter(wrapper => isWrapperReady(wrapper) && !isWrapperViewed(wrapper)).length;
 }
 
 function updateViewedRemainingCounter() {
@@ -2639,6 +2635,7 @@ function updateVideoReadyLoader(video, forceReady = false) {
 
   const loader = wrapper.querySelector('.video-ready-loader');
   const percentText = wrapper.querySelector('.video-ready-percent');
+  const wasReady = wrapper.dataset.readyPlayable === 'true';
   const percent = forceReady ? 100 : getVideoReadyPercent(video);
   const rounded = Math.round(percent);
 
@@ -2664,6 +2661,9 @@ function updateVideoReadyLoader(video, forceReady = false) {
   }
 
   updateBatchReadyCounter();
+  if (wasReady !== (wrapper.dataset.readyPlayable === 'true')) {
+    updateViewedRemainingCounter();
+  }
   maybePromoteReadyDeckVideo(wrapper);
 }
 
