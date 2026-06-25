@@ -631,7 +631,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.00</div>
+  <div class="version-number">23.01</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -663,6 +663,7 @@ let currentLoadedRangeIsFull = false;
 const BATCH_SIZE = 20;
 let currentRenderBatchSize = BATCH_SIZE;
 let eromeBatchAutoAdvance = false;
+let slidingPlaybackRespectsRange = false;
 let eromeSlidingRenderPending = false;
 const VIDEO_LOAD_RETRY_DELAYS_MS = [3000, 5000, 7000, 10000, 15000, 20000];
 const VIDEO_LOAD_RETRY_POLL_MS = 1000;
@@ -1518,7 +1519,8 @@ function saveSession() {
       currentLoadedRangeEnd,
       currentLoadedRangeIsFull,
       currentRenderBatchSize,
-      eromeBatchAutoAdvance
+      eromeBatchAutoAdvance,
+      slidingPlaybackRespectsRange
     }));
   } catch(e) {}
 }
@@ -1545,6 +1547,8 @@ function loadSession() {
     activePlaybackRange = s.activePlaybackRange || null;
     setCurrentRenderBatchSize(s.currentRenderBatchSize || BATCH_SIZE);
     eromeBatchAutoAdvance = s.eromeBatchAutoAdvance === true;
+    slidingPlaybackRespectsRange = s.slidingPlaybackRespectsRange === true;
+    window.PongSlidingPlaybackRespectsRange = slidingPlaybackRespectsRange;
     setCurrentLoadedRange(
       Number(s.currentLoadedRangeStart || 0),
       Number(s.currentLoadedRangeEnd || 0),
@@ -1631,7 +1635,7 @@ function getActiveRangeTotal() {
 function getPlaybackRangeEnd(hasRange = hasActivePlaybackRange()) {
   if (!hasRange) return allVideoUrls.length;
 
-  return eromeBatchAutoAdvance
+  return eromeBatchAutoAdvance && !slidingPlaybackRespectsRange
     ? allVideoUrls.length
     : Math.min(activePlaybackRange.end, allVideoUrls.length);
 }
@@ -1649,13 +1653,18 @@ function setCurrentRenderBatchSize(size) {
   window.PongCurrentRenderBatchSize = next;
 }
 
-function setEromeTwentyCardMode(enabled) {
+function setEromeTwentyCardMode(enabled, options = {}) {
   eromeBatchAutoAdvance = enabled === true;
   window.PongEromeBatchAutoAdvance = eromeBatchAutoAdvance;
+  slidingPlaybackRespectsRange = eromeBatchAutoAdvance && options?.respectRange === true;
+  window.PongSlidingPlaybackRespectsRange = slidingPlaybackRespectsRange;
 
   if (eromeBatchAutoAdvance) {
     setCurrentRenderBatchSize(BATCH_SIZE);
     window.PongLoadAllVideosOnce = false;
+  } else {
+    slidingPlaybackRespectsRange = false;
+    window.PongSlidingPlaybackRespectsRange = false;
   }
 }
 
@@ -3980,9 +3989,15 @@ loadVideosButton.addEventListener('click', async ()=>{
   allVideoUrls = shuffledLoad.urls;
   allVideoMetadata = shuffledLoad.metadata.map(meta => meta || {});
   const shouldUseEromeTwentyCardMode = window.PongEromeAutoAdvanceOnce === true;
+  const shouldUseRegularSlidingMode = !shouldUseEromeTwentyCardMode &&
+    (newUrls.length > BATCH_SIZE || shuffledLoad.pasteEvents.length > 0);
+  const shouldUseSlidingMode = shouldUseEromeTwentyCardMode || shouldUseRegularSlidingMode;
+
   window.PongEromeAutoAdvanceOnce = false;
-  setEromeTwentyCardMode(shouldUseEromeTwentyCardMode);
-  if (!shouldUseEromeTwentyCardMode) {
+  setEromeTwentyCardMode(shouldUseSlidingMode, {
+    respectRange: shouldUseRegularSlidingMode
+  });
+  if (!shouldUseSlidingMode) {
     setCurrentRenderBatchSize(BATCH_SIZE);
   }
   window.PongLoadedSavedMode = shouldUseEromeTwentyCardMode ? 'erome' : 'normal';
@@ -4000,6 +4015,10 @@ loadVideosButton.addEventListener('click', async ()=>{
 
   pendingPastes = [];
   currentPasteIndex = -1;
+
+  if (shouldUseRegularSlidingMode && pasteEvents.length) {
+    setActivePlaybackRangeForPasteEvent(0);
+  }
 
   console.log('[Load] Finalised ' + pasteEvents.length + ' paste bundles');
 
@@ -6457,6 +6476,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=89"></script>
+<script src="pong-sync.js?v=90"></script>
 </body>
 </html>

@@ -1880,6 +1880,15 @@
     currentVideoIndex = 0;
     activePlaybackRange = null;
 
+    const hasSavedBundles = Array.isArray(newPasteEvents) && newPasteEvents.length > 0;
+    const shouldUseSlidingPlayback = urls.length > BATCH_SIZE || hasSavedBundles;
+
+    if (typeof setEromeTwentyCardMode === 'function') {
+      setEromeTwentyCardMode(shouldUseSlidingPlayback, {
+        respectRange: hasSavedBundles
+      });
+    }
+
     if (Array.isArray(newPasteEvents)) {
       pasteEvents = newPasteEvents;
       currentPasteIndex = -1;
@@ -2750,6 +2759,9 @@
         };
       });
 
+      updateSaveCountersFromData(result.data);
+      scheduleSavedPlaybackCacheWrite(result.data);
+
       if (result.result.added) {
         showMsg('Saved current video 💾');
       } else {
@@ -2775,11 +2787,20 @@
 
     try {
       const result = await updateSharedDataWithTokenRetry(data => {
-        return applyArtistBundleToData(data, bundleInfo, artistVideos);
+        const bundleResult = applyArtistBundleToData(data, bundleInfo, artistVideos);
+        const addedSavedVideoCount = addSavedVideosToData(data, artistVideos, artistKey);
+
+        return {
+          ...bundleResult,
+          addedSavedVideoCount
+        };
       });
 
-      if (result.result.addedBundleVideoCount > 0) {
-        showMsg(`Saved bundle + ${result.result.addedBundleVideoCount} videos 👤`);
+      updateSaveCountersFromData(result.data);
+      scheduleSavedPlaybackCacheWrite(result.data);
+
+      if (result.result.addedBundleVideoCount > 0 || result.result.addedSavedVideoCount > 0) {
+        showMsg(`Saved bundle + ${result.result.addedBundleVideoCount} videos, ${result.result.addedSavedVideoCount} saved links 👤`);
       } else {
         showMsg('Bundle already saved');
       }
