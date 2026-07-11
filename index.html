@@ -638,7 +638,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.04</div>
+  <div class="version-number">23.05</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -683,7 +683,11 @@ let deckOrder = [];
 let deckHistory = [];
 let deckForwardHistory = [];
 const DECK_HISTORY_LIMIT = 80;
+const DECK_PRELOAD_RADIUS = 2;
+const DECK_INITIAL_WARM_COUNT = 5;
 const EROME_SESSION_SAVE_MIN_DELAY_MS = 6000;
+const EROME_LARGE_SESSION_SAVE_MIN_DELAY_MS = 22000;
+const EROME_LARGE_SESSION_URL_THRESHOLD = 600;
 let deckCurrentIndex = -1;
 let deckRestoreIndex = null;
 let deckSwipeControllerInstalled = false;
@@ -1618,13 +1622,22 @@ function scheduleSessionSave(delay = 350) {
 
   const requestedDelay = Number(delay);
   const safeDelay = Number.isFinite(requestedDelay) ? Math.max(0, requestedDelay) : 350;
-  const effectiveDelay = (eromeBatchAutoAdvance || window.PongLoadedSavedMode === 'erome')
-    ? Math.max(safeDelay, EROME_SESSION_SAVE_MIN_DELAY_MS)
+  const isEromeSession = eromeBatchAutoAdvance || window.PongLoadedSavedMode === 'erome';
+  const eromeSaveDelay = allVideoUrls.length >= EROME_LARGE_SESSION_URL_THRESHOLD
+    ? EROME_LARGE_SESSION_SAVE_MIN_DELAY_MS
+    : EROME_SESSION_SAVE_MIN_DELAY_MS;
+  const effectiveDelay = isEromeSession
+    ? Math.max(safeDelay, eromeSaveDelay)
     : safeDelay;
 
   clearTimeout(sessionSaveTimer);
   sessionSaveTimer = setTimeout(() => {
     sessionSaveTimer = null;
+    if (isEromeSession && typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => saveSession(), { timeout: 5000 });
+      return;
+    }
+
     saveSession();
   }, effectiveDelay);
 }
@@ -2519,7 +2532,11 @@ function tuneVideoPreloadAround(activeWrapper) {
     if (!v) return;
 
     const distance = activeIndex < 0 ? Infinity : Math.abs(index - activeIndex);
-    const shouldWarm = DECK_MODE_ENABLED || distance <= 1;
+    const shouldWarm = DECK_MODE_ENABLED
+      ? activeIndex < 0
+        ? index < DECK_INITIAL_WARM_COUNT
+        : distance <= DECK_PRELOAD_RADIUS
+      : distance <= 1;
     const desiredPreload = shouldWarm ? 'auto' : 'metadata';
     const lastLoadKick = Number(v.dataset.lastLoadKick || 0);
 
@@ -2696,11 +2713,21 @@ function retryVisibleBatchVideoLoads(token) {
   if (token !== visibleBatchRetryToken) return;
 
   const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
+  const activeIndex = wrappers.findIndex(wrapper => wrapper.classList.contains('deck-active'));
   let stillPending = 0;
   let nextDelay = VIDEO_LOAD_RETRY_POLL_MS;
   const now = Date.now();
 
-  wrappers.forEach(wrapper => {
+  wrappers.forEach((wrapper, wrapperIndex) => {
+    const distance = activeIndex < 0 ? Infinity : Math.abs(wrapperIndex - activeIndex);
+    const shouldRetry = !DECK_MODE_ENABLED
+      ? true
+      : activeIndex < 0
+        ? wrapperIndex < DECK_INITIAL_WARM_COUNT
+        : distance <= DECK_PRELOAD_RADIUS;
+
+    if (!shouldRetry) return;
+
     const video = wrapper.querySelector('video');
 
     if (!video || wrapper.dataset.autoRetryDone === 'true') return;
@@ -2761,9 +2788,20 @@ function startVisibleBatchAutoRetry() {
 }
 
 function warmCurrentBatchVideos() {
-  const videos = Array.from(document.querySelectorAll('.video-wrapper video'));
+  const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
+  const activeIndex = wrappers.findIndex(wrapper => wrapper.classList.contains('deck-active'));
+  const videos = wrappers.map(wrapper => wrapper.querySelector('video'));
 
   videos.forEach((video, index) => {
+    if (DECK_MODE_ENABLED) {
+      const distance = activeIndex < 0 ? Infinity : Math.abs(index - activeIndex);
+      const shouldWarm = activeIndex < 0
+        ? index < DECK_INITIAL_WARM_COUNT
+        : distance <= DECK_PRELOAD_RADIUS;
+
+      if (!shouldWarm) return;
+    }
+
     setTimeout(() => {
       if (!video || !document.body.contains(video) || isVideoReadyForInitialPlayback(video)) return;
 
@@ -2979,6 +3017,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   if (eromeBatchAutoAdvance) syncCurrentPasteIndexFromVisibleVideo();
   ensureVideoCounter().textContent = getVideoCounterText(currentVideoIndex);
   tuneVideoPreloadAround(target);
+  if (DECK_MODE_ENABLED && !visibleBatchRetryTimer) startVisibleBatchAutoRetry();
   updateBatchReadyCounter();
   updateViewedRemainingCounter();
 
@@ -4265,6 +4304,50 @@ const SAVED_EROME_DB_STORE = 'artists';
 let lastEromeArtistRecords = {};
 let savedEromeMenuEl = null;
 const savedEromeRefreshJobs = new Set();
+const SAVED_EROME_FULL_RECORD_WRITE_DELAY_MS = 7000;
+const SAVED_EROME_MENU_RENDER_DELAY_MS = 1200;
+const SAVED_EROME_REFRESH_PERSIST_INTERVAL_MS = 9000;
+const savedEromeFullRecordWriteTimers = new Map();
+let savedEromeMenuRenderTimer = null;
+
+function runWhenUiIdle(callback, timeout = 2500) {
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(callback, { timeout });
+    return;
+  }
+
+  setTimeout(callback, 0);
+}
+
+function scheduleSavedEromeFullRecordWrite(record, delay = SAVED_EROME_FULL_RECORD_WRITE_DELAY_MS) {
+  const url = normalizeEromeProfileSaveUrl(record?.url || '');
+
+  if (!url || countSavedEromeVideos(record?.videoGroups) <= 0) return;
+
+  const run = () => {
+    savedEromeFullRecordWriteTimers.delete(url);
+    runWhenUiIdle(() => {
+      void putSavedEromeFullRecord(record);
+    }, 5000);
+  };
+
+  clearTimeout(savedEromeFullRecordWriteTimers.get(url));
+
+  if (delay <= 0) {
+    run();
+    return;
+  }
+
+  savedEromeFullRecordWriteTimers.set(url, setTimeout(run, delay));
+}
+
+function scheduleSavedEromeMenuRender(delay = SAVED_EROME_MENU_RENDER_DELAY_MS) {
+  clearTimeout(savedEromeMenuRenderTimer);
+  savedEromeMenuRenderTimer = setTimeout(() => {
+    savedEromeMenuRenderTimer = null;
+    renderSavedEromeMenu();
+  }, Math.max(0, delay));
+}
 
 function ensureEromeProgressEl() {
   let el = document.getElementById('erome-scrape-progress');
@@ -4680,7 +4763,7 @@ function buildCurrentLoadedEromeRecords() {
   return grouped;
 }
 
-function upsertSavedEromeArtist(rawUrl, record = {}) {
+function upsertSavedEromeArtist(rawUrl, record = {}, options = {}) {
   const url = normalizeEromeProfileSaveUrl(rawUrl);
 
   if (!url) return null;
@@ -4713,9 +4796,23 @@ function upsertSavedEromeArtist(rawUrl, record = {}) {
 
   saved[url] = nextRecord;
 
-  if (videoCount > 0) {
+  if (videoGroups.length > 0) {
     lastEromeArtistRecords[url] = nextRecord;
-    void putSavedEromeFullRecord(nextRecord);
+
+    if (!options.skipFullRecordWrite) {
+      if (options.immediateFullRecordWrite) {
+        clearTimeout(savedEromeFullRecordWriteTimers.get(url));
+        savedEromeFullRecordWriteTimers.delete(url);
+        void putSavedEromeFullRecord(nextRecord);
+      } else {
+        scheduleSavedEromeFullRecordWrite(
+          nextRecord,
+          Number.isFinite(Number(options.fullRecordWriteDelayMs))
+            ? Number(options.fullRecordWriteDelayMs)
+            : SAVED_EROME_FULL_RECORD_WRITE_DELAY_MS
+        );
+      }
+    }
   }
 
   saveSavedEromeArtists(saved);
@@ -4756,7 +4853,7 @@ function rememberEromeArtistRecordsFromAlbums(albumQueue) {
     }
   });
 
-  if (changed) renderSavedEromeMenu();
+  if (changed) scheduleSavedEromeMenuRender();
 }
 
 function rememberEromeArtistRecordsFromVideoGroups(groups) {
@@ -4815,7 +4912,7 @@ function rememberEromeArtistRecordsFromVideoGroups(groups) {
     }
   });
 
-  if (changed) renderSavedEromeMenu();
+  if (changed) scheduleSavedEromeMenuRender();
 }
 
 async function saveCurrentEromeArtistsLocally() {
@@ -4854,7 +4951,9 @@ async function saveCurrentEromeArtistsLocally() {
       return;
     }
 
-    const savedRecord = upsertSavedEromeArtist(url, record);
+    const savedRecord = upsertSavedEromeArtist(url, record, {
+      skipFullRecordWrite: true
+    });
 
     if (savedRecord) {
       savedCount++;
@@ -4986,7 +5085,7 @@ function filterNewSavedEromeGroups(groups, existingVideoKeys) {
     .filter(group => group.videos.length);
 }
 
-function persistSavedEromeRefresh(targetUrl, baseRecord, albums, videoGroups) {
+function persistSavedEromeRefresh(targetUrl, baseRecord, albums, videoGroups, options = {}) {
   const mergedGroups = compactSavedEromeVideoGroups(videoGroups);
   const mergedAlbums = compactSavedEromeAlbums([
     ...(baseRecord?.albums || []),
@@ -5002,11 +5101,21 @@ function persistSavedEromeRefresh(targetUrl, baseRecord, albums, videoGroups) {
     albumCount: mergedAlbums.length,
     videoGroups: mergedGroups,
     videoCount: countSavedEromeVideos(mergedGroups)
+  }, {
+    fullRecordWriteDelayMs: Number.isFinite(Number(options.fullRecordWriteDelayMs))
+      ? Number(options.fullRecordWriteDelayMs)
+      : SAVED_EROME_FULL_RECORD_WRITE_DELAY_MS,
+    immediateFullRecordWrite: options.immediateFullRecordWrite === true
   });
 
   if (savedRecord) {
     lastEromeArtistRecords[targetUrl] = savedRecord;
-    renderSavedEromeMenu();
+
+    if (options.renderNow) {
+      renderSavedEromeMenu();
+    } else {
+      scheduleSavedEromeMenuRender();
+    }
   }
 
   return savedRecord;
@@ -5086,6 +5195,39 @@ async function refreshSavedEromeRecordInBackground(record) {
       videos,
       force
     });
+  }
+
+  let lastRefreshPersistAt = 0;
+  let refreshPersistTimer = null;
+
+  function persistRefreshSoon(force = false) {
+    const persistNow = () => {
+      if (refreshPersistTimer) {
+        clearTimeout(refreshPersistTimer);
+        refreshPersistTimer = null;
+      }
+
+      lastRefreshPersistAt = Date.now();
+      return persistSavedEromeRefresh(targetUrl, storedRecord, albums, savedGroups, {
+        fullRecordWriteDelayMs: force ? 0 : SAVED_EROME_FULL_RECORD_WRITE_DELAY_MS,
+        immediateFullRecordWrite: force,
+        renderNow: force
+      });
+    };
+
+    if (force) return persistNow();
+
+    const elapsed = Date.now() - lastRefreshPersistAt;
+
+    if (elapsed >= SAVED_EROME_REFRESH_PERSIST_INTERVAL_MS) {
+      return persistNow();
+    }
+
+    if (!refreshPersistTimer) {
+      refreshPersistTimer = setTimeout(persistNow, SAVED_EROME_REFRESH_PERSIST_INTERVAL_MS - elapsed);
+    }
+
+    return null;
   }
 
   storedAlbums.forEach(album => {
@@ -5190,7 +5332,7 @@ async function refreshSavedEromeRecordInBackground(record) {
   }
 
   if (!albumQueue.length) {
-    persistSavedEromeRefresh(targetUrl, storedRecord, albums, savedGroups);
+    persistRefreshSoon(true);
     updateSavedRefreshProgress(
       'Saved Erome Scraper',
       `${getEromeTargetLabel(targetUrl)} - no new albums found`,
@@ -5203,7 +5345,7 @@ async function refreshSavedEromeRecordInBackground(record) {
     return;
   }
 
-  persistSavedEromeRefresh(targetUrl, storedRecord, albums, savedGroups);
+  persistRefreshSoon(false);
 
   async function scrapeSavedAlbum(album, note) {
     try {
@@ -5239,7 +5381,7 @@ async function refreshSavedEromeRecordInBackground(record) {
         if (window.PongActiveSavedEromeRefreshUrl === targetUrl && window.PongLoadedSavedMode === 'erome') {
           appendEromeGroupsToCurrentCards(newGroups, base);
         }
-        persistSavedEromeRefresh(targetUrl, storedRecord, albums, savedGroups);
+        persistRefreshSoon(false);
       }
 
       completedAlbums++;
@@ -5280,7 +5422,7 @@ async function refreshSavedEromeRecordInBackground(record) {
     );
   }
 
-  persistSavedEromeRefresh(targetUrl, storedRecord, albums, savedGroups);
+  persistRefreshSoon(true);
   updateSavedRefreshProgress(
     'Saved Erome Updated',
     newVideoCount
@@ -5505,11 +5647,12 @@ function activateFirstEromeBatch() {
 const EROME_ALBUM_SCRAPE_CONCURRENCY = 8;
 const EROME_INITIAL_ALBUM_BATCH_SIZE = 4;
 const EROME_READY_ALBUM_BUFFER_TARGET = 5;
-const EROME_BACKGROUND_ALBUM_CONCURRENCY = 3;
-const EROME_BACKGROUND_LOW_BUFFER_DELAY_MS = 120;
-const EROME_BACKGROUND_READY_BUFFER_DELAY_MS = 2200;
-const EROME_PROFILE_PAGE_CONCURRENCY = 5;
-const EROME_BACKGROUND_PROFILE_CONCURRENCY = 2;
+const EROME_BACKGROUND_ALBUM_CONCURRENCY = 2;
+const EROME_BACKGROUND_LOW_BUFFER_DELAY_MS = 650;
+const EROME_BACKGROUND_PLAYING_LOW_BUFFER_DELAY_MS = 1100;
+const EROME_BACKGROUND_READY_BUFFER_DELAY_MS = 3600;
+const EROME_PROFILE_PAGE_CONCURRENCY = 4;
+const EROME_BACKGROUND_PROFILE_CONCURRENCY = 1;
 const EROME_FETCH_TIMEOUT_MS = 8000;
 const EROME_FINAL_RETRY_TIMEOUT_MS = 16000;
 
@@ -5618,10 +5761,16 @@ async function waitForEromeBackgroundScrapeSlot() {
   const readyAlbums = getEromeReadyAlbumBufferCount();
   const needsBuffer = readyAlbums < EROME_READY_ALBUM_BUFFER_TARGET;
   const activeVideo = window.currentlyPlayingVideo;
+  const isPlaying = !!(activeVideo && !activeVideo.paused && !activeVideo.ended);
+  const delay = needsBuffer
+    ? isPlaying
+      ? EROME_BACKGROUND_PLAYING_LOW_BUFFER_DELAY_MS
+      : EROME_BACKGROUND_LOW_BUFFER_DELAY_MS
+    : EROME_BACKGROUND_READY_BUFFER_DELAY_MS;
 
-  await sleep(needsBuffer ? EROME_BACKGROUND_LOW_BUFFER_DELAY_MS : EROME_BACKGROUND_READY_BUFFER_DELAY_MS);
+  await sleep(delay);
 
-  if (!needsBuffer && activeVideo && !activeVideo.paused) {
+  if (!needsBuffer && isPlaying) {
     await sleep(EROME_BACKGROUND_READY_BUFFER_DELAY_MS);
   }
 }
@@ -5737,9 +5886,9 @@ async function loadEromeAsCards() {
 
     let imported;
 
-    rememberEromeArtistRecordsFromVideoGroups(allGroups);
-
     if (!eromeCardsStarted) {
+      rememberEromeArtistRecordsFromVideoGroups(allGroups);
+
       imported = cacheEromeCardImport(allGroups, base);
       importedGroupCount = allGroups.length;
       eromeCardsStarted = true;
@@ -5752,6 +5901,10 @@ async function loadEromeAsCards() {
       showSortingIndicator(`Loaded first ${imported.urls.length} Erome videos. Continuing in background...`);
     } else {
       const newGroups = allGroups.slice(importedGroupCount);
+
+      if (newGroups.length) {
+        rememberEromeArtistRecordsFromVideoGroups(newGroups);
+      }
 
       imported = appendEromeGroupsToCurrentCards(newGroups, base);
       importedGroupCount = allGroups.length;
@@ -6483,9 +6636,15 @@ document.addEventListener('DOMContentLoaded',()=>{
   });
 
   let skippedRecycleTimer = null;
+  let lastDeckScrollSessionSaveAt = 0;
   videoContainer.addEventListener('scroll', () => {
     if (DECK_MODE_ENABLED) {
-      scheduleSessionSave(600);
+      const now = Date.now();
+
+      if (now - lastDeckScrollSessionSaveAt > 2500) {
+        lastDeckScrollSessionSaveAt = now;
+        scheduleSessionSave(1400);
+      }
       return;
     }
 
