@@ -659,7 +659,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.10</div>
+  <div class="version-number">23.11</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5672,6 +5672,7 @@ function activateFirstEromeBatch() {
 
 // --- CoomerFans Random 40 AI loader ----------------------------------------
 const RANDOM40_OPENAI_KEY = 'pong_random40_openai_key_v1';
+const RANDOM40_ACCEPTED_ARTISTS_KEY = 'pong_random40_accepted_artists_v1';
 const RANDOM40_REJECTED_ARTISTS_KEY = 'pong_random40_rejected_artists_v1';
 const RANDOM40_PANEL_POS_KEY = 'pong_random40_panel_pos_v1';
 const RANDOM40_PASSWORD = '22';
@@ -5687,6 +5688,9 @@ const RANDOM40_MODEL = 'gpt-4.1-mini';
 const RANDOM40_PROMPT_VERSION = 'cf-vision-v6';
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_MAX_REVIEW_IMAGES = 5;
+const RANDOM40_MAX_ACCEPT_RECORDS = 80;
+const RANDOM40_MAX_ACCEPT_EXAMPLES = 4;
+const RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE = 4;
 const RANDOM40_MAX_REJECT_RECORDS = 80;
 const RANDOM40_MAX_REJECT_EXAMPLES = 4;
 const RANDOM40_REJECT_IMAGES_PER_EXAMPLE = 2;
@@ -5959,6 +5963,34 @@ function random40ArtistInfo(artistUrl, doc) {
   };
 }
 
+function random40LoadAcceptedArtists() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(RANDOM40_ACCEPTED_ARTISTS_KEY) || '[]');
+    return Array.isArray(stored) ? stored.filter(item => item?.artistUrl) : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function random40SaveAcceptedArtists(records) {
+  const clean = [];
+  const seen = new Set();
+  (records || []).forEach(item => {
+    const artistUrl = random40NormalizeArtistUrl(item?.artistUrl || '');
+    if (!artistUrl || seen.has(artistUrl)) return;
+    seen.add(artistUrl);
+    clean.push({
+      artistUrl,
+      artistName: String(item.artistName || random40ArtistNameFromUrl(artistUrl) || 'unknown').slice(0, 100),
+      imageUrls: [...new Set((item.imageUrls || []).map(url => random40NormalizeUrl(url, artistUrl)).filter(Boolean))].slice(0, RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE),
+      acceptedAt: item.acceptedAt || new Date().toISOString()
+    });
+  });
+  try {
+    localStorage.setItem(RANDOM40_ACCEPTED_ARTISTS_KEY, JSON.stringify(clean.slice(0, RANDOM40_MAX_ACCEPT_RECORDS)));
+  } catch (_) {}
+}
+
 function random40LoadRejectedArtists() {
   try {
     const stored = JSON.parse(localStorage.getItem(RANDOM40_REJECTED_ARTISTS_KEY) || '[]');
@@ -6000,6 +6032,30 @@ function random40CurrentVideoMeta() {
   return allVideoMetadata[globalIndex] || videoMetadata[localIndex] || {};
 }
 
+function random40AcceptedExampleContent(excludeArtistUrl = '') {
+  const excluded = random40NormalizeArtistUrl(excludeArtistUrl);
+  const examples = random40LoadAcceptedArtists()
+    .filter(item => random40NormalizeArtistUrl(item.artistUrl) !== excluded)
+    .filter(item => Array.isArray(item.imageUrls) && item.imageUrls.length)
+    .slice(0, RANDOM40_MAX_ACCEPT_EXAMPLES);
+  const content = [];
+
+  examples.forEach((item, index) => {
+    content.push({
+      type: 'input_text',
+      text:
+        `Accepted example ${index + 1}: ${item.artistName || random40ArtistNameFromUrl(item.artistUrl) || 'artist'}.\n` +
+        'The user pressed the artist save button for this artist. Give this visual example strong positive weight when judging future artists.'
+    });
+    item.imageUrls.slice(0, RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE).forEach((url, imageIndex) => {
+      content.push({ type: 'input_text', text: `Accepted example ${index + 1} image ${imageIndex + 1}:` });
+      content.push({ type: 'input_image', image_url: url, detail: 'low' });
+    });
+  });
+
+  return content;
+}
+
 function random40RejectedExampleContent(excludeArtistUrl = '') {
   const excluded = random40NormalizeArtistUrl(excludeArtistUrl);
   const examples = random40LoadRejectedArtists()
@@ -6024,6 +6080,63 @@ function random40RejectedExampleContent(excludeArtistUrl = '') {
   return content;
 }
 
+async function random40AcceptCurrentArtistForFutureFinds(bundleInfo = {}) {
+  const meta = random40CurrentVideoMeta();
+  const artistUrl = random40NormalizeArtistUrl(bundleInfo.artistUrl || meta.artistUrl || meta.postUrl || '');
+
+  if (!artistUrl) {
+    showSortingIndicator('No Random 40 artist URL found');
+    return false;
+  }
+
+  const artistName =
+    bundleInfo.artistDisplayName ||
+    bundleInfo.bundleLabel ||
+    meta.artistDisplayName ||
+    meta.artistName ||
+    random40ArtistNameFromUrl(artistUrl) ||
+    'artist';
+
+  try {
+    showSortingIndicator(`Adding ${artistName} as a Random 40 accepted example...`);
+    const doc = await random40FetchDoc(artistUrl, { timeoutMs: 22000 });
+    const images = random40ExtractReviewImages(doc, artistUrl, meta.imageUrl || '').slice(0, RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE);
+    const accepted = random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
+    const rejected = random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
+    random40SaveAcceptedArtists([
+      {
+        artistUrl,
+        artistName,
+        imageUrls: images,
+        acceptedAt: new Date().toISOString()
+      },
+      ...accepted
+    ]);
+    random40SaveRejectedArtists(rejected);
+    random40State?.seenArtists?.add?.(artistUrl);
+    random40State?.rejectedArtistUrls?.delete?.(artistUrl);
+    showSortingIndicator(`Random 40 will favor similar artists to ${artistName}`);
+    return true;
+  } catch (err) {
+    const accepted = random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
+    const rejected = random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
+    random40SaveAcceptedArtists([
+      {
+        artistUrl,
+        artistName,
+        imageUrls: [],
+        acceptedAt: new Date().toISOString()
+      },
+      ...accepted
+    ]);
+    random40SaveRejectedArtists(rejected);
+    random40State?.seenArtists?.add?.(artistUrl);
+    random40State?.rejectedArtistUrls?.delete?.(artistUrl);
+    showSortingIndicator(`Saved ${artistName} as accepted, but images could not load`);
+    return true;
+  }
+}
+
 async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
   const meta = random40CurrentVideoMeta();
   const artistUrl = random40NormalizeArtistUrl(bundleInfo.artistUrl || meta.artistUrl || meta.postUrl || '');
@@ -6045,7 +6158,9 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
     showSortingIndicator(`Adding ${artistName} as a Random 40 avoid example...`);
     const doc = await random40FetchDoc(artistUrl, { timeoutMs: 22000 });
     const images = random40ExtractReviewImages(doc, artistUrl, meta.imageUrl || '');
+    const accepted = random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
     const existing = random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
+    random40SaveAcceptedArtists(accepted);
     random40SaveRejectedArtists([
       {
         artistUrl,
@@ -6060,7 +6175,9 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
     showSortingIndicator(`Random 40 will avoid similar artists to ${artistName}`);
     return true;
   } catch (err) {
+    const accepted = random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
     const existing = random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
+    random40SaveAcceptedArtists(accepted);
     random40SaveRejectedArtists([
       {
         artistUrl,
@@ -6077,6 +6194,7 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
   }
 }
 
+window.PongRandom40AcceptCurrentArtist = random40AcceptCurrentArtistForFutureFinds;
 window.PongRandom40RejectCurrentArtist = random40RejectCurrentArtistForFutureFinds;
 
 function random40FindArtistsOnListing(doc, pageUrl) {
@@ -6124,6 +6242,7 @@ function random40HardFilter(artist) {
 async function random40ClassifyArtist(artist, apiKey, imageUrls) {
   const candidateUrls = [...new Set((imageUrls && imageUrls.length ? imageUrls : [artist.imageUrl]).filter(Boolean))].slice(0, RANDOM40_MAX_REVIEW_IMAGES);
   if (!candidateUrls.length) return { decision: 'reject', confidence: 1, reason: 'no image' };
+  const acceptedExamples = random40AcceptedExampleContent(artist.artistUrl);
   const rejectedExamples = random40RejectedExampleContent(artist.artistUrl);
 
   const content = [
@@ -6133,9 +6252,12 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         `Artist: ${artist.artistName || 'unknown'}\n` +
         `Prompt version: ${RANDOM40_PROMPT_VERSION}\n` +
         `Candidate images included: ${candidateUrls.length}\n\n` +
+        `Accepted visual example images included: ${acceptedExamples.filter(item => item.type === 'input_image').length}\n` +
         `Rejected visual example images included: ${rejectedExamples.filter(item => item.type === 'input_image').length}\n\n` +
         'Classify this CoomerFans artist from the candidate profile/post image set. ' +
+        'Use accepted examples as strong visual favor examples from the user. ' +
         'Use the rejected examples as visual avoid examples from the user. ' +
+        'When hard rejection rules are not triggered, give strong priority to candidates that closely resemble accepted examples. ' +
         'Reject blank/logo/placeholder/anime/artwork images, images where feet are the main subject, ' +
         'images with any visible male-presenting person, images with no clearly female-presenting adult, ' +
         'and images where the person appears underage or age is unclear. Accept only when the profile clearly shows ' +
@@ -6144,6 +6266,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         'Return unsure only for unclear crops, tiny/blurred images, weak evidence, or genuinely conflicting evidence.'
     }
   ];
+  content.push(...acceptedExamples);
   content.push(...rejectedExamples);
   candidateUrls.forEach((url, index) => {
     content.push({ type: 'input_text', text: `Candidate image ${index + 1}:` });
@@ -6166,7 +6289,8 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
             text:
               'You are a decisive image triage classifier. Return only the requested structured output. ' +
               'Do not identify the person. Do not infer ethnicity, sexuality, medical conditions, or weight status. ' +
-              'Reject any male-presenting person, male-only image, clearly non-photographic image, placeholder, feet-dominant image, or non-adult-presenting profile image.'
+              'Reject any male-presenting person, male-only image, clearly non-photographic image, placeholder, feet-dominant image, or non-adult-presenting profile image. ' +
+              'Treat user-saved accepted examples as the strongest positive preference signal after hard rejection rules.'
           }]
         },
         { role: 'user', content }

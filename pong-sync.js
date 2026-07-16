@@ -2798,6 +2798,13 @@
       updateSaveCountersFromData(result.data);
       scheduleSavedPlaybackCacheWrite(result.data);
 
+      if (
+        bundleInfo.source === 'random40' &&
+        typeof window.PongRandom40AcceptCurrentArtist === 'function'
+      ) {
+        await window.PongRandom40AcceptCurrentArtist(bundleInfo);
+      }
+
       if (result.result.addedBundleVideoCount > 0) {
         showMsg(`Saved bundle + ${result.result.addedBundleVideoCount} videos 👤`);
       } else {
