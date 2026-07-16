@@ -262,6 +262,7 @@
     #open-erome { background: rgba(34,197,94,0.20); }
     #saved-erome { background: rgba(251,191,36,0.18); }
     #auth-button { background: rgba(167,139,250,0.20); }
+    #random-40 { background: rgba(244,114,182,0.20); }
     .url-input button:hover, .url-input button:active { transform: translateY(-1px); background: rgba(255,255,255,0.12); }
     .control-button {
       position: fixed; bottom: 48px; background: var(--ui-bg);
@@ -423,6 +424,23 @@
       backdrop-filter: blur(9px); -webkit-backdrop-filter: blur(9px);
       color: var(--ui-text); pointer-events: none;
     }
+    #random40-progress {
+      display: none; position: fixed; left: 50%; top: 12px; transform: translateX(-50%);
+      z-index: 1600; width: min(280px, calc(100vw - 24px));
+      padding: 8px; border-radius: 9px; background: rgba(9,14,20,0.78);
+      color: rgba(244,248,255,0.88); border: 1px solid var(--ui-border);
+      box-shadow: 0 14px 36px rgba(0,0,0,0.38);
+      backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+      font-size: 11px;
+    }
+    .random40-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+    .random40-progress-title { font-weight: 800; color: var(--ui-text); }
+    #random40-stop {
+      border: 1px solid rgba(248,113,113,0.55); border-radius: 999px;
+      background: rgba(220,38,38,0.28); color: #fff; font: 800 10px system-ui;
+      padding: 3px 8px;
+    }
+    .random40-progress-detail { color: var(--ui-muted); line-height: 1.3; margin-bottom: 5px; }
     .erome-progress-title {
       display: flex; justify-content: space-between; gap: 10px;
       font-size: 10px; font-weight: 750; margin-bottom: 3px;
@@ -638,7 +656,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.05</div>
+  <div class="version-number">23.06</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -650,6 +668,7 @@
         <button id="open-erome">Open Erome</button>
         <button id="saved-erome">Saved Erome</button>
         <button id="auth-button">Auth URL</button>
+        <button id="random-40">Random 40</button>
       </div>
     </div>
   </div>
@@ -1483,6 +1502,7 @@ const SESSION_KEY = 'pong_session_v1';
 const UPDATE_PRESERVED_PONG_KEYS = new Set([
   'pong_github_token_v1',
   'pong_coomerfans_proxy_url_v1',
+  'pong_random40_openai_key_v1',
   'pong_save_counts_v1',
   'pong_autoplay',
   'pong_repair_item_concurrency_v1',
@@ -5644,6 +5664,601 @@ function activateFirstEromeBatch() {
   }, 500);
 }
 
+// --- CoomerFans Random 40 AI loader ----------------------------------------
+const RANDOM40_OPENAI_KEY = 'pong_random40_openai_key_v1';
+const RANDOM40_PASSWORD = '22';
+const RANDOM40_TARGET_ACCEPTED = 40;
+const RANDOM40_PAGE_MIN = 1;
+const RANDOM40_PAGE_MAX = 3500;
+const RANDOM40_AI_CONCURRENCY = 5;
+const RANDOM40_POST_CONCURRENCY = 8;
+const RANDOM40_PAGE_BATCH_SIZE = 4;
+const RANDOM40_MAX_ARTIST_PAGES = 40;
+const RANDOM40_MODEL = 'gpt-4.1-mini';
+const RANDOM40_PROMPT_VERSION = 'cf-vision-v6';
+const RANDOM40_CONFIDENCE_REVIEW = 0.95;
+const RANDOM40_MAX_REVIEW_IMAGES = 5;
+const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
+let random40State = null;
+let random40ProgressHideTimer = null;
+
+function ensureRandom40ProgressEl() {
+  let el = document.getElementById('random40-progress');
+  if (el) return el;
+
+  el = document.createElement('div');
+  el.id = 'random40-progress';
+  el.innerHTML = `
+    <div class="random40-progress-head">
+      <span id="random40-title" class="random40-progress-title">Random 40</span>
+      <button id="random40-stop" type="button">Stop</button>
+    </div>
+    <div id="random40-detail" class="random40-progress-detail">Ready</div>
+    <div class="erome-progress-track">
+      <div id="random40-fill" class="erome-progress-fill"></div>
+    </div>
+  `;
+  document.body.appendChild(el);
+  document.getElementById('random40-stop')?.addEventListener('click', () => {
+    if (random40State) {
+      random40State.stop = true;
+      updateRandom40Progress({ detail: 'Stopping after current work...', force: true });
+    }
+  });
+  return el;
+}
+
+function updateRandom40Progress({ detail, accepted, videos, pages, api, force } = {}) {
+  const state = random40State || {};
+  const now = Date.now();
+
+  if (!force && state.lastPaintAt && now - state.lastPaintAt < 700) return;
+  state.lastPaintAt = now;
+
+  const el = ensureRandom40ProgressEl();
+  const acceptedCount = Number.isFinite(Number(accepted)) ? Number(accepted) : Number(state.accepted || 0);
+  const videoCount = Number.isFinite(Number(videos)) ? Number(videos) : Number(state.videos || 0);
+  const pageCount = Number.isFinite(Number(pages)) ? Number(pages) : Number(state.pages || 0);
+  const apiCount = Number.isFinite(Number(api)) ? Number(api) : Number(state.api || 0);
+  const pct = Math.max(2, Math.min(100, Math.round((acceptedCount / RANDOM40_TARGET_ACCEPTED) * 100)));
+
+  clearTimeout(random40ProgressHideTimer);
+  el.style.display = 'block';
+  const title = document.getElementById('random40-title');
+  const detailEl = document.getElementById('random40-detail');
+  const fill = document.getElementById('random40-fill');
+  if (title) title.textContent = `Random 40 ${acceptedCount}/${RANDOM40_TARGET_ACCEPTED}`;
+  if (detailEl) detailEl.textContent = detail || `Pages ${pageCount} - Videos ${videoCount} - API ${apiCount}`;
+  if (fill) fill.style.width = `${pct}%`;
+}
+
+function hideRandom40Progress(delay = 1200) {
+  clearTimeout(random40ProgressHideTimer);
+  random40ProgressHideTimer = setTimeout(() => {
+    const el = document.getElementById('random40-progress');
+    if (el) el.style.display = 'none';
+  }, delay);
+}
+
+function getRandom40ApiKey() {
+  try {
+    const existing = String(localStorage.getItem(RANDOM40_OPENAI_KEY) || '').trim();
+    if (existing) return existing;
+  } catch (_) {}
+
+  const pass = prompt('Random 40 password:');
+  if (pass !== RANDOM40_PASSWORD) {
+    showSortingIndicator('Random 40 locked');
+    return '';
+  }
+
+  const key = prompt('Paste OpenAI API key for Random 40:');
+  const trimmed = String(key || '').trim();
+  if (!trimmed) return '';
+
+  try {
+    localStorage.setItem(RANDOM40_OPENAI_KEY, trimmed);
+  } catch (_) {}
+  return trimmed;
+}
+
+function random40ProxyUrl(rawUrl) {
+  let proxy = RANDOM40_DEFAULT_PROXY;
+  try {
+    proxy = String(localStorage.getItem('pong_coomerfans_proxy_url_v1') || proxy || '').trim().replace(/\/+$/, '');
+  } catch (_) {}
+  if (!proxy) return rawUrl;
+  return `${proxy}${proxy.includes('?') ? '&' : '?'}url=${encodeURIComponent(rawUrl)}&t=${Date.now()}`;
+}
+
+async function random40FetchText(rawUrl, options = {}) {
+  const urls = options.proxyOnly ? [random40ProxyUrl(rawUrl)] : [rawUrl, random40ProxyUrl(rawUrl)];
+  let lastError = null;
+
+  for (const url of [...new Set(urls)]) {
+    try {
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = controller ? setTimeout(() => controller.abort(), Number(options.timeoutMs || 18000)) : null;
+      const res = await fetch(url, {
+        credentials: url === rawUrl ? 'include' : 'omit',
+        mode: 'cors',
+        cache: 'no-store',
+        signal: controller?.signal
+      });
+      if (timer) clearTimeout(timer);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.text();
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw lastError || new Error('Fetch failed');
+}
+
+async function random40FetchDoc(rawUrl, options = {}) {
+  const html = await random40FetchText(rawUrl, options);
+  return new DOMParser().parseFromString(html, 'text/html');
+}
+
+function random40NormalizeArtistUrl(raw) {
+  try {
+    const url = new URL(raw, 'https://coomerfans.com/');
+    if (!/\/u\//i.test(url.pathname)) return '';
+    url.protocol = 'https:';
+    url.hostname = 'coomerfans.com';
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/$/, '');
+  } catch (_) {
+    return '';
+  }
+}
+
+function random40NormalizeUrl(raw, base) {
+  try {
+    return new URL(raw, base || 'https://coomerfans.com/').toString();
+  } catch (_) {
+    return '';
+  }
+}
+
+function random40ArtistNameFromUrl(raw) {
+  try {
+    const parts = new URL(raw, 'https://coomerfans.com/').pathname.split('/').filter(Boolean);
+    return decodeURIComponent(parts[parts.length - 1] || '').trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+function random40ArtistInfo(artistUrl, doc) {
+  const url = new URL(artistUrl, 'https://coomerfans.com/');
+  const parts = url.pathname.split('/').filter(Boolean);
+  const userIndex = parts.findIndex(part => part.toLowerCase() === 'u');
+  const service = userIndex >= 0 ? parts[userIndex + 1] || '' : '';
+  const accountId = userIndex >= 0 ? parts[userIndex + 2] || '' : '';
+  const username = userIndex >= 0 ? parts[userIndex + 3] || accountId || '' : '';
+  const artistName = decodeURIComponent(username || random40ArtistNameFromUrl(artistUrl) || 'unknown');
+  return {
+    type: 'artist',
+    source: 'coomerfans',
+    artistName,
+    artistDisplayName: artistName,
+    artistKey: service && (accountId || username)
+      ? `${service.toLowerCase()}:${decodeURIComponent(accountId || username).toLowerCase()}`
+      : url.pathname.toLowerCase(),
+    artistUrl: url.toString().replace(/\/$/, ''),
+    scrapedAt: new Date().toISOString()
+  };
+}
+
+function random40FindArtistsOnListing(doc, pageUrl) {
+  const found = new Map();
+  for (const link of doc.querySelectorAll('a[href*="/u/"]')) {
+    const artistUrl = random40NormalizeArtistUrl(link.getAttribute('href'));
+    if (!artistUrl || found.has(artistUrl)) continue;
+    const card = link.closest('.thumb, article, li, .card, .creator, .model, div') || link.parentElement || link;
+    const image = link.querySelector('img') || card?.querySelector('img');
+    const imageUrl = random40NormalizeUrl(
+      image?.currentSrc || image?.src || image?.getAttribute('data-src') || image?.getAttribute('data-lazy-src') || '',
+      pageUrl
+    );
+    const artistName = String(
+      link.getAttribute('title') ||
+      link.textContent ||
+      image?.getAttribute('alt') ||
+      random40ArtistNameFromUrl(artistUrl)
+    ).replace(/\s+/g, ' ').trim();
+    found.set(artistUrl, {
+      artistUrl,
+      artistName,
+      imageUrl,
+      pageText: String(card?.textContent || '').replace(/\s+/g, ' ').trim()
+    });
+  }
+  return [...found.values()];
+}
+
+function random40HardFilter(artist) {
+  const nameLetters = String(artist.artistName || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
+  if (nameLetters.includes('ts')) return { decision: 'reject', confidence: 1, reason: 'blocked name contains: ts' };
+  const tokens = new Set(String(`${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`)
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .split(/[^a-z0-9]+/g)
+    .filter(Boolean));
+  for (const word of ['trans', 'transgender', 'bbw', 'feet']) {
+    if (tokens.has(word)) return { decision: 'reject', confidence: 1, reason: `blocked word: ${word}` };
+  }
+  return null;
+}
+
+async function random40ClassifyArtist(artist, apiKey, imageUrls) {
+  const candidateUrls = [...new Set((imageUrls && imageUrls.length ? imageUrls : [artist.imageUrl]).filter(Boolean))].slice(0, RANDOM40_MAX_REVIEW_IMAGES);
+  if (!candidateUrls.length) return { decision: 'reject', confidence: 1, reason: 'no image' };
+
+  const content = [
+    {
+      type: 'input_text',
+      text:
+        `Artist: ${artist.artistName || 'unknown'}\n` +
+        `Prompt version: ${RANDOM40_PROMPT_VERSION}\n` +
+        `Candidate images included: ${candidateUrls.length}\n\n` +
+        'Classify this CoomerFans artist from the candidate profile/post image set. ' +
+        'Reject blank/logo/placeholder/anime/artwork images, images where feet are the main subject, ' +
+        'images with any visible male-presenting person, images with no clearly female-presenting adult, ' +
+        'and images where the person appears underage or age is unclear. Accept only when the profile clearly shows ' +
+        'a female-presenting adult and matches at least one preferred style: slim presentation, fit or athletic presentation, ' +
+        'conventionally pretty or attractive styling, or youthful adult presentation. Do not diagnose, label, or mention body weight or health status. ' +
+        'Return unsure only for unclear crops, tiny/blurred images, weak evidence, or genuinely conflicting evidence.'
+    }
+  ];
+  candidateUrls.forEach((url, index) => {
+    content.push({ type: 'input_text', text: `Candidate image ${index + 1}:` });
+    content.push({ type: 'input_image', image_url: url, detail: 'low' });
+  });
+
+  const res = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: RANDOM40_MODEL,
+      input: [
+        {
+          role: 'system',
+          content: [{
+            type: 'input_text',
+            text:
+              'You are a decisive image triage classifier. Return only the requested structured output. ' +
+              'Do not identify the person. Do not infer ethnicity, sexuality, medical conditions, or weight status. ' +
+              'Reject any male-presenting person, male-only image, clearly non-photographic image, placeholder, feet-dominant image, or non-adult-presenting profile image.'
+          }]
+        },
+        { role: 'user', content }
+      ],
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'artist_profile_decision',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              decision: { type: 'string', enum: ['accept', 'reject', 'unsure'] },
+              confidence: { type: 'number', minimum: 0, maximum: 1 },
+              reason: { type: 'string' },
+              checks: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  photograph: { type: ['boolean', 'null'] },
+                  woman_prominent: { type: ['boolean', 'null'] },
+                  male_only: { type: ['boolean', 'null'] },
+                  male_present: { type: ['boolean', 'null'] },
+                  female_presenting_adult: { type: ['boolean', 'null'] },
+                  feet_dominant: { type: ['boolean', 'null'] },
+                  logo_or_placeholder: { type: ['boolean', 'null'] }
+                },
+                required: ['photograph', 'woman_prominent', 'male_only', 'male_present', 'female_presenting_adult', 'feet_dominant', 'logo_or_placeholder']
+              }
+            },
+            required: ['decision', 'confidence', 'reason', 'checks']
+          }
+        }
+      }
+    })
+  });
+
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`OpenAI HTTP ${res.status}: ${raw.slice(0, 240)}`);
+  const payload = JSON.parse(raw);
+  const outputText = payload.output_text || payload.output?.flatMap(item => item.content || [])?.find(item => item.type === 'output_text')?.text;
+  if (!outputText) throw new Error('OpenAI returned no decision');
+  const parsed = JSON.parse(outputText);
+  const checks = parsed.checks || {};
+  if (checks.male_present === true || checks.male_only === true) {
+    return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.99), reason: 'male-presenting person visible' };
+  }
+  if (parsed.decision === 'accept' && checks.female_presenting_adult !== true) {
+    return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.95), reason: 'no clearly female-presenting adult' };
+  }
+  return { ...parsed, reason: String(parsed.reason || '').slice(0, 120) };
+}
+
+function random40ExtractReviewImages(doc, baseUrl, firstImage) {
+  const urls = [];
+  const add = raw => {
+    const url = random40NormalizeUrl(raw, baseUrl);
+    if (!url || urls.includes(url)) return;
+    if (!/\.(?:avif|gif|jpe?g|png|webp)(?:\?|$)/i.test(url) && !/\/(?:i?storage|data)\//i.test(url)) return;
+    urls.push(url);
+  };
+  add(firstImage);
+  doc.querySelectorAll('meta[property="og:image"], meta[name="twitter:image"]').forEach(node => add(node.getAttribute('content')));
+  doc.querySelectorAll('main img, article img, .post img, div.post img, img').forEach(node => {
+    const context = `${node.getAttribute('alt') || ''} ${node.className || ''}`.toLowerCase();
+    if (/\b(logo|favicon|sprite|icon|banner|placeholder|advert|ads?)\b/i.test(context)) return;
+    add(node.currentSrc || node.src || node.getAttribute('src') || node.getAttribute('data-src') || node.getAttribute('data-lazy-src'));
+  });
+  return urls.slice(0, RANDOM40_MAX_REVIEW_IMAGES);
+}
+
+function random40PageUrl(page) {
+  return `https://coomerfans.com/${page > 1 ? `?page=${page}` : ''}`;
+}
+
+function random40RandomPage() {
+  return RANDOM40_PAGE_MIN + Math.floor(Math.random() * (RANDOM40_PAGE_MAX - RANDOM40_PAGE_MIN + 1));
+}
+
+function random40ExtractVideoPostLinks(doc, baseUrl) {
+  const links = [];
+  doc.querySelectorAll('div.post').forEach(post => {
+    if (post.querySelector('img')) return;
+    const link = post.querySelector('a.view-post, a[href*="/p/"], a[href*="/post/"]');
+    const href = link?.getAttribute('href') || '';
+    if (href) links.push(random40NormalizeUrl(href, baseUrl));
+  });
+  return [...new Set(links.filter(Boolean))];
+}
+
+async function random40VideoEntriesFromPost(postUrl, artistInfo) {
+  const doc = await random40FetchDoc(postUrl, { timeoutMs: 22000 });
+  const body = doc.querySelector('div.post-body') || doc.body;
+  const urls = [];
+  body.querySelectorAll('video source[src], video[src], a[href]').forEach(node => {
+    const raw = node.getAttribute('src') || node.getAttribute('href');
+    if (raw && /\.(mp4|m4v|mov|webm)(\?|$)/i.test(raw)) {
+      urls.push(random40NormalizeUrl(raw, postUrl));
+    }
+  });
+  return [...new Set(urls.filter(Boolean))].map((videoUrl, postIndex) => ({
+    ...artistInfo,
+    type: 'video',
+    videoUrl,
+    mediaKey: extractArtistKeyFromUrl(videoUrl) || videoUrl,
+    postUrl,
+    postIndex
+  }));
+}
+
+async function random40ScrapeArtistVideos(artist) {
+  const base = artist.artistUrl;
+  const firstDoc = await random40FetchDoc(base, { timeoutMs: 22000 });
+  const artistInfo = random40ArtistInfo(base, firstDoc);
+  const postLinks = new Set(random40ExtractVideoPostLinks(firstDoc, base));
+  let page = 2;
+
+  while (page <= RANDOM40_MAX_ARTIST_PAGES) {
+    if (random40State?.stop) break;
+    const pages = Array.from({ length: RANDOM40_PAGE_BATCH_SIZE }, (_, i) => page + i);
+    const docs = await Promise.all(pages.map(n =>
+      random40FetchDoc(`${base}?page=${n}`, { timeoutMs: 16000 }).catch(() => null)
+    ));
+    let hasPosts = false;
+    docs.forEach((doc, index) => {
+      if (!doc) return;
+      if (doc.querySelector('div.post')) hasPosts = true;
+      random40ExtractVideoPostLinks(doc, `${base}?page=${pages[index]}`).forEach(url => postLinks.add(url));
+    });
+    if (!hasPosts) break;
+    page += RANDOM40_PAGE_BATCH_SIZE;
+  }
+
+  const links = [...postLinks];
+  return random40Pool(links, RANDOM40_POST_CONCURRENCY, postUrl =>
+    random40VideoEntriesFromPost(postUrl, artistInfo).catch(() => [])
+  ).then(results => results.flat());
+}
+
+function random40BuildImportPayload(entries, globalStartIndex = 0) {
+  const byArtist = new Map();
+  entries.filter(entry => entry?.videoUrl).forEach(entry => {
+    const key = entry.artistKey || entry.artistUrl;
+    if (!byArtist.has(key)) byArtist.set(key, []);
+    byArtist.get(key).push(entry);
+  });
+
+  const urls = [];
+  const metadata = [];
+  const events = [];
+
+  for (const artistEntries of byArtist.values()) {
+    const first = artistEntries[0];
+    const start = urls.length;
+    artistEntries.forEach(entry => {
+      urls.push(entry.videoUrl);
+      metadata.push({
+        ...entry,
+        artistDisplayName: entry.artistDisplayName || entry.artistName || random40ArtistNameFromUrl(entry.artistUrl)
+      });
+    });
+    events.push({
+      startIndex: Number(globalStartIndex || 0) + start,
+      count: urls.length - start,
+      artistKey: first.artistKey || first.artistUrl,
+      bundleKey: `random40:${first.artistKey || first.artistUrl}`,
+      source: 'coomerfans',
+      artistUrl: first.artistUrl,
+      postUrl: first.artistUrl,
+      artistDisplayName: first.artistDisplayName || first.artistName || '',
+      bundleLabel: first.artistDisplayName || first.artistName || '',
+      loadAll: false,
+      ready: true,
+      pending: false
+    });
+  }
+
+  return { urls, metadata, events };
+}
+
+function random40PublishEntries(entries) {
+  const payload = random40BuildImportPayload(entries, allVideoUrls.length);
+  if (!payload.urls.length) return payload;
+
+  if (!random40State.cardsStarted) {
+    parsedVideoUrlsCache = payload.urls;
+    parsedVideoMetadataCache = payload.metadata;
+    pendingPastes = payload.events.map(event => ({ ...event, startIndex: event.startIndex - allVideoUrls.length }));
+    _prevUrlCount = payload.urls.length;
+    parseCacheDirty = false;
+    syncPendingPasteCacheState();
+    updatePendingPasteButton();
+    if (videoUrlsInput) videoUrlsInput.value = `Cached Random 40: ${payload.urls.length} videos`;
+    setEromeTwentyCardMode(true);
+    window.PongEromeAutoAdvanceOnce = true;
+    window.PongLoadAllVideosOnce = false;
+    loadVideosButton.click();
+    random40State.cardsStarted = true;
+    showSortingIndicator(`Loaded first ${payload.urls.length} Random 40 videos. Continuing in background...`);
+  } else {
+    allVideoUrls.push(...payload.urls);
+    allVideoMetadata.push(...payload.metadata);
+    pasteEvents.push(...payload.events);
+    window.PongLoadedSavedMode = 'erome';
+    updatePasteNavigationButton();
+    scheduleSessionSave(700);
+  }
+
+  random40State.videos += payload.urls.length;
+  return payload;
+}
+
+async function random40Pool(items, limit, worker) {
+  const results = new Array(items.length);
+  let index = 0;
+  async function run() {
+    while (index < items.length && !random40State?.stop) {
+      const current = index++;
+      results[current] = await worker(items[current], current);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length || 1) }, run));
+  return results;
+}
+
+async function random40AnalyzeArtist(artist, apiKey) {
+  const hard = random40HardFilter(artist);
+  if (hard) return hard;
+  let decision = await random40ClassifyArtist(artist, apiKey);
+  random40State.api++;
+  if (Number(decision.confidence || 0) < RANDOM40_CONFIDENCE_REVIEW) {
+    try {
+      const doc = await random40FetchDoc(artist.artistUrl, { timeoutMs: 18000 });
+      const images = random40ExtractReviewImages(doc, artist.artistUrl, artist.imageUrl);
+      if (images.length > 1) {
+        decision = await random40ClassifyArtist(artist, apiKey, images);
+        random40State.api++;
+        decision.reason = `reviewed ${images.length} images: ${decision.reason || ''}`.slice(0, 120);
+      }
+    } catch (_) {}
+  }
+  return decision;
+}
+
+async function startRandom40() {
+  if (random40State && !random40State.done) {
+    random40State.stop = true;
+    updateRandom40Progress({ detail: 'Stopping after current work...', force: true });
+    return;
+  }
+
+  const apiKey = getRandom40ApiKey();
+  if (!apiKey) return;
+
+  random40State = {
+    accepted: 0,
+    videos: 0,
+    pages: 0,
+    api: 0,
+    cardsStarted: false,
+    stop: false,
+    done: false,
+    seenPages: new Set(),
+    seenArtists: new Set()
+  };
+
+  updateRandom40Progress({ detail: 'Starting random scan...', force: true });
+
+  try {
+    while (!random40State.stop && random40State.accepted < RANDOM40_TARGET_ACCEPTED) {
+      let page = random40RandomPage();
+      while (random40State.seenPages.has(page)) page = random40RandomPage();
+      random40State.seenPages.add(page);
+      const pageUrl = random40PageUrl(page);
+      updateRandom40Progress({ detail: `Loading page ${page}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+
+      let artists = [];
+      try {
+        const doc = await random40FetchDoc(pageUrl, { timeoutMs: 22000 });
+        artists = shuffleInPlace(random40FindArtistsOnListing(doc, pageUrl))
+          .filter(artist => artist.imageUrl && !random40State.seenArtists.has(artist.artistUrl));
+      } catch (err) {
+        random40State.pages++;
+        updateRandom40Progress({ detail: `Page ${page} failed: ${err.message}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+        continue;
+      }
+
+      random40State.pages++;
+      await random40Pool(artists, RANDOM40_AI_CONCURRENCY, async artist => {
+        if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
+        random40State.seenArtists.add(artist.artistUrl);
+        updateRandom40Progress({ detail: `AI ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} - ${random40State.accepted}/${RANDOM40_TARGET_ACCEPTED}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        const decision = await random40AnalyzeArtist(artist, apiKey).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
+        if (decision.decision !== 'accept') return;
+        if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
+        random40State.accepted++;
+        updateRandom40Progress({ detail: `Accepted ${artist.artistName}. Scraping videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+        const entries = await random40ScrapeArtistVideos(artist).catch(() => []);
+        random40PublishEntries(entries);
+        updateRandom40Progress({ detail: `${random40State.accepted}/${RANDOM40_TARGET_ACCEPTED} accepted - ${random40State.videos} videos`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+      });
+    }
+
+    random40State.done = true;
+    updateRandom40Progress({
+      detail: random40State.stop
+        ? `Stopped: ${random40State.accepted} accepted, ${random40State.videos} videos`
+        : `Done: ${random40State.accepted} accepted, ${random40State.videos} videos`,
+      accepted: random40State.accepted,
+      videos: random40State.videos,
+      pages: random40State.pages,
+      api: random40State.api,
+      force: true
+    });
+    hideRandom40Progress(2500);
+  } catch (err) {
+    random40State.done = true;
+    updateRandom40Progress({ detail: `Random 40 failed: ${err.message}`, force: true });
+  }
+}
+
 const EROME_ALBUM_SCRAPE_CONCURRENCY = 8;
 const EROME_INITIAL_ALBUM_BATCH_SIZE = 4;
 const EROME_READY_ALBUM_BUFFER_TARGET = 5;
@@ -6335,6 +6950,10 @@ function openAuthBrowser(rawUrl) {
 
 document.getElementById('auth-button').addEventListener('click',()=>{
   openAuthBrowser(document.getElementById('auth-url-input')?.value || DEFAULT_AUTH_URL);
+});
+
+document.getElementById('random-40')?.addEventListener('click',()=>{
+  startRandom40();
 });
 
 document.getElementById('open-erome').addEventListener('click',()=>{
