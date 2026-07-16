@@ -36,11 +36,13 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 
 $env:HF_HOME = if ($env:PONG_HF_HOME) { $env:PONG_HF_HOME } elseif (Test-Path 'E:\') { 'E:\pong-hf-cache' } else { Join-Path $localDir 'hf-cache' }
 $env:TRANSFORMERS_CACHE = $env:HF_HOME
+$env:HF_HUB_DISABLE_SYMLINKS_WARNING = '1'
 $env:PONG_REPO_ROOT = $RepoRoot
 
 Write-Status 'running' 'Starting Qwen LoRA training.'
-& $venvPython (Join-Path $PSScriptRoot 'train_qwen_lora.py') --repo-root $RepoRoot *>&1 | Tee-Object -FilePath $logPath -Append
+$output = & $venvPython (Join-Path $PSScriptRoot 'train_qwen_lora.py') --repo-root $RepoRoot 2>&1
 $code = $LASTEXITCODE
+$output | Tee-Object -FilePath $logPath -Append
 
 if ($code -eq 0) {
   Write-Status 'complete' 'Qwen LoRA training completed.' @{ exitCode = $code }

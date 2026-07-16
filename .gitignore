@@ -3,3 +3,5 @@ node_modules/
 .cache/
 local-ai-server.log
 .pong-local-ai/
+__pycache__/
+*.pyc
