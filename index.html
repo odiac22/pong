@@ -7332,7 +7332,6 @@ async function random40ClassifyArtistLocal(artist, endpoint, imageUrls, options 
       model: RANDOM40_LOCAL_MODEL_NAME,
       visionModel: options.visionModel || '',
       localVariant: random40NormalizeMode(options.mode || 'local'),
-      preferOllama: random40NormalizeMode(options.mode || 'local') === 'local2',
       promptVersion: RANDOM40_PROMPT_VERSION,
       artist: {
         artistUrl: artist.artistUrl,
