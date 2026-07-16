@@ -426,24 +426,24 @@
     }
     #random40-progress {
       display: none; position: fixed; right: 10px; bottom: 78px;
-      z-index: 1600; width: min(185px, calc(100vw - 18px));
-      padding: 5px 6px; border-radius: 7px; background: rgba(9,14,20,0.78);
+      z-index: 1600; width: min(145px, calc(100vw - 14px));
+      padding: 4px 5px; border-radius: 6px; background: rgba(9,14,20,0.78);
       color: rgba(244,248,255,0.88); border: 1px solid var(--ui-border);
-      box-shadow: 0 10px 24px rgba(0,0,0,0.32);
-      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-      font-size: 8px; cursor: move; touch-action: none;
+      box-shadow: 0 8px 18px rgba(0,0,0,0.30);
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      font-size: 7px; cursor: move; touch-action: none;
     }
     @media (max-width: 420px) {
-      #random40-progress { right: 7px; bottom: 72px; width: min(170px, calc(100vw - 14px)); }
+      #random40-progress { right: 6px; bottom: 70px; width: min(138px, calc(100vw - 12px)); }
     }
-    .random40-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 5px; margin-bottom: 2px; }
-    .random40-progress-title { font-size: 9px; font-weight: 800; color: var(--ui-text); }
+    .random40-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-bottom: 1px; }
+    .random40-progress-title { font-size: 8px; font-weight: 800; color: var(--ui-text); }
     #random40-stop {
       border: 1px solid rgba(248,113,113,0.55); border-radius: 999px;
-      background: rgba(220,38,38,0.28); color: #fff; font: 800 8px system-ui;
-      padding: 2px 6px; cursor: pointer; touch-action: manipulation;
+      background: rgba(220,38,38,0.28); color: #fff; font: 800 7px system-ui;
+      padding: 1px 5px; cursor: pointer; touch-action: manipulation;
     }
-    .random40-progress-detail { color: var(--ui-muted); line-height: 1.2; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .random40-progress-detail { color: var(--ui-muted); line-height: 1.15; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #random40-progress .erome-progress-track { height: 2px; }
     .erome-progress-title {
       display: flex; justify-content: space-between; gap: 10px;
@@ -660,7 +660,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.24</div>
+  <div class="version-number">23.25</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4132,8 +4132,7 @@ function updatePasteNavigationButton(){
     btn.style.opacity='0.2';
     btn.style.background='';
   } else {
-    const activeCount = getPaperclipActiveBundleCount();
-    btn.setAttribute('data-count',`${Math.max(1, paperclipStepCount)}/${activeCount || 0}`);
+    btn.setAttribute('data-count',`${Math.max(1, paperclipStepCount)}/${pasteEvents.length}`);
     btn.style.opacity='0.74';
     btn.style.background='rgba(103,232,249,0.22)';
   }
