@@ -660,7 +660,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.30</div>
+  <div class="version-number">23.31</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5778,6 +5778,7 @@ function activateFirstEromeBatch() {
 // --- CoomerFans Random 40 AI loader ----------------------------------------
 const RANDOM40_OPENAI_KEY = 'pong_random40_openai_key_v1';
 const RANDOM40_LOCAL_ENDPOINT_KEY = 'pong_random40_local_endpoint_v1';
+const RANDOM40_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787', 'http://192.168.1.124:8787'];
 const RANDOM40_ACCEPTED_ARTISTS_KEY = 'pong_random40_accepted_artists_v1';
 const RANDOM40_REJECTED_ARTISTS_KEY = 'pong_random40_rejected_artists_v1';
 const RANDOM40_PANEL_POS_KEY = 'pong_random40_panel_pos_v1';
@@ -6013,17 +6014,26 @@ async function random40PingLocalEndpoint(endpoint) {
 }
 
 async function getRandom40LocalEndpoint() {
-  let endpoint = random40NormalizeLocalEndpoint(random40StoredLocalEndpoint() || 'http://127.0.0.1:8787');
+  const stored = random40StoredLocalEndpoint();
+  const candidates = [
+    stored,
+    ...RANDOM40_LOCAL_ENDPOINTS,
+    location.hostname && /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname) ? `http://${location.hostname}:8787` : ''
+  ]
+    .map(random40NormalizeLocalEndpoint)
+    .filter(Boolean);
 
-  try {
-    await random40PingLocalEndpoint(endpoint);
-    try { localStorage.setItem(RANDOM40_LOCAL_ENDPOINT_KEY, endpoint); } catch (_) {}
-    return endpoint;
-  } catch (_) {}
+  for (const endpoint of [...new Set(candidates)]) {
+    try {
+      await random40PingLocalEndpoint(endpoint);
+      try { localStorage.setItem(RANDOM40_LOCAL_ENDPOINT_KEY, endpoint); } catch (_) {}
+      return endpoint;
+    } catch (_) {}
+  }
 
   const pasted = prompt(
     'Local AI server URL. Start start-local-ai.bat on your PC first.\nPC browser usually: http://127.0.0.1:8787\nPhone may need your PC LAN URL.',
-    endpoint
+    RANDOM40_LOCAL_ENDPOINTS[RANDOM40_LOCAL_ENDPOINTS.length - 1] || 'http://127.0.0.1:8787'
   );
   if (pasted === null) return '';
   endpoint = random40NormalizeLocalEndpoint(pasted);
