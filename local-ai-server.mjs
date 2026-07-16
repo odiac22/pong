@@ -23,6 +23,9 @@ const FINETUNE_JSONL_PATH = path.join(LOCAL_AI_DIR, 'qwen-lora-dataset.jsonl');
 const FINETUNE_STATUS_PATH = path.join(LOCAL_AI_DIR, 'finetune-status.json');
 const FINETUNE_IMAGE_DIR = path.join(LOCAL_AI_DIR, 'training-images');
 const FINETUNE_RUN_SCRIPT = path.join(process.cwd(), 'scripts', 'run-lora-train.ps1');
+const LORA_INFERENCE_RUN_SCRIPT = path.join(process.cwd(), 'scripts', 'run-lora-infer.ps1');
+const LORA_INFERENCE_URL = (process.env.PONG_LORA_INFERENCE_URL || 'http://127.0.0.1:8790').replace(/\/+$/, '');
+const LORA_ADAPTER_DIR = path.join(LOCAL_AI_DIR, 'qwen-lora', 'latest');
 const FINETUNE_AUTO_RUN = process.env.PONG_LORA_AUTOTRAIN !== '0';
 const FINETUNE_MAX_IMAGE_BYTES = Number(process.env.PONG_LORA_MAX_IMAGE_BYTES || 12 * 1024 * 1024);
 const MAX_LEARNED_RECORDS = 2000;
@@ -39,6 +42,8 @@ const ollamaFailureByModel = new Map();
 const embeddingCache = new Map();
 let learnedStorePromise = null;
 let fineTuneProcess = null;
+let loraInferenceProcess = null;
+let loraInferenceStarting = null;
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -426,6 +431,86 @@ async function writeFineTuneStatus(patch) {
   };
   await writeJsonFile(FINETUNE_STATUS_PATH, next);
   return next;
+}
+
+async function loraAdapterExists() {
+  try {
+    await fs.access(path.join(LORA_ADAPTER_DIR, 'adapter_model.safetensors'));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 3000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 180)}`);
+    return text ? JSON.parse(text) : {};
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function loraInferenceHealth(timeoutMs = 2500) {
+  return fetchJsonWithTimeout(`${LORA_INFERENCE_URL}/health?t=${Date.now()}`, {}, timeoutMs);
+}
+
+async function ensureLoraInferenceService() {
+  if (!(await loraAdapterExists())) return null;
+
+  try {
+    const health = await loraInferenceHealth(1200);
+    if (health?.ok && health?.ready) return health;
+  } catch (_) {}
+
+  if (loraInferenceStarting) return loraInferenceStarting;
+  if (loraInferenceProcess) return null;
+
+  loraInferenceStarting = (async () => {
+    try {
+      await fs.access(LORA_INFERENCE_RUN_SCRIPT);
+      loraInferenceProcess = spawn('powershell.exe', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        LORA_INFERENCE_RUN_SCRIPT,
+        '-RepoRoot',
+        process.cwd()
+      ], {
+        cwd: process.cwd(),
+        windowsHide: true,
+        detached: false,
+        stdio: 'ignore'
+      });
+
+      loraInferenceProcess.once('exit', () => {
+        loraInferenceProcess = null;
+      });
+
+      for (let i = 0; i < 90; i++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        try {
+          const health = await loraInferenceHealth(2000);
+          if (health?.ok && health?.ready) return health;
+        } catch (_) {}
+      }
+    } catch (_) {
+      loraInferenceProcess = null;
+    } finally {
+      loraInferenceStarting = null;
+    }
+    return null;
+  })();
+
+  return loraInferenceStarting;
 }
 
 async function storeFineTuneImages(artistUrl, imageUrls) {
@@ -857,6 +942,26 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
   };
 }
 
+async function classifyWithLoraVision({ artist, candidateUrls, siglipDecision, imageGrades, rejectionSummary = '' }) {
+  const health = await ensureLoraInferenceService();
+  if (!health?.ready) {
+    throw new Error('LoRA inference service is not ready');
+  }
+
+  return fetchJsonWithTimeout(`${LORA_INFERENCE_URL}/classify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      artist,
+      candidateImageUrls: candidateUrls.slice(0, QWEN_CANDIDATE_IMAGES),
+      siglipDecision,
+      imageGrades,
+      rejectionSummary,
+      promptVersion: 'random40-lora-v1'
+    })
+  }, Number(process.env.PONG_LORA_CLASSIFY_TIMEOUT_MS || 90000));
+}
+
 async function classify(payload) {
   const artist = payload.artist || {};
   const visionModel = requestedVisionModel(payload.visionModel);
@@ -934,40 +1039,53 @@ async function classify(payload) {
   ]);
   let qwen;
   try {
-    qwen = await classifyWithOllamaVision({
+    qwen = await classifyWithLoraVision({
       artist,
       candidateUrls,
       siglipDecision: final,
       imageGrades,
-      acceptedExampleUrls,
-      rejectedExampleUrls,
-      rejectionSummary,
-      visionModel
     });
+    qwen.source = qwen.source || 'qwen_lora';
   } catch (error) {
-    const message = error.message || String(error);
-    if (/CUDA|PTX|Ollama HTTP 500|model/i.test(message)) {
-      ollamaFailureByModel.set(visionModel, message.slice(0, 180));
-      if (visionModel === OLLAMA_VISION_MODEL) {
-        ollamaVisionDisabled = true;
-        ollamaFailureReason = message.slice(0, 180);
+    const loraMessage = error.message || String(error);
+    try {
+      qwen = await classifyWithOllamaVision({
+        artist,
+        candidateUrls,
+        siglipDecision: final,
+        imageGrades,
+        acceptedExampleUrls,
+        rejectedExampleUrls,
+        rejectionSummary,
+        visionModel
+      });
+      qwen.source = qwen.source || 'ollama_fallback';
+      qwen.lora_error = loraMessage.slice(0, 180);
+    } catch (fallbackError) {
+      const message = fallbackError.message || String(fallbackError);
+      if (/CUDA|PTX|Ollama HTTP 500|model/i.test(message)) {
+        ollamaFailureByModel.set(visionModel, message.slice(0, 180));
+        if (visionModel === OLLAMA_VISION_MODEL) {
+          ollamaVisionDisabled = true;
+          ollamaFailureReason = message.slice(0, 180);
+        }
       }
+      qwen = {
+        decision: 'unsure',
+        confidence: 0.5,
+        reason: `qwen unavailable: lora ${loraMessage}; fallback ${message}`,
+        checks: {
+          photograph: null,
+          woman_prominent: null,
+          male_only: null,
+          male_present: null,
+          female_presenting_adult: null,
+          appears_over_50: null,
+          feet_dominant: null,
+          logo_or_placeholder: null
+        }
+      };
     }
-    qwen = {
-      decision: 'unsure',
-      confidence: 0.5,
-      reason: `qwen unavailable: ${message}`,
-      checks: {
-        photograph: null,
-        woman_prominent: null,
-        male_only: null,
-        male_present: null,
-        female_presenting_adult: null,
-        appears_over_50: null,
-        feet_dominant: null,
-        logo_or_placeholder: null
-      }
-    };
   }
 
   let combined = /^qwen unavailable:/i.test(qwen.reason || '')
@@ -997,9 +1115,16 @@ async function classify(payload) {
     }
   }
 
+  const actualVisionLabel = qwen.source === 'qwen_lora'
+    ? 'qwen-lora'
+    : qwen.source === 'ollama_fallback'
+      ? `${visionModel} fallback`
+      : visionModel;
+
   return {
     ...combined,
-    model: `${MODEL} + ${visionModel}`,
+    model: `${MODEL} + ${actualVisionLabel}`,
+    vision_source: qwen.source || 'ollama',
     examples: {
       accepted_images: acceptedVectors.length,
       rejected_images: rejectedVectors.length,
@@ -1027,6 +1152,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/health') {
       const learnedStore = await loadLearnedStore();
       const fineTuneStatus = await readJsonFile(FINETUNE_STATUS_PATH, { status: 'idle' });
+      const adapterPresent = await loraAdapterExists();
+      let adapterHealth = null;
+      try {
+        adapterHealth = await loraInferenceHealth(900);
+      } catch (_) {}
       json(res, 200, {
         ok: true,
         app: 'pong-local-ai',
@@ -1045,7 +1175,32 @@ const server = http.createServer(async (req, res) => {
           status: fineTuneProcess ? 'running' : fineTuneStatus.status || 'idle',
           message: fineTuneStatus.message || '',
           updatedAt: fineTuneStatus.updatedAt || ''
+        },
+        lora_inference: {
+          adapter_present: adapterPresent,
+          running: Boolean(loraInferenceProcess),
+          ready: Boolean(adapterHealth?.ready),
+          url: LORA_INFERENCE_URL,
+          model: adapterHealth?.model || '',
+          adapter: adapterHealth?.adapter || ''
         }
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/lora/health') {
+      const adapterPresent = await loraAdapterExists();
+      let adapterHealth = null;
+      try {
+        adapterHealth = await loraInferenceHealth(3000);
+      } catch (error) {
+        adapterHealth = { ok: false, error: error.message || String(error) };
+      }
+      json(res, 200, {
+        ok: true,
+        adapter_present: adapterPresent,
+        running: Boolean(loraInferenceProcess),
+        inference: adapterHealth
       });
       return;
     }

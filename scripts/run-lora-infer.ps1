@@ -5,9 +5,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $localDir = Join-Path $RepoRoot '.pong-local-ai'
 $venvPython = Join-Path $localDir 'lora-venv\Scripts\python.exe'
-$statusPath = Join-Path $localDir 'finetune-status.json'
-$logPath = Join-Path $localDir 'lora-train.log'
-$datasetPath = Join-Path $localDir 'qwen-lora-dataset.jsonl'
+$statusPath = Join-Path $localDir 'lora-inference-status.json'
+$logPath = Join-Path $localDir 'lora-inference.log'
 
 function Write-Status($status, $message, $extra = @{}) {
   New-Item -ItemType Directory -Force -Path $localDir | Out-Null
@@ -15,18 +14,10 @@ function Write-Status($status, $message, $extra = @{}) {
     status = $status
     message = $message
     updatedAt = (Get-Date).ToUniversalTime().ToString('o')
-    datasetPath = $datasetPath
     logPath = $logPath
   }
   foreach ($key in $extra.Keys) { $payload[$key] = $extra[$key] }
   $payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statusPath -Encoding UTF8
-}
-
-New-Item -ItemType Directory -Force -Path $localDir | Out-Null
-
-if (-not (Test-Path -LiteralPath $datasetPath)) {
-  Write-Status 'no_data' 'No LoRA dataset exists yet.'
-  exit 0
 }
 
 if (-not (Test-Path -LiteralPath $venvPython)) {
@@ -39,18 +30,11 @@ $env:TRANSFORMERS_CACHE = $env:HF_HOME
 $env:HF_HUB_DISABLE_SYMLINKS_WARNING = '1'
 $env:PONG_REPO_ROOT = $RepoRoot
 
-Write-Status 'running' 'Starting Qwen LoRA training.'
+Write-Status 'starting' 'Starting Qwen LoRA inference service.'
 $previousErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
-$output = & $venvPython (Join-Path $PSScriptRoot 'train_qwen_lora.py') --repo-root $RepoRoot 2>&1
+& $venvPython (Join-Path $PSScriptRoot 'lora_inference_server.py') --repo-root $RepoRoot 2>&1 | Tee-Object -FilePath $logPath -Append
 $code = $LASTEXITCODE
 $ErrorActionPreference = $previousErrorActionPreference
-$output | Tee-Object -FilePath $logPath -Append
-
-if ($code -eq 0) {
-  Write-Status 'complete' 'Qwen LoRA training completed.' @{ exitCode = $code }
-} else {
-  Write-Status 'blocked' "Qwen LoRA training exited with code $code. See lora-train.log." @{ exitCode = $code }
-}
-
+Write-Status 'stopped' "Qwen LoRA inference service stopped with code $code." @{ exitCode = $code }
 exit $code
