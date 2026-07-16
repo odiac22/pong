@@ -1901,6 +1901,9 @@
     if (Array.isArray(newPasteEvents)) {
       pasteEvents = newPasteEvents;
       currentPasteIndex = -1;
+      if (typeof window.PongResetPaperclipQueue === 'function') {
+        window.PongResetPaperclipQueue();
+      }
 
       if (window.PongLoadedSavedMode === 'savedArtists' && pasteEvents.length && typeof setActivePlaybackRangeForPasteEvent === 'function') {
         setActivePlaybackRangeForPasteEvent(0);

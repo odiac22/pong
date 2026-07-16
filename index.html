@@ -660,7 +660,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.22</div>
+  <div class="version-number">23.23</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -725,6 +725,8 @@ let viewedVideoKeys = new Set();
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
 let currentPasteIndex = -1;
+let paperclipRetiredBundleKeys = new Set();
+let paperclipStepCount = 1;
 let pendingPastes = [];
 let _prevUrlCount = 0;
 let parsedVideoUrlsCache = [];
@@ -3959,9 +3961,39 @@ function getNextPasteEventPreviewCount() {
   const nextLoadedIndex = getBestLoadedPasteEventIndex();
   const nextIndex = nextLoadedIndex >= 0
     ? nextLoadedIndex
-    : ((currentPasteIndex >= 0 ? currentPasteIndex + 1 : 0) + pasteEvents.length) % pasteEvents.length;
+    : getNextActivePasteEventIndex();
+  if (nextIndex < 0) return 0;
   return Math.max(1, Number(pasteEvents[nextIndex]?.count || BATCH_SIZE));
 }
+
+function getPasteEventPaperclipKey(event, index = -1) {
+  if (!event) return '';
+  return String(
+    event.artistUrl ||
+    event.bundleKey ||
+    event.artistKey ||
+    `${event.source || 'bundle'}:${event.startIndex || index}:${event.count || 0}`
+  );
+}
+
+function isPasteEventRetiredForPaperclip(event, index = -1) {
+  const key = getPasteEventPaperclipKey(event, index);
+  return !!key && paperclipRetiredBundleKeys.has(key);
+}
+
+function getPaperclipActiveBundleCount() {
+  if (!Array.isArray(pasteEvents) || !pasteEvents.length) return 0;
+  return pasteEvents.reduce((count, event, index) => (
+    isPasteEventRetiredForPaperclip(event, index) ? count : count + 1
+  ), 0);
+}
+
+function resetPaperclipQueue() {
+  paperclipRetiredBundleKeys = new Set();
+  paperclipStepCount = 1;
+}
+
+window.PongResetPaperclipQueue = resetPaperclipQueue;
 
 function countLoadedVideosForPasteEvent(event) {
   if (!event || !Array.isArray(allVideoUrls) || !allVideoUrls.length) return 0;
@@ -3985,6 +4017,7 @@ function getBestLoadedPasteEventIndex() {
   for (let offset = 1; offset <= pasteEvents.length; offset++) {
     const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
     if (index === currentPasteIndex) continue;
+    if (isPasteEventRetiredForPaperclip(pasteEvents[index], index)) continue;
     const loaded = countLoadedVideosForPasteEvent(pasteEvents[index]);
     if (loaded > bestCount) {
       bestCount = loaded;
@@ -3993,6 +4026,28 @@ function getBestLoadedPasteEventIndex() {
   }
 
   return bestIndex;
+}
+
+function getNextActivePasteEventIndex() {
+  if (!Array.isArray(pasteEvents) || !pasteEvents.length) return -1;
+  const startIndex = currentPasteIndex >= 0 ? currentPasteIndex : -1;
+
+  for (let offset = 1; offset <= pasteEvents.length; offset++) {
+    const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
+    if (index === currentPasteIndex) continue;
+    if (!isPasteEventRetiredForPaperclip(pasteEvents[index], index)) return index;
+  }
+
+  return -1;
+}
+
+function retireCurrentPasteEventForPaperclip() {
+  if (currentPasteIndex < 0 || !pasteEvents[currentPasteIndex]) return false;
+  const key = getPasteEventPaperclipKey(pasteEvents[currentPasteIndex], currentPasteIndex);
+  if (!key) return false;
+  const wasNew = !paperclipRetiredBundleKeys.has(key);
+  paperclipRetiredBundleKeys.add(key);
+  return wasNew;
 }
 
 function shouldNextBatchAdvanceSavedArtist() {
@@ -4009,8 +4064,18 @@ function navigateToNextPasteEvent(){
 
   syncCurrentPasteIndexFromVisibleVideo();
 
+  const retired = retireCurrentPasteEventForPaperclip();
   const nextLoadedIndex = getBestLoadedPasteEventIndex();
-  setActivePlaybackRangeForPasteEvent(nextLoadedIndex >= 0 ? nextLoadedIndex : currentPasteIndex + 1);
+  const nextActiveIndex = nextLoadedIndex >= 0 ? nextLoadedIndex : getNextActivePasteEventIndex();
+
+  if (nextActiveIndex < 0) {
+    updatePasteNavigationButton();
+    showSortingIndicator('No new paperclip artists loaded yet');
+    return;
+  }
+
+  if (retired) paperclipStepCount++;
+  setActivePlaybackRangeForPasteEvent(nextActiveIndex);
   updatePasteNavigationButton();
   scheduleSessionSave(700);
 
@@ -4031,6 +4096,7 @@ function resetPasteEvents(){
   pendingPastes=[];
   syncPendingPasteCacheState();
   currentPasteIndex=-1;
+  resetPaperclipQueue();
   viewedVideoKeys = new Set();
   updatePasteNavigationButton();
 }
@@ -4066,8 +4132,8 @@ function updatePasteNavigationButton(){
     btn.style.opacity='0.2';
     btn.style.background='';
   } else {
-    const next=(currentPasteIndex+1)%pasteEvents.length;
-    btn.setAttribute('data-count',`${next+1}/${pasteEvents.length}`);
+    const activeCount = getPaperclipActiveBundleCount();
+    btn.setAttribute('data-count',`${Math.max(1, paperclipStepCount)}/${activeCount || 0}`);
     btn.style.opacity='0.74';
     btn.style.background='rgba(103,232,249,0.22)';
   }
@@ -4198,6 +4264,7 @@ loadVideosButton.addEventListener('click', async ()=>{
 
   pendingPastes = [];
   currentPasteIndex = -1;
+  resetPaperclipQueue();
 
   if (shouldUseRegularSlidingMode && pasteEvents.length) {
     setActivePlaybackRangeForPasteEvent(0);
