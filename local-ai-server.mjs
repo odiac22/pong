@@ -1,0 +1,301 @@
+import http from 'node:http';
+import { pipeline, RawImage, env } from '@xenova/transformers';
+
+const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
+const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
+const MODEL = process.env.PONG_LOCAL_IMAGE_MODEL || 'Xenova/clip-vit-base-patch32';
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
+const TOP_K = 10;
+
+env.allowLocalModels = false;
+env.useBrowserCache = true;
+
+let extractorPromise = null;
+let extractorReady = false;
+const embeddingCache = new Map();
+
+function json(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store'
+  });
+  res.end(body);
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error('Request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+async function getExtractor() {
+  if (!extractorPromise) {
+    extractorPromise = pipeline('image-feature-extraction', MODEL, { quantized: true })
+      .then(model => {
+        extractorReady = true;
+        return model;
+      });
+  }
+  return extractorPromise;
+}
+
+function normalizeUrl(raw, base = 'https://coomerfans.com/') {
+  try {
+    return new URL(String(raw || ''), base).toString();
+  } catch (_) {
+    return '';
+  }
+}
+
+async function fetchImageBlob(url) {
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 PongLocalAI/1.0',
+      'Referer': 'https://coomerfans.com/'
+    }
+  });
+  if (!response.ok) throw new Error(`image HTTP ${response.status}`);
+  return response.blob();
+}
+
+async function embedImage(rawUrl) {
+  const url = normalizeUrl(rawUrl);
+  if (!url) throw new Error('bad image url');
+  if (embeddingCache.has(url)) return embeddingCache.get(url);
+
+  const extractor = await getExtractor();
+  const blob = await fetchImageBlob(url);
+  const image = await RawImage.fromBlob(blob);
+  const output = await extractor(image, { pooling: 'mean', normalize: true });
+  const values = Array.from(output?.data || output?.tolist?.()?.flat?.() || []);
+  if (!values.length) throw new Error('empty embedding');
+
+  embeddingCache.set(url, values);
+  return values;
+}
+
+function cosine(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+  return dot;
+}
+
+function topMean(vector, examples, k = TOP_K) {
+  if (!examples.length) return 0;
+  const scores = examples.map(item => cosine(vector, item.vector)).sort((a, b) => b - a);
+  const selected = scores.slice(0, Math.min(k, scores.length));
+  return selected.reduce((sum, n) => sum + n, 0) / selected.length;
+}
+
+function logistic(x) {
+  return 1 / (1 + Math.exp(-x));
+}
+
+function textHardFilter(artist = {}) {
+  const nameLetters = String(artist.artistName || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
+  if (nameLetters.includes('ts')) return 'blocked name contains: ts';
+
+  const combined = `${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '');
+  const fragments = ['transgender', 'transsexual', 'transgirl', 'trans girl', 'tgirl', 't-girl', 'shemale', 'femboy', 'ladyboy', 'crossdresser', 'crossdress', 'mtf', 'trans'];
+  for (const fragment of fragments) {
+    if (combined.includes(fragment)) return `blocked text contains: ${fragment}`;
+  }
+  const tokens = new Set(combined.split(/[^a-z0-9]+/g).filter(Boolean));
+  for (const word of ['cd', 'trap', 'bbw', 'feet']) {
+    if (tokens.has(word)) return `blocked word: ${word}`;
+  }
+  return '';
+}
+
+function imageUrlsFromRecords(records = []) {
+  const out = [];
+  for (const record of records || []) {
+    for (const url of record?.imageUrls || []) {
+      const normalized = normalizeUrl(url, record.artistUrl || 'https://coomerfans.com/');
+      if (normalized) out.push({ url: normalized, artistUrl: record.artistUrl || '', artistName: record.artistName || '' });
+    }
+  }
+  return out;
+}
+
+async function embedExamples(records, label) {
+  const items = imageUrlsFromRecords(records);
+  const out = [];
+  for (const item of items) {
+    try {
+      out.push({ ...item, label, vector: await embedImage(item.url) });
+    } catch (_) {}
+  }
+  return out;
+}
+
+function gradeCandidate(vector, index, acceptedVectors, rejectedVectors) {
+  const pos = topMean(vector, acceptedVectors);
+  const neg = topMean(vector, rejectedVectors);
+  const margin = pos - neg;
+  const preference = logistic(margin * 18);
+  const confidence = Math.max(0.5, Math.min(0.99, 0.5 + Math.abs(margin) * 16));
+  let decision = 'unsure';
+  if (preference >= 0.58 && margin > 0.012) decision = 'accept';
+  if (preference <= 0.46 && margin < -0.012) decision = 'reject';
+
+  return {
+    image_index: index + 1,
+    decision,
+    confidence,
+    reason: `taste ${Math.round(preference * 100)} pos ${pos.toFixed(3)} neg ${neg.toFixed(3)}`,
+    local_score: preference,
+    checks: {
+      male_present: null,
+      female_presenting_adult: null,
+      appears_over_50: null,
+      feet_dominant: null,
+      logo_or_placeholder: null,
+      visual_preference_match: preference >= 0.55
+    }
+  };
+}
+
+function finalDecision(imageGrades, acceptedCount, rejectedCount) {
+  if (acceptedCount < 2 || rejectedCount < 2) {
+    return {
+      decision: 'unsure',
+      confidence: 0.5,
+      reason: `local needs more saved examples (${acceptedCount} accept / ${rejectedCount} reject images)`
+    };
+  }
+
+  const scores = imageGrades.map(item => Number(item.local_score || 0.5));
+  const average = scores.reduce((sum, n) => sum + n, 0) / Math.max(1, scores.length);
+  const accepts = imageGrades.filter(item => item.decision === 'accept').length;
+  const rejects = imageGrades.filter(item => item.decision === 'reject').length;
+  const confidence = Math.max(0.5, Math.min(0.98, 0.5 + Math.abs(average - 0.5) * 2.2));
+
+  if (rejects >= Math.ceil(imageGrades.length / 2) || average < 0.47) {
+    return { decision: 'reject', confidence, reason: `local rejected ${rejects}/${imageGrades.length}, taste ${Math.round(average * 100)}` };
+  }
+  if (accepts >= Math.ceil(imageGrades.length / 2) && average >= 0.57) {
+    return { decision: 'accept', confidence, reason: `local accepted ${accepts}/${imageGrades.length}, taste ${Math.round(average * 100)}` };
+  }
+  return { decision: 'unsure', confidence, reason: `local unsure, taste ${Math.round(average * 100)}` };
+}
+
+async function classify(payload) {
+  const artist = payload.artist || {};
+  const hard = textHardFilter(artist);
+  if (hard) {
+    return {
+      decision: 'reject',
+      confidence: 1,
+      reason: hard,
+      checks: {
+        photograph: null,
+        woman_prominent: null,
+        male_only: null,
+        male_present: null,
+        female_presenting_adult: null,
+        appears_over_50: null,
+        feet_dominant: null,
+        logo_or_placeholder: null
+      },
+      image_grades: []
+    };
+  }
+
+  const candidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))].slice(0, 8);
+  if (!candidateUrls.length) throw new Error('No candidate image URLs supplied.');
+
+  const [acceptedVectors, rejectedVectors] = await Promise.all([
+    embedExamples(payload.acceptedArtists || [], 'accept'),
+    embedExamples(payload.rejectedArtists || [], 'reject')
+  ]);
+
+  const candidateVectors = [];
+  for (const url of candidateUrls) {
+    try {
+      candidateVectors.push(await embedImage(url));
+    } catch (_) {}
+  }
+  if (!candidateVectors.length) throw new Error('Could not embed any candidate images.');
+
+  const imageGrades = candidateVectors.map((vector, index) => gradeCandidate(vector, index, acceptedVectors, rejectedVectors));
+  const final = finalDecision(imageGrades, acceptedVectors.length, rejectedVectors.length);
+
+  return {
+    ...final,
+    model: MODEL,
+    examples: {
+      accepted_images: acceptedVectors.length,
+      rejected_images: rejectedVectors.length,
+      cached_images: embeddingCache.size
+    },
+    checks: {
+      photograph: null,
+      woman_prominent: null,
+      male_only: null,
+      male_present: null,
+      female_presenting_adult: final.decision === 'accept' ? true : null,
+      appears_over_50: null,
+      feet_dominant: null,
+      logo_or_placeholder: null
+    },
+    image_grades: imageGrades
+  };
+}
+
+const server = http.createServer(async (req, res) => {
+  if (req.method === 'OPTIONS') {
+    json(res, 204, {});
+    return;
+  }
+
+  try {
+    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    if (req.method === 'GET' && url.pathname === '/health') {
+      json(res, 200, {
+        ok: true,
+        app: 'pong-local-ai',
+        model: MODEL,
+        ready: extractorReady,
+        cached_images: embeddingCache.size
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/classify') {
+      const payload = JSON.parse(await readBody(req));
+      const result = await classify(payload);
+      json(res, 200, result);
+      return;
+    }
+
+    json(res, 404, { error: 'not found' });
+  } catch (error) {
+    json(res, 500, { error: error.message || String(error) });
+  }
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`Pong local AI listening on http://${HOST}:${PORT}`);
+  console.log(`Model: ${MODEL}`);
+});
