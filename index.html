@@ -6015,7 +6015,11 @@ const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
 const RANDOM40_MODEL = 'gpt-4.1-nano';
 const RANDOM40_LOCAL_MODEL_NAME = 'local-image-embeddings';
-const RANDOM40_PROMPT_VERSION = 'cf-vision-v9';
+const RANDOM40_PROMPT_VERSION = 'cf-vision-v10';
+const RANDOM40_THUMBNAIL_REJECT_CONFIDENCE = 0.8;
+const RANDOM40_REJECT_CACHE_KEY = 'pong_random40_model_reject_cache_v1';
+const RANDOM40_REJECT_CACHE_MAX = 4000;
+const RANDOM40_REJECT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_ACCEPT_CONFIDENCE = 0.9;
 const RANDOM40_MAX_REVIEW_IMAGES = 3;
@@ -6899,8 +6903,15 @@ function random40FindArtistsOnListing(doc, pageUrl) {
 }
 
 function random40HardFilter(artist) {
-  const nameLetters = String(artist.artistName || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
-  if (nameLetters.includes('ts')) return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: 'blocked name contains: ts' };
+  const nameTokens = String(artist.artistName || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .split(/[^a-z0-9]+/g)
+    .filter(Boolean);
+  if (nameTokens.some(token => token === 'ts' || token.startsWith('ts'))) {
+    return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: 'blocked name prefix: ts' };
+  }
   const combinedText = String(`${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`)
     .toLowerCase()
     .normalize('NFKD')
@@ -6909,14 +6920,60 @@ function random40HardFilter(artist) {
   for (const fragment of blockedFragments) {
     if (combinedText.includes(fragment)) return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: `blocked text contains: ${fragment}` };
   }
-  if (combinedText.includes('trans')) return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: 'blocked text contains: trans' };
   const tokens = new Set(combinedText
     .split(/[^a-z0-9]+/g)
     .filter(Boolean));
-  for (const word of ['cd', 'trap', 'bbw', 'feet']) {
+  for (const word of ['trans', 'ts', 'cd', 'trap', 'bbw', 'feet']) {
     if (tokens.has(word)) return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: `blocked word: ${word}` };
   }
   return null;
+}
+
+let random40RejectCacheMemo = null;
+let random40RejectCacheSaveTimer = null;
+
+function random40GetRejectCache() {
+  if (random40RejectCacheMemo) return random40RejectCacheMemo;
+  let cache = { promptVersion: RANDOM40_PROMPT_VERSION, artists: {} };
+  try {
+    const stored = JSON.parse(localStorage.getItem(RANDOM40_REJECT_CACHE_KEY) || 'null');
+    if (stored && stored.promptVersion === RANDOM40_PROMPT_VERSION && stored.artists && typeof stored.artists === 'object') {
+      cache.artists = stored.artists;
+    }
+  } catch (_) {}
+  random40RejectCacheMemo = cache;
+  return cache;
+}
+
+function random40SaveRejectCacheSoon() {
+  clearTimeout(random40RejectCacheSaveTimer);
+  random40RejectCacheSaveTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(RANDOM40_REJECT_CACHE_KEY, JSON.stringify(random40GetRejectCache()));
+    } catch (_) {}
+  }, 1500);
+}
+
+function random40CachedHardReject(artistUrl) {
+  const url = random40NormalizeArtistUrl(artistUrl);
+  if (!url) return null;
+  const entry = random40GetRejectCache().artists[url];
+  if (!entry) return null;
+  if (Date.now() - Number(entry.at || 0) > RANDOM40_REJECT_CACHE_TTL_MS) return null;
+  return entry;
+}
+
+function random40CacheHardReject(artistUrl, reason) {
+  const url = random40NormalizeArtistUrl(artistUrl);
+  if (!url) return;
+  const cache = random40GetRejectCache();
+  cache.artists[url] = { reason: String(reason || '').slice(0, 80), at: Date.now() };
+  const entries = Object.entries(cache.artists);
+  if (entries.length > RANDOM40_REJECT_CACHE_MAX) {
+    entries.sort((a, b) => Number(a[1]?.at || 0) - Number(b[1]?.at || 0));
+    cache.artists = Object.fromEntries(entries.slice(entries.length - RANDOM40_REJECT_CACHE_MAX));
+  }
+  random40SaveRejectCacheSoon();
 }
 
 function random40IsAcceptedDecision(decision) {
@@ -7154,6 +7211,135 @@ async function random40ClassifyArtistLocal(artist, endpoint, imageUrls) {
     return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.96), reason: 'appears over age limit' };
   }
   return { ...parsed, reason: String(parsed.reason || '').slice(0, 120) };
+}
+
+async function random40ThumbnailTriageNano(artist, apiKey) {
+  const res = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: RANDOM40_MODEL,
+      input: [
+        {
+          role: 'system',
+          content: [{
+            type: 'input_text',
+            text:
+              'You are a decisive image triage classifier. Return only the requested structured output. ' +
+              'Do not identify the person. Do not infer ethnicity, sexuality, medical conditions, or weight status.'
+          }]
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text:
+                `Artist: ${artist.artistName || 'unknown'}\n` +
+                `Prompt version: ${RANDOM40_PROMPT_VERSION}\n\n` +
+                'Quick triage of one adult creator listing thumbnail. ' +
+                'Reject when the image shows any male-presenting person, no clearly female-presenting adult, ' +
+                'a person who appears underage or whose adult age is unclear, a person who appears over 50, ' +
+                'feet as the main subject, or a logo/placeholder/anime/non-photograph image. ' +
+                'Accept only means the profile is worth a closer full review, not a final decision.'
+            },
+            { type: 'input_text', text: 'Thumbnail:' },
+            { type: 'input_image', image_url: artist.imageUrl, detail: 'low' }
+          ]
+        }
+      ],
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'thumbnail_triage',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              decision: { type: 'string', enum: ['accept', 'reject', 'unsure'] },
+              confidence: { type: 'number', minimum: 0, maximum: 1 },
+              reason: { type: 'string' },
+              checks: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  photograph: { type: ['boolean', 'null'] },
+                  male_present: { type: ['boolean', 'null'] },
+                  female_presenting_adult: { type: ['boolean', 'null'] },
+                  appears_over_50: { type: ['boolean', 'null'] },
+                  feet_dominant: { type: ['boolean', 'null'] },
+                  logo_or_placeholder: { type: ['boolean', 'null'] }
+                },
+                required: ['photograph', 'male_present', 'female_presenting_adult', 'appears_over_50', 'feet_dominant', 'logo_or_placeholder']
+              }
+            },
+            required: ['decision', 'confidence', 'reason', 'checks']
+          }
+        }
+      }
+    })
+  });
+
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`OpenAI HTTP ${res.status}: ${raw.slice(0, 200)}`);
+  const payload = JSON.parse(raw);
+  const outputText = payload.output_text || payload.output?.flatMap(item => item.content || [])?.find(item => item.type === 'output_text')?.text;
+  if (!outputText) throw new Error('OpenAI returned no triage decision');
+  return JSON.parse(outputText);
+}
+
+async function random40ThumbnailTriage(artist, apiKey, mode, localEndpoint) {
+  if (!artist?.imageUrl) return { skip: false };
+  random40State.api++;
+
+  if (mode === 'local') {
+    const res = await fetch(`${localEndpoint}/classify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        app: 'pong-random40',
+        model: RANDOM40_LOCAL_MODEL_NAME,
+        promptVersion: RANDOM40_PROMPT_VERSION,
+        stage: 'thumbnail',
+        artist: {
+          artistUrl: artist.artistUrl,
+          artistName: artist.artistName || random40ArtistNameFromUrl(artist.artistUrl),
+          pageText: artist.pageText || '',
+          imageUrl: artist.imageUrl || ''
+        },
+        candidateImageUrls: [artist.imageUrl],
+        acceptedArtists: random40LoadAcceptedArtists(),
+        rejectedArtists: random40LoadRejectedArtists()
+      })
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Local AI HTTP ${res.status}: ${text.slice(0, 180)}`);
+    const parsed = JSON.parse(text);
+    if (parsed.decision === 'reject') {
+      const hardReject = String(parsed.source || '') === 'hard_filter';
+      return { skip: true, hardReject, reason: String(parsed.reason || 'local thumbnail reject').slice(0, 80) };
+    }
+    return { skip: false };
+  }
+
+  const parsed = await random40ThumbnailTriageNano(artist, apiKey);
+  const checks = parsed.checks || {};
+  const hardReject =
+    checks.male_present === true ||
+    checks.appears_over_50 === true ||
+    checks.feet_dominant === true ||
+    (checks.photograph === true && checks.female_presenting_adult === false);
+  if (hardReject) {
+    return { skip: true, hardReject: true, reason: String(parsed.reason || 'thumbnail hard reject').slice(0, 80) };
+  }
+  if (parsed.decision === 'reject' && Number(parsed.confidence || 0) >= RANDOM40_THUMBNAIL_REJECT_CONFIDENCE) {
+    return { skip: true, hardReject: false, reason: String(parsed.reason || 'thumbnail reject').slice(0, 80) };
+  }
+  return { skip: false };
 }
 
 function random40ExtractReviewImages(doc, baseUrl, firstImage) {
@@ -7554,7 +7740,9 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
     ? await random40ClassifyArtistLocal(workingArtist, options.localEndpoint, initialImages)
     : await random40ClassifyArtist(workingArtist, apiKey, initialImages);
   random40State.api++;
-  if (Number(decision.confidence || 0) < RANDOM40_CONFIDENCE_REVIEW) {
+  const needsSecondLook = decision.decision === 'unsure' ||
+    (decision.decision === 'accept' && Number(decision.confidence || 0) < RANDOM40_CONFIDENCE_REVIEW);
+  if (needsSecondLook) {
     try {
       if (!doc) doc = await random40FetchDoc(workingArtist.artistUrl, { timeoutMs: 18000 });
       const images = random40SelectCandidateImages(
@@ -7599,6 +7787,8 @@ async function startRandom40(mode = 'nano') {
     pages: 0,
     api: 0,
     skippedLowVideo: 0,
+    thumbnailSkips: 0,
+    cachedSkips: 0,
     cardsStarted: false,
     stop: false,
     done: false,
@@ -7663,7 +7853,25 @@ async function startRandom40(mode = 'nano') {
       await random40Pool(artists, classifierConcurrency, async artist => {
         if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
         random40State.seenArtists.add(artist.artistUrl);
-        updateRandom40Progress({ detail: `Checking videos: ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        const artistLabel = artist.artistName || random40ArtistNameFromUrl(artist.artistUrl);
+        const classifierLabel = runMode === 'local' ? 'Local' : 'Nano';
+
+        if (random40CachedHardReject(artist.artistUrl)) {
+          random40State.cachedSkips = (random40State.cachedSkips || 0) + 1;
+          return;
+        }
+        if (random40HardFilter(artist)) return;
+
+        updateRandom40Progress({ detail: `${classifierLabel} thumbnail check: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        const triage = await random40ThumbnailTriage(artist, apiKey, runMode, localEndpoint).catch(() => ({ skip: false }));
+        if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
+        if (triage.skip) {
+          random40State.thumbnailSkips = (random40State.thumbnailSkips || 0) + 1;
+          if (triage.hardReject) random40CacheHardReject(artist.artistUrl, triage.reason);
+          return;
+        }
+
+        updateRandom40Progress({ detail: `Checking videos: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         const precheck = await random40CollectVideoPostLinks(artist, { stopAt: RANDOM40_MIN_VIDEOS_PER_ARTIST }).catch(() => ({ links: [] }));
         if ((precheck.links || []).length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
           random40State.skippedLowVideo = (random40State.skippedLowVideo || 0) + 1;
@@ -7676,10 +7884,15 @@ async function startRandom40(mode = 'nano') {
           });
           return;
         }
-        const classifierLabel = runMode === 'local' ? 'Local' : 'Nano';
-        updateRandom40Progress({ detail: `${classifierLabel} ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} - ${precheck.links.length}+ videos, ${RANDOM40_INITIAL_IMAGES_PER_ARTIST} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        updateRandom40Progress({ detail: `${classifierLabel} ${artistLabel} - ${precheck.links.length}+ videos, ${RANDOM40_INITIAL_IMAGES_PER_ARTIST} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         const decision = await random40AnalyzeArtist(artist, apiKey, { firstDoc: precheck.firstDoc, mode: runMode, localEndpoint }).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
-        if (!random40IsAcceptedDecision(decision)) return;
+        if (!random40IsAcceptedDecision(decision)) {
+          const checks = decision?.checks || {};
+          if (checks.male_present === true || checks.male_only === true || checks.appears_over_50 === true || checks.feet_dominant === true) {
+            random40CacheHardReject(artist.artistUrl, decision.reason || 'hard reject');
+          }
+          return;
+        }
         if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
         updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Loading first ${RANDOM40_MIN_VIDEOS_PER_ARTIST} videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
         const entries = await random40ScrapeArtistVideos(artist, {
@@ -7708,9 +7921,7 @@ async function startRandom40(mode = 'nano') {
 
     random40State.done = true;
     updateRandom40Progress({
-      detail: random40State.stop
-        ? `Stopped: ${random40State.accepted} accepted, ${random40State.videos} videos, ${random40State.skippedLowVideo || 0} low-video skipped`
-        : `Done: ${random40State.accepted} accepted, ${random40State.videos} videos, ${random40State.skippedLowVideo || 0} low-video skipped`,
+      detail: `${random40State.stop ? 'Stopped' : 'Done'}: ${random40State.accepted} accepted, ${random40State.videos} videos, ${random40State.skippedLowVideo || 0} low-video, ${random40State.thumbnailSkips || 0} thumb-skip, ${random40State.cachedSkips || 0} cached-skip`,
       accepted: random40State.accepted,
       videos: random40State.videos,
       pages: random40State.pages,

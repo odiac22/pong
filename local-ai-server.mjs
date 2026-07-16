@@ -87,34 +87,69 @@ async function fetchImageBlob(url) {
   return response.blob();
 }
 
-async function fetchImageBase64(rawUrl) {
+const imageBase64Cache = new Map();
+const IMAGE_BASE64_CACHE_MAX = 200;
+
+function fetchImageBase64(rawUrl) {
   const url = normalizeUrl(rawUrl);
-  if (!url) throw new Error('bad image url');
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 PongLocalAI/1.0',
-      'Referer': 'https://coomerfans.com/'
-    }
+  if (!url) return Promise.reject(new Error('bad image url'));
+  if (imageBase64Cache.has(url)) {
+    const cached = imageBase64Cache.get(url);
+    imageBase64Cache.delete(url);
+    imageBase64Cache.set(url, cached);
+    return cached;
+  }
+
+  const promise = (async () => {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 PongLocalAI/1.0',
+        'Referer': 'https://coomerfans.com/'
+      }
+    });
+    if (!response.ok) throw new Error(`image HTTP ${response.status}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return buffer.toString('base64');
+  })().catch(error => {
+    imageBase64Cache.delete(url);
+    throw error;
   });
-  if (!response.ok) throw new Error(`image HTTP ${response.status}`);
-  const buffer = Buffer.from(await response.arrayBuffer());
-  return buffer.toString('base64');
+
+  imageBase64Cache.set(url, promise);
+  while (imageBase64Cache.size > IMAGE_BASE64_CACHE_MAX) {
+    imageBase64Cache.delete(imageBase64Cache.keys().next().value);
+  }
+  return promise;
 }
 
-async function embedImage(rawUrl) {
+async function fetchImagesBase64(urls = []) {
+  const settled = await Promise.allSettled(urls.map(fetchImageBase64));
+  return settled.filter(item => item.status === 'fulfilled').map(item => item.value);
+}
+
+function embedImage(rawUrl) {
   const url = normalizeUrl(rawUrl);
-  if (!url) throw new Error('bad image url');
-  if (embeddingCache.has(url)) return embeddingCache.get(url);
+  if (!url) return Promise.reject(new Error('bad image url'));
+  if (embeddingCache.has(url)) return Promise.resolve(embeddingCache.get(url));
 
-  const extractor = await getExtractor();
-  const blob = await fetchImageBlob(url);
-  const image = await RawImage.fromBlob(blob);
-  const output = await extractor(image, { pooling: 'mean', normalize: true });
-  const values = Array.from(output?.data || output?.tolist?.()?.flat?.() || []);
-  if (!values.length) throw new Error('empty embedding');
+  const promise = (async () => {
+    const extractor = await getExtractor();
+    const blob = await fetchImageBlob(url);
+    const image = await RawImage.fromBlob(blob);
+    const output = await extractor(image, { pooling: 'mean', normalize: true });
+    const values = Array.from(output?.data || output?.tolist?.()?.flat?.() || []);
+    if (!values.length) throw new Error('empty embedding');
+    return values;
+  })().then(values => {
+    embeddingCache.set(url, values);
+    return values;
+  }).catch(error => {
+    embeddingCache.delete(url);
+    throw error;
+  });
 
-  embeddingCache.set(url, values);
-  return values;
+  embeddingCache.set(url, promise);
+  return promise;
 }
 
 function cosine(a, b) {
@@ -136,19 +171,24 @@ function logistic(x) {
 }
 
 function textHardFilter(artist = {}) {
-  const nameLetters = String(artist.artistName || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
-  if (nameLetters.includes('ts')) return 'blocked name contains: ts';
+  const nameTokens = String(artist.artistName || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .split(/[^a-z0-9]+/g)
+    .filter(Boolean);
+  if (nameTokens.some(token => token === 'ts' || token.startsWith('ts'))) return 'blocked name prefix: ts';
 
   const combined = `${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`
     .toLowerCase()
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '');
-  const fragments = ['transgender', 'transsexual', 'transgirl', 'trans girl', 'tgirl', 't-girl', 'shemale', 'femboy', 'ladyboy', 'crossdresser', 'crossdress', 'mtf', 'trans'];
+  const fragments = ['transgender', 'transsexual', 'transgirl', 'trans girl', 'tgirl', 't-girl', 'shemale', 'femboy', 'ladyboy', 'crossdresser', 'crossdress', 'mtf'];
   for (const fragment of fragments) {
     if (combined.includes(fragment)) return `blocked text contains: ${fragment}`;
   }
   const tokens = new Set(combined.split(/[^a-z0-9]+/g).filter(Boolean));
-  for (const word of ['cd', 'trap', 'bbw', 'feet']) {
+  for (const word of ['trans', 'ts', 'cd', 'trap', 'bbw', 'feet']) {
     if (tokens.has(word)) return `blocked word: ${word}`;
   }
   return '';
@@ -239,12 +279,10 @@ async function learn(payload) {
   if (!artistUrl) throw new Error('artistUrl is required');
   if (!imageUrls.length) throw new Error('at least one imageUrl is required');
 
-  const embeddings = [];
-  for (const url of imageUrls) {
-    try {
-      embeddings.push({ url, vector: await embedImage(url) });
-    } catch (_) {}
-  }
+  const embeddingResults = await Promise.allSettled(
+    imageUrls.map(async url => ({ url, vector: await embedImage(url) }))
+  );
+  const embeddings = embeddingResults.filter(item => item.status === 'fulfilled').map(item => item.value);
   if (!embeddings.length) throw new Error('could not embed learning images');
 
   const store = await loadLearnedStore();
@@ -287,13 +325,10 @@ function rejectReasonSummary(records = []) {
 
 async function embedExamples(records, label) {
   const items = imageUrlsFromRecords(records);
-  const out = [];
-  for (const item of items) {
-    try {
-      out.push({ ...item, label, vector: await embedImage(item.url) });
-    } catch (_) {}
-  }
-  return out;
+  const settled = await Promise.allSettled(
+    items.map(async item => ({ ...item, label, vector: await embedImage(item.url) }))
+  );
+  return settled.filter(item => item.status === 'fulfilled').map(item => item.value);
 }
 
 function gradeCandidate(vector, index, acceptedVectors, rejectedVectors) {
@@ -393,25 +428,15 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
   if (ollamaVisionDisabled) {
     throw new Error(`Ollama vision disabled: ${ollamaFailureReason || 'previous failure'}`);
   }
-  const images = [];
-  const candidateCount = Math.min(candidateUrls.length, QWEN_CANDIDATE_IMAGES);
-  for (const url of candidateUrls.slice(0, candidateCount)) {
-    try {
-      images.push(await fetchImageBase64(url));
-    } catch (_) {}
-  }
-  const acceptedStart = images.length + 1;
-  for (const url of acceptedExampleUrls.slice(0, QWEN_ACCEPT_EXAMPLES)) {
-    try {
-      images.push(await fetchImageBase64(url));
-    } catch (_) {}
-  }
-  const rejectedStart = images.length + 1;
-  for (const url of rejectedExampleUrls.slice(0, QWEN_REJECT_EXAMPLES)) {
-    try {
-      images.push(await fetchImageBase64(url));
-    } catch (_) {}
-  }
+  const [candidateImages, acceptedImages, rejectedImages] = await Promise.all([
+    fetchImagesBase64(candidateUrls.slice(0, QWEN_CANDIDATE_IMAGES)),
+    fetchImagesBase64(acceptedExampleUrls.slice(0, QWEN_ACCEPT_EXAMPLES)),
+    fetchImagesBase64(rejectedExampleUrls.slice(0, QWEN_REJECT_EXAMPLES))
+  ]);
+  const candidateCount = candidateImages.length;
+  const acceptedStart = candidateImages.length + 1;
+  const rejectedStart = candidateImages.length + acceptedImages.length + 1;
+  const images = [...candidateImages, ...acceptedImages, ...rejectedImages];
   if (!images.length) return null;
 
   const localSummary = imageGrades.map(item =>
@@ -436,11 +461,11 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
     localSummary,
     '',
     `Attached images 1-${candidateCount}: candidate artist images to judge.`,
-    acceptedExampleUrls.length
-      ? `Attached images ${acceptedStart}-${acceptedStart + Math.min(acceptedExampleUrls.length, QWEN_ACCEPT_EXAMPLES) - 1}: nearest user-saved ACCEPT examples. Use as visual preference examples.`
+    acceptedImages.length
+      ? `Attached images ${acceptedStart}-${acceptedStart + acceptedImages.length - 1}: nearest user-saved ACCEPT examples. Use as visual preference examples.`
       : 'No accepted example images are attached.',
-    rejectedExampleUrls.length
-      ? `Attached images ${rejectedStart}-${rejectedStart + Math.min(rejectedExampleUrls.length, QWEN_REJECT_EXAMPLES) - 1}: nearest user red-X/rejected examples. Treat these as stronger avoid examples.`
+    rejectedImages.length
+      ? `Attached images ${rejectedStart}-${rejectedStart + rejectedImages.length - 1}: nearest user red-X/rejected examples. Treat these as stronger avoid examples.`
       : 'No rejected example images are attached.',
     '',
     'Judge only the candidate artist images for the final decision. Use accepted/rejected example images only to understand user preference.'
@@ -489,6 +514,7 @@ async function classify(payload) {
     return {
       decision: 'reject',
       confidence: 1,
+      source: 'hard_filter',
       reason: hard,
       checks: {
         photograph: null,
@@ -518,16 +544,37 @@ async function classify(payload) {
   const acceptedVectors = [...learnedAcceptedVectors, ...payloadAcceptedVectors];
   const rejectedVectors = [...learnedRejectedVectors, ...payloadRejectedVectors];
 
-  const candidateVectors = [];
-  for (const url of candidateUrls) {
-    try {
-      candidateVectors.push(await embedImage(url));
-    } catch (_) {}
-  }
+  const candidateResults = await Promise.allSettled(candidateUrls.map(url => embedImage(url)));
+  const candidateVectors = candidateResults.filter(item => item.status === 'fulfilled').map(item => item.value);
   if (!candidateVectors.length) throw new Error('Could not embed any candidate images.');
 
   const imageGrades = candidateVectors.map((vector, index) => gradeCandidate(vector, index, acceptedVectors, rejectedVectors));
   const final = finalDecision(imageGrades, acceptedVectors.length, rejectedVectors.length);
+
+  if (String(payload.stage || '') === 'thumbnail') {
+    return {
+      ...final,
+      stage: 'thumbnail',
+      model: MODEL,
+      checks: {
+        photograph: null,
+        woman_prominent: null,
+        male_only: null,
+        male_present: null,
+        female_presenting_adult: null,
+        appears_over_50: null,
+        feet_dominant: null,
+        logo_or_placeholder: null
+      },
+      examples: {
+        accepted_images: acceptedVectors.length,
+        rejected_images: rejectedVectors.length,
+        cached_images: embeddingCache.size
+      },
+      siglip_decision: final,
+      image_grades: imageGrades
+    };
+  }
   const acceptedExampleUrls = nearestExampleUrls(candidateVectors, acceptedVectors, QWEN_ACCEPT_EXAMPLES);
   const rejectedExampleUrls = nearestExampleUrls(candidateVectors, rejectedVectors, QWEN_REJECT_EXAMPLES);
   const rejectionSummary = rejectReasonSummary([
