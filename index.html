@@ -431,7 +431,7 @@
       color: rgba(244,248,255,0.88); border: 1px solid var(--ui-border);
       box-shadow: 0 14px 36px rgba(0,0,0,0.38);
       backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-      font-size: 11px;
+      font-size: 11px; cursor: move; touch-action: none;
     }
     @media (max-width: 420px) {
       #random40-progress { right: 8px; bottom: 74px; width: min(260px, calc(100vw - 16px)); }
@@ -441,7 +441,7 @@
     #random40-stop {
       border: 1px solid rgba(248,113,113,0.55); border-radius: 999px;
       background: rgba(220,38,38,0.28); color: #fff; font: 800 10px system-ui;
-      padding: 3px 8px;
+      padding: 3px 8px; cursor: pointer; touch-action: manipulation;
     }
     .random40-progress-detail { color: var(--ui-muted); line-height: 1.3; margin-bottom: 5px; }
     .erome-progress-title {
@@ -659,7 +659,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.09</div>
+  <div class="version-number">23.10</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5673,6 +5673,7 @@ function activateFirstEromeBatch() {
 // --- CoomerFans Random 40 AI loader ----------------------------------------
 const RANDOM40_OPENAI_KEY = 'pong_random40_openai_key_v1';
 const RANDOM40_REJECTED_ARTISTS_KEY = 'pong_random40_rejected_artists_v1';
+const RANDOM40_PANEL_POS_KEY = 'pong_random40_panel_pos_v1';
 const RANDOM40_PASSWORD = '22';
 const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
@@ -5693,9 +5694,101 @@ const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.odiac22-pong-repai
 let random40State = null;
 let random40ProgressHideTimer = null;
 
+function clampRandom40PanelPosition(left, top, rect) {
+  const margin = 8;
+  const width = rect?.width || 280;
+  const height = rect?.height || 90;
+  const maxLeft = Math.max(margin, window.innerWidth - width - margin);
+  const maxTop = Math.max(margin, window.innerHeight - height - margin);
+  return {
+    left: Math.min(Math.max(margin, Number(left) || margin), maxLeft),
+    top: Math.min(Math.max(margin, Number(top) || margin), maxTop)
+  };
+}
+
+function applyRandom40PanelPosition(el) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(RANDOM40_PANEL_POS_KEY) || 'null');
+    if (!saved || !Number.isFinite(Number(saved.left)) || !Number.isFinite(Number(saved.top))) return;
+    const pos = clampRandom40PanelPosition(saved.left, saved.top, el.getBoundingClientRect());
+    el.style.left = `${pos.left}px`;
+    el.style.top = `${pos.top}px`;
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+  } catch (_) {}
+}
+
+function saveRandom40PanelPosition(el) {
+  try {
+    const rect = el.getBoundingClientRect();
+    const pos = clampRandom40PanelPosition(rect.left, rect.top, rect);
+    localStorage.setItem(RANDOM40_PANEL_POS_KEY, JSON.stringify(pos));
+    el.style.left = `${pos.left}px`;
+    el.style.top = `${pos.top}px`;
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+  } catch (_) {}
+}
+
+function makeRandom40ProgressDraggable(el) {
+  if (!el || el.dataset.random40Draggable === '1') return;
+  el.dataset.random40Draggable = '1';
+
+  let drag = null;
+
+  el.addEventListener('pointerdown', event => {
+    if (event.button !== undefined && event.button !== 0) return;
+    if (event.target?.closest?.('button, input, textarea, select, a')) return;
+
+    const rect = el.getBoundingClientRect();
+    drag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+      rect
+    };
+    el.style.left = `${rect.left}px`;
+    el.style.top = `${rect.top}px`;
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+    el.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  });
+
+  el.addEventListener('pointermove', event => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const pos = clampRandom40PanelPosition(
+      drag.left + event.clientX - drag.startX,
+      drag.top + event.clientY - drag.startY,
+      drag.rect
+    );
+    el.style.left = `${pos.left}px`;
+    el.style.top = `${pos.top}px`;
+  });
+
+  const finish = event => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    el.releasePointerCapture?.(event.pointerId);
+    drag = null;
+    saveRandom40PanelPosition(el);
+  };
+
+  el.addEventListener('pointerup', finish);
+  el.addEventListener('pointercancel', finish);
+  window.addEventListener('resize', () => {
+    if (getComputedStyle(el).display === 'none') return;
+    if (el.isConnected) saveRandom40PanelPosition(el);
+  });
+}
+
 function ensureRandom40ProgressEl() {
   let el = document.getElementById('random40-progress');
-  if (el) return el;
+  if (el) {
+    makeRandom40ProgressDraggable(el);
+    return el;
+  }
 
   el = document.createElement('div');
   el.id = 'random40-progress';
@@ -5710,6 +5803,8 @@ function ensureRandom40ProgressEl() {
     </div>
   `;
   document.body.appendChild(el);
+  applyRandom40PanelPosition(el);
+  makeRandom40ProgressDraggable(el);
   document.getElementById('random40-stop')?.addEventListener('click', () => {
     if (random40State) {
       random40State.stop = true;
