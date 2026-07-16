@@ -24,6 +24,7 @@
   const SAVED_ARTISTS_PLAYBACK_CACHE_KEY = 'pong_saved_artists_playback_cache_v2';
   const DEFAULT_COOMERFANS_PROXY_URL = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
   const REPAIR_CONCURRENCY_KEY = 'pong_repair_item_concurrency_v1';
+  const SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT = 80;
   const PONG_ARTIST_PREFIX = '#PONG_ARTIST ';
   const PONG_VIDEO_PREFIX = '#PONG_VIDEO ';
   const REPAIR_LOG_UPLOAD_PATH = 'pong-data/repair-log-latest.txt';
@@ -988,7 +989,8 @@
       .filter(artist => artist && Array.isArray(artist.videos) && artist.videos.length)
       .map((artist, artistIndex) => {
         const artistMeta = compactSavedArtistPlaybackMeta(artist);
-        const cleanVideos = dedupeAndRefreshMediaUrls(artist.videos.filter(Boolean));
+        const cleanVideos = shuffleArray(dedupeAndRefreshMediaUrls(artist.videos.filter(Boolean)))
+          .slice(0, SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT);
         const videos = cleanVideos.map(url => {
           const mediaKey = getSavedVideoKey(url);
           const videoMeta = mediaKey && artist.videoMeta ? artist.videoMeta[mediaKey] : null;
@@ -2131,7 +2133,8 @@
     const rebuiltPasteEvents = [];
 
     randomizedArtists.forEach((artist, artistIndex) => {
-      const cleanVideos = shuffleArray(dedupeAndRefreshMediaUrls(artist.videos.filter(Boolean)));
+      const cleanVideos = shuffleArray(dedupeAndRefreshMediaUrls(artist.videos.filter(Boolean)))
+        .slice(0, SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT);
       const artistMeta = compactSavedArtistPlaybackMeta(artist);
 
       if (!cleanVideos.length) return;
@@ -2187,7 +2190,8 @@
     const rebuiltPasteEvents = [];
 
     shuffleArray(artistEntries).forEach((artist, artistIndex) => {
-      const cleanVideos = shuffleArray(artist.videos.filter(item => item?.url));
+      const cleanVideos = shuffleArray(artist.videos.filter(item => item?.url))
+        .slice(0, SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT);
 
       if (!cleanVideos.length) return;
 
@@ -2376,7 +2380,7 @@
 
       loadSavedPlaybackDataFast(playbackData);
     } catch (e) {
-      showMsg('Could not load saved artists');
+      showMsg(`Could not load saved artists: ${getSaveErrorMessage(e)}`);
       console.error(e);
     }
   };
