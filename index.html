@@ -425,13 +425,16 @@
       color: var(--ui-text); pointer-events: none;
     }
     #random40-progress {
-      display: none; position: fixed; left: 50%; top: 12px; transform: translateX(-50%);
+      display: none; position: fixed; right: 10px; bottom: 78px;
       z-index: 1600; width: min(280px, calc(100vw - 24px));
       padding: 8px; border-radius: 9px; background: rgba(9,14,20,0.78);
       color: rgba(244,248,255,0.88); border: 1px solid var(--ui-border);
       box-shadow: 0 14px 36px rgba(0,0,0,0.38);
       backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
       font-size: 11px;
+    }
+    @media (max-width: 420px) {
+      #random40-progress { right: 8px; bottom: 74px; width: min(260px, calc(100vw - 16px)); }
     }
     .random40-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
     .random40-progress-title { font-weight: 800; color: var(--ui-text); }
@@ -656,7 +659,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.08</div>
+  <div class="version-number">23.09</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1642,7 +1645,7 @@ function scheduleSessionSave(delay = 350) {
 
   const requestedDelay = Number(delay);
   const safeDelay = Number.isFinite(requestedDelay) ? Math.max(0, requestedDelay) : 350;
-  const isEromeSession = eromeBatchAutoAdvance || window.PongLoadedSavedMode === 'erome';
+  const isEromeSession = eromeBatchAutoAdvance || window.PongLoadedSavedMode === 'erome' || window.PongLoadedSavedMode === 'random40';
   const eromeSaveDelay = allVideoUrls.length >= EROME_LARGE_SESSION_URL_THRESHOLD
     ? EROME_LARGE_SESSION_SAVE_MIN_DELAY_MS
     : EROME_SESSION_SAVE_MIN_DELAY_MS;
@@ -5669,6 +5672,7 @@ function activateFirstEromeBatch() {
 
 // --- CoomerFans Random 40 AI loader ----------------------------------------
 const RANDOM40_OPENAI_KEY = 'pong_random40_openai_key_v1';
+const RANDOM40_REJECTED_ARTISTS_KEY = 'pong_random40_rejected_artists_v1';
 const RANDOM40_PASSWORD = '22';
 const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
@@ -5682,6 +5686,9 @@ const RANDOM40_MODEL = 'gpt-4.1-mini';
 const RANDOM40_PROMPT_VERSION = 'cf-vision-v6';
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_MAX_REVIEW_IMAGES = 5;
+const RANDOM40_MAX_REJECT_RECORDS = 80;
+const RANDOM40_MAX_REJECT_EXAMPLES = 4;
+const RANDOM40_REJECT_IMAGES_PER_EXAMPLE = 2;
 const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
 let random40State = null;
 let random40ProgressHideTimer = null;
@@ -5857,6 +5864,126 @@ function random40ArtistInfo(artistUrl, doc) {
   };
 }
 
+function random40LoadRejectedArtists() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(RANDOM40_REJECTED_ARTISTS_KEY) || '[]');
+    return Array.isArray(stored) ? stored.filter(item => item?.artistUrl) : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function random40SaveRejectedArtists(records) {
+  const clean = [];
+  const seen = new Set();
+  (records || []).forEach(item => {
+    const artistUrl = random40NormalizeArtistUrl(item?.artistUrl || '');
+    if (!artistUrl || seen.has(artistUrl)) return;
+    seen.add(artistUrl);
+    clean.push({
+      artistUrl,
+      artistName: String(item.artistName || random40ArtistNameFromUrl(artistUrl) || 'unknown').slice(0, 100),
+      imageUrls: [...new Set((item.imageUrls || []).map(url => random40NormalizeUrl(url, artistUrl)).filter(Boolean))].slice(0, RANDOM40_MAX_REVIEW_IMAGES),
+      rejectedAt: item.rejectedAt || new Date().toISOString()
+    });
+  });
+  try {
+    localStorage.setItem(RANDOM40_REJECTED_ARTISTS_KEY, JSON.stringify(clean.slice(0, RANDOM40_MAX_REJECT_RECORDS)));
+  } catch (_) {}
+}
+
+function random40CurrentVideoMeta() {
+  const activeWrapper =
+    document.querySelector('.video-wrapper.deck-active') ||
+    document.querySelector('.video-wrapper.video-playing') ||
+    document.querySelector('.video-wrapper.active') ||
+    document.querySelector('.video-wrapper');
+  const localIndex = Number(activeWrapper?.dataset?.index ?? currentVideoIndex ?? deckCurrentIndex ?? 0);
+  const globalIndex = typeof getVideoGlobalIndexForLocalIndex === 'function'
+    ? getVideoGlobalIndexForLocalIndex(localIndex)
+    : currentLoadedRangeStart + localIndex;
+  return allVideoMetadata[globalIndex] || videoMetadata[localIndex] || {};
+}
+
+function random40RejectedExampleContent(excludeArtistUrl = '') {
+  const excluded = random40NormalizeArtistUrl(excludeArtistUrl);
+  const examples = random40LoadRejectedArtists()
+    .filter(item => random40NormalizeArtistUrl(item.artistUrl) !== excluded)
+    .filter(item => Array.isArray(item.imageUrls) && item.imageUrls.length)
+    .slice(0, RANDOM40_MAX_REJECT_EXAMPLES);
+  const content = [];
+
+  examples.forEach((item, index) => {
+    content.push({
+      type: 'input_text',
+      text:
+        `Rejected example ${index + 1}: ${item.artistName || random40ArtistNameFromUrl(item.artistUrl) || 'artist'}.\n` +
+        'The user pressed the red X for this artist. Treat this as a visual avoid example and reject future artists with a strongly similar presentation.'
+    });
+    item.imageUrls.slice(0, RANDOM40_REJECT_IMAGES_PER_EXAMPLE).forEach((url, imageIndex) => {
+      content.push({ type: 'input_text', text: `Rejected example ${index + 1} image ${imageIndex + 1}:` });
+      content.push({ type: 'input_image', image_url: url, detail: 'low' });
+    });
+  });
+
+  return content;
+}
+
+async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
+  const meta = random40CurrentVideoMeta();
+  const artistUrl = random40NormalizeArtistUrl(bundleInfo.artistUrl || meta.artistUrl || meta.postUrl || '');
+
+  if (!artistUrl) {
+    showSortingIndicator('No Random 40 artist URL found');
+    return false;
+  }
+
+  const artistName =
+    bundleInfo.artistDisplayName ||
+    bundleInfo.bundleLabel ||
+    meta.artistDisplayName ||
+    meta.artistName ||
+    random40ArtistNameFromUrl(artistUrl) ||
+    'artist';
+
+  try {
+    showSortingIndicator(`Adding ${artistName} as a Random 40 avoid example...`);
+    const doc = await random40FetchDoc(artistUrl, { timeoutMs: 22000 });
+    const images = random40ExtractReviewImages(doc, artistUrl, meta.imageUrl || '');
+    const existing = random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
+    random40SaveRejectedArtists([
+      {
+        artistUrl,
+        artistName,
+        imageUrls: images,
+        rejectedAt: new Date().toISOString()
+      },
+      ...existing
+    ]);
+    random40State?.seenArtists?.add?.(artistUrl);
+    random40State?.rejectedArtistUrls?.add?.(artistUrl);
+    showSortingIndicator(`Random 40 will avoid similar artists to ${artistName}`);
+    return true;
+  } catch (err) {
+    const existing = random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
+    random40SaveRejectedArtists([
+      {
+        artistUrl,
+        artistName,
+        imageUrls: [],
+        rejectedAt: new Date().toISOString()
+      },
+      ...existing
+    ]);
+    random40State?.seenArtists?.add?.(artistUrl);
+    random40State?.rejectedArtistUrls?.add?.(artistUrl);
+    showSortingIndicator(`Saved ${artistName} as avoid, but images could not load`);
+    return true;
+  }
+}
+
+window.PongRandom40RejectCurrentArtist = random40RejectCurrentArtistForFutureFinds;
+
 function random40FindArtistsOnListing(doc, pageUrl) {
   const found = new Map();
   for (const link of doc.querySelectorAll('a[href*="/u/"]')) {
@@ -5902,6 +6029,7 @@ function random40HardFilter(artist) {
 async function random40ClassifyArtist(artist, apiKey, imageUrls) {
   const candidateUrls = [...new Set((imageUrls && imageUrls.length ? imageUrls : [artist.imageUrl]).filter(Boolean))].slice(0, RANDOM40_MAX_REVIEW_IMAGES);
   if (!candidateUrls.length) return { decision: 'reject', confidence: 1, reason: 'no image' };
+  const rejectedExamples = random40RejectedExampleContent(artist.artistUrl);
 
   const content = [
     {
@@ -5910,7 +6038,9 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         `Artist: ${artist.artistName || 'unknown'}\n` +
         `Prompt version: ${RANDOM40_PROMPT_VERSION}\n` +
         `Candidate images included: ${candidateUrls.length}\n\n` +
+        `Rejected visual example images included: ${rejectedExamples.filter(item => item.type === 'input_image').length}\n\n` +
         'Classify this CoomerFans artist from the candidate profile/post image set. ' +
+        'Use the rejected examples as visual avoid examples from the user. ' +
         'Reject blank/logo/placeholder/anime/artwork images, images where feet are the main subject, ' +
         'images with any visible male-presenting person, images with no clearly female-presenting adult, ' +
         'and images where the person appears underage or age is unclear. Accept only when the profile clearly shows ' +
@@ -5919,6 +6049,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         'Return unsure only for unclear crops, tiny/blurred images, weak evidence, or genuinely conflicting evidence.'
     }
   ];
+  content.push(...rejectedExamples);
   candidateUrls.forEach((url, index) => {
     content.push({ type: 'input_text', text: `Candidate image ${index + 1}:` });
     content.push({ type: 'input_image', image_url: url, detail: 'low' });
@@ -6151,13 +6282,14 @@ function random40PublishEntries(entries) {
     window.PongEromeAutoAdvanceOnce = true;
     window.PongLoadAllVideosOnce = false;
     loadVideosButton.click();
+    window.PongLoadedSavedMode = 'random40';
     random40State.cardsStarted = true;
     showSortingIndicator(`Loaded first ${payload.urls.length} Random 40 videos. Continuing in background...`);
   } else {
     allVideoUrls.push(...payload.urls);
     allVideoMetadata.push(...payload.metadata);
     pasteEvents.push(...payload.events);
-    window.PongLoadedSavedMode = 'erome';
+    window.PongLoadedSavedMode = 'random40';
     updatePasteNavigationButton();
     updateViewedRemainingCounter();
     scheduleSessionSave(700);
@@ -6219,7 +6351,8 @@ async function startRandom40() {
     stop: false,
     done: false,
     seenPages: new Set(),
-    seenArtists: new Set()
+    seenArtists: new Set(),
+    rejectedArtistUrls: new Set(random40LoadRejectedArtists().map(item => random40NormalizeArtistUrl(item.artistUrl)).filter(Boolean))
   };
 
   updateRandom40Progress({ detail: 'Starting random scan...', force: true });
@@ -6236,7 +6369,11 @@ async function startRandom40() {
       try {
         const doc = await random40FetchDoc(pageUrl, { timeoutMs: 22000 });
         artists = shuffleInPlace(random40FindArtistsOnListing(doc, pageUrl))
-          .filter(artist => artist.imageUrl && !random40State.seenArtists.has(artist.artistUrl));
+          .filter(artist =>
+            artist.imageUrl &&
+            !random40State.seenArtists.has(artist.artistUrl) &&
+            !random40State.rejectedArtistUrls.has(artist.artistUrl)
+          );
       } catch (err) {
         random40State.pages++;
         updateRandom40Progress({ detail: `Page ${page} failed: ${err.message}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });

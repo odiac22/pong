@@ -2894,6 +2894,22 @@
 
   async function removeCurrentSavedItemOverride() {
     const mode = window.PongLoadedSavedMode || 'normal';
+    const bundleInfo = getCurrentPasteBundleInfo();
+
+    if (
+      bundleInfo?.source === 'random40' &&
+      typeof window.PongRandom40RejectCurrentArtist === 'function'
+    ) {
+      try {
+        showMsg('Teaching Random 40 to avoid this artist...');
+        const handled = await window.PongRandom40RejectCurrentArtist(bundleInfo);
+        if (handled) return;
+      } catch (e) {
+        showMsg('Could not teach Random 40 from this artist');
+        console.error(e);
+        return;
+      }
+    }
 
     if (mode === 'savedVideos') {
       const url = getCurrentVideoUrlOverride();
@@ -2942,7 +2958,6 @@
     }
 
     if (mode === 'savedArtists') {
-      const bundleInfo = getCurrentPasteBundleInfo();
       const eventIndex = getCurrentPasteEventIndex();
 
       if (!bundleInfo || !bundleInfo.bundleKey || eventIndex < 0) {
