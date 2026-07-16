@@ -2236,6 +2236,29 @@
     );
   }
 
+  function clearSavedArtistsPlaybackCache() {
+    try {
+      localStorage.removeItem(SAVED_ARTISTS_PLAYBACK_CACHE_KEY);
+    } catch (_) {}
+
+    if (window.PongSavedPlaybackMemoryCache) {
+      delete window.PongSavedPlaybackMemoryCache.artists;
+    }
+  }
+
+  function tryLoadSavedArtistsPlaybackSource(source, label) {
+    try {
+      const playbackData = buildSavedArtistsPlaybackDataFromSource(source);
+      if (!playbackData) return false;
+      loadSavedPlaybackDataFast(playbackData);
+      return true;
+    } catch (error) {
+      clearSavedArtistsPlaybackCache();
+      console.warn(`[Pong saved] Could not load saved artists from ${label}`, error);
+      return false;
+    }
+  }
+
   function refreshSavedPlaybackCacheInBackground(label) {
     fetchSharedDataFromGitHub()
       .then(loaded => {
@@ -2317,26 +2340,29 @@
     try {
       showMsg('Loading saved artists...');
 
-      const cachedPlayback = buildSavedArtistsPlaybackDataFromSource(loadSavedPlaybackSource('artists'));
-      if (cachedPlayback) {
-        loadSavedPlaybackDataFast(cachedPlayback);
+      if (tryLoadSavedArtistsPlaybackSource(loadSavedPlaybackSource('artists'), 'cache')) {
         warmSavedPlaybackCacheInBackground();
         return;
       }
 
       if (savedPlaybackWarmPromise) {
         await savedPlaybackWarmPromise;
-        const warmedPlayback = buildSavedArtistsPlaybackDataFromSource(loadSavedPlaybackSource('artists'));
 
-        if (warmedPlayback) {
-          loadSavedPlaybackDataFast(warmedPlayback);
+        if (tryLoadSavedArtistsPlaybackSource(loadSavedPlaybackSource('artists'), 'warm cache')) {
           return;
         }
       }
 
-      const loaded = await fetchSharedDataFromGitHub();
-      const savedData = loaded.data;
-      mirrorSharedDataToLocal(savedData);
+      let savedData = null;
+
+      try {
+        const loaded = await fetchSharedDataFromGitHub();
+        savedData = loaded.data;
+        mirrorSharedDataToLocal(savedData);
+      } catch (error) {
+        console.warn('[Pong saved] GitHub saved artists load failed; trying local cache', error);
+        savedData = loadCachedSharedData();
+      }
 
       const playbackData = buildSavedArtistsPlaybackDataFromSource(buildSavedArtistsPlaybackSource(savedData))
         || buildSavedArtistsPlaybackDataFast(savedData);
