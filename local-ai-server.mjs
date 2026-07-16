@@ -458,14 +458,17 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
     'decision must be accept, reject, or unsure. confidence must be 0 to 1.',
     'checks must contain: photograph, woman_prominent, male_only, male_present, female_presenting_adult, appears_over_50, feet_dominant, logo_or_placeholder.',
     'This is an adult creator filtering task. Do not reject merely because an image is revealing, sexualized, lingerie, swimwear, nude, or adult-media styled. Do not give platform/community-guidelines refusals. Judge only the requested filters and user preference signal.',
-    'Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible, feet are the main subject, non-photo/logo/placeholder, age appears over the configured limit, underage-looking, unclear adult age, or the visual presentation conflicts with the saved preference signal.',
+    'First perform hard visual checks. Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, age appears over the configured limit, underage-looking, or unclear adult age.',
+    'Reject if the entire candidate image set is non-photo/logo/placeholder/anime/artwork/unclear or lacks enough visible face or body evidence to judge the artist. A face-only image or body-only image can still be judged when it gives enough evidence for the hard checks and visual preference.',
+    'Do not reject the whole artist just because one candidate image is weak, blank, cropped, or unclear if another candidate clearly supplies enough face/body evidence.',
+    'Only after hard checks pass, use the saved preference signal to judge fit. SigLIP is a preference hint, never a hard-rule authority.',
     'Accept only when the image set clearly shows a female-presenting adult and fits the saved visual preference signal: conventionally attractive styling, fit/athletic/slim/lean presentation, polished appearance, or youthful adult presentation.',
     'User reject reasons may include Fat, Male, Trans, and Ugly. Use Male as a hard visual rejection reason. Use Trans only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health.',
     'Do not identify anyone. Do not infer ethnicity, sexuality, medical conditions, or weight status. Do not mention body weight or health.',
     '',
     `Artist: ${artist.artistName || 'unknown'}`,
     `URL: ${artist.artistUrl || ''}`,
-    `SigLIP learned-taste decision: ${siglipDecision.decision}, confidence ${Number(siglipDecision.confidence || 0).toFixed(2)}, ${siglipDecision.reason || ''}`,
+    `SigLIP learned-taste hint, not a hard rule: ${siglipDecision.decision}, confidence ${Number(siglipDecision.confidence || 0).toFixed(2)}, ${siglipDecision.reason || ''}`,
     rejectionSummary ? `User red-X reason history: ${rejectionSummary}` : 'No user red-X reason history yet.',
     'Per-image learned-taste grades:',
     localSummary,
@@ -643,12 +646,17 @@ async function classify(payload) {
   let combined = /^qwen unavailable:/i.test(qwen.reason || '')
     ? { ...qwen, decision: 'reject', confidence: 0.75, reason: 'qwen unavailable for visual safety check' }
     : qwen;
-  if (qwen.checks?.male_present === true || qwen.checks?.male_only === true || qwen.checks?.appears_over_50 === true || qwen.checks?.feet_dominant === true) {
+
+  if (qwen.checks?.male_present === true || qwen.checks?.male_only === true || qwen.checks?.appears_over_50 === true || qwen.checks?.feet_dominant === true || qwen.checks?.logo_or_placeholder === true || qwen.checks?.photograph === false) {
     combined = { ...qwen, decision: 'reject', confidence: Math.max(Number(qwen.confidence || 0), 0.96) };
   }
   if (combined.decision === 'accept') {
     const checks = qwen.checks || {};
     const safeFemaleOnly =
+      checks.photograph !== false &&
+      checks.logo_or_placeholder !== true &&
+      checks.appears_over_50 !== true &&
+      checks.feet_dominant !== true &&
       checks.female_presenting_adult === true &&
       checks.male_present === false &&
       checks.male_only === false;

@@ -677,7 +677,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.43</div>
+  <div class="version-number">23.44</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6003,6 +6003,7 @@ const RANDOM40_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787', 'http://192.168.1.124
 const RANDOM40_ACCEPTED_ARTISTS_KEY = 'pong_random40_accepted_artists_v1';
 const RANDOM40_REJECTED_ARTISTS_KEY = 'pong_random40_rejected_artists_v1';
 const RANDOM40_ACCURACY_KEY = 'pong_random40_model_accuracy_v1';
+const RANDOM40_TIMING_KEY = 'pong_random40_stage_timing_v1';
 const RANDOM40_PANEL_POS_KEY = 'pong_random40_panel_pos_v1';
 const RANDOM40_PASSWORD = '22';
 const RANDOM40_TARGET_ACCEPTED = 40;
@@ -6015,10 +6016,11 @@ const RANDOM40_PAGE_BATCH_SIZE = 8;
 const RANDOM40_LISTING_PAGE_BATCH_SIZE = 4;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
+const RANDOM40_FAST_PUBLISH_VIDEOS = 8;
 const RANDOM40_MODEL = 'gpt-4.1-nano';
 const RANDOM40_LOCAL_MODEL_NAME = 'local-image-embeddings';
 const RANDOM40_LOCAL2_VISION_MODEL = 'qwen3-vl:4b';
-const RANDOM40_PROMPT_VERSION = 'cf-vision-v10';
+const RANDOM40_PROMPT_VERSION = 'cf-vision-v11';
 const RANDOM40_THUMBNAIL_REJECT_CONFIDENCE = 0.95;
 const RANDOM40_REJECT_CACHE_KEY = 'pong_random40_model_reject_cache_v1';
 const RANDOM40_REJECT_CACHE_MAX = 4000;
@@ -6507,6 +6509,66 @@ function random40RejectReasonSummary() {
     .join(', ');
 }
 
+function random40LoadTimingHistory() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(RANDOM40_TIMING_KEY) || '[]');
+    return Array.isArray(stored) ? stored : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function random40SaveTimingHistory(history) {
+  try {
+    localStorage.setItem(RANDOM40_TIMING_KEY, JSON.stringify((history || []).slice(-20)));
+  } catch (_) {}
+}
+
+function random40RecordStageTiming(stage, ms) {
+  if (!random40State || !stage) return;
+  const value = Math.max(0, Math.round(Number(ms || 0)));
+  const timings = random40State.stageTimings || (random40State.stageTimings = {});
+  const bucket = timings[stage] || (timings[stage] = { count: 0, totalMs: 0, maxMs: 0 });
+  bucket.count++;
+  bucket.totalMs += value;
+  bucket.maxMs = Math.max(bucket.maxMs, value);
+}
+
+function random40PersistStageTimings() {
+  if (!random40State?.stageTimings) return;
+  const history = random40LoadTimingHistory();
+  history.push({
+    createdAt: new Date().toISOString(),
+    mode: random40NormalizeMode(random40State.mode),
+    accepted: Number(random40State.accepted || 0),
+    videos: Number(random40State.videos || 0),
+    pages: Number(random40State.pages || 0),
+    api: Number(random40State.api || 0),
+    stages: random40State.stageTimings
+  });
+  random40SaveTimingHistory(history);
+}
+
+function random40StageTimingLines() {
+  const source = random40State?.stageTimings
+    ? { mode: random40NormalizeMode(random40State.mode), stages: random40State.stageTimings, active: true }
+    : random40LoadTimingHistory().slice(-1)[0];
+  if (!source?.stages) return [];
+
+  const lines = [
+    '',
+    `Random 40 stage timing${source.active ? ' (current run)' : ` (${source.mode || 'last run'})`}:`
+  ];
+
+  Object.entries(source.stages).forEach(([stage, item]) => {
+    const count = Math.max(1, Number(item.count || 0));
+    const avg = Math.round(Number(item.totalMs || 0) / count);
+    lines.push(`${stage}: avg ${(avg / 1000).toFixed(1)}s, max ${(Number(item.maxMs || 0) / 1000).toFixed(1)}s, n=${count}`);
+  });
+
+  return lines;
+}
+
 function random40NormalizeMode(mode) {
   const value = String(mode || '').toLowerCase();
   if (value === 'local2' || value === 'local-2') return 'local2';
@@ -6690,6 +6752,8 @@ function random40AccuracyReport() {
       ].join(' | '));
     });
   }
+
+  lines.push(...random40StageTimingLines());
 
   return lines.join('\n');
 }
@@ -7013,6 +7077,7 @@ function random40IsAcceptedDecision(decision) {
 
   const checks = decision.checks || {};
   const provenSafe =
+    checks.photograph !== false &&
     checks.female_presenting_adult === true &&
     checks.male_present === false &&
     checks.male_only === false &&
@@ -7020,6 +7085,10 @@ function random40IsAcceptedDecision(decision) {
     checks.feet_dominant !== true &&
     checks.logo_or_placeholder !== true;
   if (!provenSafe) return false;
+
+  // Local mode uses SigLIP only as preference memory. Once Qwen proves the
+  // hard visual checks and returns accept, do not let SigLIP veto the result.
+  if (decision.qwen_decision) return true;
 
   const imageGrades = Array.isArray(decision.image_grades) ? decision.image_grades : [];
   if (!imageGrades.length) return true;
@@ -7064,8 +7133,10 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         'User reject reasons Fat, Male, Trans, and Ugly are user-provided labels. Use Male as a hard visible rejection label. Use Trans as a text/URL hard-filter clue, not as an appearance inference. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health. ' +
         'When hard rejection rules are not triggered, stay broad and favor conventionally attractive adult women with clear, appealing presentation. ' +
         'Do not accept from one favorable thumbnail if the random profile/post images conflict with the hard rules or user preference examples. ' +
-        'Reject blank/logo/placeholder/anime/artwork images, images where feet are the main subject, ' +
-        'images with any visible male-presenting person, images with no clearly female-presenting adult, ' +
+        'Reject when the entire candidate set is blank/logo/placeholder/anime/artwork/non-photographic or lacks enough visible face or body evidence to judge the artist. ' +
+        'Do not reject the whole artist just because one candidate is weak, blank, cropped, or unclear if another candidate clearly supplies enough face/body evidence. ' +
+        'Reject images where feet are the main subject, images with any visible male-presenting person, images with no clearly female-presenting adult, ' +
+        'A face-only image or body-only image can still be judged when it gives enough evidence for the hard checks and visual preference. ' +
         'images where the person appears underage or age is unclear, and images where the artist appears over 50. Accept only when the profile clearly shows ' +
         'a female-presenting adult and matches at least one preferred style: conventionally attractive styling, fit or athletic presentation, ' +
         'slim/lean presentation, polished appearance, or youthful adult presentation. Do not diagnose, label, or mention body weight or health status. ' +
@@ -7096,6 +7167,8 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
               'You are a decisive image triage classifier. Return only the requested structured output. ' +
               'Do not identify the person. Do not infer ethnicity, sexuality, medical conditions, or weight status. ' +
               'Reject any male-presenting person, male-only image, clearly non-photographic image, placeholder, feet-dominant image, non-adult-presenting profile image, or artist who appears over 50. ' +
+              'Reject when the whole image set lacks enough visible face or body evidence; face-only or body-only images are acceptable when enough evidence is visible. ' +
+              'For blank/logo/non-photographic/unclear crops, judge the whole artist image set: one bad candidate does not reject the artist when another candidate is clear. ' +
               'Treat saved accepted examples as small positive nudges. Treat red-X rejected examples as stronger hard-negative corrections after hard rejection rules.'
           }]
         },
@@ -7276,6 +7349,7 @@ async function random40ThumbnailTriageNano(artist, apiKey) {
                 'Reject when the image shows any male-presenting person, no clearly female-presenting adult, ' +
                 'a person who appears underage or whose adult age is unclear, a person who appears over 50, ' +
                 'feet as the main subject, or a logo/placeholder/anime/non-photograph image. ' +
+                'Do not reject just because the thumbnail is face-only or body-only if there is enough evidence for a closer review. ' +
                 'Accept only means the profile is worth a closer full review, not a final decision.'
             },
             { type: 'input_text', text: 'Thumbnail:' },
@@ -7381,6 +7455,8 @@ async function random40ThumbnailTriage(artist, apiKey, mode, localEndpoint) {
     checks.male_present === true ||
     checks.appears_over_50 === true ||
     checks.feet_dominant === true ||
+    checks.logo_or_placeholder === true ||
+    checks.photograph === false ||
     (checks.photograph === true && checks.female_presenting_adult === false);
   if (hardReject) {
     return { skip: true, hardReject: true, reason: String(parsed.reason || 'thumbnail hard reject').slice(0, 80) };
@@ -7448,9 +7524,11 @@ function random40ExtractVideoPostLinks(doc, baseUrl) {
 async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPages = RANDOM40_MAX_ARTIST_PAGES } = {}) {
   const base = artist.artistUrl;
   const postLinks = new Set();
+  const pageTextParts = [];
   const firstDoc = await random40FetchDoc(base, { timeoutMs: 22000 });
 
   random40ExtractVideoPostLinks(firstDoc, base).forEach(url => postLinks.add(url));
+  if (firstDoc.body?.innerText) pageTextParts.push(firstDoc.body.innerText);
 
   let page = 2;
   while (page <= maxPages && postLinks.size < stopAt) {
@@ -7464,6 +7542,7 @@ async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPag
       if (!doc) return;
       if (doc.querySelector('div.post')) hasPosts = true;
       random40ExtractVideoPostLinks(doc, `${base}?page=${pages[index]}`).forEach(url => postLinks.add(url));
+      if (doc.body?.innerText) pageTextParts.push(doc.body.innerText);
     });
     if (!hasPosts) break;
     page += RANDOM40_PAGE_BATCH_SIZE;
@@ -7471,7 +7550,8 @@ async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPag
 
   return {
     firstDoc,
-    links: [...postLinks]
+    links: [...postLinks],
+    pageText: pageTextParts.join(' ').replace(/\s+/g, ' ').slice(0, 60000)
   };
 }
 
@@ -7838,6 +7918,7 @@ async function startRandom40(mode = 'nano') {
     skippedLowVideo: 0,
     thumbnailSkips: 0,
     cachedSkips: 0,
+    stageTimings: {},
     cardsStarted: false,
     stop: false,
     done: false,
@@ -7867,12 +7948,14 @@ async function startRandom40(mode = 'nano') {
 
       let artists = [];
       try {
+        const pageStageStarted = performance.now();
         const pageResults = await Promise.all(pages.map(page => {
           const pageUrl = random40PageUrl(page);
           return random40FetchDoc(pageUrl, { timeoutMs: 22000 })
             .then(doc => ({ page, pageUrl, doc }))
             .catch(error => ({ page, pageUrl, error }));
         }));
+        random40RecordStageTiming('listing-pages', performance.now() - pageStageStarted);
         const byArtist = new Map();
 
         pageResults.forEach(result => {
@@ -7912,7 +7995,9 @@ async function startRandom40(mode = 'nano') {
         if (random40HardFilter(artist)) return;
 
         updateRandom40Progress({ detail: `Checking videos: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        let stageStarted = performance.now();
         const precheck = await random40CollectVideoPostLinks(artist, { stopAt: RANDOM40_MIN_VIDEOS_PER_ARTIST }).catch(() => ({ links: [] }));
+        random40RecordStageTiming('video-precheck', performance.now() - stageStarted);
         if ((precheck.links || []).length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
           random40State.skippedLowVideo = (random40State.skippedLowVideo || 0) + 1;
           updateRandom40Progress({
@@ -7925,8 +8010,21 @@ async function startRandom40(mode = 'nano') {
           return;
         }
 
+        const artistWithPrecheckText = {
+          ...artist,
+          pageText: `${artist.pageText || ''} ${precheck.pageText || ''}`.replace(/\s+/g, ' ').trim()
+        };
+        const precheckHard = random40HardFilter(artistWithPrecheckText);
+        if (precheckHard) {
+          random40CacheHardReject(artist.artistUrl, precheckHard.reason);
+          random40State.cachedSkips = (random40State.cachedSkips || 0) + 1;
+          return;
+        }
+
         updateRandom40Progress({ detail: `${classifierLabel} thumbnail check: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
-        const triage = await random40ThumbnailTriage(artist, apiKey, runMode, localEndpoint).catch(() => ({ skip: false }));
+        stageStarted = performance.now();
+        const triage = await random40ThumbnailTriage(artistWithPrecheckText, apiKey, runMode, localEndpoint).catch(() => ({ skip: false }));
+        random40RecordStageTiming('thumbnail-ai', performance.now() - stageStarted);
         if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
         if (triage.skip) {
           random40State.thumbnailSkips = (random40State.thumbnailSkips || 0) + 1;
@@ -7935,7 +8033,9 @@ async function startRandom40(mode = 'nano') {
         }
 
         updateRandom40Progress({ detail: `${classifierLabel} ${artistLabel} - ${precheck.links.length}+ videos, ${RANDOM40_INITIAL_IMAGES_PER_ARTIST} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
-        const decision = await random40AnalyzeArtist(artist, apiKey, { firstDoc: precheck.firstDoc, mode: runMode, localEndpoint }).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
+        stageStarted = performance.now();
+        const decision = await random40AnalyzeArtist(artistWithPrecheckText, apiKey, { firstDoc: precheck.firstDoc, mode: runMode, localEndpoint }).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
+        random40RecordStageTiming('full-ai', performance.now() - stageStarted);
         if (!random40IsAcceptedDecision(decision)) {
           const checks = decision?.checks || {};
           if (checks.male_present === true || checks.male_only === true || checks.appears_over_50 === true || checks.feet_dominant === true) {
@@ -7944,15 +8044,17 @@ async function startRandom40(mode = 'nano') {
           return;
         }
         if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
-        updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Loading first ${RANDOM40_MIN_VIDEOS_PER_ARTIST} videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
-        const entries = await random40ScrapeArtistVideos(artist, {
+        updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Loading first playable videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+        stageStarted = performance.now();
+        const entries = await random40ScrapeArtistVideos(artistWithPrecheckText, {
           collected: precheck,
-          stopAtVideos: RANDOM40_MIN_VIDEOS_PER_ARTIST
+          stopAtVideos: RANDOM40_FAST_PUBLISH_VIDEOS
         }).catch(() => []);
-        if (entries.length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
+        random40RecordStageTiming('initial-video-scrape', performance.now() - stageStarted);
+        if (!entries.length) {
           random40State.skippedLowVideo = (random40State.skippedLowVideo || 0) + 1;
           updateRandom40Progress({
-            detail: `Skipped accepted ${artist.artistName}: only ${entries.length}/${RANDOM40_MIN_VIDEOS_PER_ARTIST} videos`,
+            detail: `Skipped accepted ${artist.artistName}: no playable videos found quickly`,
             accepted: random40State.accepted,
             videos: random40State.videos,
             pages: random40State.pages,
@@ -7963,8 +8065,10 @@ async function startRandom40(mode = 'nano') {
         }
         if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
         random40State.accepted++;
+        stageStarted = performance.now();
         random40PublishEntries(entries);
-        random40ContinueArtistScrapeInBackground(artist, precheck, entries);
+        random40RecordStageTiming('publish-first-videos', performance.now() - stageStarted);
+        random40ContinueArtistScrapeInBackground(artistWithPrecheckText, precheck, entries);
         updateRandom40Progress({ detail: `${random40State.accepted}/${RANDOM40_TARGET_ACCEPTED} accepted - ${random40State.videos} videos`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
       });
     }
@@ -7978,9 +8082,11 @@ async function startRandom40(mode = 'nano') {
       api: random40State.api,
       force: true
     });
+    random40PersistStageTimings();
     hideRandom40Progress(2500);
   } catch (err) {
     random40State.done = true;
+    random40PersistStageTimings();
     updateRandom40Progress({ detail: `Random 40 failed: ${err.message}`, force: true });
   }
 }
