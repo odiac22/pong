@@ -677,7 +677,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.41</div>
+  <div class="version-number">23.42</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6019,7 +6019,7 @@ const RANDOM40_MODEL = 'gpt-4.1-nano';
 const RANDOM40_LOCAL_MODEL_NAME = 'local-image-embeddings';
 const RANDOM40_LOCAL2_VISION_MODEL = 'qwen3-vl:4b';
 const RANDOM40_PROMPT_VERSION = 'cf-vision-v10';
-const RANDOM40_THUMBNAIL_REJECT_CONFIDENCE = 0.8;
+const RANDOM40_THUMBNAIL_REJECT_CONFIDENCE = 0.95;
 const RANDOM40_REJECT_CACHE_KEY = 'pong_random40_model_reject_cache_v1';
 const RANDOM40_REJECT_CACHE_MAX = 4000;
 const RANDOM40_REJECT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
@@ -7352,9 +7352,25 @@ async function random40ThumbnailTriage(artist, apiKey, mode, localEndpoint) {
     const text = await res.text();
     if (!res.ok) throw new Error(`Local AI HTTP ${res.status}: ${text.slice(0, 180)}`);
     const parsed = JSON.parse(text);
-    if (parsed.decision === 'reject') {
-      const hardReject = String(parsed.source || '') === 'hard_filter';
-      return { skip: true, hardReject, reason: String(parsed.reason || 'local thumbnail reject').slice(0, 80) };
+    const checks = parsed.checks || {};
+    const hardReject =
+      String(parsed.source || '') === 'hard_filter' ||
+      checks.male_present === true ||
+      checks.male_only === true ||
+      checks.appears_over_50 === true ||
+      checks.feet_dominant === true ||
+      checks.logo_or_placeholder === true ||
+      (checks.photograph === true && checks.female_presenting_adult === false);
+    if (hardReject) {
+      return { skip: true, hardReject: true, reason: String(parsed.reason || 'local thumbnail hard reject').slice(0, 80) };
+    }
+    const reason = String(parsed.reason || '');
+    if (
+      parsed.decision === 'reject' &&
+      Number(parsed.confidence || 0) >= RANDOM40_THUMBNAIL_REJECT_CONFIDENCE &&
+      /\b(male|feet|logo|placeholder|over age|over 50|no clearly female)\b/i.test(reason)
+    ) {
+      return { skip: true, hardReject: false, reason: String(parsed.reason || 'local thumbnail reject').slice(0, 80) };
     }
     return { skip: false };
   }
@@ -9043,6 +9059,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=104"></script>
+<script src="pong-sync.js?v=105"></script>
 </body>
 </html>
