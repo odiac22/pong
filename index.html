@@ -659,7 +659,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.11</div>
+  <div class="version-number">23.12</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5688,6 +5688,7 @@ const RANDOM40_MODEL = 'gpt-4.1-mini';
 const RANDOM40_PROMPT_VERSION = 'cf-vision-v6';
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_MAX_REVIEW_IMAGES = 5;
+const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 3;
 const RANDOM40_MAX_ACCEPT_RECORDS = 80;
 const RANDOM40_MAX_ACCEPT_EXAMPLES = 4;
 const RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE = 4;
@@ -6255,9 +6256,11 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         `Accepted visual example images included: ${acceptedExamples.filter(item => item.type === 'input_image').length}\n` +
         `Rejected visual example images included: ${rejectedExamples.filter(item => item.type === 'input_image').length}\n\n` +
         'Classify this CoomerFans artist from the candidate profile/post image set. ' +
+        'The candidate set should include the listing/profile image plus extra images from the artist profile whenever available. ' +
         'Use accepted examples as strong visual favor examples from the user. ' +
         'Use the rejected examples as visual avoid examples from the user. ' +
         'When hard rejection rules are not triggered, give strong priority to candidates that closely resemble accepted examples. ' +
+        'Do not accept from one favorable thumbnail if the additional profile/post images conflict with the hard rules or user preference examples. ' +
         'Reject blank/logo/placeholder/anime/artwork images, images where feet are the main subject, ' +
         'images with any visible male-presenting person, images with no clearly female-presenting adult, ' +
         'and images where the person appears underage or age is unclear. Accept only when the profile clearly shows ' +
@@ -6531,17 +6534,35 @@ async function random40Pool(items, limit, worker) {
   return results;
 }
 
-async function random40AnalyzeArtist(artist, apiKey) {
-  const hard = random40HardFilter(artist);
+async function random40AnalyzeArtist(artist, apiKey, options = {}) {
+  let doc = options.firstDoc || null;
+  const workingArtist = { ...artist };
+
+  if (!doc) {
+    try {
+      doc = await random40FetchDoc(artist.artistUrl, { timeoutMs: 18000 });
+    } catch (_) {}
+  }
+
+  if (doc?.body) {
+    workingArtist.pageText = `${artist.pageText || ''} ${doc.body.innerText || ''}`.replace(/\s+/g, ' ').trim();
+  }
+
+  const hard = random40HardFilter(workingArtist);
   if (hard) return hard;
-  let decision = await random40ClassifyArtist(artist, apiKey);
+
+  const initialImages = doc
+    ? random40ExtractReviewImages(doc, workingArtist.artistUrl, workingArtist.imageUrl).slice(0, RANDOM40_INITIAL_IMAGES_PER_ARTIST)
+    : [workingArtist.imageUrl].filter(Boolean);
+
+  let decision = await random40ClassifyArtist(workingArtist, apiKey, initialImages);
   random40State.api++;
   if (Number(decision.confidence || 0) < RANDOM40_CONFIDENCE_REVIEW) {
     try {
-      const doc = await random40FetchDoc(artist.artistUrl, { timeoutMs: 18000 });
-      const images = random40ExtractReviewImages(doc, artist.artistUrl, artist.imageUrl);
-      if (images.length > 1) {
-        decision = await random40ClassifyArtist(artist, apiKey, images);
+      if (!doc) doc = await random40FetchDoc(workingArtist.artistUrl, { timeoutMs: 18000 });
+      const images = random40ExtractReviewImages(doc, workingArtist.artistUrl, workingArtist.imageUrl);
+      if (images.length > initialImages.length) {
+        decision = await random40ClassifyArtist(workingArtist, apiKey, images);
         random40State.api++;
         decision.reason = `reviewed ${images.length} images: ${decision.reason || ''}`.slice(0, 120);
       }
@@ -6616,8 +6637,8 @@ async function startRandom40() {
           });
           return;
         }
-        updateRandom40Progress({ detail: `AI ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} - ${precheck.links.length}+ videos`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
-        const decision = await random40AnalyzeArtist(artist, apiKey).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
+        updateRandom40Progress({ detail: `AI ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} - ${precheck.links.length}+ videos, 3 images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        const decision = await random40AnalyzeArtist(artist, apiKey, { firstDoc: precheck.firstDoc }).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
         if (decision.decision !== 'accept') return;
         if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
         updateRandom40Progress({ detail: `AI accepted ${artist.artistName}. Scraping videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
