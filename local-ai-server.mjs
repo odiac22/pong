@@ -76,7 +76,8 @@ function sha256(value) {
 
 async function readJsonFile(filePath, fallback) {
   try {
-    return JSON.parse(await fs.readFile(filePath, 'utf8'));
+    const text = await fs.readFile(filePath, 'utf8');
+    return JSON.parse(text.replace(/^\uFEFF/, ''));
   } catch (_) {
     return fallback;
   }
