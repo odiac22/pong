@@ -2233,6 +2233,74 @@
     };
   }
 
+  function buildSavedArtistsPlaybackDataSafe(savedData) {
+    const data = savedData && typeof savedData === 'object' ? savedData : null;
+    const artistEntries = Object.values(data?.savedArtists || {})
+      .filter(artist => artist && Array.isArray(artist.videos) && artist.videos.length);
+
+    if (!artistEntries.length) return null;
+
+    const urls = [];
+    const metadata = [];
+    const pasteEventsForArtists = [];
+
+    shuffleArray(artistEntries).forEach((artist, artistIndex) => {
+      const seen = new Set();
+      const cleanVideos = shuffleArray(artist.videos.filter(url => {
+        const value = String(url || '').trim();
+        if (!value || seen.has(value)) return false;
+        seen.add(value);
+        return /\.(mp4|m4v|mov|webm)(\?|$)/i.test(value);
+      })).slice(0, SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT);
+
+      if (!cleanVideos.length) return;
+
+      const startIndex = urls.length;
+      const artistName = String(artist.artistDisplayName || artist.artistName || artist.bundleLabel || artist.artistKey || `Saved artist ${artistIndex + 1}`);
+      const artistUrl = String(artist.artistUrl || '');
+      const artistKey = String(artist.artistKey || artistUrl || `saved-artist-${artistIndex}`);
+      const source = String(artist.source || 'saved-artist-bundle');
+
+      cleanVideos.forEach((url, postIndex) => {
+        urls.push(url);
+        metadata.push({
+          source,
+          artistName,
+          artistKey,
+          artistUrl,
+          artistDisplayName: artistName,
+          postUrl: '',
+          postIndex,
+          scrapedAt: String(artist.scrapedAt || ''),
+          mediaKey: ''
+        });
+      });
+
+      pasteEventsForArtists.push({
+        startIndex,
+        count: cleanVideos.length,
+        artistKey,
+        bundleKey: artistKey,
+        source,
+        artistUrl,
+        postUrl: '',
+        artistDisplayName: artistName,
+        bundleLabel: artistName,
+        loadAll: source === 'erome'
+      });
+    });
+
+    if (!urls.length || !pasteEventsForArtists.length) return null;
+
+    return {
+      urls,
+      message: `Playing ${pasteEventsForArtists.length} saved bundles`,
+      pasteEvents: pasteEventsForArtists,
+      mode: 'savedArtists',
+      metadata
+    };
+  }
+
   function loadSavedPlaybackDataFast(playbackData) {
     if (!playbackData?.urls?.length) {
       throw new Error('Saved playback data has no URLs');
@@ -2355,19 +2423,6 @@
     try {
       showMsg('Loading saved artists...');
 
-      if (tryLoadSavedArtistsPlaybackSource(loadSavedPlaybackSource('artists'), 'cache')) {
-        warmSavedPlaybackCacheInBackground();
-        return;
-      }
-
-      if (savedPlaybackWarmPromise) {
-        await savedPlaybackWarmPromise;
-
-        if (tryLoadSavedArtistsPlaybackSource(loadSavedPlaybackSource('artists'), 'warm cache')) {
-          return;
-        }
-      }
-
       let savedData = null;
 
       try {
@@ -2379,7 +2434,8 @@
         savedData = loadCachedSharedData();
       }
 
-      const playbackData = buildSavedArtistsPlaybackDataFromSource(buildSavedArtistsPlaybackSource(savedData))
+      const playbackData = buildSavedArtistsPlaybackDataSafe(savedData)
+        || buildSavedArtistsPlaybackDataFromSource(buildSavedArtistsPlaybackSource(savedData))
         || buildSavedArtistsPlaybackDataFast(savedData);
       if (!playbackData) {
         showMsg('No saved artists yet');
@@ -2387,6 +2443,7 @@
       }
 
       loadSavedPlaybackDataFast(playbackData);
+      warmSavedPlaybackCacheInBackground();
     } catch (e) {
       showMsg(`Could not load saved artists: ${getSaveErrorMessage(e)}`);
       console.error(e);
