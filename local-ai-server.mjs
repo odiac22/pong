@@ -1,5 +1,6 @@
 import http from 'node:http';
 import path from 'node:path';
+import fs from 'node:fs/promises';
 import { pipeline, RawImage, env } from '@xenova/transformers';
 
 const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
@@ -12,6 +13,8 @@ const TOP_K = 10;
 const QWEN_ACCEPT_EXAMPLES = 2;
 const QWEN_REJECT_EXAMPLES = 2;
 const QWEN_SKIP_REJECT_CONFIDENCE = 0.78;
+const LEARNED_STORE_PATH = path.join(process.cwd(), '.pong-local-ai', 'learned-examples.json');
+const MAX_LEARNED_RECORDS = 300;
 
 env.allowLocalModels = false;
 env.useBrowserCache = false;
@@ -22,6 +25,7 @@ let extractorReady = false;
 let ollamaVisionDisabled = false;
 let ollamaFailureReason = '';
 const embeddingCache = new Map();
+let learnedStorePromise = null;
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -167,6 +171,104 @@ function imageUrlsFromRecords(records = []) {
     }
   }
   return out;
+}
+
+function normalizeArtistUrl(raw) {
+  try {
+    const url = new URL(String(raw || ''), 'https://coomerfans.com/');
+    url.hash = '';
+    url.search = '';
+    return url.toString().replace(/\/$/, '');
+  } catch (_) {
+    return '';
+  }
+}
+
+async function loadLearnedStore() {
+  if (!learnedStorePromise) {
+    learnedStorePromise = fs.readFile(LEARNED_STORE_PATH, 'utf8')
+      .then(text => JSON.parse(text))
+      .catch(() => ({ version: 1, records: [] }))
+      .then(store => ({
+        version: 1,
+        records: Array.isArray(store?.records) ? store.records : []
+      }));
+  }
+  return learnedStorePromise;
+}
+
+async function saveLearnedStore(store) {
+  await fs.mkdir(path.dirname(LEARNED_STORE_PATH), { recursive: true });
+  const clean = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    records: (store.records || []).slice(0, MAX_LEARNED_RECORDS)
+  };
+  await fs.writeFile(LEARNED_STORE_PATH, JSON.stringify(clean, null, 2), 'utf8');
+  learnedStorePromise = Promise.resolve(clean);
+  return clean;
+}
+
+function learnedVectors(store, label) {
+  const out = [];
+  for (const record of store?.records || []) {
+    if (record?.label !== label) continue;
+    for (const item of record.embeddings || []) {
+      if (!Array.isArray(item?.vector) || !item.vector.length) continue;
+      out.push({
+        url: item.url || '',
+        artistUrl: record.artistUrl || '',
+        artistName: record.artistName || '',
+        rejectReason: record.rejectReason || '',
+        rejectReasonLabel: record.rejectReasonLabel || '',
+        label,
+        vector: item.vector
+      });
+    }
+  }
+  return out;
+}
+
+async function learn(payload) {
+  const label = payload.label === 'accept' ? 'accept' : payload.label === 'reject' ? 'reject' : '';
+  if (!label) throw new Error('label must be accept or reject');
+
+  const artist = payload.artist || {};
+  const artistUrl = normalizeArtistUrl(artist.artistUrl || '');
+  const imageUrls = [...new Set((payload.imageUrls || []).map(url => normalizeUrl(url, artistUrl || undefined)).filter(Boolean))].slice(0, 8);
+  if (!artistUrl) throw new Error('artistUrl is required');
+  if (!imageUrls.length) throw new Error('at least one imageUrl is required');
+
+  const embeddings = [];
+  for (const url of imageUrls) {
+    try {
+      embeddings.push({ url, vector: await embedImage(url) });
+    } catch (_) {}
+  }
+  if (!embeddings.length) throw new Error('could not embed learning images');
+
+  const store = await loadLearnedStore();
+  const records = (store.records || [])
+    .filter(record => normalizeArtistUrl(record.artistUrl || '') !== artistUrl);
+  records.unshift({
+    artistUrl,
+    artistName: String(artist.artistName || '').slice(0, 120),
+    label,
+    rejectReason: String(payload.rejectReason || '').slice(0, 40),
+    rejectReasonLabel: String(payload.rejectReasonLabel || '').slice(0, 80),
+    learnedAt: new Date().toISOString(),
+    embeddings
+  });
+
+  const saved = await saveLearnedStore({ ...store, records });
+  return {
+    ok: true,
+    label,
+    artistUrl,
+    embeddings: embeddings.length,
+    accepted_records: saved.records.filter(record => record.label === 'accept').length,
+    rejected_records: saved.records.filter(record => record.label === 'reject').length
+  };
 }
 
 function rejectReasonSummary(records = []) {
@@ -323,7 +425,7 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
     'checks must contain: photograph, woman_prominent, male_only, male_present, female_presenting_adult, appears_over_50, feet_dominant, logo_or_placeholder.',
     'Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible, feet are the main subject, non-photo/logo/placeholder, age appears over the configured limit, underage-looking, unclear adult age, or the visual presentation conflicts with the saved preference signal.',
     'Accept only when the image set clearly shows a female-presenting adult and fits the saved visual preference signal: conventionally attractive styling, fit/athletic/slim/lean presentation, polished appearance, or youthful adult presentation.',
-    'User reject reasons may include Male, TS, Ugly, and Overweight. Use Male as a hard visual rejection reason. Use TS only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Ugly/Overweight as visual preference mismatch labels without diagnosing or mentioning health.',
+    'User reject reasons may include Fat, Male, Trans, and Ugly. Use Male as a hard visual rejection reason. Use Trans only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health.',
     'Do not identify anyone. Do not infer ethnicity, sexuality, medical conditions, or weight status. Do not mention body weight or health.',
     '',
     `Artist: ${artist.artistName || 'unknown'}`,
@@ -405,10 +507,16 @@ async function classify(payload) {
   const candidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))].slice(0, 8);
   if (!candidateUrls.length) throw new Error('No candidate image URLs supplied.');
 
-  const [acceptedVectors, rejectedVectors] = await Promise.all([
+  const learnedStore = await loadLearnedStore();
+  const learnedAcceptedVectors = learnedVectors(learnedStore, 'accept');
+  const learnedRejectedVectors = learnedVectors(learnedStore, 'reject');
+
+  const [payloadAcceptedVectors, payloadRejectedVectors] = await Promise.all([
     embedExamples(payload.acceptedArtists || [], 'accept'),
     embedExamples(payload.rejectedArtists || [], 'reject')
   ]);
+  const acceptedVectors = [...learnedAcceptedVectors, ...payloadAcceptedVectors];
+  const rejectedVectors = [...learnedRejectedVectors, ...payloadRejectedVectors];
 
   const candidateVectors = [];
   for (const url of candidateUrls) {
@@ -422,7 +530,10 @@ async function classify(payload) {
   const final = finalDecision(imageGrades, acceptedVectors.length, rejectedVectors.length);
   const acceptedExampleUrls = nearestExampleUrls(candidateVectors, acceptedVectors, QWEN_ACCEPT_EXAMPLES);
   const rejectedExampleUrls = nearestExampleUrls(candidateVectors, rejectedVectors, QWEN_REJECT_EXAMPLES);
-  const rejectionSummary = rejectReasonSummary(payload.rejectedArtists || []);
+  const rejectionSummary = rejectReasonSummary([
+    ...(learnedStore.records || []).filter(record => record.label === 'reject'),
+    ...(payload.rejectedArtists || [])
+  ]);
   let qwen;
   const skipQwen = final.decision === 'reject' && Number(final.confidence || 0) >= QWEN_SKIP_REJECT_CONFIDENCE;
   if (skipQwen) {
@@ -510,6 +621,8 @@ async function classify(payload) {
     examples: {
       accepted_images: acceptedVectors.length,
       rejected_images: rejectedVectors.length,
+      learned_accept_images: learnedAcceptedVectors.length,
+      learned_reject_images: learnedRejectedVectors.length,
       qwen_accept_examples: acceptedExampleUrls.length,
       qwen_reject_examples: rejectedExampleUrls.length,
       cached_images: embeddingCache.size
@@ -530,6 +643,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     if (req.method === 'GET' && url.pathname === '/health') {
+      const learnedStore = await loadLearnedStore();
       json(res, 200, {
         ok: true,
         app: 'pong-local-ai',
@@ -539,8 +653,17 @@ const server = http.createServer(async (req, res) => {
         ollama_disabled: ollamaVisionDisabled,
         ollama_failure: ollamaFailureReason,
         ready: extractorReady,
-        cached_images: embeddingCache.size
+        cached_images: embeddingCache.size,
+        learned_accept_records: learnedStore.records.filter(record => record.label === 'accept').length,
+        learned_reject_records: learnedStore.records.filter(record => record.label === 'reject').length
       });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/learn') {
+      const payload = JSON.parse(await readBody(req));
+      const result = await learn(payload);
+      json(res, 200, result);
       return;
     }
 

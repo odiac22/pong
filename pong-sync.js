@@ -4824,10 +4824,10 @@
     menu.dataset.open = 'false';
 
     [
+      ['fat', 'Fat'],
       ['male', 'Male'],
-      ['ts', 'TS'],
-      ['ugly', 'Ugly'],
-      ['overweight', 'Overweight']
+      ['trans', 'Trans'],
+      ['ugly', 'Ugly']
     ].forEach(([reason, label]) => {
       const reasonBtn = document.createElement('button');
       reasonBtn.type = 'button';
