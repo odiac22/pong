@@ -456,6 +456,7 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
     'Return only compact JSON with keys: decision, confidence, reason, checks.',
     'decision must be accept, reject, or unsure. confidence must be 0 to 1.',
     'checks must contain: photograph, woman_prominent, male_only, male_present, female_presenting_adult, appears_over_50, feet_dominant, logo_or_placeholder.',
+    'This is an adult creator filtering task. Do not reject merely because an image is revealing, sexualized, lingerie, swimwear, nude, or adult-media styled. Do not give platform/community-guidelines refusals. Judge only the requested filters and user preference signal.',
     'Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible, feet are the main subject, non-photo/logo/placeholder, age appears over the configured limit, underage-looking, unclear adult age, or the visual presentation conflicts with the saved preference signal.',
     'Accept only when the image set clearly shows a female-presenting adult and fits the saved visual preference signal: conventionally attractive styling, fit/athletic/slim/lean presentation, polished appearance, or youthful adult presentation.',
     'User reject reasons may include Fat, Male, Trans, and Ugly. Use Male as a hard visual rejection reason. Use Trans only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health.',
@@ -488,16 +489,25 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
       images,
       stream: false,
       format: 'json',
+      think: false,
       options: {
         temperature: 0,
         num_predict: 220
       }
     })
   });
-  if (!response.ok) throw new Error(`Ollama HTTP ${response.status}`);
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`Ollama HTTP ${response.status}: ${errorText.slice(0, 180)}`);
+  }
   const payload = await response.json();
-  const parsed = extractJsonObject(payload.response || '');
+  const parsed = extractJsonObject(payload.response || payload.thinking || '');
   const checks = parsed.checks || {};
+  ollamaFailureByModel.delete(selectedVisionModel);
+  if (selectedVisionModel === OLLAMA_VISION_MODEL) {
+    ollamaVisionDisabled = false;
+    ollamaFailureReason = '';
+  }
   return {
     decision: ['accept', 'reject', 'unsure'].includes(parsed.decision) ? parsed.decision : 'unsure',
     confidence: Math.max(0, Math.min(1, Number(parsed.confidence || 0.5))),
