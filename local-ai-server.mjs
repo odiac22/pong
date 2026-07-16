@@ -9,6 +9,8 @@ const OLLAMA_URL = (process.env.PONG_OLLAMA_URL || 'http://127.0.0.1:11434').rep
 const OLLAMA_VISION_MODEL = process.env.PONG_OLLAMA_VISION_MODEL || 'qwen2.5vl:latest';
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
+const QWEN_ACCEPT_EXAMPLES = 2;
+const QWEN_REJECT_EXAMPLES = 2;
 
 env.allowLocalModels = false;
 env.useBrowserCache = false;
@@ -220,6 +222,24 @@ function finalDecision(imageGrades, acceptedCount, rejectedCount) {
   return { decision: 'unsure', confidence, reason: `local unsure, taste ${Math.round(average * 100)}` };
 }
 
+function nearestExampleUrls(candidateVectors, examples, count) {
+  if (!candidateVectors.length || !examples.length || count <= 0) return [];
+  const ranked = examples.map(example => {
+    const best = Math.max(...candidateVectors.map(vector => cosine(vector, example.vector)));
+    return { ...example, score: best };
+  }).sort((a, b) => b.score - a.score);
+
+  const seen = new Set();
+  const urls = [];
+  for (const item of ranked) {
+    if (!item.url || seen.has(item.url)) continue;
+    seen.add(item.url);
+    urls.push(item.url);
+    if (urls.length >= count) break;
+  }
+  return urls;
+}
+
 function extractJsonObject(text) {
   const raw = String(text || '').trim();
   try {
@@ -244,12 +264,25 @@ async function ollamaAvailable() {
   }
 }
 
-async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision, imageGrades }) {
+async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision, imageGrades, acceptedExampleUrls = [], rejectedExampleUrls = [] }) {
   if (ollamaVisionDisabled) {
     throw new Error(`Ollama vision disabled: ${ollamaFailureReason || 'previous failure'}`);
   }
   const images = [];
-  for (const url of candidateUrls.slice(0, 4)) {
+  const candidateCount = Math.min(candidateUrls.length, 4);
+  for (const url of candidateUrls.slice(0, candidateCount)) {
+    try {
+      images.push(await fetchImageBase64(url));
+    } catch (_) {}
+  }
+  const acceptedStart = images.length + 1;
+  for (const url of acceptedExampleUrls.slice(0, QWEN_ACCEPT_EXAMPLES)) {
+    try {
+      images.push(await fetchImageBase64(url));
+    } catch (_) {}
+  }
+  const rejectedStart = images.length + 1;
+  for (const url of rejectedExampleUrls.slice(0, QWEN_REJECT_EXAMPLES)) {
     try {
       images.push(await fetchImageBase64(url));
     } catch (_) {}
@@ -275,7 +308,15 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
     'Per-image learned-taste grades:',
     localSummary,
     '',
-    'Judge all attached candidate images together. Be conservative.'
+    `Attached images 1-${candidateCount}: candidate artist images to judge.`,
+    acceptedExampleUrls.length
+      ? `Attached images ${acceptedStart}-${acceptedStart + Math.min(acceptedExampleUrls.length, QWEN_ACCEPT_EXAMPLES) - 1}: nearest user-saved ACCEPT examples. Use as visual preference examples.`
+      : 'No accepted example images are attached.',
+    rejectedExampleUrls.length
+      ? `Attached images ${rejectedStart}-${rejectedStart + Math.min(rejectedExampleUrls.length, QWEN_REJECT_EXAMPLES) - 1}: nearest user red-X/rejected examples. Treat these as stronger avoid examples.`
+      : 'No rejected example images are attached.',
+    '',
+    'Judge only the candidate artist images for the final decision. Use accepted/rejected example images only to understand user preference.'
   ].join('\n');
 
   const response = await fetch(`${OLLAMA_URL}/api/generate`, {
@@ -354,13 +395,17 @@ async function classify(payload) {
 
   const imageGrades = candidateVectors.map((vector, index) => gradeCandidate(vector, index, acceptedVectors, rejectedVectors));
   const final = finalDecision(imageGrades, acceptedVectors.length, rejectedVectors.length);
+  const acceptedExampleUrls = nearestExampleUrls(candidateVectors, acceptedVectors, QWEN_ACCEPT_EXAMPLES);
+  const rejectedExampleUrls = nearestExampleUrls(candidateVectors, rejectedVectors, QWEN_REJECT_EXAMPLES);
   let qwen;
   try {
     qwen = await classifyWithOllamaVision({
       artist,
       candidateUrls,
       siglipDecision: final,
-      imageGrades
+      imageGrades,
+      acceptedExampleUrls,
+      rejectedExampleUrls
     });
   } catch (error) {
     const message = error.message || String(error);
@@ -402,6 +447,8 @@ async function classify(payload) {
     examples: {
       accepted_images: acceptedVectors.length,
       rejected_images: rejectedVectors.length,
+      qwen_accept_examples: acceptedExampleUrls.length,
+      qwen_reject_examples: rejectedExampleUrls.length,
       cached_images: embeddingCache.size
     },
     siglip_decision: final,
