@@ -24,6 +24,7 @@ let extractorPromise = null;
 let extractorReady = false;
 let ollamaVisionDisabled = false;
 let ollamaFailureReason = '';
+const ollamaFailureByModel = new Map();
 const embeddingCache = new Map();
 let learnedStorePromise = null;
 
@@ -413,20 +414,27 @@ function extractJsonObject(text) {
   throw new Error('No JSON object in Ollama response');
 }
 
-async function ollamaAvailable() {
+function requestedVisionModel(raw) {
+  return String(raw || OLLAMA_VISION_MODEL).trim() || OLLAMA_VISION_MODEL;
+}
+
+async function ollamaAvailable(modelName = OLLAMA_VISION_MODEL) {
+  const selectedModel = requestedVisionModel(modelName);
   try {
     const response = await fetch(`${OLLAMA_URL}/api/tags`);
     if (!response.ok) return false;
     const payload = await response.json();
-    return Array.isArray(payload.models) && payload.models.some(model => model?.name === OLLAMA_VISION_MODEL);
+    return Array.isArray(payload.models) && payload.models.some(model => model?.name === selectedModel);
   } catch (_) {
     return false;
   }
 }
 
-async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision, imageGrades, acceptedExampleUrls = [], rejectedExampleUrls = [], rejectionSummary = '' }) {
-  if (ollamaVisionDisabled) {
-    throw new Error(`Ollama vision disabled: ${ollamaFailureReason || 'previous failure'}`);
+async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision, imageGrades, acceptedExampleUrls = [], rejectedExampleUrls = [], rejectionSummary = '', visionModel = OLLAMA_VISION_MODEL }) {
+  const selectedVisionModel = requestedVisionModel(visionModel);
+  const previousFailure = ollamaFailureByModel.get(selectedVisionModel);
+  if (previousFailure) {
+    throw new Error(`Ollama vision disabled for ${selectedVisionModel}: ${previousFailure}`);
   }
   const [candidateImages, acceptedImages, rejectedImages] = await Promise.all([
     fetchImagesBase64(candidateUrls.slice(0, QWEN_CANDIDATE_IMAGES)),
@@ -475,7 +483,7 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: OLLAMA_VISION_MODEL,
+      model: selectedVisionModel,
       prompt,
       images,
       stream: false,
@@ -509,6 +517,7 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
 
 async function classify(payload) {
   const artist = payload.artist || {};
+  const visionModel = requestedVisionModel(payload.visionModel);
   const hard = textHardFilter(artist);
   if (hard) {
     return {
@@ -590,13 +599,17 @@ async function classify(payload) {
       imageGrades,
       acceptedExampleUrls,
       rejectedExampleUrls,
-      rejectionSummary
+      rejectionSummary,
+      visionModel
     });
   } catch (error) {
     const message = error.message || String(error);
     if (/CUDA|PTX|Ollama HTTP 500|model/i.test(message)) {
-      ollamaVisionDisabled = true;
-      ollamaFailureReason = message.slice(0, 180);
+      ollamaFailureByModel.set(visionModel, message.slice(0, 180));
+      if (visionModel === OLLAMA_VISION_MODEL) {
+        ollamaVisionDisabled = true;
+        ollamaFailureReason = message.slice(0, 180);
+      }
     }
     qwen = {
       decision: 'unsure',
@@ -639,7 +652,7 @@ async function classify(payload) {
 
   return {
     ...combined,
-    model: `${MODEL} + ${OLLAMA_VISION_MODEL}`,
+    model: `${MODEL} + ${visionModel}`,
     examples: {
       accepted_images: acceptedVectors.length,
       rejected_images: rejectedVectors.length,
@@ -671,9 +684,11 @@ const server = http.createServer(async (req, res) => {
         app: 'pong-local-ai',
         model: MODEL,
         vision_model: OLLAMA_VISION_MODEL,
-        ollama_ready: !ollamaVisionDisabled && await ollamaAvailable(),
+        alternate_vision_models: ['qwen3-vl:4b'],
+        ollama_ready: !ollamaVisionDisabled && await ollamaAvailable(OLLAMA_VISION_MODEL),
         ollama_disabled: ollamaVisionDisabled,
         ollama_failure: ollamaFailureReason,
+        ollama_failures_by_model: Object.fromEntries(ollamaFailureByModel),
         ready: extractorReady,
         cached_images: embeddingCache.size,
         learned_accept_records: learnedStore.records.filter(record => record.label === 'accept').length,

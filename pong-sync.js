@@ -5027,7 +5027,7 @@
     const accuracyText = document.createElement('span');
     accuracyText.id = 'random40-accuracy-mini';
     accuracyText.className = 'side-save-accuracy';
-    accuracyText.textContent = 'Nano --\nLocal --\nTime\nNano --\nLocal --';
+    accuracyText.textContent = 'Nano --\nLocal --\nLocal2 --\nTime\nNano --\nLocal --\nLocal2 --';
 
     let videoHoldTimer = null;
     let videoLongPress = false;

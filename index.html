@@ -263,6 +263,7 @@
     #saved-erome { background: rgba(251,191,36,0.18); }
     #auth-button { background: rgba(167,139,250,0.20); }
     #random-40-local { background: rgba(244,114,182,0.20); }
+    #random-40-local2 { background: rgba(168,85,247,0.20); }
     #random-40-nano { background: rgba(14,165,233,0.20); }
     #random-40 { background: rgba(244,114,182,0.20); }
     .url-input button:hover, .url-input button:active { transform: translateY(-1px); background: rgba(255,255,255,0.12); }
@@ -676,7 +677,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.40</div>
+  <div class="version-number">23.41</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -689,6 +690,7 @@
         <button id="saved-erome">Saved Erome</button>
         <button id="auth-button">Auth URL</button>
         <button id="random-40-local">R40 Local</button>
+        <button id="random-40-local2">R40 Local 2</button>
         <button id="random-40-nano">R40 Nano</button>
       </div>
     </div>
@@ -6015,6 +6017,7 @@ const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
 const RANDOM40_MODEL = 'gpt-4.1-nano';
 const RANDOM40_LOCAL_MODEL_NAME = 'local-image-embeddings';
+const RANDOM40_LOCAL2_VISION_MODEL = 'qwen3-vl:4b';
 const RANDOM40_PROMPT_VERSION = 'cf-vision-v10';
 const RANDOM40_THUMBNAIL_REJECT_CONFIDENCE = 0.8;
 const RANDOM40_REJECT_CACHE_KEY = 'pong_random40_model_reject_cache_v1';
@@ -6170,7 +6173,7 @@ function updateRandom40Progress({ detail, accepted, videos, pages, api, force } 
   const videoCount = Number.isFinite(Number(videos)) ? Number(videos) : Number(state.videos || 0);
   const pageCount = Number.isFinite(Number(pages)) ? Number(pages) : Number(state.pages || 0);
   const apiCount = Number.isFinite(Number(api)) ? Number(api) : Number(state.api || 0);
-  const modeLabel = state.mode === 'local' ? 'Local' : 'Nano';
+  const modeLabel = random40ModeLabel(state.mode);
   const pct = Math.max(2, Math.min(100, Math.round((acceptedCount / RANDOM40_TARGET_ACCEPTED) * 100)));
 
   clearTimeout(random40ProgressHideTimer);
@@ -6505,7 +6508,29 @@ function random40RejectReasonSummary() {
 }
 
 function random40NormalizeMode(mode) {
-  return String(mode || '').toLowerCase() === 'local' ? 'local' : 'nano';
+  const value = String(mode || '').toLowerCase();
+  if (value === 'local2' || value === 'local-2') return 'local2';
+  return value === 'local' ? 'local' : 'nano';
+}
+
+function random40ModeLabel(mode) {
+  const normalized = random40NormalizeMode(mode);
+  if (normalized === 'local2') return 'Local2';
+  if (normalized === 'local') return 'Local';
+  return 'Nano';
+}
+
+function random40Modes() {
+  return ['nano', 'local', 'local2'];
+}
+
+function random40IsLocalMode(mode) {
+  const normalized = random40NormalizeMode(mode);
+  return normalized === 'local' || normalized === 'local2';
+}
+
+function random40LocalVisionModel(mode) {
+  return random40NormalizeMode(mode) === 'local2' ? RANDOM40_LOCAL2_VISION_MODEL : '';
 }
 
 function random40EmptyAccuracy() {
@@ -6514,7 +6539,8 @@ function random40EmptyAccuracy() {
     artists: {},
     timings: {
       nano: [],
-      local: []
+      local: [],
+      local2: []
     }
   };
 }
@@ -6528,7 +6554,8 @@ function random40LoadAccuracy() {
       artists: stored.artists && typeof stored.artists === 'object' ? stored.artists : {},
       timings: {
         nano: Array.isArray(stored.timings?.nano) ? stored.timings.nano : [],
-        local: Array.isArray(stored.timings?.local) ? stored.timings.local : []
+        local: Array.isArray(stored.timings?.local) ? stored.timings.local : [],
+        local2: Array.isArray(stored.timings?.local2) ? stored.timings.local2 : []
       }
     };
   } catch (_) {
@@ -6544,7 +6571,8 @@ function random40SaveAccuracy(stats) {
       artists: stats?.artists && typeof stats.artists === 'object' ? stats.artists : {},
       timings: {
         nano: Array.isArray(stats?.timings?.nano) ? stats.timings.nano.slice(-60) : [],
-        local: Array.isArray(stats?.timings?.local) ? stats.timings.local.slice(-60) : []
+        local: Array.isArray(stats?.timings?.local) ? stats.timings.local.slice(-60) : [],
+        local2: Array.isArray(stats?.timings?.local2) ? stats.timings.local2.slice(-60) : []
       }
     }));
   } catch (_) {}
@@ -6593,7 +6621,8 @@ function random40AccuracySummary() {
   const stats = random40LoadAccuracy();
   const summary = {
     nano: { shown: 0, rejected: 0, accuracy: null, avgFirstVideoSeconds: null },
-    local: { shown: 0, rejected: 0, accuracy: null, avgFirstVideoSeconds: null }
+    local: { shown: 0, rejected: 0, accuracy: null, avgFirstVideoSeconds: null },
+    local2: { shown: 0, rejected: 0, accuracy: null, avgFirstVideoSeconds: null }
   };
 
   Object.values(stats.artists || {}).forEach(item => {
@@ -6608,7 +6637,7 @@ function random40AccuracySummary() {
       : null;
   });
 
-  ['nano', 'local'].forEach(mode => {
+  random40Modes().forEach(mode => {
     const samples = (stats.timings?.[mode] || [])
       .map(item => Number(item.firstVideoMs || item.ms || 0))
       .filter(ms => Number.isFinite(ms) && ms > 0);
@@ -6624,9 +6653,11 @@ function random40AccuracyText() {
   const summary = random40AccuracySummary();
   const nano = summary.nano.accuracy == null ? '--' : `${summary.nano.accuracy}%`;
   const local = summary.local.accuracy == null ? '--' : `${summary.local.accuracy}%`;
+  const local2 = summary.local2.accuracy == null ? '--' : `${summary.local2.accuracy}%`;
   const nanoTime = summary.nano.avgFirstVideoSeconds == null ? '--' : `${summary.nano.avgFirstVideoSeconds}s`;
   const localTime = summary.local.avgFirstVideoSeconds == null ? '--' : `${summary.local.avgFirstVideoSeconds}s`;
-  return `Nano ${nano}\nLocal ${local}\nTime\nNano ${nanoTime}\nLocal ${localTime}`;
+  const local2Time = summary.local2.avgFirstVideoSeconds == null ? '--' : `${summary.local2.avgFirstVideoSeconds}s`;
+  return `Nano ${nano}\nLocal ${local}\nLocal2 ${local2}\nTime\nNano ${nanoTime}\nLocal ${localTime}\nLocal2 ${local2Time}`;
 }
 
 function random40AccuracyReport() {
@@ -6636,7 +6667,7 @@ function random40AccuracyReport() {
     `Generated: ${new Date().toISOString()}`
   ];
 
-  ['nano', 'local'].forEach(mode => {
+  random40Modes().forEach(mode => {
     const item = summary[mode];
     const accuracy = item.accuracy == null ? 'n/a' : `${item.accuracy}%`;
     const avgTime = item.avgFirstVideoSeconds == null ? 'n/a' : `${item.avgFirstVideoSeconds}s`;
@@ -6672,7 +6703,7 @@ function random40RecordFirstVideoTime(mode, elapsedMs) {
 
   const stats = random40LoadAccuracy();
   const normalized = random40NormalizeMode(mode);
-  stats.timings = stats.timings || { nano: [], local: [] };
+  stats.timings = stats.timings || { nano: [], local: [], local2: [] };
   stats.timings[normalized] = Array.isArray(stats.timings[normalized]) ? stats.timings[normalized] : [];
   stats.timings[normalized].push({
     firstVideoMs: Math.round(ms),
@@ -7174,7 +7205,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
   return { ...parsed, reason: String(parsed.reason || '').slice(0, 120) };
 }
 
-async function random40ClassifyArtistLocal(artist, endpoint, imageUrls) {
+async function random40ClassifyArtistLocal(artist, endpoint, imageUrls, options = {}) {
   const candidateUrls = [...new Set((imageUrls && imageUrls.length ? imageUrls : [artist.imageUrl]).filter(Boolean))].slice(0, RANDOM40_MAX_REVIEW_IMAGES);
   if (!candidateUrls.length) return { decision: 'reject', confidence: 1, reason: 'no image' };
 
@@ -7184,6 +7215,7 @@ async function random40ClassifyArtistLocal(artist, endpoint, imageUrls) {
     body: JSON.stringify({
       app: 'pong-random40',
       model: RANDOM40_LOCAL_MODEL_NAME,
+      visionModel: options.visionModel || '',
       promptVersion: RANDOM40_PROMPT_VERSION,
       artist: {
         artistUrl: artist.artistUrl,
@@ -7296,13 +7328,14 @@ async function random40ThumbnailTriage(artist, apiKey, mode, localEndpoint) {
   if (!artist?.imageUrl) return { skip: false };
   random40State.api++;
 
-  if (mode === 'local') {
+  if (random40IsLocalMode(mode)) {
     const res = await fetch(`${localEndpoint}/classify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         app: 'pong-random40',
         model: RANDOM40_LOCAL_MODEL_NAME,
+        visionModel: random40LocalVisionModel(mode),
         promptVersion: RANDOM40_PROMPT_VERSION,
         stage: 'thumbnail',
         artist: {
@@ -7712,7 +7745,7 @@ async function random40Pool(items, limit, worker) {
 async function random40AnalyzeArtist(artist, apiKey, options = {}) {
   let doc = options.firstDoc || null;
   const workingArtist = { ...artist };
-  const mode = options.mode === 'local' ? 'local' : 'nano';
+  const mode = random40NormalizeMode(options.mode);
 
   if (!doc) {
     try {
@@ -7736,8 +7769,8 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
       )
     : [workingArtist.imageUrl].filter(Boolean);
 
-  let decision = mode === 'local'
-    ? await random40ClassifyArtistLocal(workingArtist, options.localEndpoint, initialImages)
+  let decision = random40IsLocalMode(mode)
+    ? await random40ClassifyArtistLocal(workingArtist, options.localEndpoint, initialImages, { visionModel: random40LocalVisionModel(mode) })
     : await random40ClassifyArtist(workingArtist, apiKey, initialImages);
   random40State.api++;
   const needsSecondLook = decision.decision === 'unsure' ||
@@ -7753,8 +7786,8 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
       );
       const changedImages = images.length !== initialImages.length || images.some((url, index) => url !== initialImages[index]);
       if (images.length > initialImages.length || changedImages) {
-        decision = mode === 'local'
-          ? await random40ClassifyArtistLocal(workingArtist, options.localEndpoint, images)
+        decision = random40IsLocalMode(mode)
+          ? await random40ClassifyArtistLocal(workingArtist, options.localEndpoint, images, { visionModel: random40LocalVisionModel(mode) })
           : await random40ClassifyArtist(workingArtist, apiKey, images);
         random40State.api++;
         decision.reason = `reviewed ${images.length} images: ${decision.reason || ''}`.slice(0, 120);
@@ -7771,11 +7804,11 @@ async function startRandom40(mode = 'nano') {
     return;
   }
 
-  const runMode = mode === 'local' ? 'local' : 'nano';
+  const runMode = random40NormalizeMode(mode);
   const apiKey = runMode === 'nano' ? getRandom40ApiKey() : '';
-  const localEndpoint = runMode === 'local' ? await getRandom40LocalEndpoint() : '';
+  const localEndpoint = random40IsLocalMode(runMode) ? await getRandom40LocalEndpoint() : '';
   if (runMode === 'nano' && !apiKey) return;
-  if (runMode === 'local' && !localEndpoint) return;
+  if (random40IsLocalMode(runMode) && !localEndpoint) return;
 
   random40State = {
     mode: runMode,
@@ -7797,7 +7830,7 @@ async function startRandom40(mode = 'nano') {
     rejectedArtistUrls: new Set(random40LoadRejectedArtists().map(item => random40NormalizeArtistUrl(item.artistUrl)).filter(Boolean))
   };
 
-  updateRandom40Progress({ detail: `Starting ${runMode === 'local' ? 'local' : 'nano'} random scan...`, force: true });
+  updateRandom40Progress({ detail: `Starting ${random40ModeLabel(runMode)} random scan...`, force: true });
 
   try {
     while (!random40State.stop && random40State.accepted < RANDOM40_TARGET_ACCEPTED) {
@@ -7849,12 +7882,12 @@ async function startRandom40(mode = 'nano') {
         continue;
       }
 
-      const classifierConcurrency = runMode === 'local' ? RANDOM40_LOCAL_CONCURRENCY : RANDOM40_AI_CONCURRENCY;
+      const classifierConcurrency = random40IsLocalMode(runMode) ? RANDOM40_LOCAL_CONCURRENCY : RANDOM40_AI_CONCURRENCY;
       await random40Pool(artists, classifierConcurrency, async artist => {
         if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
         random40State.seenArtists.add(artist.artistUrl);
         const artistLabel = artist.artistName || random40ArtistNameFromUrl(artist.artistUrl);
-        const classifierLabel = runMode === 'local' ? 'Local' : 'Nano';
+        const classifierLabel = random40ModeLabel(runMode);
 
         if (random40CachedHardReject(artist.artistUrl)) {
           random40State.cachedSkips = (random40State.cachedSkips || 0) + 1;
@@ -8629,6 +8662,7 @@ document.getElementById('auth-button').addEventListener('click',()=>{
 });
 
 document.getElementById('random-40-local')?.addEventListener('click',()=>startRandom40('local'));
+document.getElementById('random-40-local2')?.addEventListener('click',()=>startRandom40('local2'));
 document.getElementById('random-40-nano')?.addEventListener('click',()=>startRandom40('nano'));
 
 document.getElementById('open-erome').addEventListener('click',()=>{
@@ -9009,6 +9043,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=103"></script>
+<script src="pong-sync.js?v=104"></script>
 </body>
 </html>
