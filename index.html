@@ -662,7 +662,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.35</div>
+  <div class="version-number">23.36</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -724,6 +724,9 @@ let deckAutoPromotionLockedUntil = 0;
 let deckReadyPromotionTimer = null;
 let deckLastEmptyNoticeAt = 0;
 let viewedVideoKeys = new Set();
+let random40PreloadTimer = null;
+let random40PreloadContainer = null;
+let random40PreloadMap = new Map();
 
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
@@ -3979,6 +3982,188 @@ function getPasteEventPaperclipKey(event, index = -1) {
   );
 }
 
+function isRandom40PasteEvent(event) {
+  return String(event?.source || '').toLowerCase() === 'random40';
+}
+
+function ensureRandom40PreloadContainer() {
+  if (random40PreloadContainer && document.body.contains(random40PreloadContainer)) {
+    return random40PreloadContainer;
+  }
+
+  random40PreloadContainer = document.createElement('div');
+  random40PreloadContainer.id = 'random40-preload-pool';
+  random40PreloadContainer.style.cssText = [
+    'position:fixed',
+    'left:-2px',
+    'top:-2px',
+    'width:1px',
+    'height:1px',
+    'overflow:hidden',
+    'opacity:0.01',
+    'pointer-events:none',
+    'z-index:-1'
+  ].join(';');
+  document.body.appendChild(random40PreloadContainer);
+  return random40PreloadContainer;
+}
+
+function getPasteEventVideoBounds(event) {
+  if (!event || !Array.isArray(allVideoUrls)) return null;
+  const start = Number(event.startIndex);
+  const count = Number(event.count);
+  if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) return null;
+  return {
+    start: Math.max(0, start),
+    end: Math.min(allVideoUrls.length, Math.max(0, start) + count)
+  };
+}
+
+function getRandom40PreloadBundleStats(event, index = -1) {
+  const bundleKey = getPasteEventPaperclipKey(event, index);
+  if (!bundleKey) return { ready: 0, loading: 0, total: 0 };
+
+  let ready = 0;
+  let loading = 0;
+  let total = 0;
+  random40PreloadMap.forEach(record => {
+    if (record.bundleKey !== bundleKey) return;
+    total++;
+    if (record.ready) ready++;
+    else loading++;
+  });
+
+  return { ready, loading, total };
+}
+
+function countReadyVideosForPasteEvent(event, index = -1) {
+  if (!isRandom40PasteEvent(event)) return 0;
+  return getRandom40PreloadBundleStats(event, index).ready;
+}
+
+function random40PreloadVideo(bundleKey, globalIndex, url) {
+  const key = `${bundleKey}|${globalIndex}|${url}`;
+  let record = random40PreloadMap.get(key);
+  if (record) return record;
+
+  const container = ensureRandom40PreloadContainer();
+  const video = document.createElement('video');
+  video.src = url;
+  video.preload = 'auto';
+  video.muted = true;
+  video.volume = 0;
+  video.playsInline = true;
+  video.setAttribute('playsinline', '');
+  video.setAttribute('webkit-playsinline', '');
+  video.style.cssText = 'width:1px;height:1px;opacity:0.01;';
+
+  record = {
+    key,
+    bundleKey,
+    globalIndex,
+    url,
+    video,
+    ready: false,
+    touchedAt: Date.now()
+  };
+
+  const markReady = () => {
+    record.ready = video.readyState >= 2 || true;
+    record.touchedAt = Date.now();
+    updatePasteNavigationButton();
+  };
+  const markTouched = () => {
+    record.ready = video.readyState >= 2;
+    record.touchedAt = Date.now();
+  };
+
+  video.addEventListener('loadeddata', markReady, { once: true });
+  video.addEventListener('canplay', markReady, { once: true });
+  video.addEventListener('progress', markTouched);
+  video.addEventListener('error', markTouched);
+
+  container.appendChild(video);
+  random40PreloadMap.set(key, record);
+  setTimeout(() => {
+    try { video.load(); } catch (_) {}
+  }, Math.min(random40PreloadMap.size * 45, 2400));
+
+  return record;
+}
+
+function cleanupRandom40PreloadPool(neededKeys) {
+  random40PreloadMap.forEach((record, key) => {
+    if (neededKeys.has(key)) return;
+    try {
+      record.video.pause();
+      record.video.removeAttribute('src');
+      record.video.load();
+      record.video.remove();
+    } catch (_) {}
+    random40PreloadMap.delete(key);
+  });
+
+  if (random40PreloadMap.size <= RANDOM40_PRELOAD_MAX_ELEMENTS) return;
+
+  [...random40PreloadMap.entries()]
+    .sort((a, b) => (a[1].ready === b[1].ready ? a[1].touchedAt - b[1].touchedAt : Number(a[1].ready) - Number(b[1].ready)))
+    .slice(0, random40PreloadMap.size - RANDOM40_PRELOAD_MAX_ELEMENTS)
+    .forEach(([key, record]) => {
+      try {
+        record.video.pause();
+        record.video.removeAttribute('src');
+        record.video.load();
+        record.video.remove();
+      } catch (_) {}
+      random40PreloadMap.delete(key);
+    });
+}
+
+function runRandom40PreloadPool() {
+  random40PreloadTimer = null;
+  if (!Array.isArray(pasteEvents) || !pasteEvents.length || !Array.isArray(allVideoUrls) || !allVideoUrls.length) {
+    cleanupRandom40PreloadPool(new Set());
+    return;
+  }
+
+  const startIndex = currentPasteIndex >= 0 ? currentPasteIndex : -1;
+  const candidates = [];
+  for (let offset = 1; offset <= pasteEvents.length && candidates.length < RANDOM40_PRELOAD_ARTIST_BUFFER; offset++) {
+    const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
+    const event = pasteEvents[index];
+    if (!isRandom40PasteEvent(event)) continue;
+    if (isPasteEventRetiredForPaperclip(event, index)) continue;
+    candidates.push({ event, index });
+  }
+
+  if (!candidates.length && currentPasteIndex >= 0 && isRandom40PasteEvent(pasteEvents[currentPasteIndex])) {
+    candidates.push({ event: pasteEvents[currentPasteIndex], index: currentPasteIndex });
+  }
+
+  const neededKeys = new Set();
+  candidates.forEach(({ event, index }) => {
+    const bundleKey = getPasteEventPaperclipKey(event, index);
+    const bounds = getPasteEventVideoBounds(event);
+    if (!bundleKey || !bounds) return;
+    const end = Math.min(bounds.end, bounds.start + RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST);
+    for (let globalIndex = bounds.start; globalIndex < end; globalIndex++) {
+      const url = allVideoUrls[globalIndex];
+      if (!url) continue;
+      const key = `${bundleKey}|${globalIndex}|${url}`;
+      neededKeys.add(key);
+      random40PreloadVideo(bundleKey, globalIndex, url);
+    }
+  });
+
+  cleanupRandom40PreloadPool(neededKeys);
+  updatePasteNavigationButton();
+}
+
+function scheduleRandom40PreloadPool(delay = 250) {
+  clearTimeout(random40PreloadTimer);
+  random40PreloadTimer = setTimeout(runRandom40PreloadPool, delay);
+}
+
 function isPasteEventRetiredForPaperclip(event, index = -1) {
   const key = getPasteEventPaperclipKey(event, index);
   return !!key && paperclipRetiredBundleKeys.has(key);
@@ -4014,21 +4199,30 @@ function countLoadedVideosForPasteEvent(event) {
 function getBestLoadedPasteEventIndex() {
   if (!Array.isArray(pasteEvents) || pasteEvents.length < 2) return -1;
   const startIndex = currentPasteIndex >= 0 ? currentPasteIndex : -1;
-  let bestIndex = -1;
-  let bestCount = 0;
+  let bestReadyIndex = -1;
+  let bestReadyCount = 0;
+  let bestLoadedIndex = -1;
+  let bestLoadedCount = 0;
 
   for (let offset = 1; offset <= pasteEvents.length; offset++) {
     const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
     if (index === currentPasteIndex) continue;
     if (isPasteEventRetiredForPaperclip(pasteEvents[index], index)) continue;
+
+    const ready = countReadyVideosForPasteEvent(pasteEvents[index], index);
+    if (ready > bestReadyCount) {
+      bestReadyCount = ready;
+      bestReadyIndex = index;
+    }
+
     const loaded = countLoadedVideosForPasteEvent(pasteEvents[index]);
-    if (loaded > bestCount) {
-      bestCount = loaded;
-      bestIndex = index;
+    if (loaded > bestLoadedCount) {
+      bestLoadedCount = loaded;
+      bestLoadedIndex = index;
     }
   }
 
-  return bestIndex;
+  return bestReadyIndex >= 0 ? bestReadyIndex : bestLoadedIndex;
 }
 
 function getNextActivePasteEventIndex() {
@@ -4079,6 +4273,7 @@ function navigateToNextPasteEvent(){
 
   if (retired) paperclipStepCount++;
   setActivePlaybackRangeForPasteEvent(nextActiveIndex);
+  scheduleRandom40PreloadPool(50);
   updatePasteNavigationButton();
   scheduleSessionSave(700);
 
@@ -4101,6 +4296,7 @@ function resetPasteEvents(){
   currentPasteIndex=-1;
   resetPaperclipQueue();
   viewedVideoKeys = new Set();
+  scheduleRandom40PreloadPool(0);
   updatePasteNavigationButton();
 }
 
@@ -4138,6 +4334,12 @@ function updatePasteNavigationButton(){
     btn.setAttribute('data-count',`${Math.max(1, paperclipStepCount)}/${pasteEvents.length}`);
     btn.style.opacity='0.74';
     btn.style.background='rgba(103,232,249,0.22)';
+    const preferredIndex = getBestLoadedPasteEventIndex();
+    const preferredEvent = preferredIndex >= 0 ? pasteEvents[preferredIndex] : null;
+    const stats = preferredEvent ? getRandom40PreloadBundleStats(preferredEvent, preferredIndex) : null;
+    btn.title = stats?.total
+      ? `Next artist: ${stats.ready}/${stats.total} videos preloaded`
+      : 'Next artist bundle';
   }
 
   updateViewedRemainingCounter();
@@ -5811,6 +6013,9 @@ const RANDOM40_MAX_REJECT_RECORDS = 80;
 const RANDOM40_MAX_REJECT_EXAMPLES = 4;
 const RANDOM40_REJECT_IMAGES_PER_EXAMPLE = 2;
 const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
+const RANDOM40_PRELOAD_ARTIST_BUFFER = 5;
+const RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST = 25;
+const RANDOM40_PRELOAD_MAX_ELEMENTS = 140;
 let random40State = null;
 let random40ProgressHideTimer = null;
 
@@ -6957,12 +7162,14 @@ function random40PublishEntries(entries) {
     loadVideosButton.click();
     window.PongLoadedSavedMode = 'random40';
     random40State.cardsStarted = true;
+    scheduleRandom40PreloadPool(900);
     showSortingIndicator(`Loaded first ${payload.urls.length} Random 40 videos. Continuing in background...`);
   } else {
     allVideoUrls.push(...payload.urls);
     allVideoMetadata.push(...payload.metadata);
     pasteEvents.push(...payload.events);
     window.PongLoadedSavedMode = 'random40';
+    scheduleRandom40PreloadPool(150);
     updatePasteNavigationButton();
     updateViewedRemainingCounter();
     scheduleSessionSave(700);
@@ -8257,6 +8464,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=98"></script>
+<script src="pong-sync.js?v=99"></script>
 </body>
 </html>

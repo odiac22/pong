@@ -180,12 +180,12 @@
       .random40-reject-reason-menu {
         position: fixed !important;
         left: 44px !important;
-        top: 50% !important;
+        top: 42% !important;
         transform: translateY(-50%) !important;
         z-index: 1301 !important;
         display: none !important;
         flex-direction: column !important;
-        gap: 3px !important;
+        gap: 4px !important;
         pointer-events: auto !important;
       }
 
@@ -194,16 +194,16 @@
       }
 
       .random40-reject-reason-button {
-        min-width: 48px !important;
-        min-height: 18px !important;
+        min-width: 62px !important;
+        min-height: 24px !important;
         border: 1px solid rgba(255,255,255,0.14) !important;
         border-radius: 999px !important;
         background: rgba(127,29,29,0.62) !important;
         color: rgba(255,245,245,0.92) !important;
-        font-size: 7px !important;
+        font-size: 9px !important;
         font-weight: 850 !important;
         line-height: 1 !important;
-        padding: 3px 6px !important;
+        padding: 5px 8px !important;
         cursor: pointer !important;
         box-shadow: 0 6px 18px rgba(0,0,0,0.28) !important;
         backdrop-filter: blur(10px) !important;
