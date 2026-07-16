@@ -6010,7 +6010,7 @@ const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
 const RANDOM40_AI_CONCURRENCY = 28;
-const RANDOM40_LOCAL_CONCURRENCY = 6;
+const RANDOM40_LOCAL_CONCURRENCY = 10;
 const RANDOM40_POST_CONCURRENCY = 14;
 const RANDOM40_PAGE_BATCH_SIZE = 8;
 const RANDOM40_LISTING_PAGE_BATCH_SIZE = 4;
@@ -6030,6 +6030,9 @@ const RANDOM40_ACCEPT_CONFIDENCE = 0.9;
 const RANDOM40_MAX_REVIEW_IMAGES = 3;
 const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 3;
 const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 2;
+const RANDOM40_LOCAL_MAX_REVIEW_IMAGES = 2;
+const RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST = 2;
+const RANDOM40_LOCAL_RANDOM_PROFILE_IMAGES_PER_ARTIST = 1;
 const RANDOM40_MAX_ACCEPT_RECORDS = 160;
 const RANDOM40_MAX_ACCEPT_EXAMPLES = 2;
 const RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE = 3;
@@ -7317,7 +7320,8 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
 }
 
 async function random40ClassifyArtistLocal(artist, endpoint, imageUrls, options = {}) {
-  const candidateUrls = [...new Set((imageUrls && imageUrls.length ? imageUrls : [artist.imageUrl]).filter(Boolean))].slice(0, RANDOM40_MAX_REVIEW_IMAGES);
+  const maxImages = Math.max(1, Number(options.maxImages || RANDOM40_LOCAL_MAX_REVIEW_IMAGES));
+  const candidateUrls = [...new Set((imageUrls && imageUrls.length ? imageUrls : [artist.imageUrl]).filter(Boolean))].slice(0, maxImages);
   if (!candidateUrls.length) return { decision: 'reject', confidence: 1, reason: 'no image' };
 
   const res = await fetch(`${endpoint}/classify`, {
@@ -7327,6 +7331,8 @@ async function random40ClassifyArtistLocal(artist, endpoint, imageUrls, options 
       app: 'pong-random40',
       model: RANDOM40_LOCAL_MODEL_NAME,
       visionModel: options.visionModel || '',
+      localVariant: random40NormalizeMode(options.mode || 'local'),
+      preferOllama: random40NormalizeMode(options.mode || 'local') === 'local2',
       promptVersion: RANDOM40_PROMPT_VERSION,
       artist: {
         artistUrl: artist.artistUrl,
@@ -7880,6 +7886,7 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
   let doc = options.firstDoc || null;
   const workingArtist = { ...artist };
   const mode = random40NormalizeMode(options.mode);
+  const localMode = random40IsLocalMode(mode);
 
   if (!doc) {
     try {
@@ -7898,17 +7905,23 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
     ? random40SelectCandidateImages(
         random40ExtractReviewImages(doc, workingArtist.artistUrl, workingArtist.imageUrl),
         workingArtist.imageUrl,
-        RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST,
-        RANDOM40_INITIAL_IMAGES_PER_ARTIST
+        localMode ? RANDOM40_LOCAL_RANDOM_PROFILE_IMAGES_PER_ARTIST : RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST,
+        localMode ? RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST : RANDOM40_INITIAL_IMAGES_PER_ARTIST
       )
     : [workingArtist.imageUrl].filter(Boolean);
 
-  let decision = random40IsLocalMode(mode)
-    ? await random40ClassifyArtistLocal(workingArtist, options.localEndpoint, initialImages, { visionModel: random40LocalVisionModel(mode) })
+  let decision = localMode
+    ? await random40ClassifyArtistLocal(workingArtist, options.localEndpoint, initialImages, {
+        visionModel: random40LocalVisionModel(mode),
+        mode,
+        maxImages: RANDOM40_LOCAL_MAX_REVIEW_IMAGES
+      })
     : await random40ClassifyArtist(workingArtist, apiKey, initialImages);
   random40State.api++;
-  const needsSecondLook = decision.decision === 'unsure' ||
-    (decision.decision === 'accept' && Number(decision.confidence || 0) < RANDOM40_CONFIDENCE_REVIEW);
+  const needsSecondLook = !localMode && (
+    decision.decision === 'unsure' ||
+    (decision.decision === 'accept' && Number(decision.confidence || 0) < RANDOM40_CONFIDENCE_REVIEW)
+  );
   if (needsSecondLook) {
     try {
       if (!doc) doc = await random40FetchDoc(workingArtist.artistUrl, { timeoutMs: 18000 });
@@ -7920,8 +7933,12 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
       );
       const changedImages = images.length !== initialImages.length || images.some((url, index) => url !== initialImages[index]);
       if (images.length > initialImages.length || changedImages) {
-        decision = random40IsLocalMode(mode)
-          ? await random40ClassifyArtistLocal(workingArtist, options.localEndpoint, images, { visionModel: random40LocalVisionModel(mode) })
+        decision = localMode
+          ? await random40ClassifyArtistLocal(workingArtist, options.localEndpoint, images, {
+              visionModel: random40LocalVisionModel(mode),
+              mode,
+              maxImages: RANDOM40_LOCAL_MAX_REVIEW_IMAGES
+            })
           : await random40ClassifyArtist(workingArtist, apiKey, images);
         random40State.api++;
         decision.reason = `reviewed ${images.length} images: ${decision.reason || ''}`.slice(0, 120);
@@ -8081,7 +8098,8 @@ async function startRandom40(mode = 'nano') {
           return;
         }
 
-        updateRandom40Progress({ detail: `${classifierLabel} ${artistLabel} - ${precheck.links.length}+ videos, ${RANDOM40_INITIAL_IMAGES_PER_ARTIST} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        const reviewImageCount = random40IsLocalMode(runMode) ? RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST : RANDOM40_INITIAL_IMAGES_PER_ARTIST;
+        updateRandom40Progress({ detail: `${classifierLabel} ${artistLabel} - ${precheck.links.length}+ videos, ${reviewImageCount} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         stageStarted = performance.now();
         const decision = await random40AnalyzeArtist(artistWithPrecheckText, apiKey, { firstDoc: precheck.firstDoc, mode: runMode, localEndpoint }).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
         random40RecordStageTiming('full-ai', performance.now() - stageStarted);

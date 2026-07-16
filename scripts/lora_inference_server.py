@@ -215,7 +215,7 @@ def classify(payload):
         with torch.no_grad():
             generated = MODEL.generate(
                 **inputs,
-                max_new_tokens=int(os.environ.get("PONG_LORA_MAX_NEW_TOKENS", "220")),
+                max_new_tokens=int(os.environ.get("PONG_LORA_MAX_NEW_TOKENS", "128")),
                 do_sample=False,
             )
         output_ids = generated[:, inputs["input_ids"].shape[1]:]

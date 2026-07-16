@@ -14,7 +14,7 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
 const QWEN_ACCEPT_EXAMPLES = Number(process.env.PONG_QWEN_ACCEPT_EXAMPLE_IMAGES || 0);
 const QWEN_REJECT_EXAMPLES = Number(process.env.PONG_QWEN_REJECT_EXAMPLE_IMAGES || 0);
-const QWEN_CANDIDATE_IMAGES = 3;
+const QWEN_CANDIDATE_IMAGES = Number(process.env.PONG_QWEN_CANDIDATE_IMAGES || 2);
 const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD || 40);
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const LEARNED_STORE_PATH = path.join(LOCAL_AI_DIR, 'learned-examples.json');
@@ -1037,17 +1037,13 @@ async function classify(payload) {
     ...(learnedStore.records || []).filter(record => record.label === 'reject'),
     ...(payload.rejectedArtists || [])
   ]);
+  const preferOllamaVision =
+    payload.preferOllama === true ||
+    String(payload.localVariant || '').toLowerCase() === 'local2' ||
+    process.env.PONG_LORA_PREFER_OLLAMA === '1';
   let qwen;
-  try {
-    qwen = await classifyWithLoraVision({
-      artist,
-      candidateUrls,
-      siglipDecision: final,
-      imageGrades,
-    });
-    qwen.source = qwen.source || 'qwen_lora';
-  } catch (error) {
-    const loraMessage = error.message || String(error);
+
+  if (preferOllamaVision) {
     try {
       qwen = await classifyWithOllamaVision({
         artist,
@@ -1059,32 +1055,91 @@ async function classify(payload) {
         rejectionSummary,
         visionModel
       });
-      qwen.source = qwen.source || 'ollama_fallback';
-      qwen.lora_error = loraMessage.slice(0, 180);
-    } catch (fallbackError) {
-      const message = fallbackError.message || String(fallbackError);
-      if (/CUDA|PTX|Ollama HTTP 500|model/i.test(message)) {
-        ollamaFailureByModel.set(visionModel, message.slice(0, 180));
-        if (visionModel === OLLAMA_VISION_MODEL) {
-          ollamaVisionDisabled = true;
-          ollamaFailureReason = message.slice(0, 180);
-        }
+      qwen.source = qwen.source || 'ollama';
+    } catch (error) {
+      const ollamaMessage = error.message || String(error);
+      if (/CUDA|PTX|Ollama HTTP 500|model/i.test(ollamaMessage)) {
+        ollamaFailureByModel.set(visionModel, ollamaMessage.slice(0, 180));
       }
-      qwen = {
-        decision: 'unsure',
-        confidence: 0.5,
-        reason: `qwen unavailable: lora ${loraMessage}; fallback ${message}`,
-        checks: {
-          photograph: null,
-          woman_prominent: null,
-          male_only: null,
-          male_present: null,
-          female_presenting_adult: null,
-          appears_over_50: null,
-          feet_dominant: null,
-          logo_or_placeholder: null
+      try {
+        qwen = await classifyWithLoraVision({
+          artist,
+          candidateUrls,
+          siglipDecision: final,
+          imageGrades,
+          rejectionSummary,
+        });
+        qwen.source = qwen.source || 'qwen_lora';
+        qwen.ollama_error = ollamaMessage.slice(0, 180);
+      } catch (fallbackError) {
+        const message = fallbackError.message || String(fallbackError);
+        qwen = {
+          decision: 'unsure',
+          confidence: 0.5,
+          reason: `qwen unavailable: ollama ${ollamaMessage}; lora ${message}`,
+          checks: {
+            photograph: null,
+            woman_prominent: null,
+            male_only: null,
+            male_present: null,
+            female_presenting_adult: null,
+            appears_over_50: null,
+            feet_dominant: null,
+            logo_or_placeholder: null
+          }
+        };
+      }
+    }
+  } else {
+    try {
+      qwen = await classifyWithLoraVision({
+        artist,
+        candidateUrls,
+        siglipDecision: final,
+        imageGrades,
+        rejectionSummary,
+      });
+      qwen.source = qwen.source || 'qwen_lora';
+    } catch (error) {
+      const loraMessage = error.message || String(error);
+      try {
+        qwen = await classifyWithOllamaVision({
+          artist,
+          candidateUrls,
+          siglipDecision: final,
+          imageGrades,
+          acceptedExampleUrls,
+          rejectedExampleUrls,
+          rejectionSummary,
+          visionModel
+        });
+        qwen.source = qwen.source || 'ollama_fallback';
+        qwen.lora_error = loraMessage.slice(0, 180);
+      } catch (fallbackError) {
+        const message = fallbackError.message || String(fallbackError);
+        if (/CUDA|PTX|Ollama HTTP 500|model/i.test(message)) {
+          ollamaFailureByModel.set(visionModel, message.slice(0, 180));
+          if (visionModel === OLLAMA_VISION_MODEL) {
+            ollamaVisionDisabled = true;
+            ollamaFailureReason = message.slice(0, 180);
+          }
         }
-      };
+        qwen = {
+          decision: 'unsure',
+          confidence: 0.5,
+          reason: `qwen unavailable: lora ${loraMessage}; fallback ${message}`,
+          checks: {
+            photograph: null,
+            woman_prominent: null,
+            male_only: null,
+            male_present: null,
+            female_presenting_adult: null,
+            appears_over_50: null,
+            feet_dominant: null,
+            logo_or_placeholder: null
+          }
+        };
+      }
     }
   }
 
