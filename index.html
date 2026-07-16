@@ -660,7 +660,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.18</div>
+  <div class="version-number">23.19</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3956,8 +3956,36 @@ function setActivePlaybackRangeForPasteEvent(index) {
 function getNextPasteEventPreviewCount() {
   if (!pasteEvents.length) return 0;
 
-  const nextIndex = ((currentPasteIndex >= 0 ? currentPasteIndex + 1 : 0) + pasteEvents.length) % pasteEvents.length;
+  const nextLoadedIndex = getNextLoadedPasteEventIndex();
+  const nextIndex = nextLoadedIndex >= 0
+    ? nextLoadedIndex
+    : ((currentPasteIndex >= 0 ? currentPasteIndex + 1 : 0) + pasteEvents.length) % pasteEvents.length;
   return Math.max(1, Number(pasteEvents[nextIndex]?.count || BATCH_SIZE));
+}
+
+function pasteEventHasLoadedVideos(event) {
+  if (!event || !Array.isArray(allVideoUrls) || !allVideoUrls.length) return false;
+  const start = Number(event.startIndex);
+  const count = Number(event.count);
+  if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) return false;
+  const end = Math.min(allVideoUrls.length, Math.max(0, start) + count);
+  for (let index = Math.max(0, start); index < end; index++) {
+    if (allVideoUrls[index]) return true;
+  }
+  return false;
+}
+
+function getNextLoadedPasteEventIndex() {
+  if (!Array.isArray(pasteEvents) || pasteEvents.length < 2) return -1;
+  const startIndex = currentPasteIndex >= 0 ? currentPasteIndex : -1;
+
+  for (let offset = 1; offset <= pasteEvents.length; offset++) {
+    const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
+    if (index === currentPasteIndex) continue;
+    if (pasteEventHasLoadedVideos(pasteEvents[index])) return index;
+  }
+
+  return -1;
 }
 
 function shouldNextBatchAdvanceSavedArtist() {
@@ -3974,7 +4002,8 @@ function navigateToNextPasteEvent(){
 
   syncCurrentPasteIndexFromVisibleVideo();
 
-  setActivePlaybackRangeForPasteEvent(currentPasteIndex + 1);
+  const nextLoadedIndex = getNextLoadedPasteEventIndex();
+  setActivePlaybackRangeForPasteEvent(nextLoadedIndex >= 0 ? nextLoadedIndex : currentPasteIndex + 1);
   updatePasteNavigationButton();
   scheduleSessionSave(700);
 
