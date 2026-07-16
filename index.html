@@ -677,7 +677,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.42</div>
+  <div class="version-number">23.43</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6657,7 +6657,7 @@ function random40AccuracyText() {
   const nanoTime = summary.nano.avgFirstVideoSeconds == null ? '--' : `${summary.nano.avgFirstVideoSeconds}s`;
   const localTime = summary.local.avgFirstVideoSeconds == null ? '--' : `${summary.local.avgFirstVideoSeconds}s`;
   const local2Time = summary.local2.avgFirstVideoSeconds == null ? '--' : `${summary.local2.avgFirstVideoSeconds}s`;
-  return `Nano ${nano}\nLocal ${local}\nLocal2 ${local2}\nTime\nNano ${nanoTime}\nLocal ${localTime}\nLocal2 ${local2Time}`;
+  return `Nano ${nano}\nLocal ${local}\nLocal2 ${local2}\nNano ${nanoTime}\nLocal ${localTime}\nLocal2 ${local2Time}`;
 }
 
 function random40AccuracyReport() {
@@ -7911,15 +7911,6 @@ async function startRandom40(mode = 'nano') {
         }
         if (random40HardFilter(artist)) return;
 
-        updateRandom40Progress({ detail: `${classifierLabel} thumbnail check: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
-        const triage = await random40ThumbnailTriage(artist, apiKey, runMode, localEndpoint).catch(() => ({ skip: false }));
-        if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
-        if (triage.skip) {
-          random40State.thumbnailSkips = (random40State.thumbnailSkips || 0) + 1;
-          if (triage.hardReject) random40CacheHardReject(artist.artistUrl, triage.reason);
-          return;
-        }
-
         updateRandom40Progress({ detail: `Checking videos: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         const precheck = await random40CollectVideoPostLinks(artist, { stopAt: RANDOM40_MIN_VIDEOS_PER_ARTIST }).catch(() => ({ links: [] }));
         if ((precheck.links || []).length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
@@ -7933,6 +7924,16 @@ async function startRandom40(mode = 'nano') {
           });
           return;
         }
+
+        updateRandom40Progress({ detail: `${classifierLabel} thumbnail check: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        const triage = await random40ThumbnailTriage(artist, apiKey, runMode, localEndpoint).catch(() => ({ skip: false }));
+        if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
+        if (triage.skip) {
+          random40State.thumbnailSkips = (random40State.thumbnailSkips || 0) + 1;
+          if (triage.hardReject) random40CacheHardReject(artist.artistUrl, triage.reason);
+          return;
+        }
+
         updateRandom40Progress({ detail: `${classifierLabel} ${artistLabel} - ${precheck.links.length}+ videos, ${RANDOM40_INITIAL_IMAGES_PER_ARTIST} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         const decision = await random40AnalyzeArtist(artist, apiKey, { firstDoc: precheck.firstDoc, mode: runMode, localEndpoint }).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
         if (!random40IsAcceptedDecision(decision)) {
@@ -9059,6 +9060,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=105"></script>
+<script src="pong-sync.js?v=106"></script>
 </body>
 </html>
