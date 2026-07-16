@@ -659,7 +659,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.14</div>
+  <div class="version-number">23.15</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5690,10 +5690,10 @@ const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_MAX_REVIEW_IMAGES = 5;
 const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 3;
 const RANDOM40_MAX_ACCEPT_RECORDS = 80;
-const RANDOM40_MAX_ACCEPT_EXAMPLES = 4;
+const RANDOM40_MAX_ACCEPT_EXAMPLES = 2;
 const RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE = 4;
 const RANDOM40_MAX_REJECT_RECORDS = 80;
-const RANDOM40_MAX_REJECT_EXAMPLES = 4;
+const RANDOM40_MAX_REJECT_EXAMPLES = 2;
 const RANDOM40_REJECT_IMAGES_PER_EXAMPLE = 2;
 const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
 let random40State = null;
@@ -6046,7 +6046,7 @@ function random40AcceptedExampleContent(excludeArtistUrl = '') {
       type: 'input_text',
       text:
         `Accepted example ${index + 1}: ${item.artistName || random40ArtistNameFromUrl(item.artistUrl) || 'artist'}.\n` +
-        'The user pressed the artist save button for this artist. Give this visual example strong positive weight when judging future artists.'
+        'The user pressed the artist save button for this artist. Use this as a light positive preference nudge, not a strict look-alike requirement.'
     });
     item.imageUrls.slice(0, RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE).forEach((url, imageIndex) => {
       content.push({ type: 'input_text', text: `Accepted example ${index + 1} image ${imageIndex + 1}:` });
@@ -6070,7 +6070,7 @@ function random40RejectedExampleContent(excludeArtistUrl = '') {
       type: 'input_text',
       text:
         `Rejected example ${index + 1}: ${item.artistName || random40ArtistNameFromUrl(item.artistUrl) || 'artist'}.\n` +
-        'The user pressed the red X for this artist. Treat this as a visual avoid example and reject future artists with a strongly similar presentation.'
+        'The user pressed the red X for this artist. Use this as a light avoid preference nudge, while still applying the hard filters.'
     });
     item.imageUrls.slice(0, RANDOM40_REJECT_IMAGES_PER_EXAMPLE).forEach((url, imageIndex) => {
       content.push({ type: 'input_text', text: `Rejected example ${index + 1} image ${imageIndex + 1}:` });
@@ -6260,15 +6260,14 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         `Rejected visual example images included: ${rejectedExamples.filter(item => item.type === 'input_image').length}\n\n` +
         'Classify this CoomerFans artist from the candidate profile/post image set. ' +
         'The candidate set should include the listing/profile image plus extra images from the artist profile whenever available. ' +
-        'Use accepted examples as strong visual favor examples from the user. ' +
-        'Use the rejected examples as visual avoid examples from the user. ' +
-        'When hard rejection rules are not triggered, give strong priority to candidates that closely resemble accepted examples. ' +
+        'Use accepted and rejected examples only as small preference adjustments from the user, not strict look-alike matching. ' +
+        'When hard rejection rules are not triggered, stay broad and favor conventionally attractive adult women with clear, appealing presentation. ' +
         'Do not accept from one favorable thumbnail if the additional profile/post images conflict with the hard rules or user preference examples. ' +
         'Reject blank/logo/placeholder/anime/artwork images, images where feet are the main subject, ' +
         'images with any visible male-presenting person, images with no clearly female-presenting adult, ' +
         'images where the person appears underage or age is unclear, and images where the artist appears over 50. Accept only when the profile clearly shows ' +
-        'a female-presenting adult and matches at least one preferred style: slim presentation, fit or athletic presentation, ' +
-        'conventionally pretty or attractive styling, or youthful adult presentation. Do not diagnose, label, or mention body weight or health status. ' +
+        'a female-presenting adult and matches at least one preferred style: conventionally attractive styling, fit or athletic presentation, ' +
+        'slim presentation, polished appearance, or youthful adult presentation. Do not diagnose, label, or mention body weight or health status. ' +
         'Return unsure only for unclear crops, tiny/blurred images, weak evidence, or genuinely conflicting evidence.'
     }
   ];
@@ -6296,7 +6295,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
               'You are a decisive image triage classifier. Return only the requested structured output. ' +
               'Do not identify the person. Do not infer ethnicity, sexuality, medical conditions, or weight status. ' +
               'Reject any male-presenting person, male-only image, clearly non-photographic image, placeholder, feet-dominant image, non-adult-presenting profile image, or artist who appears over 50. ' +
-              'Treat user-saved accepted examples as the strongest positive preference signal after hard rejection rules.'
+              'Treat user-saved accepted and rejected examples as small preference nudges after hard rejection rules, not as strict matching requirements.'
           }]
         },
         { role: 'user', content }
