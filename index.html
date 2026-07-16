@@ -659,7 +659,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.16</div>
+  <div class="version-number">23.17</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3986,6 +3986,8 @@ function navigateToNextPasteEvent(){
     updatePasteNavigationButton();
   },0);
 }
+
+window.PongNavigateToNextPasteEvent = navigateToNextPasteEvent;
 
 function resetPasteEvents(){
   pasteEvents=[];

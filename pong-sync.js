@@ -2910,7 +2910,12 @@
       try {
         showMsg('Teaching Random 40 to avoid this artist...');
         const handled = await window.PongRandom40RejectCurrentArtist(bundleInfo);
-        if (handled) return;
+        if (handled) {
+          if (typeof window.PongNavigateToNextPasteEvent === 'function') {
+            window.PongNavigateToNextPasteEvent();
+          }
+          return;
+        }
       } catch (e) {
         showMsg('Could not teach Random 40 from this artist');
         console.error(e);
