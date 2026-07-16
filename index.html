@@ -676,7 +676,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.39</div>
+  <div class="version-number">23.40</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6507,7 +6507,11 @@ function random40NormalizeMode(mode) {
 function random40EmptyAccuracy() {
   return {
     version: 1,
-    artists: {}
+    artists: {},
+    timings: {
+      nano: [],
+      local: []
+    }
   };
 }
 
@@ -6517,7 +6521,11 @@ function random40LoadAccuracy() {
     if (!stored || typeof stored !== 'object') return random40EmptyAccuracy();
     return {
       version: 1,
-      artists: stored.artists && typeof stored.artists === 'object' ? stored.artists : {}
+      artists: stored.artists && typeof stored.artists === 'object' ? stored.artists : {},
+      timings: {
+        nano: Array.isArray(stored.timings?.nano) ? stored.timings.nano : [],
+        local: Array.isArray(stored.timings?.local) ? stored.timings.local : []
+      }
     };
   } catch (_) {
     return random40EmptyAccuracy();
@@ -6529,7 +6537,11 @@ function random40SaveAccuracy(stats) {
     localStorage.setItem(RANDOM40_ACCURACY_KEY, JSON.stringify({
       version: 1,
       updatedAt: new Date().toISOString(),
-      artists: stats?.artists && typeof stats.artists === 'object' ? stats.artists : {}
+      artists: stats?.artists && typeof stats.artists === 'object' ? stats.artists : {},
+      timings: {
+        nano: Array.isArray(stats?.timings?.nano) ? stats.timings.nano.slice(-60) : [],
+        local: Array.isArray(stats?.timings?.local) ? stats.timings.local.slice(-60) : []
+      }
     }));
   } catch (_) {}
 }
@@ -6574,12 +6586,13 @@ function random40RecordModelRejected(record = {}) {
 }
 
 function random40AccuracySummary() {
+  const stats = random40LoadAccuracy();
   const summary = {
-    nano: { shown: 0, rejected: 0, accuracy: null },
-    local: { shown: 0, rejected: 0, accuracy: null }
+    nano: { shown: 0, rejected: 0, accuracy: null, avgFirstVideoSeconds: null },
+    local: { shown: 0, rejected: 0, accuracy: null, avgFirstVideoSeconds: null }
   };
 
-  Object.values(random40LoadAccuracy().artists || {}).forEach(item => {
+  Object.values(stats.artists || {}).forEach(item => {
     const mode = random40NormalizeMode(item.mode);
     summary[mode].shown++;
     if (item.rejected) summary[mode].rejected++;
@@ -6591,6 +6604,15 @@ function random40AccuracySummary() {
       : null;
   });
 
+  ['nano', 'local'].forEach(mode => {
+    const samples = (stats.timings?.[mode] || [])
+      .map(item => Number(item.firstVideoMs || item.ms || 0))
+      .filter(ms => Number.isFinite(ms) && ms > 0);
+    summary[mode].avgFirstVideoSeconds = samples.length
+      ? Math.round((samples.reduce((sum, ms) => sum + ms, 0) / samples.length) / 1000)
+      : null;
+  });
+
   return summary;
 }
 
@@ -6598,7 +6620,9 @@ function random40AccuracyText() {
   const summary = random40AccuracySummary();
   const nano = summary.nano.accuracy == null ? '--' : `${summary.nano.accuracy}%`;
   const local = summary.local.accuracy == null ? '--' : `${summary.local.accuracy}%`;
-  return `Nano ${nano}\nLocal ${local}`;
+  const nanoTime = summary.nano.avgFirstVideoSeconds == null ? '--' : `${summary.nano.avgFirstVideoSeconds}s`;
+  const localTime = summary.local.avgFirstVideoSeconds == null ? '--' : `${summary.local.avgFirstVideoSeconds}s`;
+  return `Nano ${nano}\nLocal ${local}\nTime\nNano ${nanoTime}\nLocal ${localTime}`;
 }
 
 function random40AccuracyReport() {
@@ -6611,7 +6635,8 @@ function random40AccuracyReport() {
   ['nano', 'local'].forEach(mode => {
     const item = summary[mode];
     const accuracy = item.accuracy == null ? 'n/a' : `${item.accuracy}%`;
-    lines.push(`${mode}: ${accuracy} (${item.shown - item.rejected}/${item.shown} kept; ${item.rejected} red-X rejects)`);
+    const avgTime = item.avgFirstVideoSeconds == null ? 'n/a' : `${item.avgFirstVideoSeconds}s`;
+    lines.push(`${mode}: ${accuracy} (${item.shown - item.rejected}/${item.shown} kept; ${item.rejected} red-X rejects; avg first Pong video ${avgTime})`);
   });
 
   const recentRejects = Object.values(random40LoadAccuracy().artists || {})
@@ -6636,6 +6661,22 @@ function random40AccuracyReport() {
 
 window.PongRandom40AccuracyText = random40AccuracyText;
 window.PongRandom40AccuracyReport = random40AccuracyReport;
+
+function random40RecordFirstVideoTime(mode, elapsedMs) {
+  const ms = Number(elapsedMs || 0);
+  if (!Number.isFinite(ms) || ms <= 0) return;
+
+  const stats = random40LoadAccuracy();
+  const normalized = random40NormalizeMode(mode);
+  stats.timings = stats.timings || { nano: [], local: [] };
+  stats.timings[normalized] = Array.isArray(stats.timings[normalized]) ? stats.timings[normalized] : [];
+  stats.timings[normalized].push({
+    firstVideoMs: Math.round(ms),
+    recordedAt: new Date().toISOString()
+  });
+  random40SaveAccuracy(stats);
+  window.PongRenderRandom40Accuracy?.();
+}
 
 async function random40FindReadyLocalEndpointSilently() {
   const candidates = [
@@ -7340,6 +7381,10 @@ function random40PublishEntries(entries) {
     loadVideosButton.click();
     window.PongLoadedSavedMode = 'random40';
     random40State.cardsStarted = true;
+    if (!random40State.firstVideoRecordedAt && random40State.startedAt) {
+      random40State.firstVideoRecordedAt = Date.now();
+      random40RecordFirstVideoTime(random40State.mode, random40State.firstVideoRecordedAt - random40State.startedAt);
+    }
     scheduleRandom40PreloadPool(900);
     showSortingIndicator(`Loaded first ${payload.urls.length} Random 40 videos. Continuing in background...`);
   } else {
@@ -7547,6 +7592,8 @@ async function startRandom40(mode = 'nano') {
   random40State = {
     mode: runMode,
     localEndpoint,
+    startedAt: Date.now(),
+    firstVideoRecordedAt: 0,
     accepted: 0,
     videos: 0,
     pages: 0,
@@ -8751,6 +8798,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=102"></script>
+<script src="pong-sync.js?v=103"></script>
 </body>
 </html>
