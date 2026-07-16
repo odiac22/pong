@@ -18,11 +18,20 @@ STATE = {
     "model": "",
     "adapter": "",
     "loadedAt": "",
+    "batchMax": 0,
+    "batchWaitMs": 0,
+    "queued": 0,
+    "lastBatchSize": 0,
 }
 MODEL = None
 PROCESSOR = None
 DEVICE = None
 LOCK = threading.Lock()
+BATCH_CONDITION = threading.Condition()
+BATCH_QUEUE = []
+BATCH_MAX_SIZE = max(1, min(8, int(os.environ.get("PONG_LORA_BATCH_SIZE", "6"))))
+BATCH_WAIT_MS = max(0, min(1000, int(os.environ.get("PONG_LORA_BATCH_WAIT_MS", "160"))))
+MAX_CANDIDATE_IMAGES = max(1, min(6, int(os.environ.get("PONG_LORA_CANDIDATE_IMAGES", "2"))))
 
 
 def write_status(local_dir: Path, status: str, message: str, **extra):
@@ -115,6 +124,40 @@ def fetch_image(url: str, timeout=20):
     return Image.open(BytesIO(data)).convert("RGB")
 
 
+def build_messages(payload, images):
+    artist = payload.get("artist") or {}
+    siglip = payload.get("siglipDecision") or {}
+    image_grades = payload.get("imageGrades") or []
+    grade_lines = "\n".join(
+        f"image {item.get('image_index')}: {item.get('decision')} confidence {item.get('confidence')} {item.get('reason', '')}"
+        for item in image_grades[:5]
+    )
+
+    system_text = (
+        "You are a strict local LoRA-adapted visual triage classifier. "
+        "Return only one compact minified JSON object with keys decision, confidence, reason, checks. "
+        "Keep reason under 12 words. "
+        "Do not identify anyone. Do not infer ethnicity, sexuality, medical conditions, or weight status. "
+        "Use Trans only as a text/URL hard-filter clue supplied by runtime, never as an appearance inference."
+    )
+    user_text = (
+        f"Artist: {artist.get('artistName') or 'unknown'}\n"
+        f"URL: {artist.get('artistUrl') or ''}\n"
+        f"SigLIP full-bank preference signal: {siglip.get('decision')} confidence {siglip.get('confidence')}, {siglip.get('reason') or ''}\n"
+        f"Recent reject reason history: {payload.get('rejectionSummary') or 'none'}\n"
+        f"Per-image embedding grades:\n{grade_lines or 'none'}\n\n"
+        "Hard visual checks first: reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, non-photo/logo/placeholder/anime/artwork, unclear adult age, or appears over the age limit. "
+        "Reject if the whole candidate set lacks enough visible face or body evidence. A face-only or body-only image can still be judged when enough evidence is visible. "
+        "After hard checks, use the LoRA-adapted saved preference plus the full-bank embedding signal. "
+        'Return JSON only, like {"decision":"reject","confidence":0.98,"reason":"male visible","checks":{"photograph":true,"woman_prominent":false,"male_only":true,"male_present":true,"female_presenting_adult":false,"appears_over_50":null,"feet_dominant":false,"logo_or_placeholder":false}}'
+    )
+
+    return [
+        {"role": "system", "content": [{"type": "text", "text": system_text}]},
+        {"role": "user", "content": [{"type": "image", "image": image} for image in images] + [{"type": "text", "text": user_text}]},
+    ]
+
+
 def load_model(repo_root: Path):
     global MODEL, PROCESSOR, DEVICE
     if STATE["ready"] or STATE["loading"]:
@@ -154,6 +197,8 @@ def load_model(repo_root: Path):
             "model": model_id,
             "adapter": str(adapter),
             "loadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "batchMax": BATCH_MAX_SIZE,
+            "batchWaitMs": BATCH_WAIT_MS,
         })
         write_status(local_dir, "ready", "Qwen LoRA inference model is ready.", model=model_id, adapter=str(adapter))
     except Exception as exc:
@@ -161,11 +206,11 @@ def load_model(repo_root: Path):
         write_status(local_dir, "blocked", f"Qwen LoRA inference failed: {exc}", model=model_id, adapter=str(adapter))
 
 
-def classify(payload):
+def prepare_classification(payload):
     if not STATE["ready"]:
         raise RuntimeError(STATE["error"] or "LoRA model is not ready")
 
-    candidate_urls = list(dict.fromkeys(payload.get("candidateImageUrls") or []))[:3]
+    candidate_urls = list(dict.fromkeys(payload.get("candidateImageUrls") or []))[:MAX_CANDIDATE_IMAGES]
     images = []
     for url in candidate_urls:
         try:
@@ -173,54 +218,15 @@ def classify(payload):
         except Exception:
             pass
     if not images:
-        return normalize_result({"decision": "reject", "confidence": 1, "reason": "no readable candidate images", "checks": {}})
+        return {"immediate": normalize_result({"decision": "reject", "confidence": 1, "reason": "no readable candidate images", "checks": {}})}
 
-    artist = payload.get("artist") or {}
-    siglip = payload.get("siglipDecision") or {}
-    image_grades = payload.get("imageGrades") or []
-    grade_lines = "\n".join(
-        f"image {item.get('image_index')}: {item.get('decision')} confidence {item.get('confidence')} {item.get('reason', '')}"
-        for item in image_grades[:5]
-    )
+    return {
+        "messages": build_messages(payload, images),
+        "images": images,
+    }
 
-    system_text = (
-        "You are a strict local LoRA-adapted visual triage classifier. "
-        "Return only one compact minified JSON object with keys decision, confidence, reason, checks. "
-        "Keep reason under 12 words. "
-        "Do not identify anyone. Do not infer ethnicity, sexuality, medical conditions, or weight status. "
-        "Use Trans only as a text/URL hard-filter clue supplied by runtime, never as an appearance inference."
-    )
-    user_text = (
-        f"Artist: {artist.get('artistName') or 'unknown'}\n"
-        f"URL: {artist.get('artistUrl') or ''}\n"
-        f"SigLIP full-bank preference signal: {siglip.get('decision')} confidence {siglip.get('confidence')}, {siglip.get('reason') or ''}\n"
-        f"Recent reject reason history: {payload.get('rejectionSummary') or 'none'}\n"
-        f"Per-image embedding grades:\n{grade_lines or 'none'}\n\n"
-        "Hard visual checks first: reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, non-photo/logo/placeholder/anime/artwork, unclear adult age, or appears over the age limit. "
-        "Reject if the whole candidate set lacks enough visible face or body evidence. A face-only or body-only image can still be judged when enough evidence is visible. "
-        "After hard checks, use the LoRA-adapted saved preference plus the full-bank embedding signal. "
-        'Return JSON only, like {"decision":"reject","confidence":0.98,"reason":"male visible","checks":{"photograph":true,"woman_prominent":false,"male_only":true,"male_present":true,"female_presenting_adult":false,"appears_over_50":null,"feet_dominant":false,"logo_or_placeholder":false}}'
-    )
 
-    messages = [
-        {"role": "system", "content": [{"type": "text", "text": system_text}]},
-        {"role": "user", "content": [{"type": "image", "image": image} for image in images] + [{"type": "text", "text": user_text}]},
-    ]
-
-    with LOCK:
-        import torch
-        text = PROCESSOR.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = PROCESSOR(text=[text], images=images, return_tensors="pt", padding=True)
-        inputs = {k: v.to(DEVICE) if hasattr(v, "to") else v for k, v in inputs.items()}
-        with torch.no_grad():
-            generated = MODEL.generate(
-                **inputs,
-                max_new_tokens=int(os.environ.get("PONG_LORA_MAX_NEW_TOKENS", "128")),
-                do_sample=False,
-            )
-        output_ids = generated[:, inputs["input_ids"].shape[1]:]
-        output = PROCESSOR.batch_decode(output_ids, skip_special_tokens=True)[0]
-
+def parse_model_output(output):
     try:
         return normalize_result(extract_json_object(output))
     except Exception:
@@ -235,6 +241,129 @@ def classify(payload):
                 "reason": f"could not parse lora output: {output[:90]}",
                 "checks": {},
             })
+
+
+def generate_prepared_batch(prepared_batch):
+    if not prepared_batch:
+        return []
+
+    texts = []
+    images = []
+    for prepared in prepared_batch:
+        texts.append(PROCESSOR.apply_chat_template(prepared["messages"], tokenize=False, add_generation_prompt=True))
+        images.extend(prepared["images"])
+
+    import torch
+    with LOCK:
+        inputs = PROCESSOR(text=texts, images=images, return_tensors="pt", padding=True)
+        inputs = {k: v.to(DEVICE) if hasattr(v, "to") else v for k, v in inputs.items()}
+        with torch.no_grad():
+            generated = MODEL.generate(
+                **inputs,
+                max_new_tokens=int(os.environ.get("PONG_LORA_MAX_NEW_TOKENS", "128")),
+                do_sample=False,
+            )
+
+    trimmed = [
+        out_ids[len(in_ids):]
+        for in_ids, out_ids in zip(inputs["input_ids"], generated)
+    ]
+    outputs = PROCESSOR.batch_decode(trimmed, skip_special_tokens=True)
+    results = []
+    batch_size = len(prepared_batch)
+    for output in outputs:
+        parsed = parse_model_output(output)
+        parsed["batch_size"] = batch_size
+        results.append(parsed)
+    STATE["lastBatchSize"] = batch_size
+    return results
+
+
+def run_batch_items(items):
+    if not items:
+        return
+    prepared = [item["prepared"] for item in items]
+    try:
+        results = generate_prepared_batch(prepared)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "out of memory" in message.lower() and len(items) > 1:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            midpoint = max(1, len(items) // 2)
+            run_batch_items(items[:midpoint])
+            run_batch_items(items[midpoint:])
+            return
+        for item in items:
+            item["error"] = exc
+            item["event"].set()
+        return
+    except Exception as exc:
+        if len(items) > 1:
+            for item in items:
+                run_batch_items([item])
+            return
+        items[0]["error"] = exc
+        items[0]["event"].set()
+        return
+
+    for item, result in zip(items, results):
+        item["result"] = result
+        item["event"].set()
+
+
+def batch_worker():
+    while True:
+        with BATCH_CONDITION:
+            while not BATCH_QUEUE:
+                STATE["queued"] = 0
+                BATCH_CONDITION.wait()
+
+            deadline = time.time() + (BATCH_WAIT_MS / 1000)
+            while len(BATCH_QUEUE) < BATCH_MAX_SIZE:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                BATCH_CONDITION.wait(remaining)
+
+            items = BATCH_QUEUE[:BATCH_MAX_SIZE]
+            del BATCH_QUEUE[:BATCH_MAX_SIZE]
+            STATE["queued"] = len(BATCH_QUEUE)
+
+        run_batch_items(items)
+
+
+def enqueue_prepared(prepared):
+    if BATCH_MAX_SIZE <= 1:
+        return generate_prepared_batch([prepared])[0]
+
+    item = {
+        "prepared": prepared,
+        "event": threading.Event(),
+        "result": None,
+        "error": None,
+    }
+    with BATCH_CONDITION:
+        BATCH_QUEUE.append(item)
+        STATE["queued"] = len(BATCH_QUEUE)
+        BATCH_CONDITION.notify()
+
+    if not item["event"].wait(float(os.environ.get("PONG_LORA_REQUEST_TIMEOUT_SEC", "180"))):
+        raise TimeoutError("LoRA batch request timed out")
+    if item["error"]:
+        raise item["error"]
+    return item["result"]
+
+
+def classify(payload):
+    prepared = prepare_classification(payload)
+    if "immediate" in prepared:
+        return prepared["immediate"]
+    return enqueue_prepared(prepared)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -287,6 +416,7 @@ def main():
     # Load synchronously. On Windows, loading Qwen/PyTorch in a daemon thread can
     # exit the process without a useful traceback after the HTTP listener opens.
     load_model(repo_root)
+    threading.Thread(target=batch_worker, daemon=True).start()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Pong LoRA inference listening on http://{args.host}:{args.port}", flush=True)
     server.serve_forever()
