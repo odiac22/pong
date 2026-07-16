@@ -656,7 +656,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.06</div>
+  <div class="version-number">23.07</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5670,10 +5670,11 @@ const RANDOM40_PASSWORD = '22';
 const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
-const RANDOM40_AI_CONCURRENCY = 5;
+const RANDOM40_AI_CONCURRENCY = 20;
 const RANDOM40_POST_CONCURRENCY = 8;
 const RANDOM40_PAGE_BATCH_SIZE = 4;
 const RANDOM40_MAX_ARTIST_PAGES = 40;
+const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
 const RANDOM40_MODEL = 'gpt-4.1-mini';
 const RANDOM40_PROMPT_VERSION = 'cf-vision-v6';
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
@@ -6028,6 +6029,36 @@ function random40ExtractVideoPostLinks(doc, baseUrl) {
   return [...new Set(links.filter(Boolean))];
 }
 
+async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPages = RANDOM40_MAX_ARTIST_PAGES } = {}) {
+  const base = artist.artistUrl;
+  const postLinks = new Set();
+  const firstDoc = await random40FetchDoc(base, { timeoutMs: 22000 });
+
+  random40ExtractVideoPostLinks(firstDoc, base).forEach(url => postLinks.add(url));
+
+  let page = 2;
+  while (page <= maxPages && postLinks.size < stopAt) {
+    if (random40State?.stop) break;
+    const pages = Array.from({ length: RANDOM40_PAGE_BATCH_SIZE }, (_, i) => page + i);
+    const docs = await Promise.all(pages.map(n =>
+      random40FetchDoc(`${base}?page=${n}`, { timeoutMs: 16000 }).catch(() => null)
+    ));
+    let hasPosts = false;
+    docs.forEach((doc, index) => {
+      if (!doc) return;
+      if (doc.querySelector('div.post')) hasPosts = true;
+      random40ExtractVideoPostLinks(doc, `${base}?page=${pages[index]}`).forEach(url => postLinks.add(url));
+    });
+    if (!hasPosts) break;
+    page += RANDOM40_PAGE_BATCH_SIZE;
+  }
+
+  return {
+    firstDoc,
+    links: [...postLinks]
+  };
+}
+
 async function random40VideoEntriesFromPost(postUrl, artistInfo) {
   const doc = await random40FetchDoc(postUrl, { timeoutMs: 22000 });
   const body = doc.querySelector('div.post-body') || doc.body;
@@ -6050,28 +6081,9 @@ async function random40VideoEntriesFromPost(postUrl, artistInfo) {
 
 async function random40ScrapeArtistVideos(artist) {
   const base = artist.artistUrl;
-  const firstDoc = await random40FetchDoc(base, { timeoutMs: 22000 });
-  const artistInfo = random40ArtistInfo(base, firstDoc);
-  const postLinks = new Set(random40ExtractVideoPostLinks(firstDoc, base));
-  let page = 2;
-
-  while (page <= RANDOM40_MAX_ARTIST_PAGES) {
-    if (random40State?.stop) break;
-    const pages = Array.from({ length: RANDOM40_PAGE_BATCH_SIZE }, (_, i) => page + i);
-    const docs = await Promise.all(pages.map(n =>
-      random40FetchDoc(`${base}?page=${n}`, { timeoutMs: 16000 }).catch(() => null)
-    ));
-    let hasPosts = false;
-    docs.forEach((doc, index) => {
-      if (!doc) return;
-      if (doc.querySelector('div.post')) hasPosts = true;
-      random40ExtractVideoPostLinks(doc, `${base}?page=${pages[index]}`).forEach(url => postLinks.add(url));
-    });
-    if (!hasPosts) break;
-    page += RANDOM40_PAGE_BATCH_SIZE;
-  }
-
-  const links = [...postLinks];
+  const collected = await random40CollectVideoPostLinks(artist);
+  const artistInfo = random40ArtistInfo(base, collected.firstDoc);
+  const links = collected.links;
   return random40Pool(links, RANDOM40_POST_CONCURRENCY, postUrl =>
     random40VideoEntriesFromPost(postUrl, artistInfo).catch(() => [])
   ).then(results => results.flat());
@@ -6197,6 +6209,7 @@ async function startRandom40() {
     videos: 0,
     pages: 0,
     api: 0,
+    skippedLowVideo: 0,
     cardsStarted: false,
     stop: false,
     done: false,
@@ -6229,13 +6242,39 @@ async function startRandom40() {
       await random40Pool(artists, RANDOM40_AI_CONCURRENCY, async artist => {
         if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
         random40State.seenArtists.add(artist.artistUrl);
-        updateRandom40Progress({ detail: `AI ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} - ${random40State.accepted}/${RANDOM40_TARGET_ACCEPTED}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        updateRandom40Progress({ detail: `Checking videos: ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        const precheck = await random40CollectVideoPostLinks(artist, { stopAt: RANDOM40_MIN_VIDEOS_PER_ARTIST }).catch(() => ({ links: [] }));
+        if ((precheck.links || []).length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
+          random40State.skippedLowVideo = (random40State.skippedLowVideo || 0) + 1;
+          updateRandom40Progress({
+            detail: `Skipped ${artist.artistName || 'artist'}: ${precheck.links?.length || 0}/${RANDOM40_MIN_VIDEOS_PER_ARTIST} video posts`,
+            accepted: random40State.accepted,
+            videos: random40State.videos,
+            pages: random40State.pages,
+            api: random40State.api
+          });
+          return;
+        }
+        updateRandom40Progress({ detail: `AI ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} - ${precheck.links.length}+ videos`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         const decision = await random40AnalyzeArtist(artist, apiKey).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
         if (decision.decision !== 'accept') return;
         if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
-        random40State.accepted++;
-        updateRandom40Progress({ detail: `Accepted ${artist.artistName}. Scraping videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+        updateRandom40Progress({ detail: `AI accepted ${artist.artistName}. Scraping videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
         const entries = await random40ScrapeArtistVideos(artist).catch(() => []);
+        if (entries.length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
+          random40State.skippedLowVideo = (random40State.skippedLowVideo || 0) + 1;
+          updateRandom40Progress({
+            detail: `Skipped accepted ${artist.artistName}: only ${entries.length}/${RANDOM40_MIN_VIDEOS_PER_ARTIST} videos`,
+            accepted: random40State.accepted,
+            videos: random40State.videos,
+            pages: random40State.pages,
+            api: random40State.api,
+            force: true
+          });
+          return;
+        }
+        if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
+        random40State.accepted++;
         random40PublishEntries(entries);
         updateRandom40Progress({ detail: `${random40State.accepted}/${RANDOM40_TARGET_ACCEPTED} accepted - ${random40State.videos} videos`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
       });
@@ -6244,8 +6283,8 @@ async function startRandom40() {
     random40State.done = true;
     updateRandom40Progress({
       detail: random40State.stop
-        ? `Stopped: ${random40State.accepted} accepted, ${random40State.videos} videos`
-        : `Done: ${random40State.accepted} accepted, ${random40State.videos} videos`,
+        ? `Stopped: ${random40State.accepted} accepted, ${random40State.videos} videos, ${random40State.skippedLowVideo || 0} low-video skipped`
+        : `Done: ${random40State.accepted} accepted, ${random40State.videos} videos, ${random40State.skippedLowVideo || 0} low-video skipped`,
       accepted: random40State.accepted,
       videos: random40State.videos,
       pages: random40State.pages,
