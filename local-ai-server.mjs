@@ -10,11 +10,12 @@ const OLLAMA_URL = (process.env.PONG_OLLAMA_URL || 'http://127.0.0.1:11434').rep
 const OLLAMA_VISION_MODEL = process.env.PONG_OLLAMA_VISION_MODEL || 'qwen2.5vl:latest';
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
-const QWEN_ACCEPT_EXAMPLES = 2;
-const QWEN_REJECT_EXAMPLES = 2;
+const QWEN_ACCEPT_EXAMPLES = Number(process.env.PONG_QWEN_ACCEPT_EXAMPLE_IMAGES || 0);
+const QWEN_REJECT_EXAMPLES = Number(process.env.PONG_QWEN_REJECT_EXAMPLE_IMAGES || 0);
 const QWEN_CANDIDATE_IMAGES = 3;
+const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD || 40);
 const LEARNED_STORE_PATH = path.join(process.cwd(), '.pong-local-ai', 'learned-examples.json');
-const MAX_LEARNED_RECORDS = 300;
+const MAX_LEARNED_RECORDS = 2000;
 
 env.allowLocalModels = false;
 env.useBrowserCache = false;
@@ -250,6 +251,18 @@ async function saveLearnedStore(store) {
   return clean;
 }
 
+function learnedRecordSummaries(store) {
+  return (store?.records || []).map(record => ({
+    artistUrl: record.artistUrl || '',
+    artistName: record.artistName || '',
+    label: record.label || '',
+    rejectReason: record.rejectReason || '',
+    rejectReasonLabel: record.rejectReasonLabel || '',
+    learnedAt: record.learnedAt || '',
+    imageUrls: (record.embeddings || []).map(item => item?.url).filter(Boolean)
+  }));
+}
+
 function learnedVectors(store, label) {
   const out = [];
   for (const record of store?.records || []) {
@@ -276,7 +289,7 @@ async function learn(payload) {
 
   const artist = payload.artist || {};
   const artistUrl = normalizeArtistUrl(artist.artistUrl || '');
-  const imageUrls = [...new Set((payload.imageUrls || []).map(url => normalizeUrl(url, artistUrl || undefined)).filter(Boolean))].slice(0, 8);
+  const imageUrls = [...new Set((payload.imageUrls || []).map(url => normalizeUrl(url, artistUrl || undefined)).filter(Boolean))].slice(0, LEARN_IMAGES_PER_RECORD);
   if (!artistUrl) throw new Error('artistUrl is required');
   if (!imageUrls.length) throw new Error('at least one imageUrl is required');
 
@@ -462,6 +475,7 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
     'Reject if the entire candidate image set is non-photo/logo/placeholder/anime/artwork/unclear or lacks enough visible face or body evidence to judge the artist. A face-only image or body-only image can still be judged when it gives enough evidence for the hard checks and visual preference.',
     'Do not reject the whole artist just because one candidate image is weak, blank, cropped, or unclear if another candidate clearly supplies enough face/body evidence.',
     'Only after hard checks pass, use the saved preference signal to judge fit. SigLIP is a preference hint, never a hard-rule authority.',
+    'The saved preference signal was computed against every locally stored accepted/rejected embedding, not just a nearest-example subset.',
     'Accept only when the image set clearly shows a female-presenting adult and fits the saved visual preference signal: conventionally attractive styling, fit/athletic/slim/lean presentation, polished appearance, or youthful adult presentation.',
     'User reject reasons may include Fat, Male, Trans, and Ugly. Use Male as a hard visual rejection reason. Use Trans only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health.',
     'Do not identify anyone. Do not infer ethnicity, sexuality, medical conditions, or weight status. Do not mention body weight or health.',
@@ -599,8 +613,8 @@ async function classify(payload) {
       image_grades: imageGrades
     };
   }
-  const acceptedExampleUrls = nearestExampleUrls(candidateVectors, acceptedVectors, QWEN_ACCEPT_EXAMPLES);
-  const rejectedExampleUrls = nearestExampleUrls(candidateVectors, rejectedVectors, QWEN_REJECT_EXAMPLES);
+  const acceptedExampleUrls = QWEN_ACCEPT_EXAMPLES > 0 ? nearestExampleUrls(candidateVectors, acceptedVectors, QWEN_ACCEPT_EXAMPLES) : [];
+  const rejectedExampleUrls = QWEN_REJECT_EXAMPLES > 0 ? nearestExampleUrls(candidateVectors, rejectedVectors, QWEN_REJECT_EXAMPLES) : [];
   const rejectionSummary = rejectReasonSummary([
     ...(learnedStore.records || []).filter(record => record.label === 'reject'),
     ...(payload.rejectedArtists || [])
@@ -713,6 +727,18 @@ const server = http.createServer(async (req, res) => {
         cached_images: embeddingCache.size,
         learned_accept_records: learnedStore.records.filter(record => record.label === 'accept').length,
         learned_reject_records: learnedStore.records.filter(record => record.label === 'reject').length
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/examples') {
+      const learnedStore = await loadLearnedStore();
+      const records = learnedRecordSummaries(learnedStore);
+      json(res, 200, {
+        ok: true,
+        records,
+        accepted: records.filter(record => record.label === 'accept'),
+        rejected: records.filter(record => record.label === 'reject')
       });
       return;
     }

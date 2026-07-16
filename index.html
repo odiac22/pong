@@ -677,7 +677,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.45</div>
+  <div class="version-number">23.46</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6036,11 +6036,15 @@ const RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE = 3;
 const RANDOM40_MAX_REJECT_RECORDS = 200;
 const RANDOM40_MAX_REJECT_EXAMPLES = 4;
 const RANDOM40_REJECT_IMAGES_PER_EXAMPLE = 3;
-const RANDOM40_STORED_IMAGES_PER_ARTIST = 8;
-const RANDOM40_LOCAL_LEARN_IMAGES_PER_EXAMPLE = 8;
+const RANDOM40_STORED_IMAGES_PER_ARTIST = 40;
+const RANDOM40_LOCAL_LEARN_IMAGES_PER_EXAMPLE = 40;
 const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
 const RANDOM40_PRELOAD_ARTIST_BUFFER = 5;
 const RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST = 25;
+let random40AcceptedArtistsMemory = [];
+let random40RejectedArtistsMemory = [];
+let random40MemoryLoadPromise = null;
+let random40MemoryEndpoint = '';
 const RANDOM40_PRELOAD_MAX_ELEMENTS = 140;
 let random40State = null;
 let random40ProgressHideTimer = null;
@@ -6375,12 +6379,9 @@ function random40ArtistInfo(artistUrl, doc) {
 }
 
 function random40LoadAcceptedArtists() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(RANDOM40_ACCEPTED_ARTISTS_KEY) || '[]');
-    return Array.isArray(stored) ? stored.filter(item => item?.artistUrl) : [];
-  } catch (_) {
-    return [];
-  }
+  return Array.isArray(random40AcceptedArtistsMemory)
+    ? random40AcceptedArtistsMemory.filter(item => item?.artistUrl)
+    : [];
 }
 
 function random40SaveAcceptedArtists(records) {
@@ -6397,18 +6398,13 @@ function random40SaveAcceptedArtists(records) {
       acceptedAt: item.acceptedAt || new Date().toISOString()
     });
   });
-  try {
-    localStorage.setItem(RANDOM40_ACCEPTED_ARTISTS_KEY, JSON.stringify(clean.slice(0, RANDOM40_MAX_ACCEPT_RECORDS)));
-  } catch (_) {}
+  random40AcceptedArtistsMemory = clean.slice(0, RANDOM40_MAX_ACCEPT_RECORDS);
 }
 
 function random40LoadRejectedArtists() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(RANDOM40_REJECTED_ARTISTS_KEY) || '[]');
-    return Array.isArray(stored) ? stored.filter(item => item?.artistUrl) : [];
-  } catch (_) {
-    return [];
-  }
+  return Array.isArray(random40RejectedArtistsMemory)
+    ? random40RejectedArtistsMemory.filter(item => item?.artistUrl)
+    : [];
 }
 
 function random40SaveRejectedArtists(records) {
@@ -6427,9 +6423,54 @@ function random40SaveRejectedArtists(records) {
       rejectedAt: item.rejectedAt || new Date().toISOString()
     });
   });
-  try {
-    localStorage.setItem(RANDOM40_REJECTED_ARTISTS_KEY, JSON.stringify(clean.slice(0, RANDOM40_MAX_REJECT_RECORDS)));
-  } catch (_) {}
+  random40RejectedArtistsMemory = clean.slice(0, RANDOM40_MAX_REJECT_RECORDS);
+}
+
+function random40NormalizeMemoryRecord(record) {
+  const artistUrl = random40NormalizeArtistUrl(record?.artistUrl || '');
+  if (!artistUrl) return null;
+  return {
+    artistUrl,
+    artistName: String(record.artistName || random40ArtistNameFromUrl(artistUrl) || 'unknown').slice(0, 100),
+    imageUrls: [...new Set((record.imageUrls || []).map(url => random40NormalizeUrl(url, artistUrl)).filter(Boolean))].slice(0, RANDOM40_STORED_IMAGES_PER_ARTIST),
+    rejectReason: String(record.rejectReason || '').slice(0, 40),
+    rejectReasonLabel: String(record.rejectReasonLabel || '').slice(0, 80),
+    acceptedAt: record.acceptedAt || record.learnedAt || '',
+    rejectedAt: record.rejectedAt || record.learnedAt || ''
+  };
+}
+
+async function random40LoadPcLearningMemory(endpoint = '') {
+  const selectedEndpoint = endpoint || random40MemoryEndpoint || await random40FindReadyLocalEndpointSilently();
+  if (!selectedEndpoint) return false;
+  if (random40MemoryLoadPromise && random40MemoryEndpoint === selectedEndpoint) return random40MemoryLoadPromise;
+
+  random40MemoryEndpoint = selectedEndpoint;
+  random40MemoryLoadPromise = (async () => {
+    const res = await fetch(`${selectedEndpoint}/examples?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`Local examples HTTP ${res.status}`);
+    const payload = await res.json();
+    random40AcceptedArtistsMemory = (payload.accepted || payload.records || [])
+      .filter(item => item?.label === 'accept' || Array.isArray(payload.accepted))
+      .map(random40NormalizeMemoryRecord)
+      .filter(Boolean)
+      .slice(0, RANDOM40_MAX_ACCEPT_RECORDS);
+    random40RejectedArtistsMemory = (payload.rejected || payload.records || [])
+      .filter(item => item?.label === 'reject' || Array.isArray(payload.rejected))
+      .map(random40NormalizeMemoryRecord)
+      .filter(Boolean)
+      .slice(0, RANDOM40_MAX_REJECT_RECORDS);
+    try {
+      localStorage.removeItem(RANDOM40_ACCEPTED_ARTISTS_KEY);
+      localStorage.removeItem(RANDOM40_REJECTED_ARTISTS_KEY);
+    } catch (_) {}
+    return true;
+  })().catch(error => {
+    random40MemoryLoadPromise = null;
+    throw error;
+  });
+
+  return random40MemoryLoadPromise;
 }
 
 function random40CurrentVideoMeta() {
@@ -6737,7 +6778,7 @@ function random40AccuracyText() {
   const nanoTime = summary.nano.avgFirstVideoSeconds == null ? '--' : `${summary.nano.avgFirstVideoSeconds}s`;
   const localTime = summary.local.avgFirstVideoSeconds == null ? '--' : `${summary.local.avgFirstVideoSeconds}s`;
   const local2Time = summary.local2.avgFirstVideoSeconds == null ? '--' : `${summary.local2.avgFirstVideoSeconds}s`;
-  return `Nano ${nano}\nLocal ${local}\nLocal2 ${local2}\nNano ${nanoTime}\nLocal ${localTime}\nLocal2 ${local2Time}`;
+  return `Nano ${nano}\nLocal ${local}\nLocal2 ${local2}\n\nNano ${nanoTime}\nLocal ${localTime}\nLocal2 ${local2Time}`;
 }
 
 function random40AccuracyReport() {
@@ -6838,7 +6879,10 @@ async function random40SendLocalLearningExample(label, record) {
         rejectReasonLabel: record.rejectReasonLabel || ''
       })
     });
-    return res.ok;
+    if (!res.ok) return false;
+    random40MemoryLoadPromise = null;
+    await random40LoadPcLearningMemory(endpoint).catch(() => false);
+    return true;
   } catch (_) {
     return false;
   }
@@ -6878,29 +6922,18 @@ async function random40AcceptCurrentArtistForFutureFinds(bundleInfo = {}) {
       ...accepted
     ]);
     random40SaveRejectedArtists(rejected);
-    random40SendLocalLearningExample('accept', record);
+    const learned = await random40SendLocalLearningExample('accept', record);
     random40State?.seenArtists?.add?.(artistUrl);
     random40State?.rejectedArtistUrls?.delete?.(artistUrl);
-    showSortingIndicator(`Random 40 will favor similar artists to ${artistName}`);
+    showSortingIndicator(learned
+      ? `PC memory learned accepted artist: ${artistName}`
+      : `Session-only accepted artist; PC memory unavailable: ${artistName}`);
     return true;
   } catch (err) {
-    const accepted = random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
-    const rejected = random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
-    const record = {
-      artistUrl,
-      artistName,
-      imageUrls: [],
-      acceptedAt: new Date().toISOString()
-    };
-    random40SaveAcceptedArtists([
-      record,
-      ...accepted
-    ]);
-    random40SaveRejectedArtists(rejected);
     random40State?.seenArtists?.add?.(artistUrl);
     random40State?.rejectedArtistUrls?.delete?.(artistUrl);
-    showSortingIndicator(`Saved ${artistName} as accepted, but images could not load`);
-    return true;
+    showSortingIndicator(`Could not learn accepted artist; images did not load: ${artistName}`);
+    return false;
   }
 }
 
@@ -6950,27 +6983,14 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
       rejectReason,
       rejectReasonLabel
     });
-    random40SendLocalLearningExample('reject', record);
+    const learned = await random40SendLocalLearningExample('reject', record);
     random40State?.seenArtists?.add?.(artistUrl);
     random40State?.rejectedArtistUrls?.add?.(artistUrl);
-    showSortingIndicator(`Random 40 will avoid ${rejectReasonLabel}: ${artistName}`);
+    showSortingIndicator(learned
+      ? `PC memory learned ${rejectReasonLabel}: ${artistName}`
+      : `Session-only ${rejectReasonLabel}; PC memory unavailable: ${artistName}`);
     return true;
   } catch (err) {
-    const accepted = random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
-    const existing = random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
-    random40SaveAcceptedArtists(accepted);
-    const record = {
-      artistUrl,
-      artistName,
-      imageUrls: [],
-      rejectReason,
-      rejectReasonLabel,
-      rejectedAt: new Date().toISOString()
-    };
-    random40SaveRejectedArtists([
-      record,
-      ...existing
-    ]);
     random40RecordModelRejected({
       artistUrl,
       artistName,
@@ -6980,8 +7000,8 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
     });
     random40State?.seenArtists?.add?.(artistUrl);
     random40State?.rejectedArtistUrls?.add?.(artistUrl);
-    showSortingIndicator(`Saved ${artistName} as ${rejectReasonLabel}, but images could not load`);
-    return true;
+    showSortingIndicator(`Could not learn ${rejectReasonLabel}; images did not load: ${artistName}`);
+    return false;
   }
 }
 
@@ -7315,8 +7335,8 @@ async function random40ClassifyArtistLocal(artist, endpoint, imageUrls, options 
         imageUrl: artist.imageUrl || ''
       },
       candidateImageUrls: candidateUrls,
-      acceptedArtists: random40LoadAcceptedArtists(),
-      rejectedArtists: random40LoadRejectedArtists()
+      acceptedArtists: [],
+      rejectedArtists: []
     })
   });
 
@@ -7437,8 +7457,8 @@ async function random40ThumbnailTriage(artist, apiKey, mode, localEndpoint) {
           imageUrl: artist.imageUrl || ''
         },
         candidateImageUrls: [artist.imageUrl],
-        acceptedArtists: random40LoadAcceptedArtists(),
-        rejectedArtists: random40LoadRejectedArtists()
+        acceptedArtists: [],
+        rejectedArtists: []
       })
     });
     const text = await res.text();
@@ -7920,9 +7940,20 @@ async function startRandom40(mode = 'nano') {
 
   const runMode = random40NormalizeMode(mode);
   const apiKey = runMode === 'nano' ? getRandom40ApiKey() : '';
-  const localEndpoint = random40IsLocalMode(runMode) ? await getRandom40LocalEndpoint() : '';
+  const localEndpoint = random40IsLocalMode(runMode)
+    ? await getRandom40LocalEndpoint()
+    : await random40FindReadyLocalEndpointSilently();
   if (runMode === 'nano' && !apiKey) return;
   if (random40IsLocalMode(runMode) && !localEndpoint) return;
+
+  if (localEndpoint) {
+    await random40LoadPcLearningMemory(localEndpoint).catch(error => {
+      if (random40IsLocalMode(runMode)) {
+        showSortingIndicator(`PC memory unavailable: ${error.message}`);
+      }
+      return false;
+    });
+  }
 
   random40State = {
     mode: runMode,
