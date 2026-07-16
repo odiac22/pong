@@ -622,6 +622,19 @@
   -webkit-user-select: none;
 }
 
+.side-save-accuracy {
+  margin-top: 2px;
+  color: rgba(226,232,240,0.74);
+  font-size: 5.5px;
+  font-weight: 800;
+  line-height: 1.05;
+  max-width: 34px;
+  text-align: center;
+  white-space: pre-line;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
     @supports (-moz-appearance:none) {
       .video-wrapper video { height: 100vh; }
       #video-container { background: #000; overscroll-behavior: contain; }
@@ -662,7 +675,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.36</div>
+  <div class="version-number">23.37</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5986,6 +5999,7 @@ const RANDOM40_LOCAL_ENDPOINT_KEY = 'pong_random40_local_endpoint_v1';
 const RANDOM40_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787', 'http://192.168.1.124:8787'];
 const RANDOM40_ACCEPTED_ARTISTS_KEY = 'pong_random40_accepted_artists_v1';
 const RANDOM40_REJECTED_ARTISTS_KEY = 'pong_random40_rejected_artists_v1';
+const RANDOM40_ACCURACY_KEY = 'pong_random40_model_accuracy_v1';
 const RANDOM40_PANEL_POS_KEY = 'pong_random40_panel_pos_v1';
 const RANDOM40_PASSWORD = '22';
 const RANDOM40_TARGET_ACCEPTED = 40;
@@ -6485,6 +6499,143 @@ function random40RejectReasonSummary() {
     .join(', ');
 }
 
+function random40NormalizeMode(mode) {
+  return String(mode || '').toLowerCase() === 'local' ? 'local' : 'nano';
+}
+
+function random40EmptyAccuracy() {
+  return {
+    version: 1,
+    artists: {}
+  };
+}
+
+function random40LoadAccuracy() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(RANDOM40_ACCURACY_KEY) || 'null');
+    if (!stored || typeof stored !== 'object') return random40EmptyAccuracy();
+    return {
+      version: 1,
+      artists: stored.artists && typeof stored.artists === 'object' ? stored.artists : {}
+    };
+  } catch (_) {
+    return random40EmptyAccuracy();
+  }
+}
+
+function random40SaveAccuracy(stats) {
+  try {
+    localStorage.setItem(RANDOM40_ACCURACY_KEY, JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      artists: stats?.artists && typeof stats.artists === 'object' ? stats.artists : {}
+    }));
+  } catch (_) {}
+}
+
+function random40RecordModelShown(record = {}) {
+  const artistUrl = random40NormalizeArtistUrl(record.artistUrl || '');
+  if (!artistUrl) return;
+
+  const stats = random40LoadAccuracy();
+  const existing = stats.artists[artistUrl] || {};
+  stats.artists[artistUrl] = {
+    ...existing,
+    artistUrl,
+    artistName: String(record.artistName || existing.artistName || random40ArtistNameFromUrl(artistUrl) || '').slice(0, 120),
+    mode: random40NormalizeMode(record.mode || existing.mode || random40State?.mode),
+    shownAt: existing.shownAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  random40SaveAccuracy(stats);
+  window.PongRenderRandom40Accuracy?.();
+}
+
+function random40RecordModelRejected(record = {}) {
+  const artistUrl = random40NormalizeArtistUrl(record.artistUrl || '');
+  if (!artistUrl) return;
+
+  const stats = random40LoadAccuracy();
+  const existing = stats.artists[artistUrl] || {};
+  stats.artists[artistUrl] = {
+    ...existing,
+    artistUrl,
+    artistName: String(record.artistName || existing.artistName || random40ArtistNameFromUrl(artistUrl) || '').slice(0, 120),
+    mode: random40NormalizeMode(record.mode || existing.mode || random40State?.mode),
+    rejected: true,
+    rejectReason: String(record.rejectReason || existing.rejectReason || '').slice(0, 40),
+    rejectReasonLabel: String(record.rejectReasonLabel || existing.rejectReasonLabel || '').slice(0, 80),
+    rejectedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  random40SaveAccuracy(stats);
+  window.PongRenderRandom40Accuracy?.();
+}
+
+function random40AccuracySummary() {
+  const summary = {
+    nano: { shown: 0, rejected: 0, accuracy: null },
+    local: { shown: 0, rejected: 0, accuracy: null }
+  };
+
+  Object.values(random40LoadAccuracy().artists || {}).forEach(item => {
+    const mode = random40NormalizeMode(item.mode);
+    summary[mode].shown++;
+    if (item.rejected) summary[mode].rejected++;
+  });
+
+  Object.values(summary).forEach(item => {
+    item.accuracy = item.shown
+      ? Math.max(0, Math.round(((item.shown - item.rejected) / item.shown) * 100))
+      : null;
+  });
+
+  return summary;
+}
+
+function random40AccuracyText() {
+  const summary = random40AccuracySummary();
+  const nano = summary.nano.accuracy == null ? '--' : `${summary.nano.accuracy}%`;
+  const local = summary.local.accuracy == null ? '--' : `${summary.local.accuracy}%`;
+  return `Nano ${nano}\nLocal ${local}`;
+}
+
+function random40AccuracyReport() {
+  const summary = random40AccuracySummary();
+  const lines = [
+    'Random 40 model accuracy',
+    `Generated: ${new Date().toISOString()}`
+  ];
+
+  ['nano', 'local'].forEach(mode => {
+    const item = summary[mode];
+    const accuracy = item.accuracy == null ? 'n/a' : `${item.accuracy}%`;
+    lines.push(`${mode}: ${accuracy} (${item.shown - item.rejected}/${item.shown} kept; ${item.rejected} red-X rejects)`);
+  });
+
+  const recentRejects = Object.values(random40LoadAccuracy().artists || {})
+    .filter(item => item.rejected)
+    .sort((a, b) => String(b.rejectedAt || '').localeCompare(String(a.rejectedAt || '')))
+    .slice(0, 30);
+
+  if (recentRejects.length) {
+    lines.push('', 'Recent red-X rejects:');
+    recentRejects.forEach(item => {
+      lines.push([
+        random40NormalizeMode(item.mode),
+        item.rejectReasonLabel || item.rejectReason || 'Reject',
+        item.artistName || random40ArtistNameFromUrl(item.artistUrl),
+        item.artistUrl
+      ].join(' | '));
+    });
+  }
+
+  return lines.join('\n');
+}
+
+window.PongRandom40AccuracyText = random40AccuracyText;
+window.PongRandom40AccuracyReport = random40AccuracyReport;
+
 async function random40FindReadyLocalEndpointSilently() {
   const candidates = [
     random40StoredLocalEndpoint(),
@@ -6599,6 +6750,7 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
   const artistUrl = random40NormalizeArtistUrl(bundleInfo.artistUrl || meta.artistUrl || meta.postUrl || '');
   const rejectReason = String(bundleInfo.rejectReason || 'reject').slice(0, 40);
   const rejectReasonLabel = String(bundleInfo.rejectReasonLabel || 'Reject').slice(0, 80);
+  const modelMode = random40NormalizeMode(bundleInfo.random40Mode || meta.random40Mode || bundleInfo.mode || random40State?.mode);
 
   if (!artistUrl) {
     showSortingIndicator('No Random 40 artist URL found');
@@ -6632,6 +6784,13 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
       record,
       ...existing
     ]);
+    random40RecordModelRejected({
+      artistUrl,
+      artistName,
+      mode: modelMode,
+      rejectReason,
+      rejectReasonLabel
+    });
     random40SendLocalLearningExample('reject', record);
     random40State?.seenArtists?.add?.(artistUrl);
     random40State?.rejectedArtistUrls?.add?.(artistUrl);
@@ -6653,6 +6812,13 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
       record,
       ...existing
     ]);
+    random40RecordModelRejected({
+      artistUrl,
+      artistName,
+      mode: modelMode,
+      rejectReason,
+      rejectReasonLabel
+    });
     random40State?.seenArtists?.add?.(artistUrl);
     random40State?.rejectedArtistUrls?.add?.(artistUrl);
     showSortingIndicator(`Saved ${artistName} as ${rejectReasonLabel}, but images could not load`);
@@ -7101,7 +7267,7 @@ async function random40ScrapeArtistVideos(artist, options = {}) {
   return entries.concat(extraEntries).slice(0, stopAtVideos);
 }
 
-function random40BuildImportPayload(entries, globalStartIndex = 0) {
+function random40BuildImportPayload(entries, globalStartIndex = 0, mode = random40State?.mode || 'nano') {
   const byArtist = new Map();
   entries.filter(entry => entry?.videoUrl).forEach(entry => {
     const key = entry.artistKey || entry.artistUrl;
@@ -7112,6 +7278,7 @@ function random40BuildImportPayload(entries, globalStartIndex = 0) {
   const urls = [];
   const metadata = [];
   const events = [];
+  const modelMode = random40NormalizeMode(mode);
 
   for (const artistEntries of byArtist.values()) {
     const first = artistEntries[0];
@@ -7121,8 +7288,14 @@ function random40BuildImportPayload(entries, globalStartIndex = 0) {
       metadata.push({
         ...entry,
         source: 'random40',
+        random40Mode: modelMode,
         artistDisplayName: entry.artistDisplayName || entry.artistName || random40ArtistNameFromUrl(entry.artistUrl)
       });
+    });
+    random40RecordModelShown({
+      artistUrl: first.artistUrl,
+      artistName: first.artistName || first.artistDisplayName || random40ArtistNameFromUrl(first.artistUrl),
+      mode: modelMode
     });
     events.push({
       startIndex: Number(globalStartIndex || 0) + start,
@@ -7130,6 +7303,7 @@ function random40BuildImportPayload(entries, globalStartIndex = 0) {
       artistKey: first.artistKey || first.artistUrl,
       bundleKey: `random40:${first.artistKey || first.artistUrl}`,
       source: 'random40',
+      random40Mode: modelMode,
       artistUrl: first.artistUrl,
       postUrl: first.artistUrl,
       artistDisplayName: first.artistDisplayName || first.artistName || '',
@@ -7144,7 +7318,7 @@ function random40BuildImportPayload(entries, globalStartIndex = 0) {
 }
 
 function random40PublishEntries(entries) {
-  const payload = random40BuildImportPayload(entries, allVideoUrls.length);
+  const payload = random40BuildImportPayload(entries, allVideoUrls.length, random40State?.mode || 'nano');
   if (!payload.urls.length) return payload;
 
   if (!random40State.cardsStarted) {
@@ -8464,6 +8638,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=99"></script>
+<script src="pong-sync.js?v=100"></script>
 </body>
 </html>

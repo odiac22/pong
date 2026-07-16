@@ -590,6 +590,7 @@
   function updateSaveCounterElements(counts) {
     const videoCount = document.getElementById('saved-video-count');
     const artistCount = document.getElementById('saved-artist-count');
+    const accuracy = document.getElementById('random40-accuracy-mini');
 
     if (videoCount) {
       videoCount.textContent = String(Math.max(0, Number(counts?.videos || 0)));
@@ -598,7 +599,19 @@
     if (artistCount) {
       artistCount.textContent = String(Math.max(0, Number(counts?.artists || 0)));
     }
+
+    if (accuracy && typeof window.PongRandom40AccuracyText === 'function') {
+      accuracy.textContent = window.PongRandom40AccuracyText();
+    }
   }
+
+  function renderRandom40AccuracyMini() {
+    const accuracy = document.getElementById('random40-accuracy-mini');
+    if (!accuracy || typeof window.PongRandom40AccuracyText !== 'function') return;
+    accuracy.textContent = window.PongRandom40AccuracyText();
+  }
+
+  window.PongRenderRandom40Accuracy = renderRandom40AccuracyMini;
 
   function getCountsFromSharedData(data) {
     return {
@@ -2804,6 +2817,7 @@
       postUrl: bundle.postUrl || '',
       artistDisplayName: bundle.artistDisplayName || '',
       bundleLabel: bundle.bundleLabel || '',
+      random40Mode: bundle.random40Mode || '',
       startIndex,
       count,
       urls
@@ -3999,6 +4013,10 @@
       ''
     ];
 
+    if (typeof window.PongRandom40AccuracyReport === 'function') {
+      lines.push(window.PongRandom40AccuracyReport(), '');
+    }
+
     if (reports.length) {
       lines.push('Item timing:');
       reports.forEach(report => {
@@ -5004,6 +5022,8 @@
       <span class="side-save-icon">💾</span>
       <span class="side-save-label">Video</span>
       <span id="saved-video-count" class="side-save-count">0</span>
+      <span id="random40-accuracy-mini" class="side-save-accuracy">Nano --
+Local --</span>
     `;
 
     let videoHoldTimer = null;
