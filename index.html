@@ -675,7 +675,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.37</div>
+  <div class="version-number">23.38</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6010,16 +6010,16 @@ const RANDOM40_LOCAL_CONCURRENCY = 6;
 const RANDOM40_POST_CONCURRENCY = 14;
 const RANDOM40_PAGE_BATCH_SIZE = 8;
 const RANDOM40_LISTING_PAGE_BATCH_SIZE = 4;
-const RANDOM40_MAX_ARTIST_PAGES = 40;
+const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
 const RANDOM40_MODEL = 'gpt-4.1-nano';
 const RANDOM40_LOCAL_MODEL_NAME = 'local-image-embeddings';
-const RANDOM40_PROMPT_VERSION = 'cf-vision-v8';
+const RANDOM40_PROMPT_VERSION = 'cf-vision-v9';
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_ACCEPT_CONFIDENCE = 0.9;
-const RANDOM40_MAX_REVIEW_IMAGES = 6;
-const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 5;
-const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 4;
+const RANDOM40_MAX_REVIEW_IMAGES = 3;
+const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 3;
+const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 2;
 const RANDOM40_MAX_ACCEPT_RECORDS = 80;
 const RANDOM40_MAX_ACCEPT_EXAMPLES = 2;
 const RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE = 4;
@@ -7238,11 +7238,14 @@ async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = I
 
 async function random40ScrapeArtistVideos(artist, options = {}) {
   const base = artist.artistUrl;
-  let collected = options.collected?.links?.length
+  let collected = options.fullScan
+    ? await random40CollectVideoPostLinks(artist, { stopAt: Infinity, maxPages: RANDOM40_MAX_ARTIST_PAGES })
+    : options.collected?.links?.length
     ? options.collected
     : await random40CollectVideoPostLinks(artist);
   const artistInfo = random40ArtistInfo(base, collected.firstDoc);
-  let links = [...new Set(collected.links || [])];
+  const skipPostUrls = new Set((options.skipPostUrls || []).filter(Boolean));
+  let links = [...new Set(collected.links || [])].filter(link => !skipPostUrls.has(link));
   const stopAtVideos = Number.isFinite(Number(options.stopAtVideos))
     ? Number(options.stopAtVideos)
     : Infinity;
@@ -7351,6 +7354,114 @@ function random40PublishEntries(entries) {
 
   random40State.videos += payload.urls.length;
   return payload;
+}
+
+function random40FindArtistEventForEntries(entries) {
+  const first = (entries || []).find(entry => entry?.artistUrl || entry?.artistKey);
+  if (!first || !Array.isArray(pasteEvents)) return { event: null, index: -1 };
+  const artistUrl = random40NormalizeArtistUrl(first.artistUrl || '');
+  const artistKey = String(first.artistKey || '').toLowerCase();
+
+  const index = pasteEvents.findIndex(event => {
+    if (!isRandom40PasteEvent(event)) return false;
+    if (artistUrl && random40NormalizeArtistUrl(event.artistUrl || '') === artistUrl) return true;
+    return artistKey && String(event.artistKey || '').toLowerCase() === artistKey;
+  });
+
+  return {
+    event: index >= 0 ? pasteEvents[index] : null,
+    index
+  };
+}
+
+function random40AppendEntriesToExistingArtist(entries) {
+  const cleanEntries = (entries || []).filter(entry => entry?.videoUrl);
+  if (!cleanEntries.length) return 0;
+
+  const found = random40FindArtistEventForEntries(cleanEntries);
+  if (!found.event || found.index < 0) return 0;
+
+  const existingUrls = new Set(allVideoUrls.filter(Boolean));
+  const newEntries = cleanEntries.filter(entry => {
+    if (!entry?.videoUrl || existingUrls.has(entry.videoUrl)) return false;
+    existingUrls.add(entry.videoUrl);
+    return true;
+  });
+  if (!newEntries.length) return 0;
+
+  const insertAt = Math.max(0, Number(found.event.startIndex || 0)) + Math.max(0, Number(found.event.count || 0));
+  const urls = [];
+  const metadata = [];
+  newEntries.forEach(entry => {
+    urls.push(entry.videoUrl);
+    metadata.push({
+      ...entry,
+      source: 'random40',
+      random40Mode: found.event.random40Mode || random40State?.mode || 'nano',
+      artistDisplayName: entry.artistDisplayName || entry.artistName || random40ArtistNameFromUrl(entry.artistUrl)
+    });
+  });
+
+  allVideoUrls.splice(insertAt, 0, ...urls);
+  allVideoMetadata.splice(insertAt, 0, ...metadata);
+  found.event.count = Math.max(0, Number(found.event.count || 0)) + urls.length;
+
+  pasteEvents.forEach((event, index) => {
+    if (index === found.index) return;
+    if (Number(event.startIndex || 0) >= insertAt) {
+      event.startIndex = Number(event.startIndex || 0) + urls.length;
+    }
+  });
+
+  if (activePlaybackRange) {
+    if (currentPasteIndex === found.index) {
+      activePlaybackRange.end += urls.length;
+    } else if (Number(activePlaybackRange.start || 0) >= insertAt) {
+      activePlaybackRange.start += urls.length;
+      activePlaybackRange.end += urls.length;
+    }
+  }
+
+  if (Number(currentLoadedRangeStart || 0) >= insertAt) {
+    currentLoadedRangeStart += urls.length;
+    currentLoadedRangeEnd += urls.length;
+  } else if (Number(currentLoadedRangeEnd || 0) > insertAt) {
+    currentLoadedRangeEnd += urls.length;
+  }
+
+  random40State.videos += urls.length;
+  scheduleRandom40PreloadPool(150);
+  updatePasteNavigationButton();
+  updateViewedRemainingCounter();
+  scheduleSessionSave(700);
+  return urls.length;
+}
+
+function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries) {
+  if (!artist?.artistUrl || random40State?.stop) return;
+  const firstPostUrls = [...new Set((firstEntries || []).map(entry => entry?.postUrl).filter(Boolean))];
+
+  setTimeout(async () => {
+    try {
+      const moreEntries = await random40ScrapeArtistVideos(artist, {
+        collected: precheck,
+        fullScan: true,
+        skipPostUrls: firstPostUrls,
+        stopAtVideos: Infinity
+      });
+      const added = random40AppendEntriesToExistingArtist(moreEntries);
+      if (added) {
+        updateRandom40Progress({
+          detail: `Added ${added} more videos for ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} from 100-page scan`,
+          accepted: random40State?.accepted,
+          videos: random40State?.videos,
+          pages: random40State?.pages,
+          api: random40State?.api,
+          force: true
+        });
+      }
+    } catch (_) {}
+  }, 1200);
 }
 
 async function random40Pool(items, limit, worker) {
@@ -7542,6 +7653,7 @@ async function startRandom40(mode = 'nano') {
         if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
         random40State.accepted++;
         random40PublishEntries(entries);
+        random40ContinueArtistScrapeInBackground(artist, precheck, entries);
         updateRandom40Progress({ detail: `${random40State.accepted}/${RANDOM40_TARGET_ACCEPTED} accepted - ${random40State.videos} videos`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
       });
     }
@@ -8638,6 +8750,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=100"></script>
+<script src="pong-sync.js?v=101"></script>
 </body>
 </html>

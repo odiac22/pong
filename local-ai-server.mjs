@@ -12,8 +12,7 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
 const QWEN_ACCEPT_EXAMPLES = 2;
 const QWEN_REJECT_EXAMPLES = 2;
-const QWEN_CANDIDATE_IMAGES = 5;
-const QWEN_SKIP_REJECT_CONFIDENCE = 0.78;
+const QWEN_CANDIDATE_IMAGES = 3;
 const LEARNED_STORE_PATH = path.join(process.cwd(), '.pong-local-ai', 'learned-examples.json');
 const MAX_LEARNED_RECORDS = 300;
 
@@ -536,12 +535,26 @@ async function classify(payload) {
     ...(payload.rejectedArtists || [])
   ]);
   let qwen;
-  const skipQwen = final.decision === 'reject' && Number(final.confidence || 0) >= QWEN_SKIP_REJECT_CONFIDENCE;
-  if (skipQwen) {
+  try {
+    qwen = await classifyWithOllamaVision({
+      artist,
+      candidateUrls,
+      siglipDecision: final,
+      imageGrades,
+      acceptedExampleUrls,
+      rejectedExampleUrls,
+      rejectionSummary
+    });
+  } catch (error) {
+    const message = error.message || String(error);
+    if (/CUDA|PTX|Ollama HTTP 500|model/i.test(message)) {
+      ollamaVisionDisabled = true;
+      ollamaFailureReason = message.slice(0, 180);
+    }
     qwen = {
-      decision: 'reject',
-      confidence: final.confidence,
-      reason: 'qwen skipped for high-confidence local reject',
+      decision: 'unsure',
+      confidence: 0.5,
+      reason: `qwen unavailable: ${message}`,
       checks: {
         photograph: null,
         woman_prominent: null,
@@ -553,50 +566,11 @@ async function classify(payload) {
         logo_or_placeholder: null
       }
     };
-  } else {
-    try {
-      qwen = await classifyWithOllamaVision({
-        artist,
-        candidateUrls,
-        siglipDecision: final,
-        imageGrades,
-        acceptedExampleUrls,
-        rejectedExampleUrls,
-        rejectionSummary
-      });
-    } catch (error) {
-      const message = error.message || String(error);
-      if (/CUDA|PTX|Ollama HTTP 500|model/i.test(message)) {
-        ollamaVisionDisabled = true;
-        ollamaFailureReason = message.slice(0, 180);
-      }
-      qwen = {
-        decision: 'unsure',
-        confidence: 0.5,
-        reason: `qwen unavailable: ${message}`,
-        checks: {
-          photograph: null,
-          woman_prominent: null,
-          male_only: null,
-          male_present: null,
-          female_presenting_adult: null,
-          appears_over_50: null,
-          feet_dominant: null,
-          logo_or_placeholder: null
-        }
-      };
-    }
   }
 
   let combined = /^qwen unavailable:/i.test(qwen.reason || '')
-    ? (final.decision === 'reject' ? final : { ...final, decision: 'reject', confidence: Math.max(Number(final.confidence || 0), 0.75), reason: 'qwen unavailable for visual safety check' })
+    ? { ...qwen, decision: 'reject', confidence: 0.75, reason: 'qwen unavailable for visual safety check' }
     : qwen;
-  if (qwen.decision === 'accept' && final.decision === 'reject' && Number(final.confidence || 0) >= 0.8) {
-    combined = { ...qwen, decision: 'unsure', confidence: 0.7, reason: 'qwen accepted but saved-taste model rejected' };
-  }
-  if (qwen.decision === 'accept' && final.decision === 'unsure' && Number(final.confidence || 0) >= 0.75) {
-    combined = { ...qwen, decision: 'unsure', confidence: 0.7, reason: 'qwen accepted but saved-taste model was unsure' };
-  }
   if (qwen.checks?.male_present === true || qwen.checks?.male_only === true || qwen.checks?.appears_over_50 === true || qwen.checks?.feet_dominant === true) {
     combined = { ...qwen, decision: 'reject', confidence: Math.max(Number(qwen.confidence || 0), 0.96) };
   }
