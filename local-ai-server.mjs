@@ -12,6 +12,7 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
 const QWEN_ACCEPT_EXAMPLES = 2;
 const QWEN_REJECT_EXAMPLES = 2;
+const QWEN_CANDIDATE_IMAGES = 5;
 const QWEN_SKIP_REJECT_CONFIDENCE = 0.78;
 const LEARNED_STORE_PATH = path.join(process.cwd(), '.pong-local-ai', 'learned-examples.json');
 const MAX_LEARNED_RECORDS = 300;
@@ -394,7 +395,7 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
     throw new Error(`Ollama vision disabled: ${ollamaFailureReason || 'previous failure'}`);
   }
   const images = [];
-  const candidateCount = Math.min(candidateUrls.length, 4);
+  const candidateCount = Math.min(candidateUrls.length, QWEN_CANDIDATE_IMAGES);
   for (const url of candidateUrls.slice(0, candidateCount)) {
     try {
       images.push(await fetchImageBase64(url));
@@ -504,7 +505,7 @@ async function classify(payload) {
     };
   }
 
-  const candidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))].slice(0, 8);
+  const candidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))].slice(0, QWEN_CANDIDATE_IMAGES);
   if (!candidateUrls.length) throw new Error('No candidate image URLs supplied.');
 
   const learnedStore = await loadLearnedStore();

@@ -662,7 +662,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.34</div>
+  <div class="version-number">23.35</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5798,11 +5798,12 @@ const RANDOM40_MAX_ARTIST_PAGES = 40;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
 const RANDOM40_MODEL = 'gpt-4.1-nano';
 const RANDOM40_LOCAL_MODEL_NAME = 'local-image-embeddings';
-const RANDOM40_PROMPT_VERSION = 'cf-vision-v7';
+const RANDOM40_PROMPT_VERSION = 'cf-vision-v8';
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
+const RANDOM40_ACCEPT_CONFIDENCE = 0.9;
 const RANDOM40_MAX_REVIEW_IMAGES = 6;
-const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 4;
-const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 3;
+const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 5;
+const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 4;
 const RANDOM40_MAX_ACCEPT_RECORDS = 80;
 const RANDOM40_MAX_ACCEPT_EXAMPLES = 2;
 const RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE = 4;
@@ -6486,23 +6487,55 @@ function random40FindArtistsOnListing(doc, pageUrl) {
 
 function random40HardFilter(artist) {
   const nameLetters = String(artist.artistName || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
-  if (nameLetters.includes('ts')) return { decision: 'reject', confidence: 1, reason: 'blocked name contains: ts' };
+  if (nameLetters.includes('ts')) return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: 'blocked name contains: ts' };
   const combinedText = String(`${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`)
     .toLowerCase()
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '');
   const blockedFragments = ['transgender', 'transsexual', 'transgirl', 'trans girl', 'tgirl', 't-girl', 'shemale', 'femboy', 'ladyboy', 'crossdresser', 'crossdress', 'mtf'];
   for (const fragment of blockedFragments) {
-    if (combinedText.includes(fragment)) return { decision: 'reject', confidence: 1, reason: `blocked text contains: ${fragment}` };
+    if (combinedText.includes(fragment)) return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: `blocked text contains: ${fragment}` };
   }
-  if (combinedText.includes('trans')) return { decision: 'reject', confidence: 1, reason: 'blocked text contains: trans' };
+  if (combinedText.includes('trans')) return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: 'blocked text contains: trans' };
   const tokens = new Set(combinedText
     .split(/[^a-z0-9]+/g)
     .filter(Boolean));
   for (const word of ['cd', 'trap', 'bbw', 'feet']) {
-    if (tokens.has(word)) return { decision: 'reject', confidence: 1, reason: `blocked word: ${word}` };
+    if (tokens.has(word)) return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: `blocked word: ${word}` };
   }
   return null;
+}
+
+function random40IsAcceptedDecision(decision) {
+  if (!decision || decision.decision !== 'accept') return false;
+  if (Number(decision.confidence || 0) < RANDOM40_ACCEPT_CONFIDENCE) return false;
+
+  const checks = decision.checks || {};
+  const provenSafe =
+    checks.female_presenting_adult === true &&
+    checks.male_present === false &&
+    checks.male_only === false &&
+    checks.appears_over_50 !== true &&
+    checks.feet_dominant !== true &&
+    checks.logo_or_placeholder !== true;
+  if (!provenSafe) return false;
+
+  const imageGrades = Array.isArray(decision.image_grades) ? decision.image_grades : [];
+  if (!imageGrades.length) return true;
+
+  const hardRejected = imageGrades.some(grade => {
+    const gradeChecks = grade?.checks || {};
+    return gradeChecks.male_present === true ||
+      gradeChecks.female_presenting_adult === false ||
+      gradeChecks.appears_over_50 === true ||
+      gradeChecks.feet_dominant === true ||
+      gradeChecks.logo_or_placeholder === true;
+  });
+  if (hardRejected) return false;
+
+  const visualMatches = imageGrades.filter(grade => grade?.checks?.visual_preference_match === true).length;
+  const acceptGrades = imageGrades.filter(grade => grade?.decision === 'accept').length;
+  return visualMatches >= Math.ceil(imageGrades.length / 2) || acceptGrades >= Math.ceil(imageGrades.length / 2);
 }
 
 async function random40ClassifyArtist(artist, apiKey, imageUrls) {
@@ -6757,7 +6790,6 @@ function random40RandomPage() {
 function random40ExtractVideoPostLinks(doc, baseUrl) {
   const links = [];
   doc.querySelectorAll('div.post').forEach(post => {
-    if (post.querySelector('img')) return;
     const link = post.querySelector('a.view-post, a[href*="/p/"], a[href*="/post/"]');
     const href = link?.getAttribute('href') || '';
     if (href) links.push(random40NormalizeUrl(href, baseUrl));
@@ -6815,14 +6847,53 @@ async function random40VideoEntriesFromPost(postUrl, artistInfo) {
   }));
 }
 
-async function random40ScrapeArtistVideos(artist) {
+async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = Infinity) {
+  const results = new Array(links.length);
+  let index = 0;
+  let found = 0;
+
+  async function worker() {
+    while (index < links.length && !random40State?.stop && found < stopAtVideos) {
+      const current = index++;
+      const entries = await random40VideoEntriesFromPost(links[current], artistInfo).catch(() => []);
+      results[current] = entries;
+      found += entries.length;
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(RANDOM40_POST_CONCURRENCY, links.length || 1) }, worker));
+  return results.flat().filter(Boolean).slice(0, stopAtVideos);
+}
+
+async function random40ScrapeArtistVideos(artist, options = {}) {
   const base = artist.artistUrl;
-  const collected = await random40CollectVideoPostLinks(artist);
+  let collected = options.collected?.links?.length
+    ? options.collected
+    : await random40CollectVideoPostLinks(artist);
   const artistInfo = random40ArtistInfo(base, collected.firstDoc);
-  const links = collected.links;
-  return random40Pool(links, RANDOM40_POST_CONCURRENCY, postUrl =>
-    random40VideoEntriesFromPost(postUrl, artistInfo).catch(() => [])
-  ).then(results => results.flat());
+  let links = [...new Set(collected.links || [])];
+  const stopAtVideos = Number.isFinite(Number(options.stopAtVideos))
+    ? Number(options.stopAtVideos)
+    : Infinity;
+
+  let entries = await random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos);
+  if (entries.length >= stopAtVideos || stopAtVideos === Infinity || random40State?.stop) return entries;
+
+  const expanded = await random40CollectVideoPostLinks(artist, {
+    stopAt: Math.max(links.length + RANDOM40_MIN_VIDEOS_PER_ARTIST, RANDOM40_MIN_VIDEOS_PER_ARTIST * 2)
+  }).catch(() => null);
+  if (!expanded?.links?.length) return entries;
+
+  const seen = new Set(links);
+  const extraLinks = expanded.links.filter(link => link && !seen.has(link));
+  if (!extraLinks.length) return entries;
+
+  const extraEntries = await random40ScrapeVideoLinksUntil(
+    extraLinks,
+    random40ArtistInfo(base, expanded.firstDoc || collected.firstDoc),
+    stopAtVideos - entries.length
+  );
+  return entries.concat(extraEntries).slice(0, stopAtVideos);
 }
 
 function random40BuildImportPayload(entries, globalStartIndex = 0) {
@@ -7066,12 +7137,15 @@ async function startRandom40(mode = 'nano') {
           return;
         }
         const classifierLabel = runMode === 'local' ? 'Local' : 'Nano';
-        updateRandom40Progress({ detail: `${classifierLabel} ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} - ${precheck.links.length}+ videos, 4 images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        updateRandom40Progress({ detail: `${classifierLabel} ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} - ${precheck.links.length}+ videos, ${RANDOM40_INITIAL_IMAGES_PER_ARTIST} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         const decision = await random40AnalyzeArtist(artist, apiKey, { firstDoc: precheck.firstDoc, mode: runMode, localEndpoint }).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
-        if (decision.decision !== 'accept') return;
+        if (!random40IsAcceptedDecision(decision)) return;
         if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
-        updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Scraping videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
-        const entries = await random40ScrapeArtistVideos(artist).catch(() => []);
+        updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Loading first ${RANDOM40_MIN_VIDEOS_PER_ARTIST} videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+        const entries = await random40ScrapeArtistVideos(artist, {
+          collected: precheck,
+          stopAtVideos: RANDOM40_MIN_VIDEOS_PER_ARTIST
+        }).catch(() => []);
         if (entries.length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
           random40State.skippedLowVideo = (random40State.skippedLowVideo || 0) + 1;
           updateRandom40Progress({
@@ -8183,6 +8257,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=97"></script>
+<script src="pong-sync.js?v=98"></script>
 </body>
 </html>
