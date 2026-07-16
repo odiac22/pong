@@ -659,7 +659,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.13</div>
+  <div class="version-number">23.14</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6228,13 +6228,16 @@ function random40FindArtistsOnListing(doc, pageUrl) {
 function random40HardFilter(artist) {
   const nameLetters = String(artist.artistName || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
   if (nameLetters.includes('ts')) return { decision: 'reject', confidence: 1, reason: 'blocked name contains: ts' };
-  const tokens = new Set(String(`${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`)
+  const combinedText = String(`${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`)
     .toLowerCase()
     .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (combinedText.includes('transgender')) return { decision: 'reject', confidence: 1, reason: 'blocked text contains: transgender' };
+  if (combinedText.includes('trans')) return { decision: 'reject', confidence: 1, reason: 'blocked text contains: trans' };
+  const tokens = new Set(combinedText
     .split(/[^a-z0-9]+/g)
     .filter(Boolean));
-  for (const word of ['trans', 'transgender', 'bbw', 'feet']) {
+  for (const word of ['bbw', 'feet']) {
     if (tokens.has(word)) return { decision: 'reject', confidence: 1, reason: `blocked word: ${word}` };
   }
   return null;
