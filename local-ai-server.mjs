@@ -11,6 +11,7 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
 const QWEN_ACCEPT_EXAMPLES = 2;
 const QWEN_REJECT_EXAMPLES = 2;
+const QWEN_SKIP_REJECT_CONFIDENCE = 0.78;
 
 env.allowLocalModels = false;
 env.useBrowserCache = false;
@@ -398,25 +399,12 @@ async function classify(payload) {
   const acceptedExampleUrls = nearestExampleUrls(candidateVectors, acceptedVectors, QWEN_ACCEPT_EXAMPLES);
   const rejectedExampleUrls = nearestExampleUrls(candidateVectors, rejectedVectors, QWEN_REJECT_EXAMPLES);
   let qwen;
-  try {
-    qwen = await classifyWithOllamaVision({
-      artist,
-      candidateUrls,
-      siglipDecision: final,
-      imageGrades,
-      acceptedExampleUrls,
-      rejectedExampleUrls
-    });
-  } catch (error) {
-    const message = error.message || String(error);
-    if (/CUDA|PTX|Ollama HTTP 500|model/i.test(message)) {
-      ollamaVisionDisabled = true;
-      ollamaFailureReason = message.slice(0, 180);
-    }
+  const skipQwen = final.decision === 'reject' && Number(final.confidence || 0) >= QWEN_SKIP_REJECT_CONFIDENCE;
+  if (skipQwen) {
     qwen = {
-      decision: 'unsure',
-      confidence: 0.5,
-      reason: `qwen unavailable: ${message}`,
+      decision: 'reject',
+      confidence: final.confidence,
+      reason: 'qwen skipped for high-confidence local reject',
       checks: {
         photograph: null,
         woman_prominent: null,
@@ -428,9 +416,43 @@ async function classify(payload) {
         logo_or_placeholder: null
       }
     };
+  } else {
+    try {
+      qwen = await classifyWithOllamaVision({
+        artist,
+        candidateUrls,
+        siglipDecision: final,
+        imageGrades,
+        acceptedExampleUrls,
+        rejectedExampleUrls
+      });
+    } catch (error) {
+      const message = error.message || String(error);
+      if (/CUDA|PTX|Ollama HTTP 500|model/i.test(message)) {
+        ollamaVisionDisabled = true;
+        ollamaFailureReason = message.slice(0, 180);
+      }
+      qwen = {
+        decision: 'unsure',
+        confidence: 0.5,
+        reason: `qwen unavailable: ${message}`,
+        checks: {
+          photograph: null,
+          woman_prominent: null,
+          male_only: null,
+          male_present: null,
+          female_presenting_adult: null,
+          appears_over_50: null,
+          feet_dominant: null,
+          logo_or_placeholder: null
+        }
+      };
+    }
   }
 
-  let combined = /^qwen unavailable:/i.test(qwen.reason || '') ? final : qwen;
+  let combined = /^qwen unavailable:/i.test(qwen.reason || '')
+    ? (final.decision === 'reject' ? final : { ...final, decision: 'reject', confidence: Math.max(Number(final.confidence || 0), 0.75), reason: 'qwen unavailable for visual safety check' })
+    : qwen;
   if (qwen.decision === 'accept' && final.decision === 'reject' && Number(final.confidence || 0) >= 0.8) {
     combined = { ...qwen, decision: 'unsure', confidence: 0.7, reason: 'qwen accepted but saved-taste model rejected' };
   }
@@ -439,6 +461,21 @@ async function classify(payload) {
   }
   if (qwen.checks?.male_present === true || qwen.checks?.male_only === true || qwen.checks?.appears_over_50 === true || qwen.checks?.feet_dominant === true) {
     combined = { ...qwen, decision: 'reject', confidence: Math.max(Number(qwen.confidence || 0), 0.96) };
+  }
+  if (combined.decision === 'accept') {
+    const checks = qwen.checks || {};
+    const safeFemaleOnly =
+      checks.female_presenting_adult === true &&
+      checks.male_present === false &&
+      checks.male_only === false;
+    if (!safeFemaleOnly) {
+      combined = {
+        ...combined,
+        decision: 'reject',
+        confidence: Math.max(Number(combined.confidence || 0), 0.93),
+        reason: 'local vision did not prove female-only adult profile'
+      };
+    }
   }
 
   return {

@@ -262,6 +262,8 @@
     #open-erome { background: rgba(34,197,94,0.20); }
     #saved-erome { background: rgba(251,191,36,0.18); }
     #auth-button { background: rgba(167,139,250,0.20); }
+    #random-40-local { background: rgba(244,114,182,0.20); }
+    #random-40-nano { background: rgba(14,165,233,0.20); }
     #random-40 { background: rgba(244,114,182,0.20); }
     .url-input button:hover, .url-input button:active { transform: translateY(-1px); background: rgba(255,255,255,0.12); }
     .control-button {
@@ -660,7 +662,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.31</div>
+  <div class="version-number">23.32</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -672,7 +674,8 @@
         <button id="open-erome">Open Erome</button>
         <button id="saved-erome">Saved Erome</button>
         <button id="auth-button">Auth URL</button>
-        <button id="random-40">Random 40</button>
+        <button id="random-40-local">R40 Local</button>
+        <button id="random-40-nano">R40 Nano</button>
       </div>
     </div>
   </div>
@@ -7715,10 +7718,8 @@ document.getElementById('auth-button').addEventListener('click',()=>{
   openAuthBrowser(document.getElementById('auth-url-input')?.value || DEFAULT_AUTH_URL);
 });
 
-document.getElementById('random-40')?.addEventListener('click',()=>{
-  const mode = chooseRandom40Mode();
-  if (mode) startRandom40(mode);
-});
+document.getElementById('random-40-local')?.addEventListener('click',()=>startRandom40('local'));
+document.getElementById('random-40-nano')?.addEventListener('click',()=>startRandom40('nano'));
 
 document.getElementById('open-erome').addEventListener('click',()=>{
   loadEromeAsCards();
