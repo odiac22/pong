@@ -21,7 +21,7 @@
   const SAVE_COUNTS_KEY = 'pong_save_counts_v1';
   const SHARED_DATA_CACHE_KEY = 'pong_shared_saved_links_cache_v1';
   const SAVED_VIDEOS_PLAYBACK_CACHE_KEY = 'pong_saved_videos_playback_cache_v2';
-  const SAVED_ARTISTS_PLAYBACK_CACHE_KEY = 'pong_saved_artists_playback_cache_v2';
+  const SAVED_ARTISTS_PLAYBACK_CACHE_KEY = 'pong_saved_artists_playback_cache_v3';
   const DEFAULT_COOMERFANS_PROXY_URL = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
   const REPAIR_CONCURRENCY_KEY = 'pong_repair_item_concurrency_v1';
   const SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT = 80;
@@ -2234,6 +2234,14 @@
   }
 
   function loadSavedPlaybackDataFast(playbackData) {
+    if (!playbackData?.urls?.length) {
+      throw new Error('Saved playback data has no URLs');
+    }
+
+    if (playbackData.mode === 'savedArtists' && !playbackData?.pasteEvents?.length) {
+      throw new Error('Saved artist playback has no artist bundles');
+    }
+
     loadSavedListIntoPlayer(
       playbackData.urls,
       playbackData.message,
