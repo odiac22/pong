@@ -660,7 +660,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.28</div>
+  <div class="version-number">23.29</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5791,10 +5791,11 @@ const RANDOM40_LISTING_PAGE_BATCH_SIZE = 4;
 const RANDOM40_MAX_ARTIST_PAGES = 40;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
 const RANDOM40_MODEL = 'gpt-4.1-nano';
-const RANDOM40_PROMPT_VERSION = 'cf-vision-v6';
+const RANDOM40_PROMPT_VERSION = 'cf-vision-v7';
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
-const RANDOM40_MAX_REVIEW_IMAGES = 5;
-const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 3;
+const RANDOM40_MAX_REVIEW_IMAGES = 6;
+const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 4;
+const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 3;
 const RANDOM40_MAX_ACCEPT_RECORDS = 80;
 const RANDOM40_MAX_ACCEPT_EXAMPLES = 2;
 const RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE = 4;
@@ -6368,16 +6369,17 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         `Accepted visual example images included: ${acceptedExamples.filter(item => item.type === 'input_image').length}\n` +
         `Rejected visual example images included: ${rejectedExamples.filter(item => item.type === 'input_image').length}\n\n` +
         'Classify this CoomerFans artist from the candidate profile/post image set. ' +
-        'The candidate set should include the listing/profile image plus extra images from the artist profile whenever available. ' +
+        'The candidate set should include the listing/profile image plus randomly sampled images from the artist profile whenever available. ' +
+        'Grade every candidate image separately, then make one artist-level decision from the full set. ' +
         'Use accepted examples as small positive preference adjustments, not strict look-alike matching. ' +
         'Use red-X rejected examples as stronger hard-negative corrections because they often represent missed hard-filter cases. ' +
         'When hard rejection rules are not triggered, stay broad and favor conventionally attractive adult women with clear, appealing presentation. ' +
-        'Do not accept from one favorable thumbnail if the additional profile/post images conflict with the hard rules or user preference examples. ' +
+        'Do not accept from one favorable thumbnail if the random profile/post images conflict with the hard rules or user preference examples. ' +
         'Reject blank/logo/placeholder/anime/artwork images, images where feet are the main subject, ' +
         'images with any visible male-presenting person, images with no clearly female-presenting adult, ' +
         'images where the person appears underage or age is unclear, and images where the artist appears over 50. Accept only when the profile clearly shows ' +
         'a female-presenting adult and matches at least one preferred style: conventionally attractive styling, fit or athletic presentation, ' +
-        'slim presentation, polished appearance, or youthful adult presentation. Do not diagnose, label, or mention body weight or health status. ' +
+        'slim/lean presentation, polished appearance, or youthful adult presentation. Do not diagnose, label, or mention body weight or health status. ' +
         'Return unsure only for unclear crops, tiny/blurred images, weak evidence, or genuinely conflicting evidence.'
     }
   ];
@@ -6436,9 +6438,36 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
                   logo_or_placeholder: { type: ['boolean', 'null'] }
                 },
                 required: ['photograph', 'woman_prominent', 'male_only', 'male_present', 'female_presenting_adult', 'appears_over_50', 'feet_dominant', 'logo_or_placeholder']
+              },
+              image_grades: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    image_index: { type: 'integer', minimum: 1 },
+                    decision: { type: 'string', enum: ['accept', 'reject', 'unsure'] },
+                    confidence: { type: 'number', minimum: 0, maximum: 1 },
+                    reason: { type: 'string' },
+                    checks: {
+                      type: 'object',
+                      additionalProperties: false,
+                      properties: {
+                        male_present: { type: ['boolean', 'null'] },
+                        female_presenting_adult: { type: ['boolean', 'null'] },
+                        appears_over_50: { type: ['boolean', 'null'] },
+                        feet_dominant: { type: ['boolean', 'null'] },
+                        logo_or_placeholder: { type: ['boolean', 'null'] },
+                        visual_preference_match: { type: ['boolean', 'null'] }
+                      },
+                      required: ['male_present', 'female_presenting_adult', 'appears_over_50', 'feet_dominant', 'logo_or_placeholder', 'visual_preference_match']
+                    }
+                  },
+                  required: ['image_index', 'decision', 'confidence', 'reason', 'checks']
+                }
               }
             },
-            required: ['decision', 'confidence', 'reason', 'checks']
+            required: ['decision', 'confidence', 'reason', 'checks', 'image_grades']
           }
         }
       }
@@ -6452,6 +6481,21 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
   if (!outputText) throw new Error('OpenAI returned no decision');
   const parsed = JSON.parse(outputText);
   const checks = parsed.checks || {};
+  const imageGrades = Array.isArray(parsed.image_grades) ? parsed.image_grades : [];
+  const hardRejectedGrade = imageGrades.find(grade => {
+    const gradeChecks = grade?.checks || {};
+    return gradeChecks.male_present === true ||
+      gradeChecks.appears_over_50 === true ||
+      gradeChecks.feet_dominant === true;
+  });
+  if (hardRejectedGrade) {
+    return {
+      ...parsed,
+      decision: 'reject',
+      confidence: Math.max(parsed.confidence || 0, hardRejectedGrade.confidence || 0, 0.97),
+      reason: `image ${hardRejectedGrade.image_index || '?'} hard reject`
+    };
+  }
   if (checks.male_present === true || checks.male_only === true) {
     return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.99), reason: 'male-presenting person visible' };
   }
@@ -6460,6 +6504,14 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
   }
   if (checks.appears_over_50 === true) {
     return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.96), reason: 'appears over age limit' };
+  }
+  const visualRejects = imageGrades.filter(grade =>
+    grade?.decision === 'reject' &&
+    Number(grade.confidence || 0) >= 0.88 &&
+    grade?.checks?.visual_preference_match === false
+  ).length;
+  if (parsed.decision === 'accept' && imageGrades.length >= 2 && visualRejects >= Math.ceil(imageGrades.length / 2)) {
+    return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.9), reason: 'random profile images did not match preference' };
   }
   return { ...parsed, reason: String(parsed.reason || '').slice(0, 120) };
 }
@@ -6479,7 +6531,25 @@ function random40ExtractReviewImages(doc, baseUrl, firstImage) {
     if (/\b(logo|favicon|sprite|icon|banner|placeholder|advert|ads?)\b/i.test(context)) return;
     add(node.currentSrc || node.src || node.getAttribute('src') || node.getAttribute('data-src') || node.getAttribute('data-lazy-src'));
   });
-  return urls.slice(0, RANDOM40_MAX_REVIEW_IMAGES);
+  return urls;
+}
+
+function random40ShuffleUrls(urls) {
+  const shuffled = [...urls];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
+function random40SelectCandidateImages(imageUrls, firstImage, randomExtraCount, maxImages) {
+  const normalizedFirst = random40NormalizeUrl(firstImage, location.href);
+  const unique = [...new Set((imageUrls || []).filter(Boolean))];
+  const primary = normalizedFirst || unique[0] || '';
+  const extras = unique.filter(url => url && url !== primary);
+  const selectedExtras = random40ShuffleUrls(extras).slice(0, Math.max(0, randomExtraCount));
+  return [primary, ...selectedExtras].filter(Boolean).slice(0, maxImages);
 }
 
 function random40PageUrl(page) {
@@ -6668,7 +6738,12 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
   if (hard) return hard;
 
   const initialImages = doc
-    ? random40ExtractReviewImages(doc, workingArtist.artistUrl, workingArtist.imageUrl).slice(0, RANDOM40_INITIAL_IMAGES_PER_ARTIST)
+    ? random40SelectCandidateImages(
+        random40ExtractReviewImages(doc, workingArtist.artistUrl, workingArtist.imageUrl),
+        workingArtist.imageUrl,
+        RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST,
+        RANDOM40_INITIAL_IMAGES_PER_ARTIST
+      )
     : [workingArtist.imageUrl].filter(Boolean);
 
   let decision = await random40ClassifyArtist(workingArtist, apiKey, initialImages);
@@ -6676,8 +6751,14 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
   if (Number(decision.confidence || 0) < RANDOM40_CONFIDENCE_REVIEW) {
     try {
       if (!doc) doc = await random40FetchDoc(workingArtist.artistUrl, { timeoutMs: 18000 });
-      const images = random40ExtractReviewImages(doc, workingArtist.artistUrl, workingArtist.imageUrl);
-      if (images.length > initialImages.length) {
+      const images = random40SelectCandidateImages(
+        random40ExtractReviewImages(doc, workingArtist.artistUrl, workingArtist.imageUrl),
+        workingArtist.imageUrl,
+        RANDOM40_MAX_REVIEW_IMAGES - 1,
+        RANDOM40_MAX_REVIEW_IMAGES
+      );
+      const changedImages = images.length !== initialImages.length || images.some((url, index) => url !== initialImages[index]);
+      if (images.length > initialImages.length || changedImages) {
         decision = await random40ClassifyArtist(workingArtist, apiKey, images);
         random40State.api++;
         decision.reason = `reviewed ${images.length} images: ${decision.reason || ''}`.slice(0, 120);
