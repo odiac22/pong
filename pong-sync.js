@@ -5022,9 +5022,12 @@
       <span class="side-save-icon">💾</span>
       <span class="side-save-label">Video</span>
       <span id="saved-video-count" class="side-save-count">0</span>
-      <span id="random40-accuracy-mini" class="side-save-accuracy">Nano --
-Local --</span>
     `;
+
+    const accuracyText = document.createElement('span');
+    accuracyText.id = 'random40-accuracy-mini';
+    accuracyText.className = 'side-save-accuracy';
+    accuracyText.textContent = 'Nano --\nLocal --';
 
     let videoHoldTimer = null;
     let videoLongPress = false;
@@ -5094,6 +5097,7 @@ Local --</span>
     panel.appendChild(repairBtn);
     panel.appendChild(artistBtn);
     panel.appendChild(videoBtn);
+    panel.appendChild(accuracyText);
     document.body.appendChild(panel);
 
     updateSaveCountersOverride();

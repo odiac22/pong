@@ -623,14 +623,15 @@
 }
 
 .side-save-accuracy {
-  margin-top: 2px;
-  color: rgba(226,232,240,0.74);
-  font-size: 5.5px;
+  display: block;
+  color: var(--ui-muted);
+  font-size: 7px;
   font-weight: 800;
-  line-height: 1.05;
-  max-width: 34px;
-  text-align: center;
+  line-height: 1.08;
+  text-align: left;
   white-space: pre-line;
+  opacity: 0.65;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.55);
   user-select: none;
   -webkit-user-select: none;
 }
@@ -675,7 +676,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.38</div>
+  <div class="version-number">23.39</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8750,6 +8751,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=101"></script>
+<script src="pong-sync.js?v=102"></script>
 </body>
 </html>
