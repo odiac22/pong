@@ -149,6 +149,7 @@ def build_messages(payload, images):
         "Hard visual checks first: reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, non-photo/logo/placeholder/anime/artwork, unclear adult age, or appears over the age limit. "
         "Reject if the whole candidate set lacks enough visible face or body evidence. A face-only or body-only image can still be judged when enough evidence is visible. "
         "After hard checks, use the LoRA-adapted saved preference plus the full-bank embedding signal. "
+        "Treat the embedding signal as a weak preference hint, not a veto; trust clear candidate-image evidence when it conflicts. "
         'Return JSON only, like {"decision":"reject","confidence":0.98,"reason":"male visible","checks":{"photograph":true,"woman_prominent":false,"male_only":true,"male_present":true,"female_presenting_adult":false,"appears_over_50":null,"feet_dominant":false,"logo_or_placeholder":false}}'
     )
 

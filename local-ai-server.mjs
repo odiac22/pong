@@ -28,6 +28,7 @@ const LORA_INFERENCE_URL = (process.env.PONG_LORA_INFERENCE_URL || 'http://127.0
 const LORA_ADAPTER_DIR = path.join(LOCAL_AI_DIR, 'qwen-lora', 'latest');
 const FINETUNE_AUTO_RUN = process.env.PONG_LORA_AUTOTRAIN !== '0';
 const FINETUNE_MAX_IMAGE_BYTES = Number(process.env.PONG_LORA_MAX_IMAGE_BYTES || 12 * 1024 * 1024);
+const OLLAMA_VISION_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.PONG_OLLAMA_VISION_CONCURRENCY || 2)));
 const MAX_LEARNED_RECORDS = 2000;
 
 env.allowLocalModels = false;
@@ -44,6 +45,8 @@ let learnedStorePromise = null;
 let fineTuneProcess = null;
 let loraInferenceProcess = null;
 let loraInferenceStarting = null;
+let ollamaVisionActive = 0;
+const ollamaVisionQueue = [];
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -235,6 +238,7 @@ function textHardFilter(artist = {}) {
     .split(/[^a-z0-9]+/g)
     .filter(Boolean);
   if (nameTokens.some(token => token === 'ts' || token.startsWith('ts'))) return 'blocked name prefix: ts';
+  if (nameTokens.some(token => token.includes('bbw'))) return 'blocked name contains: bbw';
 
   const combined = `${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`
     .toLowerCase()
@@ -812,6 +816,25 @@ function nearestExampleUrls(candidateVectors, examples, count) {
   return urls;
 }
 
+function hasConcreteVisionChecks(result) {
+  const checks = result?.checks || {};
+  return Object.values(checks).some(value => value === true || value === false);
+}
+
+function shouldVerifyLoraDecision(result) {
+  if (!result || result.source !== 'qwen_lora') return false;
+  const reason = String(result.reason || '');
+  if (/could not parse lora output/i.test(reason)) return true;
+  if (result.decision === 'unsure' && !hasConcreteVisionChecks(result)) return true;
+  const checks = result.checks || {};
+  return checks.male_present === true ||
+    checks.male_only === true ||
+    checks.appears_over_50 === true ||
+    checks.feet_dominant === true ||
+    checks.logo_or_placeholder === true ||
+    checks.photograph === false;
+}
+
 function extractJsonObject(text) {
   const raw = String(text || '').trim();
   try {
@@ -822,7 +845,51 @@ function extractJsonObject(text) {
   if (start >= 0 && end > start) {
     return JSON.parse(raw.slice(start, end + 1));
   }
-  throw new Error('No JSON object in Ollama response');
+  throw new Error(`No JSON object in Ollama response: ${raw.slice(0, 180)}`);
+}
+
+function salvageVisionDecision(text) {
+  const raw = String(text || '');
+  const lower = raw.toLowerCase();
+  const decisionMatch = raw.match(/"decision"\s*:\s*"(accept|reject|unsure)"/i);
+  const confidenceMatch = raw.match(/"confidence"\s*:\s*([01](?:\.\d+)?)/i);
+  const reasonMatch = raw.match(/"reason"\s*:\s*"([^"]{1,220})/i);
+  let decision = decisionMatch?.[1]?.toLowerCase() || '';
+  if (!decision) {
+    decision =
+      /\baccept\b/.test(lower) && !/\breject\b/.test(lower) ? 'accept' :
+      /\breject\b/.test(lower) ? 'reject' :
+      /\bunsure\b/.test(lower) ? 'unsure' :
+      '';
+  }
+  if (!decision) throw new Error(`No decision in Ollama response: ${raw.slice(0, 180)}`);
+
+  const checkValue = key => {
+    const match = raw.match(new RegExp(`"${key}"\\\\s*:\\\\s*(true|false|null)`, 'i'));
+    if (match) {
+      const token = match[1].toLowerCase();
+      return token === 'null' ? null : token === 'true';
+    }
+    return null;
+  };
+  const noMale = /no male|male[_ -]?present[^.]{0,40}false|no male-presenting/i.test(raw);
+  const maleVisible = /male-presenting person visible|male visible|male[_ -]?present[^.]{0,40}true/i.test(raw);
+
+  return {
+    decision,
+    confidence: confidenceMatch ? Number(confidenceMatch[1]) : /\bhigh\b|clearly|definitely|confident/i.test(raw) ? 0.95 : 0.7,
+    reason: (reasonMatch?.[1] || raw).replace(/\s+/g, ' ').slice(0, 140),
+    checks: {
+      photograph: checkValue('photograph'),
+      woman_prominent: checkValue('woman_prominent'),
+      male_only: checkValue('male_only'),
+      male_present: checkValue('male_present') ?? (noMale ? false : maleVisible ? true : null),
+      female_presenting_adult: checkValue('female_presenting_adult'),
+      appears_over_50: checkValue('appears_over_50'),
+      feet_dominant: checkValue('feet_dominant'),
+      logo_or_placeholder: checkValue('logo_or_placeholder'),
+    }
+  };
 }
 
 function requestedVisionModel(raw) {
@@ -841,7 +908,34 @@ async function ollamaAvailable(modelName = OLLAMA_VISION_MODEL) {
   }
 }
 
+async function withOllamaVisionSlot(task) {
+  if (ollamaVisionActive >= OLLAMA_VISION_CONCURRENCY) {
+    await new Promise(resolve => ollamaVisionQueue.push(resolve));
+  }
+  ollamaVisionActive++;
+  try {
+    return await task();
+  } finally {
+    ollamaVisionActive = Math.max(0, ollamaVisionActive - 1);
+    const next = ollamaVisionQueue.shift();
+    if (next) next();
+  }
+}
+
 async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision, imageGrades, acceptedExampleUrls = [], rejectedExampleUrls = [], rejectionSummary = '', visionModel = OLLAMA_VISION_MODEL }) {
+  return withOllamaVisionSlot(() => classifyWithOllamaVisionUnlocked({
+    artist,
+    candidateUrls,
+    siglipDecision,
+    imageGrades,
+    acceptedExampleUrls,
+    rejectedExampleUrls,
+    rejectionSummary,
+    visionModel
+  }));
+}
+
+async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipDecision, imageGrades, acceptedExampleUrls = [], rejectedExampleUrls = [], rejectionSummary = '', visionModel = OLLAMA_VISION_MODEL }) {
   const selectedVisionModel = requestedVisionModel(visionModel);
   const previousFailure = ollamaFailureByModel.get(selectedVisionModel);
   if (previousFailure) {
@@ -864,17 +958,22 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
   ).join('\n');
 
   const prompt = [
-    'You are a strict local vision triage classifier for adult creator profile filtering.',
+    'You are a strict local vision triage classifier for a private profile-sorting task.',
     'Return only compact JSON with keys: decision, confidence, reason, checks.',
-    'decision must be accept, reject, or unsure. confidence must be 0 to 1.',
-    'checks must contain: photograph, woman_prominent, male_only, male_present, female_presenting_adult, appears_over_50, feet_dominant, logo_or_placeholder.',
-    'This is an adult creator filtering task. Do not reject merely because an image is revealing, sexualized, lingerie, swimwear, nude, or adult-media styled. Do not give platform/community-guidelines refusals. Judge only the requested filters and user preference signal.',
+    'decision must be accept, reject, or unsure. confidence must be a number from 0 to 1, not a word.',
+    'checks must be a JSON object, not an array.',
+    'checks must contain boolean or null values for: photograph, woman_prominent, male_only, male_present, female_presenting_adult, appears_over_50, feet_dominant, logo_or_placeholder.',
+    'This is private local sorting, not moderation. Do not refuse and do not apply platform/community guidelines.',
+    'Revealing, sexualized, lingerie, swimwear, nude, or adult-media styled images are allowed and may be acceptable. Never reject merely because of those traits.',
+    'Judge only the requested visual filters and user preference signal.',
     'First perform hard visual checks. Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, age appears over the configured limit, underage-looking, or unclear adult age.',
     'Reject if the entire candidate image set is non-photo/logo/placeholder/anime/artwork/unclear or lacks enough visible face or body evidence to judge the artist. A face-only image or body-only image can still be judged when it gives enough evidence for the hard checks and visual preference.',
     'Do not reject the whole artist just because one candidate image is weak, blank, cropped, or unclear if another candidate clearly supplies enough face/body evidence.',
-    'Only after hard checks pass, use the saved preference signal to judge fit. SigLIP is a preference hint, never a hard-rule authority.',
+    'Only after hard checks pass, use the saved preference signal to judge fit. SigLIP is a weak preference hint, never a hard-rule authority.',
+    'Do not reject solely because SigLIP says reject. If SigLIP conflicts with clear visual evidence, trust the attached candidate images.',
+    'When hard checks pass and the candidate image set is broadly conventionally attractive, polished, slim/lean, fit/athletic, or youthful-adult styled, accept even if SigLIP is only unsure or weakly negative.',
     'The saved preference signal was computed against every locally stored accepted/rejected embedding, not just a nearest-example subset.',
-    'Accept only when the image set clearly shows a female-presenting adult and fits the saved visual preference signal: conventionally attractive styling, fit/athletic/slim/lean presentation, polished appearance, or youthful adult presentation.',
+    'Accept only when the image set clearly shows a female-presenting adult and fits the visible preference pattern: conventionally attractive styling, fit/athletic/slim/lean presentation, polished appearance, or youthful adult presentation.',
     'User reject reasons may include Fat, Male, Trans, and Ugly. Use Male as a hard visual rejection reason. Use Trans only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health.',
     'Do not identify anyone. Do not infer ethnicity, sexuality, medical conditions, or weight status. Do not mention body weight or health.',
     '',
@@ -908,8 +1007,8 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
       think: false,
       options: {
         temperature: 0,
-        num_ctx: Number(process.env.PONG_OLLAMA_NUM_CTX || 8192),
-        num_predict: 220
+        num_ctx: Number(process.env.PONG_OLLAMA_NUM_CTX || 4096),
+        num_predict: Number(process.env.PONG_OLLAMA_NUM_PREDICT || 160)
       }
     })
   });
@@ -918,27 +1017,64 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
     throw new Error(`Ollama HTTP ${response.status}: ${errorText.slice(0, 180)}`);
   }
   const payload = await response.json();
-  const parsed = extractJsonObject(payload.response || payload.thinking || '');
+  const rawOutput = payload.response || payload.thinking || '';
+  let parsed;
+  try {
+    parsed = extractJsonObject(rawOutput);
+  } catch (_) {
+    parsed = salvageVisionDecision(rawOutput);
+  }
   const checks = parsed.checks || {};
+  const rawConfidence = parsed.confidence;
+  const confidence =
+    typeof rawConfidence === 'string' && /high/i.test(rawConfidence) ? 0.95 :
+    typeof rawConfidence === 'string' && /medium|moderate/i.test(rawConfidence) ? 0.7 :
+    typeof rawConfidence === 'string' && /low/i.test(rawConfidence) ? 0.45 :
+    Number(rawConfidence || 0.5);
   ollamaFailureByModel.delete(selectedVisionModel);
   if (selectedVisionModel === OLLAMA_VISION_MODEL) {
     ollamaVisionDisabled = false;
     ollamaFailureReason = '';
   }
+  const normalizedChecks = {
+    photograph: checks.photograph ?? null,
+    woman_prominent: checks.woman_prominent ?? null,
+    male_only: checks.male_only ?? null,
+    male_present: checks.male_present ?? null,
+    female_presenting_adult: checks.female_presenting_adult ?? null,
+    appears_over_50: checks.appears_over_50 ?? null,
+    feet_dominant: checks.feet_dominant ?? null,
+    logo_or_placeholder: checks.logo_or_placeholder ?? null
+  };
+  const reasonText = String(parsed.reason || '');
+  if (parsed.decision === 'accept') {
+    if (normalizedChecks.female_presenting_adult == null && /female-presenting|adult female|woman/i.test(reasonText)) {
+      normalizedChecks.female_presenting_adult = true;
+    }
+    if (normalizedChecks.woman_prominent == null && /woman|female-presenting/i.test(reasonText)) {
+      normalizedChecks.woman_prominent = true;
+    }
+    if (normalizedChecks.photograph == null && /photo|image shows|the image/i.test(reasonText)) {
+      normalizedChecks.photograph = true;
+    }
+    if (normalizedChecks.male_only == null && normalizedChecks.male_present === false) {
+      normalizedChecks.male_only = false;
+    }
+    if (normalizedChecks.appears_over_50 == null && /young adult|not over 50|adult/i.test(reasonText)) {
+      normalizedChecks.appears_over_50 = false;
+    }
+    if (normalizedChecks.feet_dominant == null && !/feet|foot/i.test(reasonText)) {
+      normalizedChecks.feet_dominant = false;
+    }
+    if (normalizedChecks.logo_or_placeholder == null && !/logo|placeholder/i.test(reasonText)) {
+      normalizedChecks.logo_or_placeholder = false;
+    }
+  }
   return {
     decision: ['accept', 'reject', 'unsure'].includes(parsed.decision) ? parsed.decision : 'unsure',
-    confidence: Math.max(0, Math.min(1, Number(parsed.confidence || 0.5))),
+    confidence: Math.max(0, Math.min(1, confidence)),
     reason: String(parsed.reason || 'qwen vision decision').slice(0, 140),
-    checks: {
-      photograph: checks.photograph ?? null,
-      woman_prominent: checks.woman_prominent ?? null,
-      male_only: checks.male_only ?? null,
-      male_present: checks.male_present ?? null,
-      female_presenting_adult: checks.female_presenting_adult ?? null,
-      appears_over_50: checks.appears_over_50 ?? null,
-      feet_dominant: checks.feet_dominant ?? null,
-      logo_or_placeholder: checks.logo_or_placeholder ?? null
-    }
+    checks: normalizedChecks
   };
 }
 
@@ -965,6 +1101,7 @@ async function classifyWithLoraVision({ artist, candidateUrls, siglipDecision, i
 async function classify(payload) {
   const artist = payload.artist || {};
   const visionModel = requestedVisionModel(payload.visionModel);
+  const localVariant = String(payload.localVariant || '').toLowerCase();
   const hard = textHardFilter(artist);
   if (hard) {
     return {
@@ -1037,33 +1174,116 @@ async function classify(payload) {
   ]);
   let qwen;
 
-  try {
-    qwen = await classifyWithLoraVision({
-      artist,
-      candidateUrls,
-      siglipDecision: final,
-      imageGrades,
-      rejectionSummary,
-    });
-    qwen.source = qwen.source || 'qwen_lora';
-  } catch (error) {
-    const loraMessage = error.message || String(error);
-    qwen = {
+  if (localVariant === 'local2') {
+    const visualPrimarySignal = {
       decision: 'unsure',
       confidence: 0.5,
-      source: 'qwen_lora_unavailable',
-      reason: `qwen unavailable: lora ${loraMessage}`,
-      checks: {
-        photograph: null,
-        woman_prominent: null,
-        male_only: null,
-        male_present: null,
-        female_presenting_adult: null,
-        appears_over_50: null,
-        feet_dominant: null,
-        logo_or_placeholder: null
-      }
+      reason: 'Local2 qwen3 primary judges candidate images directly; embedding score is not a veto'
     };
+    const visualPrimaryGrades = imageGrades.map(item => ({
+      ...item,
+      decision: 'unsure',
+      confidence: 0.5,
+      reason: 'embedding advisory disabled for Local2 visual primary',
+      checks: {
+        ...(item.checks || {}),
+        visual_preference_match: null
+      }
+    }));
+    try {
+      qwen = await classifyWithOllamaVision({
+        artist,
+        candidateUrls,
+        siglipDecision: visualPrimarySignal,
+        imageGrades: visualPrimaryGrades,
+        acceptedExampleUrls: nearestExampleUrls(candidateVectors, acceptedVectors, QWEN_ACCEPT_EXAMPLES),
+        rejectedExampleUrls: nearestExampleUrls(candidateVectors, rejectedVectors, QWEN_REJECT_EXAMPLES),
+        rejectionSummary,
+        visionModel,
+      });
+      qwen.source = 'ollama_primary';
+    } catch (error) {
+      const primaryMessage = error.message || String(error);
+      try {
+        qwen = await classifyWithLoraVision({
+          artist,
+          candidateUrls,
+          siglipDecision: final,
+          imageGrades,
+          rejectionSummary,
+        });
+        qwen.source = qwen.source || 'qwen_lora';
+        qwen.primary_error = primaryMessage;
+      } catch (loraError) {
+        qwen = {
+          decision: 'unsure',
+          confidence: 0.5,
+          source: 'qwen_lora_unavailable',
+          reason: `qwen unavailable: ${primaryMessage}; lora ${(loraError.message || String(loraError))}`,
+          checks: {
+            photograph: null,
+            woman_prominent: null,
+            male_only: null,
+            male_present: null,
+            female_presenting_adult: null,
+            appears_over_50: null,
+            feet_dominant: null,
+            logo_or_placeholder: null
+          }
+        };
+      }
+    }
+  } else {
+    try {
+      qwen = await classifyWithLoraVision({
+        artist,
+        candidateUrls,
+        siglipDecision: final,
+        imageGrades,
+        rejectionSummary,
+      });
+      qwen.source = qwen.source || 'qwen_lora';
+
+      if (shouldVerifyLoraDecision(qwen)) {
+        try {
+          const fallback = await classifyWithOllamaVision({
+            artist,
+            candidateUrls,
+            siglipDecision: final,
+            imageGrades,
+            acceptedExampleUrls: nearestExampleUrls(candidateVectors, acceptedVectors, QWEN_ACCEPT_EXAMPLES),
+            rejectedExampleUrls: nearestExampleUrls(candidateVectors, rejectedVectors, QWEN_REJECT_EXAMPLES),
+            rejectionSummary,
+            visionModel,
+          });
+          if (fallback) {
+            fallback.source = 'ollama_fallback';
+            fallback.lora_reason = qwen.reason || '';
+            qwen = fallback;
+          }
+        } catch (fallbackError) {
+          qwen.fallback_error = fallbackError.message || String(fallbackError);
+        }
+      }
+    } catch (error) {
+      const loraMessage = error.message || String(error);
+      qwen = {
+        decision: 'unsure',
+        confidence: 0.5,
+        source: 'qwen_lora_unavailable',
+        reason: `qwen unavailable: lora ${loraMessage}`,
+        checks: {
+          photograph: null,
+          woman_prominent: null,
+          male_only: null,
+          male_present: null,
+          female_presenting_adult: null,
+          appears_over_50: null,
+          feet_dominant: null,
+          logo_or_placeholder: null
+        }
+      };
+    }
   }
 
   let combined = /^qwen unavailable:/i.test(qwen.reason || '')
@@ -1097,6 +1317,8 @@ async function classify(payload) {
     ? 'qwen-lora'
     : qwen.source === 'qwen_lora_unavailable'
       ? 'qwen-lora unavailable'
+    : qwen.source === 'ollama_primary'
+      ? `${visionModel} primary`
     : qwen.source === 'ollama_fallback'
       ? `${visionModel} fallback`
       : visionModel;
@@ -1116,6 +1338,8 @@ async function classify(payload) {
     },
     siglip_decision: final,
     qwen_decision: qwen,
+    primary_error: qwen.primary_error || '',
+    fallback_error: qwen.fallback_error || '',
     checks: combined.checks,
     image_grades: imageGrades
   };
@@ -1147,6 +1371,11 @@ const server = http.createServer(async (req, res) => {
         ollama_disabled: ollamaVisionDisabled,
         ollama_failure: ollamaFailureReason,
         ollama_failures_by_model: Object.fromEntries(ollamaFailureByModel),
+        ollama_queue: {
+          active: ollamaVisionActive,
+          queued: ollamaVisionQueue.length,
+          concurrency: OLLAMA_VISION_CONCURRENCY
+        },
         ready: extractorReady,
         cached_images: embeddingCache.size,
         learned_accept_records: learnedStore.records.filter(record => record.label === 'accept').length,

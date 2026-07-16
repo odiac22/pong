@@ -677,7 +677,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.46</div>
+  <div class="version-number">23.47</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7047,6 +7047,9 @@ function random40HardFilter(artist) {
     .filter(Boolean);
   if (nameTokens.some(token => token === 'ts' || token.startsWith('ts'))) {
     return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: 'blocked name prefix: ts' };
+  }
+  if (nameTokens.some(token => token.includes('bbw'))) {
+    return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: 'blocked name contains: bbw' };
   }
   const combinedText = String(`${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`)
     .toLowerCase()
