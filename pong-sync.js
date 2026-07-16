@@ -177,6 +177,40 @@
         transform: translateY(-50%) scale(1.06) !important;
       }
 
+      .random40-reject-reason-menu {
+        position: fixed !important;
+        left: 44px !important;
+        top: 50% !important;
+        transform: translateY(-50%) !important;
+        z-index: 1301 !important;
+        display: none !important;
+        flex-direction: column !important;
+        gap: 3px !important;
+        pointer-events: auto !important;
+      }
+
+      .random40-reject-reason-menu[data-open="true"] {
+        display: flex !important;
+      }
+
+      .random40-reject-reason-button {
+        min-width: 48px !important;
+        min-height: 18px !important;
+        border: 1px solid rgba(255,255,255,0.14) !important;
+        border-radius: 999px !important;
+        background: rgba(127,29,29,0.62) !important;
+        color: rgba(255,245,245,0.92) !important;
+        font-size: 7px !important;
+        font-weight: 850 !important;
+        line-height: 1 !important;
+        padding: 3px 6px !important;
+        cursor: pointer !important;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.28) !important;
+        backdrop-filter: blur(10px) !important;
+        -webkit-backdrop-filter: blur(10px) !important;
+        -webkit-tap-highlight-color: transparent !important;
+      }
+
       .pong-repair-panel {
         position: fixed !important;
         left: 50% !important;
@@ -2997,17 +3031,24 @@
     );
   }
 
-  async function removeCurrentSavedItemOverride() {
+  async function removeCurrentSavedItemOverride(rejectReason = null) {
     const mode = window.PongLoadedSavedMode || 'normal';
     const bundleInfo = getCurrentPasteBundleInfo();
+    const reasonInfo = rejectReason && typeof rejectReason === 'object'
+      ? rejectReason
+      : { reason: 'reject', label: 'Reject' };
 
     if (
       bundleInfo?.source === 'random40' &&
       typeof window.PongRandom40RejectCurrentArtist === 'function'
     ) {
       try {
-        showMsg('Teaching Random 40 to avoid this artist...');
-        const handled = await window.PongRandom40RejectCurrentArtist(bundleInfo);
+        showMsg(`Teaching Random 40: ${reasonInfo.label || 'Reject'}...`);
+        const handled = await window.PongRandom40RejectCurrentArtist({
+          ...bundleInfo,
+          rejectReason: reasonInfo.reason || 'reject',
+          rejectReasonLabel: reasonInfo.label || 'Reject'
+        });
         if (handled) {
           if (typeof window.PongNavigateToNextPasteEvent === 'function') {
             window.PongNavigateToNextPasteEvent();
@@ -4754,6 +4795,11 @@
       existing.remove();
     }
 
+    const existingMenu = document.getElementById('random40-reject-reason-menu');
+    if (existingMenu) {
+      existingMenu.remove();
+    }
+
     const btn = document.createElement('button');
     btn.id = 'remove-saved-button';
     btn.className = 'remove-saved-button';
@@ -4764,10 +4810,52 @@
     btn.addEventListener('click', e => {
       e.preventDefault();
       e.stopPropagation();
-      removeCurrentSavedItemOverride();
+      const menu = document.getElementById('random40-reject-reason-menu');
+      if (menu) {
+        menu.dataset.open = menu.dataset.open === 'true' ? 'false' : 'true';
+      }
     });
 
     document.body.appendChild(btn);
+
+    const menu = document.createElement('div');
+    menu.id = 'random40-reject-reason-menu';
+    menu.className = 'random40-reject-reason-menu';
+    menu.dataset.open = 'false';
+
+    [
+      ['male', 'Male'],
+      ['ts', 'TS'],
+      ['ugly', 'Ugly'],
+      ['overweight', 'Overweight']
+    ].forEach(([reason, label]) => {
+      const reasonBtn = document.createElement('button');
+      reasonBtn.type = 'button';
+      reasonBtn.className = 'random40-reject-reason-button';
+      reasonBtn.textContent = label;
+      reasonBtn.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        menu.dataset.open = 'false';
+        removeCurrentSavedItemOverride({ reason, label });
+      });
+      menu.appendChild(reasonBtn);
+    });
+
+    document.body.appendChild(menu);
+
+    if (!window.PongRejectReasonMenuCloseBound) {
+      window.PongRejectReasonMenuCloseBound = true;
+      document.addEventListener('click', event => {
+        if (
+          !event.target?.closest?.('#remove-saved-button') &&
+          !event.target?.closest?.('#random40-reject-reason-menu')
+        ) {
+          const activeMenu = document.getElementById('random40-reject-reason-menu');
+          if (activeMenu) activeMenu.dataset.open = 'false';
+        }
+      }, true);
+    }
   }
 
   function createSaveButtonsOverride() {

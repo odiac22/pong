@@ -662,7 +662,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.32</div>
+  <div class="version-number">23.33</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6190,6 +6190,8 @@ function random40SaveRejectedArtists(records) {
       artistUrl,
       artistName: String(item.artistName || random40ArtistNameFromUrl(artistUrl) || 'unknown').slice(0, 100),
       imageUrls: [...new Set((item.imageUrls || []).map(url => random40NormalizeUrl(url, artistUrl)).filter(Boolean))].slice(0, RANDOM40_MAX_REVIEW_IMAGES),
+      rejectReason: String(item.rejectReason || item.reason || '').slice(0, 40),
+      rejectReasonLabel: String(item.rejectReasonLabel || item.reasonLabel || '').slice(0, 80),
       rejectedAt: item.rejectedAt || new Date().toISOString()
     });
   });
@@ -6240,15 +6242,19 @@ function random40RejectedExampleContent(excludeArtistUrl = '') {
   const examples = random40LoadRejectedArtists()
     .filter(item => random40NormalizeArtistUrl(item.artistUrl) !== excluded)
     .filter(item => Array.isArray(item.imageUrls) && item.imageUrls.length)
+    .sort((a, b) => Number(Boolean(b.rejectReason)) - Number(Boolean(a.rejectReason)))
     .slice(0, RANDOM40_MAX_REJECT_EXAMPLES);
   const content = [];
 
   examples.forEach((item, index) => {
+    const reasonText = item.rejectReasonLabel || item.rejectReason
+      ? ` User reject reason: ${item.rejectReasonLabel || item.rejectReason}.`
+      : '';
     content.push({
       type: 'input_text',
       text:
         `Rejected example ${index + 1}: ${item.artistName || random40ArtistNameFromUrl(item.artistUrl) || 'artist'}.\n` +
-        'The user pressed the red X for this artist. Treat this as a hard-negative correction and re-check future candidates carefully for missed hard-filter violations.'
+        `The user pressed the red X for this artist.${reasonText} Treat this as a hard-negative correction and re-check future candidates carefully for missed hard-filter violations.`
     });
     item.imageUrls.slice(0, RANDOM40_REJECT_IMAGES_PER_EXAMPLE).forEach((url, imageIndex) => {
       content.push({ type: 'input_text', text: `Rejected example ${index + 1} image ${imageIndex + 1}:` });
@@ -6257,6 +6263,20 @@ function random40RejectedExampleContent(excludeArtistUrl = '') {
   });
 
   return content;
+}
+
+function random40RejectReasonSummary() {
+  const counts = new Map();
+  random40LoadRejectedArtists().forEach(item => {
+    const label = String(item.rejectReasonLabel || item.rejectReason || '').trim();
+    if (!label) return;
+    counts.set(label, (counts.get(label) || 0) + 1);
+  });
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([label, count]) => `${label}: ${count}`)
+    .join(', ');
 }
 
 async function random40AcceptCurrentArtistForFutureFinds(bundleInfo = {}) {
@@ -6319,6 +6339,8 @@ async function random40AcceptCurrentArtistForFutureFinds(bundleInfo = {}) {
 async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
   const meta = random40CurrentVideoMeta();
   const artistUrl = random40NormalizeArtistUrl(bundleInfo.artistUrl || meta.artistUrl || meta.postUrl || '');
+  const rejectReason = String(bundleInfo.rejectReason || 'reject').slice(0, 40);
+  const rejectReasonLabel = String(bundleInfo.rejectReasonLabel || 'Reject').slice(0, 80);
 
   if (!artistUrl) {
     showSortingIndicator('No Random 40 artist URL found');
@@ -6334,7 +6356,7 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
     'artist';
 
   try {
-    showSortingIndicator(`Adding ${artistName} as a Random 40 avoid example...`);
+    showSortingIndicator(`Adding ${artistName} as ${rejectReasonLabel} avoid example...`);
     const doc = await random40FetchDoc(artistUrl, { timeoutMs: 22000 });
     const images = random40ExtractReviewImages(doc, artistUrl, meta.imageUrl || '');
     const accepted = random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
@@ -6345,13 +6367,15 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
         artistUrl,
         artistName,
         imageUrls: images,
+        rejectReason,
+        rejectReasonLabel,
         rejectedAt: new Date().toISOString()
       },
       ...existing
     ]);
     random40State?.seenArtists?.add?.(artistUrl);
     random40State?.rejectedArtistUrls?.add?.(artistUrl);
-    showSortingIndicator(`Random 40 will avoid similar artists to ${artistName}`);
+    showSortingIndicator(`Random 40 will avoid ${rejectReasonLabel}: ${artistName}`);
     return true;
   } catch (err) {
     const accepted = random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
@@ -6362,13 +6386,15 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
         artistUrl,
         artistName,
         imageUrls: [],
+        rejectReason,
+        rejectReasonLabel,
         rejectedAt: new Date().toISOString()
       },
       ...existing
     ]);
     random40State?.seenArtists?.add?.(artistUrl);
     random40State?.rejectedArtistUrls?.add?.(artistUrl);
-    showSortingIndicator(`Saved ${artistName} as avoid, but images could not load`);
+    showSortingIndicator(`Saved ${artistName} as ${rejectReasonLabel}, but images could not load`);
     return true;
   }
 }
@@ -6429,6 +6455,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
   if (!candidateUrls.length) return { decision: 'reject', confidence: 1, reason: 'no image' };
   const acceptedExamples = random40AcceptedExampleContent(artist.artistUrl);
   const rejectedExamples = random40RejectedExampleContent(artist.artistUrl);
+  const rejectReasonSummary = random40RejectReasonSummary();
 
   const content = [
     {
@@ -6439,11 +6466,13 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         `Candidate images included: ${candidateUrls.length}\n\n` +
         `Accepted visual example images included: ${acceptedExamples.filter(item => item.type === 'input_image').length}\n` +
         `Rejected visual example images included: ${rejectedExamples.filter(item => item.type === 'input_image').length}\n\n` +
+        `User red-X reason history: ${rejectReasonSummary || 'none yet'}\n\n` +
         'Classify this CoomerFans artist from the candidate profile/post image set. ' +
         'The candidate set should include the listing/profile image plus randomly sampled images from the artist profile whenever available. ' +
         'Grade every candidate image separately, then make one artist-level decision from the full set. ' +
         'Use accepted examples as small positive preference adjustments, not strict look-alike matching. ' +
         'Use red-X rejected examples as stronger hard-negative corrections because they often represent missed hard-filter cases. ' +
+        'User reject reasons Male, TS, Ugly, and Overweight are user-provided labels. Use Male as a hard visible rejection label. Use TS as a text/URL hard-filter clue, not as an appearance inference. Use Ugly/Overweight as visual preference mismatch labels without diagnosing or mentioning health. ' +
         'When hard rejection rules are not triggered, stay broad and favor conventionally attractive adult women with clear, appealing presentation. ' +
         'Do not accept from one favorable thumbnail if the random profile/post images conflict with the hard rules or user preference examples. ' +
         'Reject blank/logo/placeholder/anime/artwork images, images where feet are the main subject, ' +
@@ -8099,6 +8128,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=95"></script>
+<script src="pong-sync.js?v=96"></script>
 </body>
 </html>

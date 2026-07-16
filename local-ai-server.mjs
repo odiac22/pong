@@ -155,10 +155,32 @@ function imageUrlsFromRecords(records = []) {
   for (const record of records || []) {
     for (const url of record?.imageUrls || []) {
       const normalized = normalizeUrl(url, record.artistUrl || 'https://coomerfans.com/');
-      if (normalized) out.push({ url: normalized, artistUrl: record.artistUrl || '', artistName: record.artistName || '' });
+      if (normalized) {
+        out.push({
+          url: normalized,
+          artistUrl: record.artistUrl || '',
+          artistName: record.artistName || '',
+          rejectReason: record.rejectReason || '',
+          rejectReasonLabel: record.rejectReasonLabel || ''
+        });
+      }
     }
   }
   return out;
+}
+
+function rejectReasonSummary(records = []) {
+  const counts = new Map();
+  for (const record of records || []) {
+    const label = String(record?.rejectReasonLabel || record?.rejectReason || '').trim();
+    if (!label) continue;
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([label, count]) => `${label}: ${count}`)
+    .join(', ');
 }
 
 async function embedExamples(records, label) {
@@ -265,7 +287,7 @@ async function ollamaAvailable() {
   }
 }
 
-async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision, imageGrades, acceptedExampleUrls = [], rejectedExampleUrls = [] }) {
+async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision, imageGrades, acceptedExampleUrls = [], rejectedExampleUrls = [], rejectionSummary = '' }) {
   if (ollamaVisionDisabled) {
     throw new Error(`Ollama vision disabled: ${ollamaFailureReason || 'previous failure'}`);
   }
@@ -301,11 +323,13 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
     'checks must contain: photograph, woman_prominent, male_only, male_present, female_presenting_adult, appears_over_50, feet_dominant, logo_or_placeholder.',
     'Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible, feet are the main subject, non-photo/logo/placeholder, age appears over the configured limit, underage-looking, unclear adult age, or the visual presentation conflicts with the saved preference signal.',
     'Accept only when the image set clearly shows a female-presenting adult and fits the saved visual preference signal: conventionally attractive styling, fit/athletic/slim/lean presentation, polished appearance, or youthful adult presentation.',
+    'User reject reasons may include Male, TS, Ugly, and Overweight. Use Male as a hard visual rejection reason. Use TS only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Ugly/Overweight as visual preference mismatch labels without diagnosing or mentioning health.',
     'Do not identify anyone. Do not infer ethnicity, sexuality, medical conditions, or weight status. Do not mention body weight or health.',
     '',
     `Artist: ${artist.artistName || 'unknown'}`,
     `URL: ${artist.artistUrl || ''}`,
     `SigLIP learned-taste decision: ${siglipDecision.decision}, confidence ${Number(siglipDecision.confidence || 0).toFixed(2)}, ${siglipDecision.reason || ''}`,
+    rejectionSummary ? `User red-X reason history: ${rejectionSummary}` : 'No user red-X reason history yet.',
     'Per-image learned-taste grades:',
     localSummary,
     '',
@@ -398,6 +422,7 @@ async function classify(payload) {
   const final = finalDecision(imageGrades, acceptedVectors.length, rejectedVectors.length);
   const acceptedExampleUrls = nearestExampleUrls(candidateVectors, acceptedVectors, QWEN_ACCEPT_EXAMPLES);
   const rejectedExampleUrls = nearestExampleUrls(candidateVectors, rejectedVectors, QWEN_REJECT_EXAMPLES);
+  const rejectionSummary = rejectReasonSummary(payload.rejectedArtists || []);
   let qwen;
   const skipQwen = final.decision === 'reject' && Number(final.confidence || 0) >= QWEN_SKIP_REJECT_CONFIDENCE;
   if (skipQwen) {
@@ -424,7 +449,8 @@ async function classify(payload) {
         siglipDecision: final,
         imageGrades,
         acceptedExampleUrls,
-        rejectedExampleUrls
+        rejectedExampleUrls,
+        rejectionSummary
       });
     } catch (error) {
       const message = error.message || String(error);
