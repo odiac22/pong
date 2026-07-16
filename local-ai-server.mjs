@@ -5,6 +5,8 @@ import { pipeline, RawImage, env } from '@xenova/transformers';
 const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
 const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
 const MODEL = process.env.PONG_LOCAL_IMAGE_MODEL || 'Xenova/siglip-base-patch16-224';
+const OLLAMA_URL = (process.env.PONG_OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+const OLLAMA_VISION_MODEL = process.env.PONG_OLLAMA_VISION_MODEL || 'qwen2.5vl:latest';
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
 
@@ -14,6 +16,8 @@ env.cacheDir = path.join(process.cwd(), '.cache', 'transformers');
 
 let extractorPromise = null;
 let extractorReady = false;
+let ollamaVisionDisabled = false;
+let ollamaFailureReason = '';
 const embeddingCache = new Map();
 
 function json(res, status, payload) {
@@ -74,6 +78,20 @@ async function fetchImageBlob(url) {
   });
   if (!response.ok) throw new Error(`image HTTP ${response.status}`);
   return response.blob();
+}
+
+async function fetchImageBase64(rawUrl) {
+  const url = normalizeUrl(rawUrl);
+  if (!url) throw new Error('bad image url');
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 PongLocalAI/1.0',
+      'Referer': 'https://coomerfans.com/'
+    }
+  });
+  if (!response.ok) throw new Error(`image HTTP ${response.status}`);
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return buffer.toString('base64');
 }
 
 async function embedImage(rawUrl) {
@@ -202,6 +220,100 @@ function finalDecision(imageGrades, acceptedCount, rejectedCount) {
   return { decision: 'unsure', confidence, reason: `local unsure, taste ${Math.round(average * 100)}` };
 }
 
+function extractJsonObject(text) {
+  const raw = String(text || '').trim();
+  try {
+    return JSON.parse(raw);
+  } catch (_) {}
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    return JSON.parse(raw.slice(start, end + 1));
+  }
+  throw new Error('No JSON object in Ollama response');
+}
+
+async function ollamaAvailable() {
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/tags`);
+    if (!response.ok) return false;
+    const payload = await response.json();
+    return Array.isArray(payload.models) && payload.models.some(model => model?.name === OLLAMA_VISION_MODEL);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision, imageGrades }) {
+  if (ollamaVisionDisabled) {
+    throw new Error(`Ollama vision disabled: ${ollamaFailureReason || 'previous failure'}`);
+  }
+  const images = [];
+  for (const url of candidateUrls.slice(0, 4)) {
+    try {
+      images.push(await fetchImageBase64(url));
+    } catch (_) {}
+  }
+  if (!images.length) return null;
+
+  const localSummary = imageGrades.map(item =>
+    `image ${item.image_index}: ${item.decision}, confidence ${item.confidence.toFixed(2)}, ${item.reason}`
+  ).join('\n');
+
+  const prompt = [
+    'You are a strict local vision triage classifier for adult creator profile filtering.',
+    'Return only compact JSON with keys: decision, confidence, reason, checks.',
+    'decision must be accept, reject, or unsure. confidence must be 0 to 1.',
+    'checks must contain: photograph, woman_prominent, male_only, male_present, female_presenting_adult, appears_over_50, feet_dominant, logo_or_placeholder.',
+    'Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible, feet are the main subject, non-photo/logo/placeholder, age appears over the configured limit, underage-looking, unclear adult age, or the visual presentation conflicts with the saved preference signal.',
+    'Accept only when the image set clearly shows a female-presenting adult and fits the saved visual preference signal: conventionally attractive styling, fit/athletic/slim/lean presentation, polished appearance, or youthful adult presentation.',
+    'Do not identify anyone. Do not infer ethnicity, sexuality, medical conditions, or weight status. Do not mention body weight or health.',
+    '',
+    `Artist: ${artist.artistName || 'unknown'}`,
+    `URL: ${artist.artistUrl || ''}`,
+    `SigLIP learned-taste decision: ${siglipDecision.decision}, confidence ${Number(siglipDecision.confidence || 0).toFixed(2)}, ${siglipDecision.reason || ''}`,
+    'Per-image learned-taste grades:',
+    localSummary,
+    '',
+    'Judge all attached candidate images together. Be conservative.'
+  ].join('\n');
+
+  const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OLLAMA_VISION_MODEL,
+      prompt,
+      images,
+      stream: false,
+      format: 'json',
+      options: {
+        temperature: 0,
+        num_predict: 220
+      }
+    })
+  });
+  if (!response.ok) throw new Error(`Ollama HTTP ${response.status}`);
+  const payload = await response.json();
+  const parsed = extractJsonObject(payload.response || '');
+  const checks = parsed.checks || {};
+  return {
+    decision: ['accept', 'reject', 'unsure'].includes(parsed.decision) ? parsed.decision : 'unsure',
+    confidence: Math.max(0, Math.min(1, Number(parsed.confidence || 0.5))),
+    reason: String(parsed.reason || 'qwen vision decision').slice(0, 140),
+    checks: {
+      photograph: checks.photograph ?? null,
+      woman_prominent: checks.woman_prominent ?? null,
+      male_only: checks.male_only ?? null,
+      male_present: checks.male_present ?? null,
+      female_presenting_adult: checks.female_presenting_adult ?? null,
+      appears_over_50: checks.appears_over_50 ?? null,
+      feet_dominant: checks.feet_dominant ?? null,
+      logo_or_placeholder: checks.logo_or_placeholder ?? null
+    }
+  };
+}
+
 async function classify(payload) {
   const artist = payload.artist || {};
   const hard = textHardFilter(artist);
@@ -242,25 +354,59 @@ async function classify(payload) {
 
   const imageGrades = candidateVectors.map((vector, index) => gradeCandidate(vector, index, acceptedVectors, rejectedVectors));
   const final = finalDecision(imageGrades, acceptedVectors.length, rejectedVectors.length);
+  let qwen;
+  try {
+    qwen = await classifyWithOllamaVision({
+      artist,
+      candidateUrls,
+      siglipDecision: final,
+      imageGrades
+    });
+  } catch (error) {
+    const message = error.message || String(error);
+    if (/CUDA|PTX|Ollama HTTP 500|model/i.test(message)) {
+      ollamaVisionDisabled = true;
+      ollamaFailureReason = message.slice(0, 180);
+    }
+    qwen = {
+      decision: 'unsure',
+      confidence: 0.5,
+      reason: `qwen unavailable: ${message}`,
+      checks: {
+        photograph: null,
+        woman_prominent: null,
+        male_only: null,
+        male_present: null,
+        female_presenting_adult: null,
+        appears_over_50: null,
+        feet_dominant: null,
+        logo_or_placeholder: null
+      }
+    };
+  }
+
+  let combined = /^qwen unavailable:/i.test(qwen.reason || '') ? final : qwen;
+  if (qwen.decision === 'accept' && final.decision === 'reject' && Number(final.confidence || 0) >= 0.8) {
+    combined = { ...qwen, decision: 'unsure', confidence: 0.7, reason: 'qwen accepted but saved-taste model rejected' };
+  }
+  if (qwen.decision === 'accept' && final.decision === 'unsure' && Number(final.confidence || 0) >= 0.75) {
+    combined = { ...qwen, decision: 'unsure', confidence: 0.7, reason: 'qwen accepted but saved-taste model was unsure' };
+  }
+  if (qwen.checks?.male_present === true || qwen.checks?.male_only === true || qwen.checks?.appears_over_50 === true || qwen.checks?.feet_dominant === true) {
+    combined = { ...qwen, decision: 'reject', confidence: Math.max(Number(qwen.confidence || 0), 0.96) };
+  }
 
   return {
-    ...final,
-    model: MODEL,
+    ...combined,
+    model: `${MODEL} + ${OLLAMA_VISION_MODEL}`,
     examples: {
       accepted_images: acceptedVectors.length,
       rejected_images: rejectedVectors.length,
       cached_images: embeddingCache.size
     },
-    checks: {
-      photograph: null,
-      woman_prominent: null,
-      male_only: null,
-      male_present: null,
-      female_presenting_adult: final.decision === 'accept' ? true : null,
-      appears_over_50: null,
-      feet_dominant: null,
-      logo_or_placeholder: null
-    },
+    siglip_decision: final,
+    qwen_decision: qwen,
+    checks: combined.checks,
     image_grades: imageGrades
   };
 }
@@ -278,6 +424,10 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         app: 'pong-local-ai',
         model: MODEL,
+        vision_model: OLLAMA_VISION_MODEL,
+        ollama_ready: !ollamaVisionDisabled && await ollamaAvailable(),
+        ollama_disabled: ollamaVisionDisabled,
+        ollama_failure: ollamaFailureReason,
         ready: extractorReady,
         cached_images: embeddingCache.size
       });
@@ -300,4 +450,5 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`Pong local AI listening on http://${HOST}:${PORT}`);
   console.log(`Model: ${MODEL}`);
+  console.log(`Vision model: ${OLLAMA_VISION_MODEL} via ${OLLAMA_URL}`);
 });
