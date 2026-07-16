@@ -660,7 +660,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.19</div>
+  <div class="version-number">23.20</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3956,36 +3956,43 @@ function setActivePlaybackRangeForPasteEvent(index) {
 function getNextPasteEventPreviewCount() {
   if (!pasteEvents.length) return 0;
 
-  const nextLoadedIndex = getNextLoadedPasteEventIndex();
+  const nextLoadedIndex = getBestLoadedPasteEventIndex();
   const nextIndex = nextLoadedIndex >= 0
     ? nextLoadedIndex
     : ((currentPasteIndex >= 0 ? currentPasteIndex + 1 : 0) + pasteEvents.length) % pasteEvents.length;
   return Math.max(1, Number(pasteEvents[nextIndex]?.count || BATCH_SIZE));
 }
 
-function pasteEventHasLoadedVideos(event) {
-  if (!event || !Array.isArray(allVideoUrls) || !allVideoUrls.length) return false;
+function countLoadedVideosForPasteEvent(event) {
+  if (!event || !Array.isArray(allVideoUrls) || !allVideoUrls.length) return 0;
   const start = Number(event.startIndex);
   const count = Number(event.count);
-  if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) return false;
+  if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) return 0;
   const end = Math.min(allVideoUrls.length, Math.max(0, start) + count);
+  let loaded = 0;
   for (let index = Math.max(0, start); index < end; index++) {
-    if (allVideoUrls[index]) return true;
+    if (allVideoUrls[index]) loaded++;
   }
-  return false;
+  return loaded;
 }
 
-function getNextLoadedPasteEventIndex() {
+function getBestLoadedPasteEventIndex() {
   if (!Array.isArray(pasteEvents) || pasteEvents.length < 2) return -1;
   const startIndex = currentPasteIndex >= 0 ? currentPasteIndex : -1;
+  let bestIndex = -1;
+  let bestCount = 0;
 
   for (let offset = 1; offset <= pasteEvents.length; offset++) {
     const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
     if (index === currentPasteIndex) continue;
-    if (pasteEventHasLoadedVideos(pasteEvents[index])) return index;
+    const loaded = countLoadedVideosForPasteEvent(pasteEvents[index]);
+    if (loaded > bestCount) {
+      bestCount = loaded;
+      bestIndex = index;
+    }
   }
 
-  return -1;
+  return bestIndex;
 }
 
 function shouldNextBatchAdvanceSavedArtist() {
@@ -4002,7 +4009,7 @@ function navigateToNextPasteEvent(){
 
   syncCurrentPasteIndexFromVisibleVideo();
 
-  const nextLoadedIndex = getNextLoadedPasteEventIndex();
+  const nextLoadedIndex = getBestLoadedPasteEventIndex();
   setActivePlaybackRangeForPasteEvent(nextLoadedIndex >= 0 ? nextLoadedIndex : currentPasteIndex + 1);
   updatePasteNavigationButton();
   scheduleSessionSave(700);
