@@ -1,6 +1,8 @@
 import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { pipeline, RawImage, env } from '@xenova/transformers';
 
 const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
@@ -14,7 +16,15 @@ const QWEN_ACCEPT_EXAMPLES = Number(process.env.PONG_QWEN_ACCEPT_EXAMPLE_IMAGES 
 const QWEN_REJECT_EXAMPLES = Number(process.env.PONG_QWEN_REJECT_EXAMPLE_IMAGES || 0);
 const QWEN_CANDIDATE_IMAGES = 3;
 const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD || 40);
-const LEARNED_STORE_PATH = path.join(process.cwd(), '.pong-local-ai', 'learned-examples.json');
+const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
+const LEARNED_STORE_PATH = path.join(LOCAL_AI_DIR, 'learned-examples.json');
+const FINETUNE_DATASET_PATH = path.join(LOCAL_AI_DIR, 'finetune-dataset.json');
+const FINETUNE_JSONL_PATH = path.join(LOCAL_AI_DIR, 'qwen-lora-dataset.jsonl');
+const FINETUNE_STATUS_PATH = path.join(LOCAL_AI_DIR, 'finetune-status.json');
+const FINETUNE_IMAGE_DIR = path.join(LOCAL_AI_DIR, 'training-images');
+const FINETUNE_RUN_SCRIPT = path.join(process.cwd(), 'scripts', 'run-lora-train.ps1');
+const FINETUNE_AUTO_RUN = process.env.PONG_LORA_AUTOTRAIN !== '0';
+const FINETUNE_MAX_IMAGE_BYTES = Number(process.env.PONG_LORA_MAX_IMAGE_BYTES || 12 * 1024 * 1024);
 const MAX_LEARNED_RECORDS = 2000;
 
 env.allowLocalModels = false;
@@ -28,6 +38,7 @@ let ollamaFailureReason = '';
 const ollamaFailureByModel = new Map();
 const embeddingCache = new Map();
 let learnedStorePromise = null;
+let fineTuneProcess = null;
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -57,6 +68,23 @@ function readBody(req) {
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+async function readJsonFile(filePath, fallback) {
+  try {
+    return JSON.parse(await fs.readFile(filePath, 'utf8'));
+  } catch (_) {
+    return fallback;
+  }
+}
+
+async function writeJsonFile(filePath, value) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(value, null, 2), 'utf8');
 }
 
 async function getExtractor() {
@@ -127,6 +155,27 @@ function fetchImageBase64(rawUrl) {
 async function fetchImagesBase64(urls = []) {
   const settled = await Promise.allSettled(urls.map(fetchImageBase64));
   return settled.filter(item => item.status === 'fulfilled').map(item => item.value);
+}
+
+async function fetchImageBuffer(rawUrl) {
+  const url = normalizeUrl(rawUrl);
+  if (!url) throw new Error('bad image url');
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 PongLocalAI/1.0',
+      'Referer': 'https://coomerfans.com/'
+    }
+  });
+  if (!response.ok) throw new Error(`image HTTP ${response.status}`);
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!buffer.length) throw new Error('empty image');
+  if (buffer.length > FINETUNE_MAX_IMAGE_BYTES) {
+    throw new Error(`image too large: ${buffer.length} bytes`);
+  }
+  return {
+    buffer,
+    contentType: response.headers.get('content-type') || 'application/octet-stream'
+  };
 }
 
 function embedImage(rawUrl) {
@@ -283,6 +332,256 @@ function learnedVectors(store, label) {
   return out;
 }
 
+function labelInstruction(record) {
+  if (record.label === 'accept') {
+    return 'Return accept for this artist. This is a user-saved positive preference example.';
+  }
+
+  const reason = String(record.rejectReasonLabel || record.rejectReason || '').trim();
+  if (/trans/i.test(reason)) {
+    return 'Return reject for this artist because the user marked a text/URL hard-filter violation. Do not infer sensitive status from appearance.';
+  }
+  if (/male/i.test(reason)) {
+    return 'Return reject for this artist because the user marked a visible male-presenting hard-filter violation.';
+  }
+  if (/fat|overweight/i.test(reason)) {
+    return 'Return reject for this artist because the user marked a visual preference mismatch. Do not mention health or medical status.';
+  }
+  if (/ugly/i.test(reason)) {
+    return 'Return reject for this artist because the user marked a visual preference mismatch.';
+  }
+  return 'Return reject for this artist. This is a user red-X negative preference example.';
+}
+
+function assistantDecision(record) {
+  return JSON.stringify({
+    decision: record.label === 'accept' ? 'accept' : 'reject',
+    confidence: 1,
+    reason: record.label === 'accept'
+      ? 'user saved accepted artist'
+      : `user rejected artist${record.rejectReasonLabel ? `: ${record.rejectReasonLabel}` : ''}`,
+    checks: {
+      photograph: null,
+      woman_prominent: null,
+      male_only: null,
+      male_present: null,
+      female_presenting_adult: null,
+      appears_over_50: null,
+      feet_dominant: null,
+      logo_or_placeholder: null
+    }
+  });
+}
+
+async function loadFineTuneDataset() {
+  return readJsonFile(FINETUNE_DATASET_PATH, { version: 1, records: [] })
+    .then(dataset => ({
+      version: 1,
+      updatedAt: dataset.updatedAt || '',
+      records: Array.isArray(dataset.records) ? dataset.records : []
+    }));
+}
+
+async function saveFineTuneDataset(dataset) {
+  const clean = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    records: (dataset.records || []).slice(0, MAX_LEARNED_RECORDS)
+  };
+  await writeJsonFile(FINETUNE_DATASET_PATH, clean);
+  const lines = clean.records.map(record => JSON.stringify({
+    id: record.id,
+    artistUrl: record.artistUrl,
+    artistName: record.artistName,
+    label: record.label,
+    rejectReason: record.rejectReason,
+    rejectReasonLabel: record.rejectReasonLabel,
+    images: record.images,
+    messages: [
+      {
+        role: 'system',
+        content: 'You are a strict visual preference classifier. Follow hard filters first. Use Trans only as a text/URL clue, never as appearance inference. Do not mention medical status.'
+      },
+      {
+        role: 'user',
+        content: [
+          ...record.images.map(image => ({ type: 'image', image: path.resolve(LOCAL_AI_DIR, image.path) })),
+          { type: 'text', text: `${labelInstruction(record)}\nClassify this saved training artist using the same Random 40 output JSON schema.` }
+        ]
+      },
+      { role: 'assistant', content: assistantDecision(record) }
+    ]
+  }));
+  await fs.writeFile(FINETUNE_JSONL_PATH, lines.join('\n') + (lines.length ? '\n' : ''), 'utf8');
+  return clean;
+}
+
+async function writeFineTuneStatus(patch) {
+  const current = await readJsonFile(FINETUNE_STATUS_PATH, { status: 'idle' });
+  const next = {
+    ...current,
+    ...patch,
+    updatedAt: new Date().toISOString()
+  };
+  await writeJsonFile(FINETUNE_STATUS_PATH, next);
+  return next;
+}
+
+async function storeFineTuneImages(artistUrl, imageUrls) {
+  await fs.mkdir(FINETUNE_IMAGE_DIR, { recursive: true });
+  const stored = [];
+  const unique = [...new Set(imageUrls || [])].filter(Boolean).slice(0, LEARN_IMAGES_PER_RECORD);
+
+  for (const rawUrl of unique) {
+    try {
+      const url = normalizeUrl(rawUrl, artistUrl || undefined);
+      const urlHash = sha256(url).slice(0, 32);
+      const fileName = `${urlHash}.imgdata`;
+      const relativePath = path.join('training-images', fileName).replace(/\\/g, '/');
+      const filePath = path.join(LOCAL_AI_DIR, relativePath);
+
+      let buffer = null;
+      let contentType = 'application/octet-stream';
+      try {
+        const existing = await fs.stat(filePath);
+        if (existing.size > 0) {
+          stored.push({ url, path: relativePath, contentType, bytes: existing.size, sha256: urlHash });
+          continue;
+        }
+      } catch (_) {}
+
+      const fetched = await fetchImageBuffer(url);
+      buffer = fetched.buffer;
+      contentType = fetched.contentType;
+      await fs.writeFile(filePath, buffer);
+      stored.push({
+        url,
+        path: relativePath,
+        contentType,
+        bytes: buffer.length,
+        sha256: sha256(buffer)
+      });
+    } catch (_) {}
+  }
+
+  return stored;
+}
+
+async function addFineTuneExample({ artistUrl, artistName, label, rejectReason = '', rejectReasonLabel = '', imageUrls = [] }) {
+  const images = await storeFineTuneImages(artistUrl, imageUrls);
+  if (!images.length) return { saved: false, images: 0 };
+
+  const dataset = await loadFineTuneDataset();
+  const id = sha256(`${artistUrl}|${label}`).slice(0, 24);
+  const records = (dataset.records || []).filter(record => normalizeArtistUrl(record.artistUrl || '') !== artistUrl);
+  records.unshift({
+    id,
+    artistUrl,
+    artistName: String(artistName || '').slice(0, 120),
+    label,
+    rejectReason: String(rejectReason || '').slice(0, 40),
+    rejectReasonLabel: String(rejectReasonLabel || '').slice(0, 80),
+    learnedAt: new Date().toISOString(),
+    promptVersion: 'random40-lora-v1',
+    images
+  });
+
+  const saved = await saveFineTuneDataset({ ...dataset, records });
+  await queueFineTuneRun(`learn:${label}`);
+  return {
+    saved: true,
+    images: images.length,
+    records: saved.records.length,
+    datasetPath: FINETUNE_DATASET_PATH,
+    jsonlPath: FINETUNE_JSONL_PATH
+  };
+}
+
+async function rebuildFineTuneDatasetFromLearnedStore() {
+  const store = await loadLearnedStore();
+  const records = [];
+
+  for (const learned of store.records || []) {
+    const artistUrl = normalizeArtistUrl(learned.artistUrl || '');
+    if (!artistUrl || !['accept', 'reject'].includes(learned.label)) continue;
+    const imageUrls = (learned.embeddings || []).map(item => item?.url).filter(Boolean);
+    const images = await storeFineTuneImages(artistUrl, imageUrls);
+    if (!images.length) continue;
+    records.push({
+      id: sha256(`${artistUrl}|${learned.label}`).slice(0, 24),
+      artistUrl,
+      artistName: String(learned.artistName || '').slice(0, 120),
+      label: learned.label,
+      rejectReason: String(learned.rejectReason || '').slice(0, 40),
+      rejectReasonLabel: String(learned.rejectReasonLabel || '').slice(0, 80),
+      learnedAt: learned.learnedAt || new Date().toISOString(),
+      promptVersion: 'random40-lora-v1',
+      images
+    });
+  }
+
+  const saved = await saveFineTuneDataset({ version: 1, records });
+  await writeFineTuneStatus({
+    status: saved.records.length ? 'queued' : 'no_data',
+    message: saved.records.length
+      ? `Rebuilt LoRA dataset from ${saved.records.length} learned records.`
+      : 'No learned records with image URLs are available for LoRA.',
+    datasetRows: saved.records.length,
+    datasetPath: FINETUNE_DATASET_PATH,
+    jsonlPath: FINETUNE_JSONL_PATH
+  });
+  return saved;
+}
+
+async function queueFineTuneRun(trigger = 'manual') {
+  await writeFineTuneStatus({
+    status: fineTuneProcess ? 'queued' : 'queued',
+    trigger,
+    queuedAt: new Date().toISOString(),
+    datasetPath: FINETUNE_DATASET_PATH,
+    jsonlPath: FINETUNE_JSONL_PATH
+  });
+
+  if (!FINETUNE_AUTO_RUN || fineTuneProcess) return false;
+
+  try {
+    await fs.access(FINETUNE_RUN_SCRIPT);
+  } catch (_) {
+    await writeFineTuneStatus({
+      status: 'blocked',
+      message: 'LoRA runner script is missing.',
+      trigger
+    });
+    return false;
+  }
+
+  fineTuneProcess = spawn('powershell.exe', [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    FINETUNE_RUN_SCRIPT,
+    '-RepoRoot',
+    process.cwd()
+  ], {
+    cwd: process.cwd(),
+    windowsHide: true,
+    detached: false,
+    stdio: 'ignore'
+  });
+
+  fineTuneProcess.once('exit', code => {
+    fineTuneProcess = null;
+    writeFineTuneStatus({
+      status: code === 0 ? 'complete' : 'blocked',
+      exitCode: code,
+      completedAt: new Date().toISOString()
+    }).catch(() => {});
+  });
+
+  return true;
+}
+
 async function learn(payload) {
   const label = payload.label === 'accept' ? 'accept' : payload.label === 'reject' ? 'reject' : '';
   if (!label) throw new Error('label must be accept or reject');
@@ -313,13 +612,26 @@ async function learn(payload) {
   });
 
   const saved = await saveLearnedStore({ ...store, records });
+  const fineTune = await addFineTuneExample({
+    artistUrl,
+    artistName: String(artist.artistName || '').slice(0, 120),
+    label,
+    rejectReason: String(payload.rejectReason || '').slice(0, 40),
+    rejectReasonLabel: String(payload.rejectReasonLabel || '').slice(0, 80),
+    imageUrls
+  }).catch(error => ({
+    saved: false,
+    error: error.message || String(error)
+  }));
+
   return {
     ok: true,
     label,
     artistUrl,
     embeddings: embeddings.length,
     accepted_records: saved.records.filter(record => record.label === 'accept').length,
-    rejected_records: saved.records.filter(record => record.label === 'reject').length
+    rejected_records: saved.records.filter(record => record.label === 'reject').length,
+    finetune: fineTune
   };
 }
 
@@ -713,6 +1025,7 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     if (req.method === 'GET' && url.pathname === '/health') {
       const learnedStore = await loadLearnedStore();
+      const fineTuneStatus = await readJsonFile(FINETUNE_STATUS_PATH, { status: 'idle' });
       json(res, 200, {
         ok: true,
         app: 'pong-local-ai',
@@ -726,7 +1039,48 @@ const server = http.createServer(async (req, res) => {
         ready: extractorReady,
         cached_images: embeddingCache.size,
         learned_accept_records: learnedStore.records.filter(record => record.label === 'accept').length,
-        learned_reject_records: learnedStore.records.filter(record => record.label === 'reject').length
+        learned_reject_records: learnedStore.records.filter(record => record.label === 'reject').length,
+        finetune: {
+          status: fineTuneProcess ? 'running' : fineTuneStatus.status || 'idle',
+          message: fineTuneStatus.message || '',
+          updatedAt: fineTuneStatus.updatedAt || ''
+        }
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/finetune/status') {
+      const fineTuneStatus = await readJsonFile(FINETUNE_STATUS_PATH, { status: 'idle' });
+      json(res, 200, {
+        ok: true,
+        running: Boolean(fineTuneProcess),
+        ...fineTuneStatus
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/finetune/run') {
+      const started = await queueFineTuneRun('manual');
+      const fineTuneStatus = await readJsonFile(FINETUNE_STATUS_PATH, { status: 'queued' });
+      json(res, 200, {
+        ok: true,
+        started,
+        running: Boolean(fineTuneProcess),
+        ...fineTuneStatus
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/finetune/rebuild') {
+      const dataset = await rebuildFineTuneDatasetFromLearnedStore();
+      const started = await queueFineTuneRun('rebuild');
+      const fineTuneStatus = await readJsonFile(FINETUNE_STATUS_PATH, { status: 'queued' });
+      json(res, 200, {
+        ok: true,
+        records: dataset.records.length,
+        started,
+        running: Boolean(fineTuneProcess),
+        ...fineTuneStatus
       });
       return;
     }
