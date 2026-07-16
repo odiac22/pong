@@ -660,7 +660,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.21</div>
+  <div class="version-number">23.22</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5718,9 +5718,10 @@ const RANDOM40_PASSWORD = '22';
 const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
-const RANDOM40_AI_CONCURRENCY = 20;
-const RANDOM40_POST_CONCURRENCY = 8;
-const RANDOM40_PAGE_BATCH_SIZE = 4;
+const RANDOM40_AI_CONCURRENCY = 28;
+const RANDOM40_POST_CONCURRENCY = 14;
+const RANDOM40_PAGE_BATCH_SIZE = 8;
+const RANDOM40_LISTING_PAGE_BATCH_SIZE = 4;
 const RANDOM40_MAX_ARTIST_PAGES = 40;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
 const RANDOM40_MODEL = 'gpt-4.1-mini';
@@ -6648,28 +6649,54 @@ async function startRandom40() {
 
   try {
     while (!random40State.stop && random40State.accepted < RANDOM40_TARGET_ACCEPTED) {
-      let page = random40RandomPage();
-      while (random40State.seenPages.has(page)) page = random40RandomPage();
-      random40State.seenPages.add(page);
-      const pageUrl = random40PageUrl(page);
-      updateRandom40Progress({ detail: `Loading page ${page}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+      const pages = [];
+      let attempts = 0;
+
+      while (pages.length < RANDOM40_LISTING_PAGE_BATCH_SIZE && attempts < RANDOM40_LISTING_PAGE_BATCH_SIZE * 8) {
+        const page = random40RandomPage();
+        attempts++;
+        if (random40State.seenPages.has(page)) continue;
+        random40State.seenPages.add(page);
+        pages.push(page);
+      }
+
+      if (!pages.length) continue;
+
+      updateRandom40Progress({ detail: `Loading pages ${pages.join(', ')}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
 
       let artists = [];
       try {
-        const doc = await random40FetchDoc(pageUrl, { timeoutMs: 22000 });
-        artists = shuffleInPlace(random40FindArtistsOnListing(doc, pageUrl))
-          .filter(artist =>
-            artist.imageUrl &&
-            !random40State.seenArtists.has(artist.artistUrl) &&
-            !random40State.rejectedArtistUrls.has(artist.artistUrl)
-          );
+        const pageResults = await Promise.all(pages.map(page => {
+          const pageUrl = random40PageUrl(page);
+          return random40FetchDoc(pageUrl, { timeoutMs: 22000 })
+            .then(doc => ({ page, pageUrl, doc }))
+            .catch(error => ({ page, pageUrl, error }));
+        }));
+        const byArtist = new Map();
+
+        pageResults.forEach(result => {
+          random40State.pages++;
+          if (result.error || !result.doc) return;
+          random40FindArtistsOnListing(result.doc, result.pageUrl).forEach(artist => {
+            if (!artist.imageUrl) return;
+            if (random40State.seenArtists.has(artist.artistUrl)) return;
+            if (random40State.rejectedArtistUrls.has(artist.artistUrl)) return;
+            byArtist.set(artist.artistUrl, artist);
+          });
+        });
+
+        artists = shuffleInPlace([...byArtist.values()]);
       } catch (err) {
-        random40State.pages++;
-        updateRandom40Progress({ detail: `Page ${page} failed: ${err.message}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+        random40State.pages += pages.length;
+        updateRandom40Progress({ detail: `Page batch failed: ${err.message}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
         continue;
       }
 
-      random40State.pages++;
+      if (!artists.length) {
+        updateRandom40Progress({ detail: `No usable artists on ${pages.length} pages`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        continue;
+      }
+
       await random40Pool(artists, RANDOM40_AI_CONCURRENCY, async artist => {
         if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
         random40State.seenArtists.add(artist.artistUrl);
