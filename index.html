@@ -656,7 +656,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.07</div>
+  <div class="version-number">23.08</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3974,11 +3974,14 @@ function navigateToNextPasteEvent(){
   updatePasteNavigationButton();
   scheduleSessionSave(700);
 
+  window.PongFastNextBatchOnce = true;
+  deckCurrentIndex = 0;
+  deckRestoreIndex = 0;
   videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
   setTimeout(()=>{
     loadNextBatch(0);
     updatePasteNavigationButton();
-  },120);
+  },0);
 }
 
 function resetPasteEvents(){
@@ -6108,6 +6111,7 @@ function random40BuildImportPayload(entries, globalStartIndex = 0) {
       urls.push(entry.videoUrl);
       metadata.push({
         ...entry,
+        source: 'random40',
         artistDisplayName: entry.artistDisplayName || entry.artistName || random40ArtistNameFromUrl(entry.artistUrl)
       });
     });
@@ -6116,7 +6120,7 @@ function random40BuildImportPayload(entries, globalStartIndex = 0) {
       count: urls.length - start,
       artistKey: first.artistKey || first.artistUrl,
       bundleKey: `random40:${first.artistKey || first.artistUrl}`,
-      source: 'coomerfans',
+      source: 'random40',
       artistUrl: first.artistUrl,
       postUrl: first.artistUrl,
       artistDisplayName: first.artistDisplayName || first.artistName || '',
@@ -6155,6 +6159,7 @@ function random40PublishEntries(entries) {
     pasteEvents.push(...payload.events);
     window.PongLoadedSavedMode = 'erome';
     updatePasteNavigationButton();
+    updateViewedRemainingCounter();
     scheduleSessionSave(700);
   }
 
