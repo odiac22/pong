@@ -1,14 +1,16 @@
 import http from 'node:http';
+import path from 'node:path';
 import { pipeline, RawImage, env } from '@xenova/transformers';
 
 const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
 const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
-const MODEL = process.env.PONG_LOCAL_IMAGE_MODEL || 'Xenova/clip-vit-base-patch32';
+const MODEL = process.env.PONG_LOCAL_IMAGE_MODEL || 'Xenova/siglip-base-patch16-224';
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
 
 env.allowLocalModels = false;
-env.useBrowserCache = true;
+env.useBrowserCache = false;
+env.cacheDir = path.join(process.cwd(), '.cache', 'transformers');
 
 let extractorPromise = null;
 let extractorReady = false;
