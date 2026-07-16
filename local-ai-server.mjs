@@ -741,4 +741,7 @@ server.listen(PORT, HOST, () => {
   console.log(`Pong local AI listening on http://${HOST}:${PORT}`);
   console.log(`Model: ${MODEL}`);
   console.log(`Vision model: ${OLLAMA_VISION_MODEL} via ${OLLAMA_URL}`);
+  getExtractor()
+    .then(() => console.log('Embedding model ready'))
+    .catch(error => console.error(`Embedding model failed to preload: ${error.message || error}`));
 });
