@@ -436,10 +436,11 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
   if (previousFailure) {
     throw new Error(`Ollama vision disabled for ${selectedVisionModel}: ${previousFailure}`);
   }
+  const useExampleImages = !/^qwen3-vl\b/i.test(selectedVisionModel);
   const [candidateImages, acceptedImages, rejectedImages] = await Promise.all([
     fetchImagesBase64(candidateUrls.slice(0, QWEN_CANDIDATE_IMAGES)),
-    fetchImagesBase64(acceptedExampleUrls.slice(0, QWEN_ACCEPT_EXAMPLES)),
-    fetchImagesBase64(rejectedExampleUrls.slice(0, QWEN_REJECT_EXAMPLES))
+    useExampleImages ? fetchImagesBase64(acceptedExampleUrls.slice(0, QWEN_ACCEPT_EXAMPLES)) : Promise.resolve([]),
+    useExampleImages ? fetchImagesBase64(rejectedExampleUrls.slice(0, QWEN_REJECT_EXAMPLES)) : Promise.resolve([])
   ]);
   const candidateCount = candidateImages.length;
   const acceptedStart = candidateImages.length + 1;
@@ -492,6 +493,7 @@ async function classifyWithOllamaVision({ artist, candidateUrls, siglipDecision,
       think: false,
       options: {
         temperature: 0,
+        num_ctx: Number(process.env.PONG_OLLAMA_NUM_CTX || 8192),
         num_predict: 220
       }
     })
