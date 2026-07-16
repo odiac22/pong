@@ -659,7 +659,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.12</div>
+  <div class="version-number">23.13</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6263,7 +6263,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         'Do not accept from one favorable thumbnail if the additional profile/post images conflict with the hard rules or user preference examples. ' +
         'Reject blank/logo/placeholder/anime/artwork images, images where feet are the main subject, ' +
         'images with any visible male-presenting person, images with no clearly female-presenting adult, ' +
-        'and images where the person appears underage or age is unclear. Accept only when the profile clearly shows ' +
+        'images where the person appears underage or age is unclear, and images where the artist appears over 50. Accept only when the profile clearly shows ' +
         'a female-presenting adult and matches at least one preferred style: slim presentation, fit or athletic presentation, ' +
         'conventionally pretty or attractive styling, or youthful adult presentation. Do not diagnose, label, or mention body weight or health status. ' +
         'Return unsure only for unclear crops, tiny/blurred images, weak evidence, or genuinely conflicting evidence.'
@@ -6292,7 +6292,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
             text:
               'You are a decisive image triage classifier. Return only the requested structured output. ' +
               'Do not identify the person. Do not infer ethnicity, sexuality, medical conditions, or weight status. ' +
-              'Reject any male-presenting person, male-only image, clearly non-photographic image, placeholder, feet-dominant image, or non-adult-presenting profile image. ' +
+              'Reject any male-presenting person, male-only image, clearly non-photographic image, placeholder, feet-dominant image, non-adult-presenting profile image, or artist who appears over 50. ' +
               'Treat user-saved accepted examples as the strongest positive preference signal after hard rejection rules.'
           }]
         },
@@ -6319,10 +6319,11 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
                   male_only: { type: ['boolean', 'null'] },
                   male_present: { type: ['boolean', 'null'] },
                   female_presenting_adult: { type: ['boolean', 'null'] },
+                  appears_over_50: { type: ['boolean', 'null'] },
                   feet_dominant: { type: ['boolean', 'null'] },
                   logo_or_placeholder: { type: ['boolean', 'null'] }
                 },
-                required: ['photograph', 'woman_prominent', 'male_only', 'male_present', 'female_presenting_adult', 'feet_dominant', 'logo_or_placeholder']
+                required: ['photograph', 'woman_prominent', 'male_only', 'male_present', 'female_presenting_adult', 'appears_over_50', 'feet_dominant', 'logo_or_placeholder']
               }
             },
             required: ['decision', 'confidence', 'reason', 'checks']
@@ -6344,6 +6345,9 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
   }
   if (parsed.decision === 'accept' && checks.female_presenting_adult !== true) {
     return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.95), reason: 'no clearly female-presenting adult' };
+  }
+  if (checks.appears_over_50 === true) {
+    return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.96), reason: 'appears over age limit' };
   }
   return { ...parsed, reason: String(parsed.reason || '').slice(0, 120) };
 }
