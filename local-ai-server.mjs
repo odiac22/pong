@@ -9,7 +9,7 @@ const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
 const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
 const MODEL = process.env.PONG_LOCAL_IMAGE_MODEL || 'Xenova/siglip-base-patch16-224';
 const OLLAMA_URL = (process.env.PONG_OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
-const OLLAMA_VISION_MODEL = process.env.PONG_OLLAMA_VISION_MODEL || 'qwen2.5vl:latest';
+const OLLAMA_VISION_MODEL = process.env.PONG_OLLAMA_VISION_MODEL || 'qwen3-vl:4b';
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
 const QWEN_ACCEPT_EXAMPLES = Number(process.env.PONG_QWEN_ACCEPT_EXAMPLE_IMAGES || 0);
@@ -30,6 +30,7 @@ const FINETUNE_AUTO_RUN = process.env.PONG_LORA_AUTOTRAIN !== '0';
 const FINETUNE_MAX_IMAGE_BYTES = Number(process.env.PONG_LORA_MAX_IMAGE_BYTES || 12 * 1024 * 1024);
 const FINETUNE_AUTO_IDLE_MS = Math.max(30000, Number(process.env.PONG_LORA_AUTOTRAIN_IDLE_MS || 180000));
 const OLLAMA_VISION_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.PONG_OLLAMA_VISION_CONCURRENCY || 3)));
+const LOCAL_LORA_FAST_TIMEOUT_MS = Math.max(1500, Number(process.env.PONG_LOCAL_LORA_FAST_TIMEOUT_MS || 3000));
 const MAX_LEARNED_RECORDS = 2000;
 
 env.allowLocalModels = false;
@@ -1192,7 +1193,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
   };
 }
 
-async function classifyWithLoraVision({ artist, candidateUrls, siglipDecision, imageGrades, rejectionSummary = '' }) {
+async function classifyWithLoraVision({ artist, candidateUrls, siglipDecision, imageGrades, rejectionSummary = '', timeoutMs = Number(process.env.PONG_LORA_CLASSIFY_TIMEOUT_MS || 90000) }) {
   const health = await ensureLoraInferenceService();
   if (!health?.ready) {
     throw new Error('LoRA inference service is not ready');
@@ -1209,7 +1210,7 @@ async function classifyWithLoraVision({ artist, candidateUrls, siglipDecision, i
       rejectionSummary,
       promptVersion: 'random40-lora-v1'
     })
-  }, Number(process.env.PONG_LORA_CLASSIFY_TIMEOUT_MS || 90000));
+  }, timeoutMs);
 }
 
 async function classifyInner(payload) {
@@ -1333,6 +1334,42 @@ async function classifyInner(payload) {
       }
     }
   } else {
+    const fastRandom40Local =
+      /^pong-random40/i.test(String(payload.app || '')) &&
+      process.env.PONG_LOCAL_RANDOM40_USE_LORA !== '1';
+
+    if (fastRandom40Local) {
+      try {
+        qwen = await classifyWithOllamaVision({
+          artist,
+          candidateUrls,
+          siglipDecision: final,
+          imageGrades,
+          acceptedExampleUrls: [],
+          rejectedExampleUrls: [],
+          rejectionSummary: '',
+          visionModel,
+        });
+        qwen.source = 'ollama_primary';
+      } catch (error) {
+        qwen = {
+          decision: 'unsure',
+          confidence: 0.5,
+          source: 'qwen_lora_unavailable',
+          reason: `qwen unavailable: ${error.message || String(error)}`,
+          checks: {
+            photograph: null,
+            woman_prominent: null,
+            male_only: null,
+            male_present: null,
+            female_presenting_adult: null,
+            appears_over_50: null,
+            feet_dominant: null,
+            logo_or_placeholder: null
+          }
+        };
+      }
+    } else {
     try {
       qwen = await classifyWithLoraVision({
         artist,
@@ -1340,6 +1377,7 @@ async function classifyInner(payload) {
         siglipDecision: final,
         imageGrades,
         rejectionSummary,
+        timeoutMs: LOCAL_LORA_FAST_TIMEOUT_MS,
       });
       qwen.source = qwen.source || 'qwen_lora';
 
@@ -1366,31 +1404,52 @@ async function classifyInner(payload) {
       }
     } catch (error) {
       const loraMessage = error.message || String(error);
-      qwen = {
-        decision: 'unsure',
-        confidence: 0.5,
-        source: 'qwen_lora_unavailable',
-        reason: `qwen unavailable: lora ${loraMessage}`,
-        checks: {
-          photograph: null,
-          woman_prominent: null,
-          male_only: null,
-          male_present: null,
-          female_presenting_adult: null,
-          appears_over_50: null,
-          feet_dominant: null,
-          logo_or_placeholder: null
-        }
-      };
+      try {
+        const fallback = await classifyWithOllamaVision({
+          artist,
+          candidateUrls,
+          siglipDecision: final,
+          imageGrades,
+          acceptedExampleUrls: [],
+          rejectedExampleUrls: [],
+          rejectionSummary: '',
+          visionModel,
+        });
+        qwen = {
+          ...fallback,
+          source: 'ollama_fallback',
+          lora_error: loraMessage
+        };
+      } catch (fallbackError) {
+        qwen = {
+          decision: 'unsure',
+          confidence: 0.5,
+          source: 'qwen_lora_unavailable',
+          reason: `qwen unavailable: lora ${loraMessage}; fallback ${fallbackError.message || String(fallbackError)}`,
+          checks: {
+            photograph: null,
+            woman_prominent: null,
+            male_only: null,
+            male_present: null,
+            female_presenting_adult: null,
+            appears_over_50: null,
+            feet_dominant: null,
+            logo_or_placeholder: null
+          }
+        };
+      }
+    }
     }
   }
 
   let combined;
 
-  if (localVariant === 'local2') {
+  if (localVariant === 'local2' || localVariant === 'local') {
     const hardVeto = local2HardVeto(qwen);
     if (/^qwen unavailable:/i.test(qwen.reason || '') || qwen.source === 'qwen_lora_unavailable') {
       combined = { ...qwen, decision: 'reject', confidence: 0.75, reason: 'local visual hard check unavailable' };
+    } else if (!hasConcreteVisionChecks(qwen)) {
+      combined = { ...qwen, decision: 'reject', confidence: 0.75, reason: 'local visual hard check inconclusive' };
     } else if (hardVeto) {
       combined = {
         ...qwen,
