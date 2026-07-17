@@ -677,7 +677,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.64</div>
+  <div class="version-number">23.65</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6064,8 +6064,8 @@ const RANDOM40_PASSWORD = '22';
 const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
-const RANDOM40_AI_CONCURRENCY = 28;
-const RANDOM40_LOCAL_CONCURRENCY = 32;
+const RANDOM40_AI_CONCURRENCY = 18;
+const RANDOM40_LOCAL_CONCURRENCY = 18;
 const RANDOM40_POST_CONCURRENCY = 14;
 const RANDOM40_PAGE_BATCH_SIZE = 8;
 const RANDOM40_LISTING_PAGE_BATCH_SIZE = 4;
@@ -6083,13 +6083,13 @@ const RANDOM40_REJECT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_ACCEPT_CONFIDENCE = 0.9;
 const RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE = 0.6;
-const RANDOM40_MIN_SCREENED_IMAGES = 3;
-const RANDOM40_MAX_REVIEW_IMAGES = 3;
-const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 3;
-const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 2;
-const RANDOM40_LOCAL_MAX_REVIEW_IMAGES = 3;
-const RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST = 3;
-const RANDOM40_LOCAL_RANDOM_PROFILE_IMAGES_PER_ARTIST = 2;
+const RANDOM40_MIN_SCREENED_IMAGES = 2;
+const RANDOM40_MAX_REVIEW_IMAGES = 2;
+const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 2;
+const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 1;
+const RANDOM40_LOCAL_MAX_REVIEW_IMAGES = 2;
+const RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST = 2;
+const RANDOM40_LOCAL_RANDOM_PROFILE_IMAGES_PER_ARTIST = 1;
 const RANDOM40_MAX_ACCEPT_RECORDS = 160;
 const RANDOM40_MAX_ACCEPT_EXAMPLES = 2;
 const RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE = 3;
@@ -7108,6 +7108,53 @@ function random40FindArtistsOnListing(doc, pageUrl) {
   return [...found.values()];
 }
 
+function random40EmojiCount(text) {
+  try {
+    return (String(text || '').match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu) || []).length;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function random40SpamAdReason(artist) {
+  const text = String(`${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`);
+  const normalized = text
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, ' ')
+    .replace(/\s+/g, ' ');
+  if (!normalized.trim()) return '';
+
+  const artistSlug = random40ArtistNameFromUrl(artist.artistUrl || '').toLowerCase().replace(/[^a-z0-9_.-]+/g, '');
+  const mentionedHandles = [...text.matchAll(/(^|[\s([{:;,])@([a-z0-9_.-]{3,})/gi)]
+    .map(match => String(match[2] || '').toLowerCase())
+    .filter(handle => handle && handle !== artistSlug);
+  const uniqueOtherHandles = new Set(mentionedHandles);
+  const adTagCount = (normalized.match(/#\s*(?:ad|ads|advertisement|advertising|adverting|promo|promotion)\b/g) || []).length;
+  const vipPhraseCount = (normalized.match(/\b(?:free\s+vip\s+page|vip\s+page|free\s+page|free\s+trial|free\s+subscribe)\b/g) || []).length;
+  const promoPhraseCount = (normalized.match(/\b(?:write\s+to\s+her|text\s+her|dm\s+me|message\s+me|free\s+gift|online\s+now|subscribe\s+to\s+her|join\s+her|check\s+her|new\s+page|main\s+page)\b/g) || []).length;
+  const emojiCount = random40EmojiCount(text);
+  const emojiDense = emojiCount >= 80 && emojiCount / Math.max(text.length, 1) > 0.006;
+
+  let score = 0;
+  if (adTagCount >= 3) score += 2;
+  if (vipPhraseCount >= 3) score += 2;
+  if (promoPhraseCount >= 5) score += 1;
+  if (mentionedHandles.length >= 12 && uniqueOtherHandles.size >= 6) score += 2;
+  if (uniqueOtherHandles.size >= 4 && promoPhraseCount >= 2) score += 1;
+  if (emojiDense) score += 1;
+
+  if (score >= 3) {
+    const signals = [];
+    if (adTagCount >= 3) signals.push(`${adTagCount} ad tags`);
+    if (uniqueOtherHandles.size >= 6) signals.push(`${uniqueOtherHandles.size} promoted handles`);
+    if (vipPhraseCount >= 3) signals.push('VIP/free-page promo text');
+    if (emojiDense) signals.push('dense emoji promo text');
+    return `spam/ad page: ${signals.slice(0, 2).join(', ') || 'promotional post text'}`;
+  }
+  return '';
+}
+
 function random40HardFilter(artist) {
   const nameTokens = String(artist.artistName || '')
     .toLowerCase()
@@ -7135,7 +7182,41 @@ function random40HardFilter(artist) {
   for (const word of ['trans', 'ts', 'cd', 'trap', 'bbw', 'feet']) {
     if (tokens.has(word)) return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: `blocked word: ${word}` };
   }
+  const spamReason = random40SpamAdReason(artist);
+  if (spamReason) return { decision: 'reject', confidence: 1, source: 'hard_filter', reason: spamReason };
   return null;
+}
+
+function random40FindImageGradeHardReject(imageGrades) {
+  const grades = Array.isArray(imageGrades) ? imageGrades : [];
+  if (!grades.length) return null;
+
+  const confidentReason = grade => Number(grade?.confidence || 0) >= 0.82;
+  const reasonText = grade => String(grade?.reason || '').toLowerCase();
+  const immediate = grades.find(grade => {
+    const checks = grade?.checks || {};
+    const reason = reasonText(grade);
+    return checks.male_present === true ||
+      checks.appears_over_50 === true ||
+      checks.feet_dominant === true ||
+      (confidentReason(grade) && /\b(male|man visible|men visible|over 50|age limit|feet|foot|midsection|abdominal|abdomen|folds?|overhang|apron|visual preference mismatch)\b/i.test(reason));
+  });
+  if (immediate) return immediate;
+
+  const hasFemaleEvidence = grades.some(grade => grade?.checks?.female_presenting_adult === true);
+  const allNoFemaleEvidence = !hasFemaleEvidence && grades.every(grade => {
+    const checks = grade?.checks || {};
+    return checks.female_presenting_adult === false ||
+      (confidentReason(grade) && /\b(no clearly female|no female-presenting|no adult woman|without a female)\b/i.test(reasonText(grade)));
+  });
+  if (allNoFemaleEvidence) return grades[0];
+
+  const allLogoOrPlaceholder = grades.every(grade => {
+    const checks = grade?.checks || {};
+    return checks.logo_or_placeholder === true ||
+      (confidentReason(grade) && /\b(logo|placeholder|anime|artwork|non-photo|not a photograph)\b/i.test(reasonText(grade)));
+  });
+  return allLogoOrPlaceholder ? grades[0] : null;
 }
 
 let random40RejectCacheMemo = null;
@@ -7192,18 +7273,7 @@ function random40IsAcceptedDecision(decision) {
   const screenedImages = imageGrades.length;
   if (screenedImages < RANDOM40_MIN_SCREENED_IMAGES) return false;
 
-  const hardRejected = imageGrades.some(grade => {
-    const gradeChecks = grade?.checks || {};
-    const reason = String(grade?.reason || '').toLowerCase();
-    const confident = Number(grade?.confidence || 0) >= 0.82;
-    return gradeChecks.male_present === true ||
-      gradeChecks.female_presenting_adult === false ||
-      gradeChecks.appears_over_50 === true ||
-      gradeChecks.feet_dominant === true ||
-      gradeChecks.logo_or_placeholder === true ||
-      (confident && /\b(male|man visible|men visible|no clearly female|over 50|age limit|feet|foot|logo|placeholder|anime|artwork|non-photo|midsection|abdominal|abdomen|folds?|overhang|apron|visual preference mismatch)\b/i.test(reason));
-  });
-  if (hardRejected) return false;
+  if (random40FindImageGradeHardReject(imageGrades)) return false;
 
   const visualMatches = imageGrades.filter(grade => grade?.checks?.visual_preference_match === true).length;
   const acceptGrades = imageGrades.filter(grade => grade?.decision === 'accept').length;
@@ -7230,6 +7300,10 @@ function random40IsAcceptedDecision(decision) {
     checks.feet_dominant !== true &&
     checks.logo_or_placeholder !== true;
   if (!provenSafe) return false;
+
+  if (visionSource === 'local_preference') {
+    return acceptGrades >= 1 || visualMatches >= 1;
+  }
 
   return visualMatches >= requiredImageMajority && acceptGrades >= requiredImageMajority;
 }
@@ -7327,7 +7401,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
               'Reject pronounced midsection overhang, visible abdominal folds, or apron-like midsection as a visual preference mismatch; do not mention weight or health. Mild curves or a smooth/non-overhanging midsection are allowed. ' +
               'Reject when the whole image set lacks enough visible face or body evidence; face-only or body-only images are acceptable when enough evidence is visible. ' +
               'For blank/logo/non-photographic/unclear crops, judge the whole artist image set: one bad candidate does not reject the artist when another candidate is clear. ' +
-              'Artist-level accept requires most candidate image_grades to be accept and visual_preference_match true. ' +
+              'Artist-level accept requires the candidate image set overall to pass; one weak/unclear candidate does not reject the artist when another candidate provides clear acceptable evidence. ' +
               'Treat saved accepted examples as small positive nudges. Treat red-X rejected examples as stronger hard-negative corrections after hard rejection rules.'
           }]
         },
@@ -7403,17 +7477,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
   const parsed = JSON.parse(outputText);
   const checks = parsed.checks || {};
   const imageGrades = Array.isArray(parsed.image_grades) ? parsed.image_grades : [];
-  const hardRejectedGrade = imageGrades.find(grade => {
-    const gradeChecks = grade?.checks || {};
-    const reason = String(grade?.reason || '');
-    const confident = Number(grade?.confidence || 0) >= 0.82;
-    return gradeChecks.male_present === true ||
-      gradeChecks.female_presenting_adult === false ||
-      gradeChecks.appears_over_50 === true ||
-      gradeChecks.feet_dominant === true ||
-      gradeChecks.logo_or_placeholder === true ||
-      (confident && /\b(midsection|abdominal|abdomen|folds?|overhang|apron|visual preference mismatch)\b/i.test(reason));
-  });
+  const hardRejectedGrade = random40FindImageGradeHardReject(imageGrades);
   if (hardRejectedGrade) {
     return {
       ...parsed,
@@ -7439,7 +7503,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
     Number(grade.confidence || 0) >= 0.88 &&
     grade?.checks?.visual_preference_match === false
   ).length;
-  if (parsed.decision === 'accept' && imageGrades.length >= 2 && visualRejects >= Math.ceil(imageGrades.length / 2)) {
+  if (parsed.decision === 'accept' && imageGrades.length >= 2 && visualRejects >= Math.floor(imageGrades.length / 2) + 1) {
     return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.9), reason: 'random profile images did not match preference' };
   }
   const visualMatches = imageGrades.filter(grade => grade?.checks?.visual_preference_match === true).length;
@@ -7485,17 +7549,7 @@ async function random40ClassifyArtistLocal(artist, endpoint, imageUrls, options 
   const parsed = JSON.parse(text);
   const checks = parsed.checks || {};
   const imageGrades = Array.isArray(parsed.image_grades) ? parsed.image_grades : [];
-  const hardRejectedGrade = imageGrades.find(grade => {
-    const gradeChecks = grade?.checks || {};
-    const reason = String(grade?.reason || '');
-    const confident = Number(grade?.confidence || 0) >= 0.82;
-    return gradeChecks.male_present === true ||
-      gradeChecks.female_presenting_adult === false ||
-      gradeChecks.appears_over_50 === true ||
-      gradeChecks.feet_dominant === true ||
-      gradeChecks.logo_or_placeholder === true ||
-      (confident && /\b(midsection|abdominal|abdomen|folds?|overhang|apron|visual preference mismatch)\b/i.test(reason));
-  });
+  const hardRejectedGrade = random40FindImageGradeHardReject(imageGrades);
   if (hardRejectedGrade) {
     return {
       ...parsed,

@@ -14,7 +14,7 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
 const QWEN_ACCEPT_EXAMPLES = Number(process.env.PONG_QWEN_ACCEPT_EXAMPLE_IMAGES || 0);
 const QWEN_REJECT_EXAMPLES = Number(process.env.PONG_QWEN_REJECT_EXAMPLE_IMAGES || 0);
-const QWEN_CANDIDATE_IMAGES = Number(process.env.PONG_QWEN_CANDIDATE_IMAGES || 3);
+const QWEN_CANDIDATE_IMAGES = Number(process.env.PONG_QWEN_CANDIDATE_IMAGES || 2);
 const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD || 40);
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const LEARNED_STORE_PATH = path.join(LOCAL_AI_DIR, 'learned-examples.json');
@@ -268,6 +268,57 @@ function logistic(x) {
   return 1 / (1 + Math.exp(-x));
 }
 
+function emojiCount(text) {
+  try {
+    return (String(text || '').match(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu) || []).length;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function spamAdReason(artist = {}) {
+  const text = String(`${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`);
+  const normalized = text
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, ' ')
+    .replace(/\s+/g, ' ');
+  if (!normalized.trim()) return '';
+
+  const artistSlug = normalizeArtistUrl(artist.artistUrl || '')
+    .split('/')
+    .filter(Boolean)
+    .at(-1)?.toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, '') || '';
+  const mentionedHandles = [...text.matchAll(/(^|[\s([{:;,])@([a-z0-9_.-]{3,})/gi)]
+    .map(match => String(match[2] || '').toLowerCase())
+    .filter(handle => handle && handle !== artistSlug);
+  const uniqueOtherHandles = new Set(mentionedHandles);
+  const adTagCount = (normalized.match(/#\s*(?:ad|ads|advertisement|advertising|adverting|promo|promotion)\b/g) || []).length;
+  const vipPhraseCount = (normalized.match(/\b(?:free\s+vip\s+page|vip\s+page|free\s+page|free\s+trial|free\s+subscribe)\b/g) || []).length;
+  const promoPhraseCount = (normalized.match(/\b(?:write\s+to\s+her|text\s+her|dm\s+me|message\s+me|free\s+gift|online\s+now|subscribe\s+to\s+her|join\s+her|check\s+her|new\s+page|main\s+page)\b/g) || []).length;
+  const emojis = emojiCount(text);
+  const emojiDense = emojis >= 80 && emojis / Math.max(text.length, 1) > 0.006;
+
+  let score = 0;
+  if (adTagCount >= 3) score += 2;
+  if (vipPhraseCount >= 3) score += 2;
+  if (promoPhraseCount >= 5) score += 1;
+  if (mentionedHandles.length >= 12 && uniqueOtherHandles.size >= 6) score += 2;
+  if (uniqueOtherHandles.size >= 4 && promoPhraseCount >= 2) score += 1;
+  if (emojiDense) score += 1;
+
+  if (score >= 3) {
+    const signals = [];
+    if (adTagCount >= 3) signals.push(`${adTagCount} ad tags`);
+    if (uniqueOtherHandles.size >= 6) signals.push(`${uniqueOtherHandles.size} promoted handles`);
+    if (vipPhraseCount >= 3) signals.push('VIP/free-page promo text');
+    if (emojiDense) signals.push('dense emoji promo text');
+    return `spam/ad page: ${signals.slice(0, 2).join(', ') || 'promotional post text'}`;
+  }
+  return '';
+}
+
 function textHardFilter(artist = {}) {
   const nameTokens = String(artist.artistName || '')
     .toLowerCase()
@@ -290,6 +341,8 @@ function textHardFilter(artist = {}) {
   for (const word of ['trans', 'ts', 'cd', 'trap', 'bbw', 'feet']) {
     if (tokens.has(word)) return `blocked word: ${word}`;
   }
+  const spamReason = spamAdReason(artist);
+  if (spamReason) return spamReason;
   return '';
 }
 
