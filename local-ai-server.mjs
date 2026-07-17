@@ -25,6 +25,7 @@ const FINETUNE_IMAGE_DIR = path.join(LOCAL_AI_DIR, 'training-images');
 const FINETUNE_RUN_SCRIPT = path.join(process.cwd(), 'scripts', 'run-lora-train.ps1');
 const LORA_INFERENCE_RUN_SCRIPT = path.join(process.cwd(), 'scripts', 'run-lora-infer.ps1');
 const LORA_INFERENCE_URL = (process.env.PONG_LORA_INFERENCE_URL || 'http://127.0.0.1:8790').replace(/\/+$/, '');
+const PREFERENCE_AI_URL = (process.env.PONG_PREFERENCE_AI_URL || 'http://127.0.0.1:8791').replace(/\/+$/, '');
 const LORA_ADAPTER_DIR = path.join(LOCAL_AI_DIR, 'qwen-lora', 'latest');
 const FINETUNE_AUTO_RUN = process.env.PONG_LORA_AUTOTRAIN !== '0';
 const FINETUNE_MAX_IMAGE_BYTES = Number(process.env.PONG_LORA_MAX_IMAGE_BYTES || 12 * 1024 * 1024);
@@ -54,6 +55,8 @@ let activeClassifyRequests = 0;
 let lastClassifyAt = 0;
 let pendingFineTuneTimer = null;
 let pendingFineTuneTrigger = '';
+let preferenceAiLastHealth = null;
+let preferenceAiLastHealthAt = 0;
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -573,6 +576,30 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 3000) {
   }
 }
 
+async function preferenceAiHealth(force = false) {
+  if (!force && preferenceAiLastHealth && Date.now() - preferenceAiLastHealthAt < 4000) {
+    return preferenceAiLastHealth;
+  }
+  try {
+    const health = await fetchJsonWithTimeout(`${PREFERENCE_AI_URL}/health`, {}, 1800);
+    preferenceAiLastHealth = health?.ok ? health : null;
+  } catch (_) {
+    preferenceAiLastHealth = null;
+  }
+  preferenceAiLastHealthAt = Date.now();
+  return preferenceAiLastHealth;
+}
+
+async function preferenceAiRequest(pathname, payload, timeoutMs = 90000) {
+  const health = await preferenceAiHealth();
+  if (!health?.ready) throw new Error('personal preference service unavailable');
+  return fetchJsonWithTimeout(`${PREFERENCE_AI_URL}${pathname}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  }, timeoutMs);
+}
+
 async function loraInferenceHealth(timeoutMs = 2500) {
   return fetchJsonWithTimeout(`${LORA_INFERENCE_URL}/health?t=${Date.now()}`, {}, timeoutMs);
 }
@@ -824,6 +851,17 @@ async function learn(payload) {
   const imageUrls = [...new Set((payload.imageUrls || []).map(url => normalizeUrl(url, artistUrl || undefined)).filter(Boolean))].slice(0, LEARN_IMAGES_PER_RECORD);
   if (!artistUrl) throw new Error('artistUrl is required');
   if (!imageUrls.length) throw new Error('at least one imageUrl is required');
+
+  try {
+    return await preferenceAiRequest('/learn', {
+      ...payload,
+      label,
+      artist: { ...artist, artistUrl },
+      imageUrls
+    }, 240000);
+  } catch (_) {
+    // Keep the original embedding/LoRA learner as an offline fallback.
+  }
 
   const embeddingResults = await Promise.allSettled(
     imageUrls.map(async url => ({ url, vector: await embedImage(url) }))
@@ -1397,8 +1435,21 @@ async function classifyInner(payload) {
     };
   }
 
-  const candidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))].slice(0, QWEN_CANDIDATE_IMAGES);
-  if (!candidateUrls.length) throw new Error('No candidate image URLs supplied.');
+  const personalCandidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))].slice(0, 4);
+  const candidateUrls = personalCandidateUrls.slice(0, QWEN_CANDIDATE_IMAGES);
+  if (!personalCandidateUrls.length) throw new Error('No candidate image URLs supplied.');
+
+  if (localVariant === 'local' || localVariant === 'local2') {
+    try {
+      return await preferenceAiRequest('/classify', {
+        ...payload,
+        localVariant,
+        candidateImageUrls: personalCandidateUrls
+      }, payload.hardCheckOnly ? 90000 : 120000);
+    } catch (_) {
+      // Continue through the previous local stack while v2 starts or downloads.
+    }
+  }
 
   if (payload.hardCheckOnly) {
     const qwen = await classifyWithOllamaVision({
@@ -1762,7 +1813,8 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     if (req.method === 'GET' && url.pathname === '/health') {
-      const learnedStore = await loadLearnedStore();
+      const preferenceAi = await preferenceAiHealth(true);
+      const learnedStore = preferenceAi ? { records: [] } : await loadLearnedStore();
       const fineTuneStatus = await readJsonFile(FINETUNE_STATUS_PATH, { status: 'idle' });
       const adapterPresent = await loraAdapterExists();
       let adapterHealth = null;
@@ -1784,11 +1836,29 @@ const server = http.createServer(async (req, res) => {
           queued: ollamaVisionQueue.length,
           concurrency: OLLAMA_VISION_CONCURRENCY
         },
-        ready: extractorReady,
+        ready: Boolean(preferenceAi?.ready || extractorReady),
         cached_images: embeddingCache.size,
-        learned_accept_records: learnedStore.records.filter(record => record.label === 'accept').length,
-        learned_reject_records: learnedStore.records.filter(record => record.label === 'reject').length,
-        finetune: {
+        learned_accept_records: preferenceAi?.accepts ?? learnedStore.records.filter(record => record.label === 'accept').length,
+        learned_reject_records: preferenceAi?.rejects ?? learnedStore.records.filter(record => record.label === 'reject').length,
+        personal_preference: preferenceAi ? {
+          ready: Boolean(preferenceAi.ready),
+          url: PREFERENCE_AI_URL,
+          device: preferenceAi.device || '',
+          gpu: preferenceAi.gpu || '',
+          local1_model: preferenceAi.local1_model || '',
+          local2_model: preferenceAi.local2_model || '',
+          semantic_model: preferenceAi.semantic_model || '',
+          records: Number(preferenceAi.records || 0),
+          bootstrap: preferenceAi.bootstrap || {}
+        } : { ready: false, url: PREFERENCE_AI_URL },
+        finetune: preferenceAi?.ready ? {
+          status: 'personal-head-ready',
+          message: 'Personal v2 classifiers retrain immediately on every Save, Red-X, and Train AI swipe.',
+          updatedAt: fineTuneStatus.updatedAt || '',
+          pending: false,
+          idleDelayMs: 0,
+          legacyLoraStatus: fineTuneStatus.status || 'idle'
+        } : {
           status: fineTuneProcess ? 'running' : fineTuneStatus.status || 'idle',
           message: fineTuneStatus.message || '',
           updatedAt: fineTuneStatus.updatedAt || '',
@@ -1865,6 +1935,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/examples') {
+      const preferenceAi = await preferenceAiHealth();
+      if (preferenceAi?.ready) {
+        const response = await fetchJsonWithTimeout(`${PREFERENCE_AI_URL}/examples`, {}, 5000);
+        json(res, 200, response);
+        return;
+      }
       const learnedStore = await loadLearnedStore();
       const records = learnedRecordSummaries(learnedStore);
       json(res, 200, {
@@ -1900,9 +1976,15 @@ server.listen(PORT, HOST, () => {
   console.log(`Pong local AI listening on http://${HOST}:${PORT}`);
   console.log(`Model: ${MODEL}`);
   console.log(`Vision model: ${OLLAMA_VISION_MODEL} via ${OLLAMA_URL}`);
-  getExtractor()
-    .then(() => console.log('Embedding model ready'))
-    .catch(error => console.error(`Embedding model failed to preload: ${error.message || error}`));
+  preferenceAiHealth(true).then(health => {
+    if (health?.ready) {
+      console.log(`Personal preference AI ready via ${PREFERENCE_AI_URL}`);
+      return;
+    }
+    getExtractor()
+      .then(() => console.log('Fallback embedding model ready'))
+      .catch(error => console.error(`Fallback embedding model failed to preload: ${error.message || error}`));
+  });
   if (process.env.PONG_LORA_PRELOAD !== '0') {
     setTimeout(() => {
       ensureLoraInferenceService()

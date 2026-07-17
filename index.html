@@ -265,6 +265,7 @@
     #random-40-local { background: rgba(244,114,182,0.20); }
     #random-40-local2 { background: rgba(168,85,247,0.20); }
     #random-40-nano { background: rgba(14,165,233,0.20); }
+    #train-ai { background: linear-gradient(135deg,rgba(236,72,153,0.28),rgba(139,92,246,0.28)); }
     #random-40 { background: rgba(244,114,182,0.20); }
     .url-input button:hover, .url-input button:active { transform: translateY(-1px); background: rgba(255,255,255,0.12); }
     .control-button {
@@ -366,6 +367,58 @@
       background: rgba(0,0,0,0.7); color: white; padding: 15px 30px;
       border-radius: 8px; font-size: 18px; z-index: 50;
     }
+
+    .train-ai-panel {
+      position: fixed; inset: 0; z-index: 1800; display: grid; place-items: center;
+      padding: 14px; background: rgba(2,6,23,0.82); backdrop-filter: blur(14px);
+    }
+    .train-ai-panel[hidden] { display: none; }
+    .train-ai-shell {
+      width: min(430px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.16); border-radius: 24px;
+      background: linear-gradient(160deg,rgba(30,41,59,0.98),rgba(15,23,42,0.98));
+      box-shadow: 0 28px 80px rgba(0,0,0,0.55); display: flex; flex-direction: column;
+    }
+    .train-ai-header { display: flex; align-items: center; gap: 10px; padding: 14px 16px 8px; }
+    .train-ai-title { flex: 1; font-size: 17px; font-weight: 800; letter-spacing: 0.01em; }
+    .train-ai-subtitle { display: block; margin-top: 2px; font-size: 10px; color: rgba(255,255,255,0.58); font-weight: 500; }
+    .train-ai-close { width: 34px; height: 34px; border-radius: 50%; font-size: 20px; }
+    .train-ai-scores { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 4px 16px 10px; }
+    .train-ai-score { border-radius: 12px; padding: 8px 10px; background: rgba(255,255,255,0.06); font-size: 11px; }
+    .train-ai-score b { display: block; font-size: 18px; line-height: 1.1; }
+    .train-ai-deck { position: relative; min-height: min(540px, 61vh); margin: 0 14px; }
+    .train-ai-card {
+      position: absolute; inset: 0; overflow: hidden; border-radius: 20px; touch-action: none;
+      background: #020617; border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 16px 38px rgba(0,0,0,0.38); transition: transform 180ms ease, opacity 180ms ease;
+      user-select: none;
+    }
+    .train-ai-images { height: 100%; display: grid; grid-auto-flow: column; grid-auto-columns: 100%; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+    .train-ai-images::-webkit-scrollbar { display: none; }
+    .train-ai-images img { width: 100%; height: 100%; object-fit: cover; scroll-snap-align: center; background: #020617; }
+    .train-ai-gradient { position: absolute; inset: 45% 0 0; background: linear-gradient(transparent,rgba(2,6,23,0.94)); pointer-events: none; }
+    .train-ai-card-info { position: absolute; left: 16px; right: 16px; bottom: 14px; pointer-events: none; }
+    .train-ai-card-name { font-size: 24px; font-weight: 850; text-shadow: 0 2px 10px #000; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .train-ai-card-meta { margin-top: 4px; color: rgba(255,255,255,0.72); font-size: 11px; }
+    .train-ai-stamp { position: absolute; top: 22px; padding: 7px 12px; border: 4px solid; border-radius: 8px; font-size: 24px; font-weight: 900; opacity: 0; pointer-events: none; }
+    .train-ai-stamp.good { left: 18px; color: #4ade80; border-color: #4ade80; transform: rotate(-9deg); }
+    .train-ai-stamp.bad { right: 18px; color: #fb7185; border-color: #fb7185; transform: rotate(9deg); }
+    .train-ai-reveal {
+      position: absolute; inset: 0; display: grid; place-content: center; gap: 10px; padding: 24px;
+      text-align: center; background: rgba(2,6,23,0.90); opacity: 0; pointer-events: none; transition: opacity 180ms ease;
+    }
+    .train-ai-reveal.visible { opacity: 1; }
+    .train-ai-reveal-title { font-size: 20px; font-weight: 850; }
+    .train-ai-model-result { min-width: 230px; padding: 10px 14px; border-radius: 12px; background: rgba(255,255,255,0.08); font-size: 13px; }
+    .train-ai-model-result b { font-size: 16px; }
+    .train-ai-reasons { display: flex; gap: 6px; padding: 10px 14px 4px; overflow-x: auto; scrollbar-width: none; }
+    .train-ai-reason { flex: 0 0 auto; border-radius: 999px; padding: 7px 10px; font-size: 10px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); }
+    .train-ai-reason.selected { color: #fff; background: rgba(244,63,94,0.28); border-color: rgba(251,113,133,0.7); }
+    .train-ai-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 10px 16px 15px; }
+    .train-ai-action { min-height: 48px; border-radius: 16px; font-weight: 850; font-size: 14px; }
+    .train-ai-good { color: #86efac; border: 1px solid rgba(74,222,128,0.45); background: rgba(34,197,94,0.15); }
+    .train-ai-bad { color: #fda4af; border: 1px solid rgba(251,113,133,0.45); background: rgba(244,63,94,0.15); }
+    .train-ai-empty { display: grid; place-content: center; height: 100%; padding: 28px; text-align: center; color: rgba(255,255,255,0.72); }
     #auth-helper {
       display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
       background: rgba(0,0,0,0.82); z-index: 10000;
@@ -730,7 +783,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.78</div>
+  <div class="version-number">23.79</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -745,8 +798,52 @@
         <button id="random-40-local">R40 Local</button>
         <button id="random-40-local2">R40 Local 2</button>
         <button id="random-40-nano">R40 Nano</button>
+        <button id="train-ai">Train AI</button>
       </div>
     </div>
+  </div>
+
+  <div id="train-ai-panel" class="train-ai-panel" hidden>
+    <section class="train-ai-shell" aria-label="Train personal AI">
+      <header class="train-ai-header">
+        <div class="train-ai-title">Train AI<span id="train-ai-subtitle" class="train-ai-subtitle">Left = good · Right = bad</span></div>
+        <button id="train-ai-close" class="train-ai-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="train-ai-scores">
+        <div class="train-ai-score">Local1 agreement<b id="train-ai-local-score">—</b><span id="train-ai-local-count">0 rated</span></div>
+        <div class="train-ai-score">Local2 agreement<b id="train-ai-local2-score">—</b><span id="train-ai-local2-count">0 rated</span></div>
+      </div>
+      <div id="train-ai-deck" class="train-ai-deck">
+        <article id="train-ai-card" class="train-ai-card">
+          <div id="train-ai-images" class="train-ai-images"></div>
+          <div class="train-ai-gradient"></div>
+          <div class="train-ai-card-info">
+            <div id="train-ai-name" class="train-ai-card-name">Loading…</div>
+            <div id="train-ai-meta" class="train-ai-card-meta">Finding a random page</div>
+          </div>
+          <div id="train-ai-good-stamp" class="train-ai-stamp good">GOOD</div>
+          <div id="train-ai-bad-stamp" class="train-ai-stamp bad">BAD</div>
+          <div id="train-ai-reveal" class="train-ai-reveal">
+            <div id="train-ai-reveal-title" class="train-ai-reveal-title"></div>
+            <div id="train-ai-local-result" class="train-ai-model-result"></div>
+            <div id="train-ai-local2-result" class="train-ai-model-result"></div>
+            <div id="train-ai-learning-status" class="train-ai-card-meta"></div>
+          </div>
+        </article>
+      </div>
+      <div id="train-ai-reasons" class="train-ai-reasons" aria-label="Bad reason">
+        <button class="train-ai-reason selected" data-reason="Not my taste" type="button">Not my taste</button>
+        <button class="train-ai-reason" data-reason="Face" type="button">Face</button>
+        <button class="train-ai-reason" data-reason="Body" type="button">Body</button>
+        <button class="train-ai-reason" data-reason="Male" type="button">Male</button>
+        <button class="train-ai-reason" data-reason="Feet" type="button">Feet</button>
+        <button class="train-ai-reason" data-reason="Logo" type="button">Logo</button>
+      </div>
+      <div class="train-ai-actions">
+        <button id="train-ai-good" class="train-ai-action train-ai-good" type="button">← Good</button>
+        <button id="train-ai-bad" class="train-ai-action train-ai-bad" type="button">Bad →</button>
+      </div>
+    </section>
   </div>
 
 <script>
@@ -6274,17 +6371,17 @@ const RANDOM40_PASSWORD = '22';
 const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
-const RANDOM40_AI_CONCURRENCY = 36;
-const RANDOM40_LOCAL_CONCURRENCY = 48;
-const RANDOM40_POST_CONCURRENCY = 28;
-const RANDOM40_PAGE_BATCH_SIZE = 20;
-const RANDOM40_LISTING_PAGE_BATCH_SIZE = 10;
+const RANDOM40_AI_CONCURRENCY = 18;
+const RANDOM40_LOCAL_CONCURRENCY = 18;
+const RANDOM40_POST_CONCURRENCY = 16;
+const RANDOM40_PAGE_BATCH_SIZE = 8;
+const RANDOM40_LISTING_PAGE_BATCH_SIZE = 6;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
 const RANDOM40_PRECHECK_MAX_ARTIST_PAGES = 36;
-const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 90;
+const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 48;
 const RANDOM40_FAST_PUBLISH_VIDEOS = 4;
-const RANDOM40_MODEL = 'gpt-4.1-nano';
+const RANDOM40_MODEL = 'gpt-5.4-nano';
 const RANDOM40_LOCAL_MODEL_NAME = 'local-image-embeddings';
 const RANDOM40_LOCAL2_VISION_MODEL = 'qwen3-vl:4b';
 const RANDOM40_PROMPT_VERSION = 'cf-vision-v11';
@@ -6296,11 +6393,11 @@ const RANDOM40_REJECT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_ACCEPT_CONFIDENCE = 0.9;
 const RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE = 0.6;
-const RANDOM40_MIN_SCREENED_IMAGES = 2;
-const RANDOM40_MAX_REVIEW_IMAGES = 2;
+const RANDOM40_MIN_SCREENED_IMAGES = 1;
+const RANDOM40_MAX_REVIEW_IMAGES = 3;
 const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 2;
 const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 1;
-const RANDOM40_LOCAL_MAX_REVIEW_IMAGES = 2;
+const RANDOM40_LOCAL_MAX_REVIEW_IMAGES = 3;
 const RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST = 2;
 const RANDOM40_LOCAL_RANDOM_PROFILE_IMAGES_PER_ARTIST = 1;
 const RANDOM40_MAX_ACCEPT_RECORDS = 160;
@@ -6310,7 +6407,7 @@ const RANDOM40_MAX_REJECT_RECORDS = 200;
 const RANDOM40_MAX_REJECT_EXAMPLES = 4;
 const RANDOM40_REJECT_IMAGES_PER_EXAMPLE = 3;
 const RANDOM40_STORED_IMAGES_PER_ARTIST = 40;
-const RANDOM40_LOCAL_LEARN_IMAGES_PER_EXAMPLE = 40;
+const RANDOM40_LOCAL_LEARN_IMAGES_PER_EXAMPLE = 6;
 const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
 const RANDOM40_PRELOAD_ARTIST_BUFFER = 5;
 const RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST = 25;
@@ -7513,7 +7610,7 @@ function random40IsAcceptedDecision(decision) {
   const acceptGrades = imageGrades.filter(grade => grade?.decision === 'accept').length;
   const requiredImageMajority = Math.ceil(screenedImages / 2);
 
-  if (visionSource === 'local_trained_embedding_classifier') {
+  if (visionSource === 'local_trained_embedding_classifier' || visionSource === 'personal_preference_v2') {
     if (decision.hard_verified !== true) return false;
     if (Number(decision.confidence || 0) < RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE) return false;
     return acceptGrades >= 1 || visualMatches >= 1;
@@ -8157,6 +8254,329 @@ function random40SelectCandidateImages(imageUrls, firstImage, randomExtraCount, 
   return [primary, ...selectedExtras].filter(Boolean).slice(0, maxImages);
 }
 
+const TRAIN_AI_ACCURACY_KEY = 'pong_train_ai_accuracy_v1';
+const trainAiState = {
+  open: false,
+  busy: false,
+  endpoint: '',
+  page: 0,
+  artists: [],
+  index: 0,
+  candidate: null,
+  imageIndex: 0,
+  predictionPromise: null,
+  selectedReason: 'Not my taste',
+  gesture: null,
+  stats: null
+};
+
+function trainAiLoadStats() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TRAIN_AI_ACCURACY_KEY) || 'null');
+    if (parsed?.local && parsed?.local2) return parsed;
+  } catch (_) {}
+  return {
+    local: { correct: 0, total: 0 },
+    local2: { correct: 0, total: 0 },
+    updatedAt: ''
+  };
+}
+
+function trainAiSaveStats() {
+  trainAiState.stats.updatedAt = new Date().toISOString();
+  localStorage.setItem(TRAIN_AI_ACCURACY_KEY, JSON.stringify(trainAiState.stats));
+  trainAiRenderStats();
+}
+
+function trainAiRenderStats() {
+  const stats = trainAiState.stats || trainAiLoadStats();
+  for (const mode of ['local', 'local2']) {
+    const item = stats[mode] || { correct: 0, total: 0 };
+    const percent = item.total ? `${Math.round(item.correct * 100 / item.total)}%` : '—';
+    const score = document.getElementById(mode === 'local' ? 'train-ai-local-score' : 'train-ai-local2-score');
+    const count = document.getElementById(mode === 'local' ? 'train-ai-local-count' : 'train-ai-local2-count');
+    if (score) score.textContent = percent;
+    if (count) count.textContent = `${item.total} rated · ${item.correct} matched`;
+  }
+}
+
+function trainAiSetStatus(text) {
+  const subtitle = document.getElementById('train-ai-subtitle');
+  if (subtitle) subtitle.textContent = text || 'Left = good · Right = bad';
+}
+
+function trainAiResetCardTransform() {
+  const card = document.getElementById('train-ai-card');
+  if (!card) return;
+  card.style.transition = 'transform 180ms ease, opacity 180ms ease';
+  card.style.transform = '';
+  card.style.opacity = '1';
+  document.getElementById('train-ai-good-stamp').style.opacity = '0';
+  document.getElementById('train-ai-bad-stamp').style.opacity = '0';
+}
+
+function trainAiRenderCurrentImage() {
+  const container = document.getElementById('train-ai-images');
+  const candidate = trainAiState.candidate;
+  if (!container || !candidate?.imageUrls?.length) return;
+  const index = Math.max(0, Math.min(trainAiState.imageIndex, candidate.imageUrls.length - 1));
+  container.replaceChildren();
+  const image = document.createElement('img');
+  image.src = candidate.imageUrls[index];
+  image.alt = `${candidate.artistName} photo ${index + 1}`;
+  image.draggable = false;
+  container.appendChild(image);
+  const meta = document.getElementById('train-ai-meta');
+  if (meta) meta.textContent = `Random page ${trainAiState.page} · photo ${index + 1}/${candidate.imageUrls.length} · tap for next photo`;
+}
+
+function trainAiRenderCandidate(candidate) {
+  trainAiState.candidate = candidate;
+  trainAiState.imageIndex = 0;
+  const name = document.getElementById('train-ai-name');
+  if (name) name.textContent = candidate.artistName || random40ArtistNameFromUrl(candidate.artistUrl);
+  document.getElementById('train-ai-reveal')?.classList.remove('visible');
+  trainAiResetCardTransform();
+  trainAiRenderCurrentImage();
+  trainAiSetStatus('Left = good · Right = bad · prediction stays hidden until your choice');
+}
+
+async function trainAiClassify(candidate, mode) {
+  const response = await fetch(`${trainAiState.endpoint}/classify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      app: 'pong-train-ai',
+      model: RANDOM40_LOCAL_MODEL_NAME,
+      localVariant: mode,
+      promptVersion: `${RANDOM40_PROMPT_VERSION}-train-ai`,
+      artist: {
+        artistUrl: candidate.artistUrl,
+        artistName: candidate.artistName,
+        pageText: candidate.pageText || '',
+        imageUrl: candidate.imageUrls[0] || ''
+      },
+      candidateImageUrls: candidate.imageUrls.slice(0, RANDOM40_LOCAL_MAX_REVIEW_IMAGES),
+      acceptedArtists: [],
+      rejectedArtists: []
+    })
+  });
+  const raw = await response.text();
+  if (!response.ok) throw new Error(`Local ${mode} HTTP ${response.status}: ${raw.slice(0, 180)}`);
+  return JSON.parse(raw);
+}
+
+function trainAiPreparePredictions(candidate) {
+  trainAiSetStatus('AI is forming hidden pre-swipe predictions…');
+  return Promise.allSettled([
+    trainAiClassify(candidate, 'local'),
+    trainAiClassify(candidate, 'local2')
+  ]).then(results => ({
+    local: results[0].status === 'fulfilled' ? results[0].value : { decision: 'unavailable', confidence: 0, reason: results[0].reason?.message || '' },
+    local2: results[1].status === 'fulfilled' ? results[1].value : { decision: 'unavailable', confidence: 0, reason: results[1].reason?.message || '' }
+  }));
+}
+
+async function trainAiBuildCandidate(artist) {
+  try {
+    const doc = await random40FetchDoc(artist.artistUrl, { timeoutMs: 18000 });
+    const profileImage = random40FindProfileImageFromDoc(doc, artist, artist.artistUrl) || artist.imageUrl;
+    const reviewImages = [
+      profileImage,
+      ...random40ExtractReviewImages(doc, artist.artistUrl, artist.imageUrl),
+      ...random40ExtractScraperPostImages(doc, artist.artistUrl, artist).map(item => item.imageUrl)
+    ].filter(Boolean);
+    const imageUrls = random40SelectCandidateImages(reviewImages, profileImage, 2, 3);
+    if (!imageUrls.length) return null;
+    return {
+      ...artist,
+      artistName: artist.artistName || random40ArtistNameFromUrl(artist.artistUrl),
+      pageText: `${artist.pageText || ''} ${doc.body?.innerText || ''}`.replace(/\s+/g, ' ').slice(0, 20000),
+      imageUrls
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function trainAiLoadRandomPage() {
+  for (let attempt = 0; attempt < 8 && trainAiState.open; attempt++) {
+    trainAiState.page = random40RandomPage();
+    trainAiSetStatus(`Loading random CoomerFans page ${trainAiState.page}…`);
+    try {
+      const pageUrl = random40PageUrl(trainAiState.page);
+      const doc = await random40FetchDoc(pageUrl, { timeoutMs: 22000 });
+      trainAiState.artists = shuffleInPlace(random40FindArtistsOnListing(doc, pageUrl).filter(artist => artist.imageUrl)).slice(0, 36);
+      trainAiState.index = 0;
+      if (trainAiState.artists.length) return true;
+    } catch (_) {}
+  }
+  return false;
+}
+
+async function trainAiNextCandidate() {
+  if (!trainAiState.open) return;
+  trainAiState.busy = true;
+  document.getElementById('train-ai-good').disabled = true;
+  document.getElementById('train-ai-bad').disabled = true;
+  while (trainAiState.open) {
+    if (trainAiState.index >= trainAiState.artists.length) {
+      const loaded = await trainAiLoadRandomPage();
+      if (!loaded) {
+        trainAiSetStatus('Could not load a usable random page. Tap Train AI to retry.');
+        trainAiState.busy = false;
+        return;
+      }
+    }
+    const artist = trainAiState.artists[trainAiState.index++];
+    trainAiSetStatus(`Loading photos for ${artist.artistName || 'artist'}…`);
+    const candidate = await trainAiBuildCandidate(artist);
+    if (!candidate) continue;
+    trainAiRenderCandidate(candidate);
+    trainAiState.predictionPromise = trainAiPreparePredictions(candidate);
+    trainAiState.busy = false;
+    document.getElementById('train-ai-good').disabled = false;
+    document.getElementById('train-ai-bad').disabled = false;
+    return;
+  }
+}
+
+function trainAiRecordPrediction(mode, prediction, label) {
+  const stats = trainAiState.stats[mode] || (trainAiState.stats[mode] = { correct: 0, total: 0 });
+  const predictedLabel = prediction?.decision === 'accept' ? 'accept' : prediction?.decision === 'reject' ? 'reject' : '';
+  if (!predictedLabel) return;
+  stats.total++;
+  if (predictedLabel === label) stats.correct++;
+}
+
+function trainAiModelResultHtml(label, prediction) {
+  const percent = Math.round(Number(prediction?.preference_probability ?? prediction?.confidence ?? 0) * 100);
+  const decision = prediction?.decision === 'accept' ? 'Good' : prediction?.decision === 'reject' ? 'Bad' : 'Unavailable';
+  const matched = (prediction?.decision === 'accept' ? 'accept' : prediction?.decision === 'reject' ? 'reject' : '') === label;
+  return `${matched ? '✓' : '✕'} <b>${decision}</b> · ${percent}%<br><span>${String(prediction?.reason || '').slice(0, 90)}</span>`;
+}
+
+function trainAiStoreBrowserFeedback(label, candidate, reasonLabel) {
+  const artistUrl = random40NormalizeArtistUrl(candidate.artistUrl);
+  const record = {
+    artistUrl,
+    artistName: candidate.artistName,
+    imageUrls: candidate.imageUrls.slice(0, RANDOM40_LOCAL_LEARN_IMAGES_PER_EXAMPLE),
+    mode: 'train-ai',
+    learnedAt: new Date().toISOString()
+  };
+  if (label === 'accept') {
+    random40SaveAcceptedArtists([record, ...random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl)]);
+    random40SaveRejectedArtists(random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl));
+  } else {
+    record.rejectReason = String(reasonLabel || 'Not my taste').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'reject';
+    record.rejectReasonLabel = reasonLabel || 'Not my taste';
+    random40SaveRejectedArtists([record, ...random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl)]);
+    random40SaveAcceptedArtists(random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl));
+  }
+  return record;
+}
+
+async function trainAiChoose(label) {
+  if (!trainAiState.open || trainAiState.busy || !trainAiState.candidate) return;
+  trainAiState.busy = true;
+  document.getElementById('train-ai-good').disabled = true;
+  document.getElementById('train-ai-bad').disabled = true;
+  const candidate = trainAiState.candidate;
+  trainAiSetStatus('Revealing the predictions made before your swipe…');
+  const predictions = await trainAiState.predictionPromise;
+  trainAiRecordPrediction('local', predictions.local, label);
+  trainAiRecordPrediction('local2', predictions.local2, label);
+  trainAiSaveStats();
+
+  document.getElementById('train-ai-reveal-title').textContent = label === 'accept' ? 'You swiped Good' : `You swiped Bad · ${trainAiState.selectedReason}`;
+  document.getElementById('train-ai-local-result').innerHTML = `Local1 ${trainAiModelResultHtml(label, predictions.local)}`;
+  document.getElementById('train-ai-local2-result').innerHTML = `Local2 ${trainAiModelResultHtml(label, predictions.local2)}`;
+  const learningStatus = document.getElementById('train-ai-learning-status');
+  learningStatus.textContent = 'Saving images and retraining both local heads…';
+  document.getElementById('train-ai-reveal').classList.add('visible');
+
+  const record = trainAiStoreBrowserFeedback(label, candidate, trainAiState.selectedReason);
+  const learned = await random40SendLocalLearningExample(label, record);
+  learningStatus.textContent = learned
+    ? 'Learned immediately. The next hidden prediction uses this swipe.'
+    : 'Saved in this browser; PC learning service was unavailable.';
+  await sleep(1500);
+  if (!trainAiState.open) return;
+  document.getElementById('train-ai-reveal').classList.remove('visible');
+  trainAiState.busy = false;
+  await trainAiNextCandidate();
+}
+
+async function openTrainAiPanel() {
+  if (trainAiState.open) return;
+  trainAiState.open = true;
+  trainAiState.stats = trainAiLoadStats();
+  trainAiRenderStats();
+  document.getElementById('train-ai-panel').hidden = false;
+  trainAiSetStatus('Connecting to the personal AI service…');
+  trainAiState.endpoint = await getRandom40LocalEndpoint();
+  if (!trainAiState.endpoint) {
+    trainAiSetStatus('Start the Pong local AI service, then reopen Train AI.');
+    trainAiState.open = false;
+    return;
+  }
+  trainAiState.artists = [];
+  trainAiState.index = 0;
+  await trainAiNextCandidate();
+}
+
+function closeTrainAiPanel() {
+  trainAiState.open = false;
+  trainAiState.busy = false;
+  trainAiState.candidate = null;
+  trainAiState.predictionPromise = null;
+  document.getElementById('train-ai-panel').hidden = true;
+}
+
+function installTrainAiSwipe() {
+  const card = document.getElementById('train-ai-card');
+  card?.addEventListener('pointerdown', event => {
+    if (trainAiState.busy) return;
+    trainAiState.gesture = { id: event.pointerId, startX: event.clientX, startY: event.clientY, dx: 0 };
+    card.setPointerCapture?.(event.pointerId);
+    card.style.transition = 'none';
+  });
+  card?.addEventListener('pointermove', event => {
+    const gesture = trainAiState.gesture;
+    if (!gesture || gesture.id !== event.pointerId || trainAiState.busy) return;
+    gesture.dx = event.clientX - gesture.startX;
+    const rotation = gesture.dx / 18;
+    card.style.transform = `translateX(${gesture.dx}px) rotate(${rotation}deg)`;
+    document.getElementById('train-ai-good-stamp').style.opacity = String(Math.max(0, Math.min(1, -gesture.dx / 90)));
+    document.getElementById('train-ai-bad-stamp').style.opacity = String(Math.max(0, Math.min(1, gesture.dx / 90)));
+  });
+  card?.addEventListener('pointerup', event => {
+    const gesture = trainAiState.gesture;
+    trainAiState.gesture = null;
+    if (!gesture || gesture.id !== event.pointerId || trainAiState.busy) return;
+    if (gesture.dx <= -85) {
+      card.style.transition = 'transform 180ms ease, opacity 180ms ease';
+      card.style.transform = 'translateX(-120vw) rotate(-18deg)';
+      card.style.opacity = '0';
+      trainAiChoose('accept');
+      return;
+    }
+    if (gesture.dx >= 85) {
+      card.style.transition = 'transform 180ms ease, opacity 180ms ease';
+      card.style.transform = 'translateX(120vw) rotate(18deg)';
+      card.style.opacity = '0';
+      trainAiChoose('reject');
+      return;
+    }
+    if (Math.abs(gesture.dx) < 12 && trainAiState.candidate?.imageUrls?.length > 1) {
+      trainAiState.imageIndex = (trainAiState.imageIndex + 1) % trainAiState.candidate.imageUrls.length;
+      trainAiRenderCurrentImage();
+    }
+    trainAiResetCardTransform();
+  });
+}
+
 function random40PageUrl(page) {
   return `https://coomerfans.com/${page > 1 ? `?page=${page}` : ''}`;
 }
@@ -8176,7 +8596,7 @@ function random40ExtractVideoPostLinks(doc, baseUrl) {
   return [...new Set(links.filter(Boolean))];
 }
 
-async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPages = RANDOM40_MAX_ARTIST_PAGES } = {}) {
+async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPages = RANDOM40_MAX_ARTIST_PAGES, ignoreStop = false } = {}) {
   const base = artist.artistUrl;
   const postLinks = new Set();
   const pageTextParts = [];
@@ -8205,8 +8625,8 @@ async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPag
 
   let page = 2;
   while (page <= maxPages && postLinks.size < stopAt) {
-    if (random40State?.stop) break;
-    const pages = Array.from({ length: RANDOM40_PAGE_BATCH_SIZE }, (_, i) => page + i);
+    if (random40State?.stop && !ignoreStop) break;
+    const pages = Array.from({ length: Math.min(RANDOM40_PAGE_BATCH_SIZE, maxPages - page + 1) }, (_, i) => page + i);
     const docs = await Promise.all(pages.map(n =>
       random40FetchDoc(`${base}?page=${n}`, { timeoutMs: 16000 }).catch(() => null)
     ));
@@ -8251,7 +8671,7 @@ async function random40VideoEntriesFromPost(postUrl, artistInfo) {
   }));
 }
 
-async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = Infinity) {
+async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = Infinity, ignoreStop = false) {
   const selectedLinks = [...new Set((links || []).filter(Boolean))];
   if (!selectedLinks.length) return [];
 
@@ -8270,12 +8690,12 @@ async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = I
 
     const launch = () => {
       if (settled) return;
-      if (random40State?.stop || results.length >= stopAtVideos || (index >= selectedLinks.length && active <= 0)) {
+      if ((random40State?.stop && !ignoreStop) || results.length >= stopAtVideos || (index >= selectedLinks.length && active <= 0)) {
         finish();
         return;
       }
 
-      while (active < limit && index < selectedLinks.length && !random40State?.stop && results.length < stopAtVideos) {
+      while (active < limit && index < selectedLinks.length && (!random40State?.stop || ignoreStop) && results.length < stopAtVideos) {
         const link = selectedLinks[index++];
         active++;
         random40VideoEntriesFromPost(link, artistInfo)
@@ -8301,8 +8721,9 @@ async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = I
 
 async function random40ScrapeArtistVideos(artist, options = {}) {
   const base = artist.artistUrl;
+  const ignoreStop = Boolean(options.ignoreStop);
   let collected = options.fullScan
-    ? await random40CollectVideoPostLinks(artist, { stopAt: Infinity, maxPages: RANDOM40_MAX_ARTIST_PAGES })
+    ? await random40CollectVideoPostLinks(artist, { stopAt: Infinity, maxPages: RANDOM40_MAX_ARTIST_PAGES, ignoreStop })
     : options.collected?.links?.length
     ? options.collected
     : await random40CollectVideoPostLinks(artist);
@@ -8313,11 +8734,12 @@ async function random40ScrapeArtistVideos(artist, options = {}) {
     ? Number(options.stopAtVideos)
     : Infinity;
 
-  let entries = await random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos);
-  if (entries.length >= stopAtVideos || stopAtVideos === Infinity || random40State?.stop) return entries;
+  let entries = await random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos, ignoreStop);
+  if (entries.length >= stopAtVideos || stopAtVideos === Infinity || (random40State?.stop && !ignoreStop)) return entries;
 
   const expanded = await random40CollectVideoPostLinks(artist, {
-    stopAt: Math.max(links.length + RANDOM40_MIN_VIDEOS_PER_ARTIST, RANDOM40_MIN_VIDEOS_PER_ARTIST * 2)
+    stopAt: Math.max(links.length + RANDOM40_MIN_VIDEOS_PER_ARTIST, RANDOM40_MIN_VIDEOS_PER_ARTIST * 2),
+    ignoreStop
   }).catch(() => null);
   if (!expanded?.links?.length) return entries;
 
@@ -8328,7 +8750,8 @@ async function random40ScrapeArtistVideos(artist, options = {}) {
   const extraEntries = await random40ScrapeVideoLinksUntil(
     extraLinks,
     random40ArtistInfo(base, expanded.firstDoc || collected.firstDoc),
-    stopAtVideos - entries.length
+    stopAtVideos - entries.length,
+    ignoreStop
   );
   return entries.concat(extraEntries).slice(0, stopAtVideos);
 }
@@ -8531,7 +8954,8 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
         collected: precheck,
         fullScan: true,
         skipPostUrls: firstPostUrls,
-        stopAtVideos: Infinity
+        stopAtVideos: Infinity,
+        ignoreStop: true
       });
       const added = await random40AppendEntriesToExistingArtistWhenReady(moreEntries);
       if (added) {
@@ -8629,7 +9053,25 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
     : await random40ClassifyArtist(workingArtist, apiKey, initialImages);
   random40State.api++;
 
-  if (mode === 'local' && decision?.decision === 'accept') {
+  const needsMoreLocalEvidence = localMode && /no usable face or body evidence/i.test(String(decision?.reason || ''));
+  if (needsMoreLocalEvidence && initialImages.length < RANDOM40_LOCAL_MAX_REVIEW_IMAGES) {
+    const expandedImages = random40SelectCandidateImages(
+      reviewImages,
+      primaryImage,
+      Math.max(2, RANDOM40_LOCAL_RANDOM_PROFILE_IMAGES_PER_ARTIST),
+      RANDOM40_LOCAL_MAX_REVIEW_IMAGES
+    );
+    if (expandedImages.length > initialImages.length) {
+      decision = await random40ClassifyArtistLocal(workingArtist, options.localEndpoint, expandedImages, {
+        visionModel: random40LocalVisionModel(mode),
+        mode,
+        maxImages: RANDOM40_LOCAL_MAX_REVIEW_IMAGES
+      });
+      random40State.api++;
+    }
+  }
+
+  if (mode === 'local' && decision?.decision === 'accept' && decision?.hard_verified !== true) {
     if (options.deferLocalHardVerification) {
       return {
         ...decision,
@@ -9693,6 +10135,23 @@ document.getElementById('auth-button').addEventListener('click',()=>{
 document.getElementById('random-40-local')?.addEventListener('click',()=>startRandom40('local'));
 document.getElementById('random-40-local2')?.addEventListener('click',()=>startRandom40('local2'));
 document.getElementById('random-40-nano')?.addEventListener('click',()=>startRandom40('nano'));
+document.getElementById('train-ai')?.addEventListener('click', openTrainAiPanel);
+document.getElementById('train-ai-close')?.addEventListener('click', closeTrainAiPanel);
+document.getElementById('train-ai-good')?.addEventListener('click', () => trainAiChoose('accept'));
+document.getElementById('train-ai-bad')?.addEventListener('click', () => trainAiChoose('reject'));
+document.getElementById('train-ai-reasons')?.addEventListener('click', event => {
+  const button = event.target.closest('.train-ai-reason');
+  if (!button) return;
+  trainAiState.selectedReason = button.dataset.reason || 'Not my taste';
+  document.querySelectorAll('.train-ai-reason').forEach(item => item.classList.toggle('selected', item === button));
+});
+document.addEventListener('keydown', event => {
+  if (!trainAiState.open || trainAiState.busy) return;
+  if (event.key === 'ArrowLeft') trainAiChoose('accept');
+  if (event.key === 'ArrowRight') trainAiChoose('reject');
+  if (event.key === 'Escape') closeTrainAiPanel();
+});
+installTrainAiSwipe();
 
 document.getElementById('open-erome').addEventListener('click',()=>{
   loadEromeAsCards();

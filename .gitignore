@@ -5,3 +5,4 @@ local-ai-server.log
 .pong-local-ai/
 __pycache__/
 *.pyc
+yolo11n-pose.pt
