@@ -148,10 +148,11 @@ def build_messages(payload, images):
         f"SigLIP full-bank preference signal: {siglip.get('decision')} confidence {siglip.get('confidence')}, {siglip.get('reason') or ''}\n"
         f"Recent reject reason history: {payload.get('rejectionSummary') or 'none'}\n"
         f"Per-image embedding grades:\n{grade_lines or 'none'}\n\n"
-        "Judge only hard visual filters. Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, non-photo/logo/placeholder/anime/artwork, unclear adult age, or appears over the age limit. "
+        "Judge hard visual filters plus one explicit visual preference blocker. Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, non-photo/logo/placeholder/anime/artwork, unclear adult age, or appears over the age limit. "
+        "Reject pronounced midsection overhang, visible abdominal folds, or apron-like midsection as a visual preference mismatch. Mild curves, slight softness, or a smooth/non-overhanging midsection are allowed. Do not describe this as weight, health, or a medical status. "
         "Reject if the whole candidate set lacks enough visible face or body evidence. A face-only or body-only image can still be judged when enough evidence is visible. "
         "Never reject because the image is adult-media styled, revealing, nude, lingerie, sexualized, or explicit. "
-        "Do not judge attractiveness, beauty, body type, sexual content, or user taste. "
+        "Do not judge attractiveness, beauty, broad body type, sexual content, or user taste except the explicit midsection-overhang blocker. "
         "When hard checks pass, return accept and leave taste/preference decisions to the outer learned classifier. "
         'Return JSON only, like {"decision":"reject","confidence":0.98,"reason":"male visible","checks":{"photograph":true,"woman_prominent":false,"male_only":true,"male_present":true,"female_presenting_adult":false,"appears_over_50":null,"feet_dominant":false,"logo_or_placeholder":false}}'
     )

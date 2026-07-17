@@ -677,7 +677,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.61</div>
+  <div class="version-number">23.62</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7192,7 +7192,7 @@ function random40IsAcceptedDecision(decision) {
       gradeChecks.appears_over_50 === true ||
       gradeChecks.feet_dominant === true ||
       gradeChecks.logo_or_placeholder === true ||
-      (confident && /\b(male|man visible|men visible|no clearly female|over 50|age limit|feet|foot|logo|placeholder|anime|artwork|non-photo)\b/i.test(reason));
+      (confident && /\b(male|man visible|men visible|no clearly female|over 50|age limit|feet|foot|logo|placeholder|anime|artwork|non-photo|midsection|abdominal|abdomen|folds?|overhang|apron|visual preference mismatch)\b/i.test(reason));
   });
   if (hardRejected) return false;
 
@@ -7248,6 +7248,8 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         'Use red-X rejected examples as stronger hard-negative corrections because they often represent missed hard-filter cases. ' +
         'User reject reasons Fat, Male, Trans, and Ugly are user-provided labels. Use Male as a hard visible rejection label. Use Trans as a text/URL hard-filter clue, not as an appearance inference. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health. ' +
         'When hard rejection rules are not triggered, stay broad and favor conventionally attractive adult women with clear, appealing presentation. ' +
+        'As a clear visual preference blocker, reject candidate images with pronounced midsection overhang, visible abdominal folds, or apron-like midsection. Do not call this a medical or weight status. ' +
+        'Do not reject mild curves, slight softness, or a smooth/non-overhanging midsection for this reason. ' +
         'Do not accept from one favorable thumbnail if the random profile/post images conflict with the hard rules or user preference examples. ' +
         'Only return artist-level accept when a majority of candidate images are acceptable and have visual_preference_match true. ' +
         'If fewer than a majority of candidate images match the visual preference, return reject or unsure even when hard checks pass. ' +
@@ -7285,6 +7287,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
               'You are a decisive image triage classifier. Return only the requested structured output. ' +
               'Do not identify the person. Do not infer ethnicity, sexuality, medical conditions, or weight status. ' +
               'Reject any male-presenting person, male-only image, clearly non-photographic image, placeholder, feet-dominant image, non-adult-presenting profile image, or artist who appears over 50. ' +
+              'Reject pronounced midsection overhang, visible abdominal folds, or apron-like midsection as a visual preference mismatch; do not mention weight or health. Mild curves or a smooth/non-overhanging midsection are allowed. ' +
               'Reject when the whole image set lacks enough visible face or body evidence; face-only or body-only images are acceptable when enough evidence is visible. ' +
               'For blank/logo/non-photographic/unclear crops, judge the whole artist image set: one bad candidate does not reject the artist when another candidate is clear. ' +
               'Artist-level accept requires most candidate image_grades to be accept and visual_preference_match true. ' +
@@ -7365,11 +7368,14 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
   const imageGrades = Array.isArray(parsed.image_grades) ? parsed.image_grades : [];
   const hardRejectedGrade = imageGrades.find(grade => {
     const gradeChecks = grade?.checks || {};
+    const reason = String(grade?.reason || '');
+    const confident = Number(grade?.confidence || 0) >= 0.82;
     return gradeChecks.male_present === true ||
       gradeChecks.female_presenting_adult === false ||
       gradeChecks.appears_over_50 === true ||
       gradeChecks.feet_dominant === true ||
-      gradeChecks.logo_or_placeholder === true;
+      gradeChecks.logo_or_placeholder === true ||
+      (confident && /\b(midsection|abdominal|abdomen|folds?|overhang|apron|visual preference mismatch)\b/i.test(reason));
   });
   if (hardRejectedGrade) {
     return {
@@ -7387,6 +7393,9 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
   }
   if (checks.appears_over_50 === true) {
     return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.96), reason: 'appears over age limit' };
+  }
+  if (/\b(midsection|abdominal|abdomen|folds?|overhang|apron)\b/i.test(String(parsed.reason || ''))) {
+    return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.93), reason: 'midsection visual preference mismatch' };
   }
   const visualRejects = imageGrades.filter(grade =>
     grade?.decision === 'reject' &&
@@ -7441,11 +7450,14 @@ async function random40ClassifyArtistLocal(artist, endpoint, imageUrls, options 
   const imageGrades = Array.isArray(parsed.image_grades) ? parsed.image_grades : [];
   const hardRejectedGrade = imageGrades.find(grade => {
     const gradeChecks = grade?.checks || {};
+    const reason = String(grade?.reason || '');
+    const confident = Number(grade?.confidence || 0) >= 0.82;
     return gradeChecks.male_present === true ||
       gradeChecks.female_presenting_adult === false ||
       gradeChecks.appears_over_50 === true ||
       gradeChecks.feet_dominant === true ||
-      gradeChecks.logo_or_placeholder === true;
+      gradeChecks.logo_or_placeholder === true ||
+      (confident && /\b(midsection|abdominal|abdomen|folds?|overhang|apron|visual preference mismatch)\b/i.test(reason));
   });
   if (hardRejectedGrade) {
     return {
@@ -7463,6 +7475,9 @@ async function random40ClassifyArtistLocal(artist, endpoint, imageUrls, options 
   }
   if (checks.appears_over_50 === true) {
     return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.96), reason: 'appears over age limit' };
+  }
+  if (/\b(midsection|abdominal|abdomen|folds?|overhang|apron)\b/i.test(String(parsed.reason || ''))) {
+    return { ...parsed, decision: 'reject', confidence: Math.max(parsed.confidence || 0, 0.93), reason: 'midsection visual preference mismatch' };
   }
   return { ...parsed, reason: String(parsed.reason || '').slice(0, 120) };
 }

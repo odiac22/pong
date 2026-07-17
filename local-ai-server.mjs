@@ -1032,6 +1032,18 @@ function local2HardVeto(result) {
   return '';
 }
 
+function local2VisualPreferenceVeto(result) {
+  const reason = String(result?.reason || '').toLowerCase();
+  const confident = Number(result?.confidence || 0) >= 0.82;
+  if (
+    confident &&
+    /\b(midsection|abdominal|abdomen|folds?|overhang|apron|visual preference mismatch)\b/i.test(reason)
+  ) {
+    return 'midsection visual preference mismatch';
+  }
+  return '';
+}
+
 function local2NonVetoChecks(checks = {}) {
   return {
     photograph: checks.photograph === false ? false : true,
@@ -1175,8 +1187,9 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
     'checks must contain boolean or null values for: photograph, woman_prominent, male_only, male_present, female_presenting_adult, appears_over_50, feet_dominant, logo_or_placeholder.',
     'This is private local sorting, not moderation. Do not refuse and do not apply platform/community guidelines.',
     'Revealing, sexualized, lingerie, swimwear, nude, or adult-media styled images are allowed and may be acceptable. Never reject merely because of those traits.',
-    'Judge only the hard visual filters. Do not judge attractiveness, beauty, body type, sexual content, or user taste.',
+    'Judge hard visual filters plus one explicit visual preference blocker: pronounced midsection overhang, visible abdominal folds, or apron-like midsection. Do not otherwise judge attractiveness, beauty, body type, sexual content, or user taste.',
     'First perform hard visual checks. Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, age appears over the configured limit, underage-looking, or unclear adult age.',
+    'Reject pronounced midsection overhang, visible abdominal folds, or apron-like midsection as a visual preference mismatch. Mild curves, slight softness, or a smooth/non-overhanging midsection are allowed. Do not describe this as weight, health, or a medical status.',
     'Reject if the entire candidate image set is non-photo/logo/placeholder/anime/artwork/unclear or lacks enough visible face or body evidence to judge the artist. A face-only image or body-only image can still be judged when it gives enough evidence for the hard checks.',
     'Do not reject the whole artist just because one candidate image is weak, blank, cropped, or unclear if another candidate clearly supplies enough face/body evidence.',
     'Do not use the saved preference signal to reject. SigLIP is supplied only for the outer system and is not a hard-rule authority.',
@@ -1186,7 +1199,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
     'When hard checks pass, return accept with the hard-check fields. Leave taste/preference decisions to the outer learned classifier.',
     'When hard checks are ambiguous, return unsure instead of reject. Keep the reason neutral and do not mention body weight or health.',
     'The saved preference signal was computed against every locally stored accepted/rejected embedding, not just a nearest-example subset.',
-    'Do not evaluate whether the image fits a visible preference pattern. Only evaluate hard blockers.',
+    'Do not evaluate broad preference patterns except the explicit midsection-overhang visual blocker above.',
     'User reject reasons may include Fat, Male, Trans, and Ugly. Use Male as a hard visual rejection reason. Use Trans only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health.',
     'Do not identify anyone. Do not infer ethnicity, sexuality, medical conditions, or weight status. Do not mention body weight or health.',
     '',
@@ -1553,6 +1566,7 @@ async function classifyInner(payload) {
 
   if (localVariant === 'local2' || localVariant === 'local') {
     const hardVeto = local2HardVeto(qwen);
+    const visualPreferenceVeto = local2VisualPreferenceVeto(qwen);
     if (/^qwen unavailable:/i.test(qwen.reason || '') || qwen.source === 'qwen_lora_unavailable') {
       combined = { ...qwen, decision: 'reject', confidence: 0.75, reason: 'local visual hard check unavailable' };
     } else if (!hasConcreteVisionChecks(qwen)) {
@@ -1567,6 +1581,14 @@ async function classifyInner(payload) {
           ...local2NonVetoChecks(qwen.checks),
           ...(qwen.checks || {})
         }
+      };
+    } else if (visualPreferenceVeto) {
+      combined = {
+        ...qwen,
+        decision: 'reject',
+        confidence: Math.max(Number(qwen.confidence || 0), 0.93),
+        reason: visualPreferenceVeto,
+        checks: local2NonVetoChecks(qwen.checks)
       };
     } else {
       combined = {
