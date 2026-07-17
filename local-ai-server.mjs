@@ -29,7 +29,7 @@ const LORA_ADAPTER_DIR = path.join(LOCAL_AI_DIR, 'qwen-lora', 'latest');
 const FINETUNE_AUTO_RUN = process.env.PONG_LORA_AUTOTRAIN !== '0';
 const FINETUNE_MAX_IMAGE_BYTES = Number(process.env.PONG_LORA_MAX_IMAGE_BYTES || 12 * 1024 * 1024);
 const FINETUNE_AUTO_IDLE_MS = Math.max(30000, Number(process.env.PONG_LORA_AUTOTRAIN_IDLE_MS || 180000));
-const OLLAMA_VISION_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.PONG_OLLAMA_VISION_CONCURRENCY || 3)));
+const OLLAMA_VISION_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.PONG_OLLAMA_VISION_CONCURRENCY || 4)));
 const LOCAL_LORA_FAST_TIMEOUT_MS = Math.max(1500, Number(process.env.PONG_LOCAL_LORA_FAST_TIMEOUT_MS || 3000));
 const MAX_LEARNED_RECORDS = 2000;
 
@@ -1399,6 +1399,28 @@ async function classifyInner(payload) {
 
   const candidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))].slice(0, QWEN_CANDIDATE_IMAGES);
   if (!candidateUrls.length) throw new Error('No candidate image URLs supplied.');
+
+  if (payload.hardCheckOnly) {
+    const qwen = await classifyWithOllamaVision({
+      artist,
+      candidateUrls,
+      siglipDecision: {
+        decision: 'accept',
+        confidence: 0.5,
+        reason: 'hard-check only'
+      },
+      imageGrades: [],
+      acceptedExampleUrls: [],
+      rejectedExampleUrls: [],
+      rejectionSummary: '',
+      visionModel
+    });
+    return {
+      ...(qwen || {}),
+      source: 'ollama_hard_check_only',
+      hard_check_only: true
+    };
+  }
 
   const learnedCache = await loadLearnedVectors();
   const learnedStore = learnedCache.store;
