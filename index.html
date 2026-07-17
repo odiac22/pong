@@ -730,7 +730,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.73</div>
+  <div class="version-number">23.74</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6540,21 +6540,8 @@ async function getRandom40LocalEndpoint() {
     } catch (_) {}
   }
 
-  const pasted = prompt(
-    'Local AI server URL. Start start-local-ai.bat on your PC first.\nPC browser usually: http://127.0.0.1:8787\nPhone may need your PC LAN URL.',
-    RANDOM40_LOCAL_ENDPOINTS[RANDOM40_LOCAL_ENDPOINTS.length - 1] || 'http://127.0.0.1:8787'
-  );
-  if (pasted === null) return '';
-  const endpoint = random40NormalizeLocalEndpoint(pasted);
-
-  try {
-    await random40PingLocalEndpoint(endpoint);
-    try { localStorage.setItem(RANDOM40_LOCAL_ENDPOINT_KEY, endpoint); } catch (_) {}
-    return endpoint;
-  } catch (error) {
-    showSortingIndicator(`Local AI unavailable: ${error.message}`);
-    return '';
-  }
+  showSortingIndicator('Local AI unavailable. Start PC local AI or use Nano.');
+  return '';
 }
 
 function random40ProxyUrl(rawUrl) {
