@@ -623,6 +623,58 @@
   -webkit-user-select: none;
 }
 
+.random40-reject-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.random40-reject-button {
+  border-color: rgba(248,113,113,0.48);
+  background: rgba(127,29,29,0.42);
+  color: #fecaca;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.random40-reject-menu {
+  position: absolute;
+  left: 36px;
+  top: -18px;
+  z-index: 1300;
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: auto;
+}
+
+.random40-reject-menu.open {
+  display: flex;
+}
+
+.random40-reject-reason {
+  min-width: 44px;
+  min-height: 24px;
+  padding: 4px 7px;
+  border-radius: 8px;
+  border: 1px solid rgba(248,113,113,0.42);
+  background: rgba(127,29,29,0.68);
+  color: #fee2e2;
+  font-size: 9px;
+  font-weight: 850;
+  line-height: 1;
+  box-shadow: 0 8px 18px rgba(0,0,0,0.30);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.random40-reject-reason:active {
+  transform: scale(0.98);
+  background: rgba(185,28,28,0.78);
+}
+
 .side-save-accuracy {
   display: block;
   color: var(--ui-muted);
@@ -677,7 +729,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.65</div>
+  <div class="version-number">23.66</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2126,6 +2178,13 @@ function showSortingIndicator(msg) {
 // ─── Saved videos / saved artists ────────────────────────────────────────────
 const SAVED_VIDEOS_KEY = 'pong_saved_videos_v1';
 const SAVED_ARTISTS_KEY = 'pong_saved_artists_v1';
+const RANDOM40_REJECT_REASONS = [
+  { code: 'male', label: 'Male' },
+  { code: 'trans', label: 'Trans' },
+  { code: 'fat', label: 'Fat' },
+  { code: 'ugly', label: 'Ugly' },
+  { code: 'feet', label: 'Feet' }
+];
 
 function loadSavedMap(key) {
   try {
@@ -2342,6 +2401,32 @@ function saveCurrentArtistVideos() {
   }
 }
 
+function currentRandom40RejectBundleInfo(reason) {
+  const meta = typeof random40CurrentVideoMeta === 'function' ? random40CurrentVideoMeta() : {};
+  return {
+    ...meta,
+    rejectReason: reason.code,
+    rejectReasonLabel: reason.label,
+    artistUrl: meta.artistUrl || '',
+    artistDisplayName: meta.artistDisplayName || meta.artistName || '',
+    bundleLabel: meta.bundleLabel || meta.artistDisplayName || meta.artistName || '',
+    random40Mode: meta.random40Mode || random40State?.mode || ''
+  };
+}
+
+async function rejectCurrentRandom40Artist(reason) {
+  const rejectFn = window.PongRandom40RejectCurrentArtist;
+  if (typeof rejectFn !== 'function') {
+    showSortingIndicator('Random 40 reject learning is not ready');
+    return;
+  }
+
+  const learned = await rejectFn(currentRandom40RejectBundleInfo(reason));
+  if (learned !== false && typeof window.PongNavigateToNextPasteEvent === 'function') {
+    setTimeout(() => window.PongNavigateToNextPasteEvent(), 120);
+  }
+}
+
 function createSaveButtons() {
   if (document.getElementById('save-actions-panel')) {
     updateSaveCounters();
@@ -2382,8 +2467,47 @@ function createSaveButtons() {
     saveCurrentArtistVideos();
   });
 
+  const rejectWrap = document.createElement('div');
+  rejectWrap.className = 'random40-reject-wrap';
+
+  const rejectBtn = document.createElement('button');
+  rejectBtn.id = 'reject-current-artist-button';
+  rejectBtn.className = 'side-save-button random40-reject-button';
+  rejectBtn.type = 'button';
+  rejectBtn.title = 'Reject current Random 40 artist';
+  rejectBtn.setAttribute('aria-label', 'Reject current Random 40 artist');
+  rejectBtn.textContent = 'X';
+
+  const rejectMenu = document.createElement('div');
+  rejectMenu.id = 'random40-reject-menu';
+  rejectMenu.className = 'random40-reject-menu';
+
+  RANDOM40_REJECT_REASONS.forEach(reason => {
+    const reasonBtn = document.createElement('button');
+    reasonBtn.type = 'button';
+    reasonBtn.className = 'random40-reject-reason';
+    reasonBtn.textContent = reason.label;
+    reasonBtn.addEventListener('click', async e => {
+      e.preventDefault();
+      e.stopPropagation();
+      rejectMenu.classList.remove('open');
+      await rejectCurrentRandom40Artist(reason);
+    });
+    rejectMenu.appendChild(reasonBtn);
+  });
+
+  rejectBtn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    rejectMenu.classList.toggle('open');
+  });
+
+  rejectWrap.appendChild(rejectBtn);
+  rejectWrap.appendChild(rejectMenu);
+
   panel.appendChild(videoBtn);
   panel.appendChild(artistBtn);
+  panel.appendChild(rejectWrap);
   document.body.appendChild(panel);
 
   updateSaveCounters();
@@ -7357,7 +7481,7 @@ async function random40ClassifyArtist(artist, apiKey, imageUrls) {
         'Grade every candidate image separately, then make one artist-level decision from the full set. ' +
         'Use accepted examples as small positive preference adjustments, not strict look-alike matching. ' +
         'Use red-X rejected examples as stronger hard-negative corrections because they often represent missed hard-filter cases. ' +
-        'User reject reasons Fat, Male, Trans, and Ugly are user-provided labels. Use Male as a hard visible rejection label. Use Trans as a text/URL hard-filter clue, not as an appearance inference. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health. ' +
+        'User reject reasons Fat, Male, Trans, Ugly, and Feet are user-provided labels. Use Male and Feet as hard visible rejection labels. Use Trans as a text/URL hard-filter clue, not as an appearance inference. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health. ' +
         'When hard rejection rules are not triggered, stay broad and favor conventionally attractive adult women with clear, appealing presentation. ' +
         'As a clear visual preference blocker, reject candidate images with pronounced midsection overhang, visible abdominal folds, or apron-like midsection. Do not call this a medical or weight status. ' +
         'Do not reject mild curves, slight softness, or a smooth/non-overhanging midsection for this reason. ' +

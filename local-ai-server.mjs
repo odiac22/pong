@@ -1253,7 +1253,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
     'When hard checks are ambiguous, return unsure instead of reject. Keep the reason neutral and do not mention body weight or health.',
     'The saved preference signal was computed against every locally stored accepted/rejected embedding, not just a nearest-example subset.',
     'Do not evaluate broad preference patterns except the explicit midsection-overhang visual blocker above.',
-    'User reject reasons may include Fat, Male, Trans, and Ugly. Use Male as a hard visual rejection reason. Use Trans only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health.',
+    'User reject reasons may include Fat, Male, Trans, Ugly, and Feet. Use Male and Feet as hard visual rejection reasons. Use Trans only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health.',
     'Do not identify anyone. Do not infer ethnicity, sexuality, medical conditions, or weight status. Do not mention body weight or health.',
     '',
     `Artist: ${artist.artistName || 'unknown'}`,
