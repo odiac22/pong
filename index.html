@@ -677,7 +677,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.58</div>
+  <div class="version-number">23.60</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6073,6 +6073,7 @@ const RANDOM40_REJECT_CACHE_MAX = 4000;
 const RANDOM40_REJECT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_ACCEPT_CONFIDENCE = 0.9;
+const RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE = 0.55;
 const RANDOM40_MAX_REVIEW_IMAGES = 3;
 const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 3;
 const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 2;
@@ -7177,6 +7178,24 @@ function random40CacheHardReject(artistUrl, reason) {
 function random40IsAcceptedDecision(decision) {
   if (!decision || decision.decision !== 'accept') return false;
   const visionSource = String(decision.vision_source || decision.source || '').toLowerCase();
+  const imageGrades = Array.isArray(decision.image_grades) ? decision.image_grades : [];
+
+  if (visionSource === 'local_trained_embedding_classifier') {
+    if (Number(decision.confidence || 0) < RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE) return false;
+    const hardRejected = imageGrades.some(grade => {
+      const gradeChecks = grade?.checks || {};
+      return gradeChecks.male_present === true ||
+        gradeChecks.female_presenting_adult === false ||
+        gradeChecks.appears_over_50 === true ||
+        gradeChecks.feet_dominant === true ||
+        gradeChecks.logo_or_placeholder === true;
+    });
+    if (hardRejected) return false;
+    const visualMatches = imageGrades.filter(grade => grade?.checks?.visual_preference_match === true).length;
+    const acceptGrades = imageGrades.filter(grade => grade?.decision === 'accept').length;
+    return acceptGrades >= 1 || visualMatches >= Math.ceil(Math.max(1, imageGrades.length) / 2);
+  }
+
   const requiredConfidence = visionSource === 'ollama_primary'
     ? Math.max(RANDOM40_ACCEPT_CONFIDENCE, 0.95)
     : RANDOM40_ACCEPT_CONFIDENCE;
@@ -7197,7 +7216,6 @@ function random40IsAcceptedDecision(decision) {
   // hard visual checks and returns accept, do not let SigLIP veto the result.
   if (decision.qwen_decision) return true;
 
-  const imageGrades = Array.isArray(decision.image_grades) ? decision.image_grades : [];
   if (!imageGrades.length) return true;
 
   const hardRejected = imageGrades.some(grade => {

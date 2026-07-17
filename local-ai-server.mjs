@@ -44,6 +44,7 @@ let ollamaFailureReason = '';
 const ollamaFailureByModel = new Map();
 const embeddingCache = new Map();
 let learnedStorePromise = null;
+let learnedVectorCache = null;
 let fineTuneProcess = null;
 let loraInferenceProcess = null;
 let loraInferenceStarting = null;
@@ -245,6 +246,24 @@ function topMean(vector, examples, k = TOP_K) {
   return selected.reduce((sum, n) => sum + n, 0) / selected.length;
 }
 
+function averageVector(vectors) {
+  if (!vectors.length) return [];
+  const width = vectors[0]?.length || 0;
+  if (!width) return [];
+  const out = new Array(width).fill(0);
+  let count = 0;
+
+  for (const vector of vectors) {
+    if (!Array.isArray(vector) || vector.length !== width) continue;
+    for (let i = 0; i < width; i++) out[i] += Number(vector[i] || 0);
+    count++;
+  }
+
+  if (!count) return [];
+  for (let i = 0; i < width; i++) out[i] /= count;
+  return normalizeVector(out);
+}
+
 function logistic(x) {
   return 1 / (1 + Math.exp(-x));
 }
@@ -332,7 +351,19 @@ async function saveLearnedStore(store) {
   await fs.writeFile(tempPath, JSON.stringify(clean, null, 2), 'utf8');
   await fs.rename(tempPath, LEARNED_STORE_PATH);
   learnedStorePromise = Promise.resolve(clean);
+  learnedVectorCache = null;
   return clean;
+}
+
+async function loadLearnedVectors() {
+  if (learnedVectorCache) return learnedVectorCache;
+  const store = await loadLearnedStore();
+  learnedVectorCache = {
+    store,
+    accepted: learnedVectors(store, 'accept'),
+    rejected: learnedVectors(store, 'reject')
+  };
+  return learnedVectorCache;
 }
 
 function learnedRecordSummaries(store) {
@@ -806,22 +837,39 @@ async function embedExamples(records, label) {
   return settled.filter(item => item.status === 'fulfilled').map(item => item.value);
 }
 
-function gradeCandidate(vector, index, acceptedVectors, rejectedVectors) {
-  const pos = topMean(vector, acceptedVectors);
-  const neg = topMean(vector, rejectedVectors);
-  const margin = pos - neg;
-  const preference = logistic(margin * 18);
-  const confidence = Math.max(0.5, Math.min(0.99, 0.5 + Math.abs(margin) * 16));
+function buildPreferenceModel(acceptedVectors, rejectedVectors) {
+  return {
+    acceptedVectors,
+    rejectedVectors,
+    acceptedCentroid: averageVector(acceptedVectors.map(item => item.vector)),
+    rejectedCentroid: averageVector(rejectedVectors.map(item => item.vector))
+  };
+}
+
+function gradeCandidate(vector, index, preferenceModel) {
+  const acceptedVectors = preferenceModel.acceptedVectors || [];
+  const rejectedVectors = preferenceModel.rejectedVectors || [];
+  const posTop = topMean(vector, acceptedVectors, Math.min(TOP_K, 16));
+  const negTop = topMean(vector, rejectedVectors, Math.min(TOP_K + 4, 20));
+  const posAll = preferenceModel.acceptedCentroid.length ? cosine(vector, preferenceModel.acceptedCentroid) : 0;
+  const negAll = preferenceModel.rejectedCentroid.length ? cosine(vector, preferenceModel.rejectedCentroid) : 0;
+  const topMargin = posTop - negTop;
+  const allMargin = posAll - negAll;
+  const margin = topMargin * 0.62 + allMargin * 0.38;
+  const preference = logistic(margin * 22);
+  const confidence = Math.max(0.5, Math.min(0.99, 0.5 + Math.abs(margin) * 18));
   let decision = 'unsure';
-  if (preference >= 0.49 && margin > -0.003) decision = 'accept';
-  if (preference <= 0.38 && margin < -0.012) decision = 'reject';
+  if (preference >= 0.49 && margin > -0.004) decision = 'accept';
+  if (preference <= 0.37 && margin < -0.014) decision = 'reject';
 
   return {
     image_index: index + 1,
     decision,
     confidence,
-    reason: `taste ${Math.round(preference * 100)} pos ${pos.toFixed(3)} neg ${neg.toFixed(3)}`,
+    reason: `trained ${Math.round(preference * 100)} top ${topMargin.toFixed(3)} all ${allMargin.toFixed(3)}`,
     local_score: preference,
+    top_margin: topMargin,
+    all_margin: allMargin,
     checks: {
       male_present: null,
       female_presenting_adult: null,
@@ -856,6 +904,51 @@ function finalDecision(imageGrades, acceptedCount, rejectedCount) {
     return { decision: 'accept', confidence, reason: `local accepted ${accepts}/${imageGrades.length}, taste ${Math.round(average * 100)}` };
   }
   return { decision: 'unsure', confidence, reason: `local unsure, taste ${Math.round(average * 100)}` };
+}
+
+function unknownVisionChecks() {
+  return {
+    photograph: null,
+    woman_prominent: null,
+    male_only: null,
+    male_present: null,
+    female_presenting_adult: null,
+    appears_over_50: null,
+    feet_dominant: null,
+    logo_or_placeholder: null
+  };
+}
+
+function localTrainedClassifierResponse({
+  final,
+  imageGrades,
+  acceptedVectors,
+  rejectedVectors,
+  learnedAcceptedVectors,
+  learnedRejectedVectors
+}) {
+  return {
+    ...final,
+    source: 'local_trained_embedding_classifier',
+    model: `${MODEL} + trained embedding classifier`,
+    vision_source: 'local_trained_embedding_classifier',
+    reason: `trained embedding classifier: ${final.reason || 'local score'}`.slice(0, 140),
+    checks: unknownVisionChecks(),
+    examples: {
+      accepted_images: acceptedVectors.length,
+      rejected_images: rejectedVectors.length,
+      learned_accept_images: learnedAcceptedVectors.length,
+      learned_reject_images: learnedRejectedVectors.length,
+      qwen_accept_examples: 0,
+      qwen_reject_examples: 0,
+      cached_images: embeddingCache.size
+    },
+    siglip_decision: final,
+    qwen_decision: null,
+    primary_error: '',
+    fallback_error: '',
+    image_grades: imageGrades
+  };
 }
 
 function nearestExampleUrls(candidateVectors, examples, count) {
@@ -1241,9 +1334,10 @@ async function classifyInner(payload) {
   const candidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))].slice(0, QWEN_CANDIDATE_IMAGES);
   if (!candidateUrls.length) throw new Error('No candidate image URLs supplied.');
 
-  const learnedStore = await loadLearnedStore();
-  const learnedAcceptedVectors = learnedVectors(learnedStore, 'accept');
-  const learnedRejectedVectors = learnedVectors(learnedStore, 'reject');
+  const learnedCache = await loadLearnedVectors();
+  const learnedStore = learnedCache.store;
+  const learnedAcceptedVectors = learnedCache.accepted;
+  const learnedRejectedVectors = learnedCache.rejected;
 
   const [payloadAcceptedVectors, payloadRejectedVectors] = await Promise.all([
     embedExamples(payload.acceptedArtists || [], 'accept'),
@@ -1256,7 +1350,8 @@ async function classifyInner(payload) {
   const candidateVectors = candidateResults.filter(item => item.status === 'fulfilled').map(item => item.value);
   if (!candidateVectors.length) throw new Error('Could not embed any candidate images.');
 
-  const imageGrades = candidateVectors.map((vector, index) => gradeCandidate(vector, index, acceptedVectors, rejectedVectors));
+  const preferenceModel = buildPreferenceModel(acceptedVectors, rejectedVectors);
+  const imageGrades = candidateVectors.map((vector, index) => gradeCandidate(vector, index, preferenceModel));
   const final = finalDecision(imageGrades, acceptedVectors.length, rejectedVectors.length);
 
   if (String(payload.stage || '') === 'thumbnail') {
@@ -1283,6 +1378,18 @@ async function classifyInner(payload) {
       image_grades: imageGrades
     };
   }
+
+  if (localVariant === 'local') {
+    return localTrainedClassifierResponse({
+      final,
+      imageGrades,
+      acceptedVectors,
+      rejectedVectors,
+      learnedAcceptedVectors,
+      learnedRejectedVectors
+    });
+  }
+
   const rejectionSummary = rejectReasonSummary([
     ...(learnedStore.records || []).filter(record => record.label === 'reject'),
     ...(payload.rejectedArtists || [])
