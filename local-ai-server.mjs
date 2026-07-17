@@ -1256,7 +1256,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
   }
   const useExampleImages = !/^qwen3-vl\b/i.test(selectedVisionModel);
   const [candidateImages, acceptedImages, rejectedImages] = await Promise.all([
-    fetchImagesBase64(candidateUrls.slice(0, QWEN_CANDIDATE_IMAGES)),
+    fetchImagesBase64(candidateUrls.slice(0, 4)),
     useExampleImages ? fetchImagesBase64(acceptedExampleUrls.slice(0, QWEN_ACCEPT_EXAMPLES)) : Promise.resolve([]),
     useExampleImages ? fetchImagesBase64(rejectedExampleUrls.slice(0, QWEN_REJECT_EXAMPLES)) : Promise.resolve([])
   ]);
@@ -1436,7 +1436,7 @@ async function classifyInner(payload) {
   }
 
   const personalCandidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))].slice(0, 4);
-  const candidateUrls = personalCandidateUrls.slice(0, QWEN_CANDIDATE_IMAGES);
+  const candidateUrls = personalCandidateUrls.slice(0, payload.hardCheckOnly ? 4 : QWEN_CANDIDATE_IMAGES);
   if (!personalCandidateUrls.length) throw new Error('No candidate image URLs supplied.');
 
   if (localVariant === 'local' || localVariant === 'local2') {

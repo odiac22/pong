@@ -805,7 +805,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.86</div>
+  <div class="version-number">23.87</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8321,6 +8321,8 @@ function random40SelectCandidateImages(imageUrls, firstImage, randomExtraCount, 
 }
 
 const TRAIN_AI_ACCURACY_KEY = 'pong_train_ai_accuracy_v1';
+const TRAIN_AI_SWIPE_COMMIT_MS = 80;
+const TRAIN_AI_RESULT_FLASH_MS = 200;
 const trainAiState = {
   open: false,
   busy: false,
@@ -8531,10 +8533,37 @@ function trainAiPreparePredictions(candidate, { quiet = false } = {}) {
   });
 }
 
+async function trainAiHardVisualCheck(candidate) {
+  const response = await fetch(`${trainAiState.endpoint}/classify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      app: 'pong-train-ai',
+      model: RANDOM40_LOCAL_MODEL_NAME,
+      visionModel: RANDOM40_LOCAL2_VISION_MODEL,
+      hardCheckOnly: true,
+      promptVersion: `${RANDOM40_PROMPT_VERSION}-train-ai-gender-gate`,
+      artist: {
+        artistUrl: candidate.artistUrl,
+        artistName: candidate.artistName,
+        pageText: candidate.pageText || '',
+        imageUrl: candidate.imageUrls[0] || ''
+      },
+      candidateImageUrls: candidate.imageUrls.slice(0, 4),
+      acceptedArtists: [],
+      rejectedArtists: []
+    })
+  });
+  const raw = await response.text();
+  if (!response.ok) throw new Error(`Local hard check HTTP ${response.status}: ${raw.slice(0, 180)}`);
+  return JSON.parse(raw);
+}
+
 function trainAiPredictionFlagsMale(prediction) {
   const checkSets = [
     prediction?.checks,
     prediction?.qwen_decision?.checks,
+    prediction?.qwen_hard_check?.checks,
     ...(Array.isArray(prediction?.image_grades) ? prediction.image_grades.map(grade => grade?.checks) : [])
   ].filter(Boolean);
   if (checkSets.some(checks => checks.male_present === true || checks.male_only === true)) return true;
@@ -8545,6 +8574,15 @@ function trainAiPredictionFlagsMale(prediction) {
 
 function trainAiPredictionsFlagMale(predictions) {
   return [predictions?.local, predictions?.local2].some(trainAiPredictionFlagsMale);
+}
+
+function trainAiHardVisualGatePasses(prediction) {
+  if (!prediction || trainAiPredictionFlagsMale(prediction)) return false;
+  const checks = prediction.checks || {};
+  return String(prediction.decision || '').toLowerCase() === 'accept' &&
+    checks.female_presenting_adult === true &&
+    checks.male_present !== true &&
+    checks.male_only !== true;
 }
 
 async function trainAiBuildCandidate(artist) {
@@ -8617,8 +8655,13 @@ function trainAiEnsureQueue(target = 3) {
       const candidate = await trainAiBuildCandidate(artist);
       if (!candidate || random40HardFilter(candidate)) continue;
       candidate.predictionPromise ||= trainAiPreparePredictions(candidate, { quiet: true });
-      const predictions = await candidate.predictionPromise;
-      if (trainAiPredictionsFlagMale(predictions)) continue;
+      candidate.hardCheckPromise ||= trainAiHardVisualCheck(candidate).catch(error => ({
+        decision: 'unavailable',
+        confidence: 0,
+        reason: error?.message || 'hard visual check unavailable'
+      }));
+      const [predictions, hardCheck] = await Promise.all([candidate.predictionPromise, candidate.hardCheckPromise]);
+      if (trainAiPredictionsFlagMale(predictions) || !trainAiHardVisualGatePasses(hardCheck)) continue;
       trainAiDeliverQueuedCandidate(candidate, generation);
     }
   })().finally(() => {
@@ -8734,10 +8777,10 @@ async function trainAiChoose(label) {
   const card = document.getElementById('train-ai-card');
   if (card) {
     const direction = label === 'accept' ? -1 : 1;
-    card.style.transition = 'transform 150ms cubic-bezier(0.2,0.82,0.2,1), opacity 150ms ease';
+    card.style.transition = `transform ${TRAIN_AI_SWIPE_COMMIT_MS}ms cubic-bezier(0.2,0.82,0.2,1), opacity ${TRAIN_AI_SWIPE_COMMIT_MS}ms ease`;
     card.style.transform = `translate3d(${direction * 64}px,0,0) rotate(${direction * 4}deg) scale(0.985)`;
     card.style.opacity = '0.82';
-    await sleep(150);
+    await sleep(TRAIN_AI_SWIPE_COMMIT_MS);
     trainAiResetCardTransform();
   }
   const candidate = trainAiState.candidate;
@@ -8754,7 +8797,7 @@ async function trainAiChoose(label) {
     }
     document.getElementById('train-ai-learning-status').textContent = 'Your swipe was ignored. Text hard filters always win.';
     document.getElementById('train-ai-reveal').classList.add('visible');
-    await sleep(1000);
+    await sleep(TRAIN_AI_RESULT_FLASH_MS);
     if (!trainAiState.open) return;
     document.getElementById('train-ai-reveal').classList.remove('visible');
     trainAiState.busy = false;
@@ -8774,7 +8817,7 @@ async function trainAiChoose(label) {
 
   const record = trainAiStoreBrowserFeedback(label, candidate, trainAiState.selectedReason);
   void random40SendLocalLearningExample(label, record).catch(() => {});
-  await sleep(1000);
+  await sleep(TRAIN_AI_RESULT_FLASH_MS);
   if (!trainAiState.open) return;
   document.getElementById('train-ai-reveal').classList.remove('visible');
   trainAiState.busy = false;
