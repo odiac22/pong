@@ -58,6 +58,11 @@ BODY_PROMPTS = [
     "a visibly larger adult figure",
     "the body shape is unclear or hidden",
 ]
+BODY_HEAD_MIN = float(os.environ.get("PONG_BODY_REJECT_HEAD_MIN", "0.43"))
+BODY_LARGER_MIN = float(os.environ.get("PONG_BODY_LARGER_MIN", "0.27"))
+BODY_LARGER_MARGIN = float(os.environ.get("PONG_BODY_LARGER_MARGIN", "0.05"))
+FACE_HEAD_MIN_LOCAL1 = float(os.environ.get("PONG_FACE_REJECT_LOCAL1_MIN", "0.56"))
+FACE_HEAD_MIN_LOCAL2 = float(os.environ.get("PONG_FACE_REJECT_LOCAL2_MIN", "0.55"))
 
 
 def now_iso() -> str:
@@ -320,7 +325,7 @@ def fetch_image(url: str, timeout: int = 18) -> Image.Image:
 def load_candidate_images(urls: list[str]) -> tuple[list[Image.Image], list[str]]:
     images: list[Image.Image] = []
     accepted_urls: list[str] = []
-    for url in urls[:4]:
+    for url in urls[:5]:
         try:
             normalized = normalize_url(url)
             if not normalized:
@@ -452,9 +457,27 @@ def hard_checks(analysis: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str
     return combined, grades, hard_reason
 
 
+def body_preference_veto(image_grades: list[dict[str, Any]], body_head: float | None) -> dict[str, Any] | None:
+    for grade in image_grades:
+        profile = grade.get("body_profile") or {}
+        larger = float(profile.get("larger") or 0)
+        slender = float(profile.get("slender") or 0)
+        average = float(profile.get("average") or 0)
+        unclear = float(profile.get("unclear") or 0)
+        margin = larger - max(slender, average)
+        strong_visual = larger >= 0.45 and margin >= 0.12 and unclear < 0.55
+        learned_visual = (
+            body_head is not None and body_head >= BODY_HEAD_MIN and
+            larger >= BODY_LARGER_MIN and margin >= BODY_LARGER_MARGIN and unclear < 0.55
+        )
+        if strong_visual or learned_visual:
+            return grade
+    return None
+
+
 def classify(payload: dict[str, Any]) -> dict[str, Any]:
     variant = "local" if str(payload.get("localVariant", "local")).lower() == "local" else "local2"
-    urls = list(dict.fromkeys(normalize_url(x) for x in payload.get("candidateImageUrls", []) if normalize_url(x)))[:4]
+    urls = list(dict.fromkeys(normalize_url(x) for x in payload.get("candidateImageUrls", []) if normalize_url(x)))[:5]
     images, used_urls = load_candidate_images(urls)
     if not images:
         raise ValueError("No usable candidate images")
@@ -468,8 +491,13 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
 
     if variant == "local2" and not include_semantics and (preference >= 0.48 or hard_only):
         with INFERENCE_SEMAPHORE:
-            semantic_analysis = VISION.analyze(images, variant, include_semantics=True)
-        # Keep the fast Local2 preference vector; use semantic pass only for hard checks.
+            _, semantic_scores, body_scores = VISION.siglip_features(images)
+        semantic_analysis = {
+            **fast_analysis,
+            "semanticScores": semantic_scores,
+            "bodyScores": body_scores,
+        }
+        # Keep the fast Local2 DINO preference vector; run only SigLIP2 for hard checks.
     else:
         semantic_analysis = fast_analysis
 
@@ -490,6 +518,13 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
         "male_reject": reason_probability(fast_analysis["feature"], variant, r"male"),
         "feet_reject": reason_probability(fast_analysis["feature"], variant, r"feet|foot"),
     }
+    body_veto_grade = body_preference_veto(image_grades, reason_heads["body_reject"])
+    face_threshold = FACE_HEAD_MIN_LOCAL1 if variant == "local" else FACE_HEAD_MIN_LOCAL2
+    face_veto = bool(
+        fast_analysis["faceAvailable"] and
+        reason_heads["face_reject"] is not None and
+        reason_heads["face_reject"] >= face_threshold
+    )
     if reason_heads["male_reject"] is not None and reason_heads["male_reject"] >= 0.82:
         hard_reason = hard_reason or "learned male-presenting hard-filter match"
         checks["male_present"] = True
@@ -514,6 +549,18 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
         decision = "accept"
         confidence = 0.96
         reason = "visual hard checks passed"
+    elif not fast_analysis["bodyAvailable"]:
+        decision = "reject"
+        confidence = 0.90
+        reason = "no usable body evidence for personal body preference"
+    elif body_veto_grade is not None:
+        decision = "reject"
+        confidence = 0.94
+        reason = "body-shape visual preference mismatch"
+    elif face_veto:
+        decision = "reject"
+        confidence = 0.92
+        reason = "face visual preference mismatch"
     elif preference >= threshold:
         decision = "accept"
         confidence = min(0.99, 0.55 + abs(preference - 0.5) * 1.7)
@@ -524,7 +571,15 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
         reason = f"personal preference {round(preference * 100)}% below {round(threshold * 100)}%"
 
     for grade in image_grades:
-        grade["checks"]["visual_preference_match"] = bool(preference >= threshold)
+        is_body_veto = grade is body_veto_grade
+        grade["checks"]["visual_preference_match"] = bool(
+            preference >= threshold and not is_body_veto and not face_veto
+        )
+        if is_body_veto:
+            grade["decision"] = "reject"
+            grade["confidence"] = 0.94
+            grade["reason"] = "body-shape visual preference mismatch"
+            continue
         if grade["decision"] == "unsure":
             grade["decision"] = "accept" if decision == "accept" else "reject"
             grade["confidence"] = confidence
@@ -538,6 +593,13 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
             "checks": {**checks, "visual_preference_match": bool(preference >= threshold)},
         })
 
+    hard_review_required = bool(
+        variant == "local" and decision == "accept" and (
+            reason_heads["body_reject"] is not None and
+            reason_heads["body_reject"] >= BODY_HEAD_MIN
+        )
+    )
+
     return {
         "decision": decision,
         "confidence": confidence,
@@ -547,7 +609,8 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
         "vision_source": "personal_preference_v2",
         "model": f"{LOCAL1_DINO} + {SIGLIP_MODEL}" if variant == "local" else f"{LOCAL2_DINO} fast personal head",
         "variant": variant,
-        "hard_verified": not bool(hard_reason) and bool(image_grades),
+        "hard_verified": decision == "accept" and not bool(hard_reason) and bool(image_grades) and not hard_review_required,
+        "hard_review_required": hard_review_required,
         "checks": checks,
         "image_grades": image_grades,
         "evidence": {
