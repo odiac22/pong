@@ -729,7 +729,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.70</div>
+  <div class="version-number">23.71</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6572,6 +6572,7 @@ function random40NormalizeArtistUrl(raw) {
 }
 
 function random40NormalizeUrl(raw, base) {
+  if (!String(raw || '').trim()) return '';
   try {
     return new URL(raw, base || 'https://coomerfans.com/').toString();
   } catch (_) {
@@ -7898,6 +7899,170 @@ function random40ExtractReviewImages(doc, baseUrl, firstImage) {
   return urls;
 }
 
+function random40IsPreferredImageExtension(url) {
+  return /\.(?:jpe?g|png|webp)(?:[?#]|$)/i.test(String(url || ''));
+}
+
+function random40IsGifImage(url) {
+  return /\.gif(?:[?#]|$)/i.test(String(url || ''));
+}
+
+function random40IsAllowedImageHost(url) {
+  try {
+    const parsed = new URL(url, 'https://coomerfans.com/');
+    const hostname = parsed.hostname.toLowerCase();
+    return hostname === 'coomerfans.com' ||
+      hostname === 'www.coomerfans.com' ||
+      hostname.endsWith('.coomerfans.com');
+  } catch (_) {
+    return false;
+  }
+}
+
+function random40IsStorageImage(url) {
+  try {
+    const pathname = new URL(url, 'https://coomerfans.com/').pathname.toLowerCase();
+    return pathname.includes('/storage/') || pathname.includes('/istorage/');
+  } catch (_) {
+    return false;
+  }
+}
+
+function random40IsLikelyUnwantedImage(url, node = null) {
+  const blocked = ['logo', 'banner', 'favicon', 'sprite', 'icon', 'emoji', 'avatar-default', 'placeholder', 'loading', 'advert', '/ads/', '/ad/', 'tracking', 'pixel'];
+  const lowerUrl = String(url || '').toLowerCase();
+  if (blocked.some(term => lowerUrl.includes(term))) return true;
+
+  if (!node?.getAttribute) return false;
+  const combined = [
+    node.getAttribute('alt'),
+    node.getAttribute('class'),
+    node.getAttribute('id')
+  ].join(' ').toLowerCase();
+  if (blocked.some(term => combined.includes(term))) return true;
+
+  const width = Number(node.getAttribute('width')) || node.naturalWidth || 0;
+  const height = Number(node.getAttribute('height')) || node.naturalHeight || 0;
+  return width > 0 && height > 0 && (width < 100 || height < 100);
+}
+
+function random40ImageCandidateFromElement(node, baseUrl) {
+  if (!node) return '';
+  const enclosingLink = node.closest?.('a[href]');
+  const candidates = [
+    enclosingLink?.getAttribute('href'),
+    node.getAttribute?.('data-src'),
+    node.getAttribute?.('data-original'),
+    node.getAttribute?.('data-lazy-src'),
+    node.currentSrc,
+    node.getAttribute?.('src')
+  ];
+
+  const srcset = node.getAttribute?.('srcset') || node.getAttribute?.('data-srcset');
+  if (srcset) {
+    candidates.unshift(...srcset.split(',').map(item => item.trim().split(/\s+/)[0]).filter(Boolean).reverse());
+  }
+
+  for (const candidate of candidates) {
+    const url = random40NormalizeUrl(candidate, baseUrl);
+    if (url) return url;
+  }
+  return '';
+}
+
+function random40FindProfileImageFromDoc(doc, artist, baseUrl) {
+  const candidates = [];
+  try {
+    const parts = new URL(artist.artistUrl || baseUrl, 'https://coomerfans.com/').pathname.split('/').filter(Boolean);
+    const userIndex = parts.findIndex(part => part.toLowerCase() === 'u');
+    const numericId = userIndex >= 0 ? parts[userIndex + 2] || '' : '';
+    if (numericId) candidates.push(random40NormalizeUrl(`/istorage/${numericId}.jpg`, baseUrl));
+  } catch (_) {}
+
+  doc?.querySelectorAll?.('img, a[href]')?.forEach(node => {
+    const raw = node.tagName === 'IMG'
+      ? random40ImageCandidateFromElement(node, baseUrl)
+      : random40NormalizeUrl(node.getAttribute('href'), baseUrl);
+    if (raw && raw.toLowerCase().includes('/istorage/')) candidates.push(raw);
+  });
+
+  const valid = [...new Set(candidates)].filter(url =>
+    random40IsAllowedImageHost(url) &&
+    random40IsStorageImage(url) &&
+    (random40IsPreferredImageExtension(url) || random40IsGifImage(url)) &&
+    !random40IsLikelyUnwantedImage(url)
+  );
+  return valid.find(random40IsPreferredImageExtension) || valid[0] || '';
+}
+
+function random40PostUrlFromPost(post, baseUrl) {
+  for (const selector of ['a.view-post[href]', 'a[href*="/p/"]', 'h2 a[href]', 'h3 a[href]']) {
+    const link = post.querySelector(selector);
+    const postUrl = random40NormalizeUrl(link?.getAttribute('href'), baseUrl);
+    try {
+      const parsed = new URL(postUrl);
+      if (parsed.hostname.endsWith('coomerfans.com') && parsed.pathname.includes('/p/')) return postUrl;
+    } catch (_) {}
+  }
+  return '';
+}
+
+function random40ExtractScraperPostImages(doc, pageUrl, artist) {
+  const entries = [];
+  doc?.querySelectorAll?.('div.post')?.forEach(post => {
+    const postUrl = random40PostUrlFromPost(post, pageUrl);
+    if (!postUrl) return;
+
+    const candidates = [];
+    post.querySelectorAll('img').forEach(image => {
+      const imageUrl = random40ImageCandidateFromElement(image, pageUrl);
+      if (imageUrl) candidates.push({ imageUrl, image });
+    });
+    post.querySelectorAll('a[href]').forEach(anchor => {
+      const imageUrl = random40NormalizeUrl(anchor.getAttribute('href'), pageUrl);
+      if (imageUrl && (random40IsPreferredImageExtension(imageUrl) || random40IsGifImage(imageUrl))) {
+        candidates.push({ imageUrl, image: anchor.querySelector('img') });
+      }
+    });
+
+    const seenInPost = new Set();
+    candidates
+      .filter(candidate => {
+        const url = candidate.imageUrl;
+        return random40IsAllowedImageHost(url) &&
+          random40IsStorageImage(url) &&
+          !url.toLowerCase().includes('/istorage/') &&
+          (random40IsPreferredImageExtension(url) || random40IsGifImage(url)) &&
+          !random40IsLikelyUnwantedImage(url, candidate.image);
+      })
+      .sort((a, b) => Number(random40IsPreferredImageExtension(b.imageUrl)) - Number(random40IsPreferredImageExtension(a.imageUrl)))
+      .forEach(candidate => {
+        if (seenInPost.has(candidate.imageUrl)) return;
+        seenInPost.add(candidate.imageUrl);
+        entries.push({
+          type: 'post',
+          imageUrl: candidate.imageUrl,
+          postUrl,
+          artistUrl: artist.artistUrl,
+          artistName: artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)
+        });
+      });
+  });
+  return entries;
+}
+
+function random40DeduplicateImageEntries(entries) {
+  const seen = new Set();
+  const deduped = [];
+  for (const entry of entries || []) {
+    const imageUrl = random40NormalizeUrl(entry?.imageUrl, entry?.postUrl || entry?.artistUrl || location.href);
+    if (!imageUrl || seen.has(imageUrl)) continue;
+    seen.add(imageUrl);
+    deduped.push({ ...entry, imageUrl });
+  }
+  return deduped;
+}
+
 function random40ShuffleUrls(urls) {
   const shuffled = [...urls];
   for (let i = shuffled.length - 1; i > 0; i--) {
@@ -7939,9 +8104,11 @@ async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPag
   const base = artist.artistUrl;
   const postLinks = new Set();
   const pageTextParts = [];
+  const postImageEntries = [];
   const firstDoc = await random40FetchDoc(base, { timeoutMs: 22000 });
 
   random40ExtractVideoPostLinks(firstDoc, base).forEach(url => postLinks.add(url));
+  postImageEntries.push(...random40ExtractScraperPostImages(firstDoc, base, artist));
   if (firstDoc.body?.innerText) pageTextParts.push(firstDoc.body.innerText);
 
   let page = 2;
@@ -7956,6 +8123,7 @@ async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPag
       if (!doc) return;
       if (doc.querySelector('div.post')) hasPosts = true;
       random40ExtractVideoPostLinks(doc, `${base}?page=${pages[index]}`).forEach(url => postLinks.add(url));
+      postImageEntries.push(...random40ExtractScraperPostImages(doc, `${base}?page=${pages[index]}`, artist));
       if (doc.body?.innerText) pageTextParts.push(doc.body.innerText);
     });
     if (!hasPosts) break;
@@ -7965,6 +8133,8 @@ async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPag
   return {
     firstDoc,
     links: [...postLinks],
+    profileImageUrl: random40FindProfileImageFromDoc(firstDoc, artist, base),
+    postImageEntries: random40DeduplicateImageEntries(postImageEntries),
     pageText: pageTextParts.join(' ').replace(/\s+/g, ' ').slice(0, 60000)
   };
 }
@@ -8318,14 +8488,25 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
   const hard = random40HardFilter(workingArtist);
   if (hard) return hard;
 
+  const scraperProfileImage = options.profileImageUrl || options.collected?.profileImageUrl || '';
+  const scraperPostImages = (options.postImageEntries || options.collected?.postImageEntries || [])
+    .map(entry => entry?.imageUrl)
+    .filter(Boolean);
+  const reviewImages = [
+    scraperProfileImage,
+    ...(doc ? random40ExtractReviewImages(doc, workingArtist.artistUrl, workingArtist.imageUrl) : []),
+    ...scraperPostImages
+  ].filter(Boolean);
+  const primaryImage = scraperProfileImage || workingArtist.imageUrl;
+
   const initialImages = doc
     ? random40SelectCandidateImages(
-        random40ExtractReviewImages(doc, workingArtist.artistUrl, workingArtist.imageUrl),
-        workingArtist.imageUrl,
+        reviewImages,
+        primaryImage,
         localMode ? RANDOM40_LOCAL_RANDOM_PROFILE_IMAGES_PER_ARTIST : RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST,
         localMode ? RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST : RANDOM40_INITIAL_IMAGES_PER_ARTIST
       )
-    : [workingArtist.imageUrl].filter(Boolean);
+    : [primaryImage].filter(Boolean);
 
   if (initialImages.length < RANDOM40_MIN_SCREENED_IMAGES) {
     return {
@@ -8400,9 +8581,14 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
   if (needsSecondLook) {
     try {
       if (!doc) doc = await random40FetchDoc(workingArtist.artistUrl, { timeoutMs: 18000 });
+      const secondLookReviewImages = [
+        scraperProfileImage,
+        ...random40ExtractReviewImages(doc, workingArtist.artistUrl, workingArtist.imageUrl),
+        ...scraperPostImages
+      ].filter(Boolean);
       const images = random40SelectCandidateImages(
-        random40ExtractReviewImages(doc, workingArtist.artistUrl, workingArtist.imageUrl),
-        workingArtist.imageUrl,
+        secondLookReviewImages,
+        primaryImage,
         RANDOM40_MAX_REVIEW_IMAGES - 1,
         RANDOM40_MAX_REVIEW_IMAGES
       );
@@ -8592,7 +8778,7 @@ async function startRandom40(mode = 'nano') {
         updateRandom40Progress({ detail: `${classifierLabel} ${artistLabel} - ${precheck.links.length}+ videos, ${reviewImageCount} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         stageStarted = performance.now();
         const decision = await random40WithTimeout(
-          random40AnalyzeArtist(artistWithPrecheckText, apiKey, { firstDoc: precheck.firstDoc, mode: runMode, localEndpoint }),
+          random40AnalyzeArtist(artistWithPrecheckText, apiKey, { firstDoc: precheck.firstDoc, collected: precheck, mode: runMode, localEndpoint }),
           random40IsLocalMode(runMode) ? 55000 : 35000,
           `${classifierLabel} timed out`
         ).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
