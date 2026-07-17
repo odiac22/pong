@@ -286,6 +286,7 @@
     .autoplay-button { left: 132px; font-size: 8px; font-weight: 850; letter-spacing: 0; }
     .autoplay-button.on { background: rgba(103,232,249,0.28) !important; opacity: 0.74 !important; }
     .update-app-button { left: 162px; font-size: 8px; font-weight: 850; letter-spacing: 0; }
+    .reset-ai-stats-button { left: 192px; font-size: 9px; font-weight: 900; letter-spacing: 0; background: rgba(127,29,29,0.32) !important; }
     .next-batch-button {
       position: fixed; left: 12px; top: 50%; transform: translateY(-50%);
       width: 30px; height: 30px; background: var(--ui-bg); opacity: 0.44;
@@ -729,7 +730,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.71</div>
+  <div class="version-number">23.72</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2137,8 +2138,15 @@ function getPaperclipCounterText() {
   return `${current}/${total}`;
 }
 
+function getPaperclipTopCounterText() {
+  const btn = document.getElementById('paste-nav-button');
+  const existing = btn?.getAttribute('data-unviewed') || '';
+  if (existing) return existing;
+  return allVideoUrls.length || videoUrls.length ? String(getUnviewedVideoCount()) : '';
+}
+
 function getArtistLabelCounterText(fallbackText = '') {
-  return isRandom40PlaybackActive() ? getPaperclipCounterText() : fallbackText;
+  return isRandom40PlaybackActive() ? getPaperclipTopCounterText() : fallbackText;
 }
 
 function getViewedVideoKeyForGlobalIndex(globalIndex) {
@@ -2175,6 +2183,7 @@ function updateViewedRemainingCounter() {
   const remaining = getUnviewedVideoCount();
 
   btn.setAttribute('data-unviewed', allVideoUrls.length || videoUrls.length ? String(remaining) : '');
+  if (isRandom40PlaybackActive()) updateBatchReadyCounter();
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -4507,6 +4516,26 @@ function navigateToNextPasteEvent(){
 
 window.PongNavigateToNextPasteEvent = navigateToNextPasteEvent;
 
+function stopRandom40WorkflowForRefresh() {
+  if (random40State && !random40State.done) {
+    random40State.stop = true;
+    random40State.done = true;
+    try { random40PersistStageTimings(); } catch (_) {}
+  }
+  clearTimeout(random40ProgressHideTimer);
+  clearTimeout(random40PreloadTimer);
+  try {
+    updateRandom40Progress({ detail: 'Stopped for refresh', force: true });
+  } catch (_) {}
+}
+
+function resetRandom40AiStatsBaseline() {
+  random40SaveAccuracy(random40EmptyAccuracy());
+  try { localStorage.removeItem(RANDOM40_TIMING_KEY); } catch (_) {}
+  window.PongRenderRandom40Accuracy?.();
+  showSortingIndicator('AI stats reset');
+}
+
 function resetPasteEvents(){
   pasteEvents=[];
   pendingPastes=[];
@@ -4584,6 +4613,7 @@ function createGearButton(){
   };
 
   mk('refresh-button','↺','Refresh',()=>{
+    stopRandom40WorkflowForRefresh();
     resetPasteEvents();
     clearSession();
     if(videoUrlsInput)videoUrlsInput.value='';
@@ -4626,6 +4656,18 @@ function createGearButton(){
     }, 80);
   });
   document.body.appendChild(updateBtn);
+
+  const resetAiStatsBtn = document.createElement('div');
+  resetAiStatsBtn.className = 'control-button reset-ai-stats-button';
+  resetAiStatsBtn.innerHTML = 'X';
+  resetAiStatsBtn.title = 'Reset Random 40 AI stats';
+  resetAiStatsBtn.setAttribute('aria-label','Reset Random 40 AI stats');
+  resetAiStatsBtn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    resetRandom40AiStatsBaseline();
+  });
+  document.body.appendChild(resetAiStatsBtn);
 }
 
 // ─── Load videos ──────────────────────────────────────────────────────────────
