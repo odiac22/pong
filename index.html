@@ -730,7 +730,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.75</div>
+  <div class="version-number">23.76</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6265,12 +6265,13 @@ const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
 const RANDOM40_AI_CONCURRENCY = 18;
-const RANDOM40_LOCAL_CONCURRENCY = 18;
-const RANDOM40_POST_CONCURRENCY = 14;
-const RANDOM40_PAGE_BATCH_SIZE = 8;
-const RANDOM40_LISTING_PAGE_BATCH_SIZE = 4;
+const RANDOM40_LOCAL_CONCURRENCY = 24;
+const RANDOM40_POST_CONCURRENCY = 20;
+const RANDOM40_PAGE_BATCH_SIZE = 12;
+const RANDOM40_LISTING_PAGE_BATCH_SIZE = 6;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
+const RANDOM40_PRECHECK_MAX_ARTIST_PAGES = 36;
 const RANDOM40_FAST_PUBLISH_VIDEOS = 8;
 const RANDOM40_MODEL = 'gpt-4.1-nano';
 const RANDOM40_LOCAL_MODEL_NAME = 'local-image-embeddings';
@@ -8792,9 +8793,12 @@ async function startRandom40(mode = 'nano') {
         updateRandom40Progress({ detail: `Checking videos: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         let stageStarted = performance.now();
         const precheck = await random40WithTimeout(
-          random40CollectVideoPostLinks(artist, { stopAt: Infinity, maxPages: RANDOM40_MAX_ARTIST_PAGES }),
-          60000,
-          'full video-post scan timed out'
+          random40CollectVideoPostLinks(artist, {
+            stopAt: RANDOM40_MIN_VIDEOS_PER_ARTIST,
+            maxPages: RANDOM40_PRECHECK_MAX_ARTIST_PAGES
+          }),
+          30000,
+          '25-video precheck timed out'
         ).catch(() => ({ links: [] }));
         random40RecordStageTiming('video-precheck', performance.now() - stageStarted);
         if ((precheck.links || []).length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
@@ -8833,15 +8837,6 @@ async function startRandom40(mode = 'nano') {
           }
         }
 
-        const initialVideoEntriesPromise = random40WithTimeout(
-          random40ScrapeArtistVideos(artistWithPrecheckText, {
-            collected: precheck,
-            stopAtVideos: Infinity
-          }),
-          60000,
-          'full video scrape timed out'
-        ).catch(() => []);
-
         const reviewImageCount = random40IsLocalMode(runMode) ? RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST : RANDOM40_INITIAL_IMAGES_PER_ARTIST;
         updateRandom40Progress({ detail: `${classifierLabel} ${artistLabel} - ${precheck.links.length}+ videos, ${reviewImageCount} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         stageStarted = performance.now();
@@ -8859,9 +8854,16 @@ async function startRandom40(mode = 'nano') {
           return;
         }
         if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
-        updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Loading scraped videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+        updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Loading first videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
         stageStarted = performance.now();
-        const entries = await initialVideoEntriesPromise;
+        const entries = await random40WithTimeout(
+          random40ScrapeArtistVideos(artistWithPrecheckText, {
+            collected: precheck,
+            stopAtVideos: RANDOM40_FAST_PUBLISH_VIDEOS
+          }),
+          30000,
+          'first video scrape timed out'
+        ).catch(() => []);
         random40RecordStageTiming('initial-video-scrape', performance.now() - stageStarted);
         if (!entries.length) {
           random40State.skippedLowVideo = (random40State.skippedLowVideo || 0) + 1;
