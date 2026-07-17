@@ -677,7 +677,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.62</div>
+  <div class="version-number">23.64</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3990,12 +3990,13 @@ function getNextPasteEventPreviewCount() {
 
 function getPasteEventPaperclipKey(event, index = -1) {
   if (!event) return '';
+  const normalizedArtistUrl = event.artistUrl ? random40NormalizeArtistUrl(event.artistUrl) : '';
   return String(
-    event.artistUrl ||
+    normalizedArtistUrl ||
     event.bundleKey ||
     event.artistKey ||
     `${event.source || 'bundle'}:${event.startIndex || index}:${event.count || 0}`
-  );
+  ).toLowerCase();
 }
 
 function isRandom40PasteEvent(event) {
@@ -4504,18 +4505,26 @@ loadVideosButton.addEventListener('click', async ()=>{
   allVideoMetadata = shuffledLoad.metadata.map(meta => meta || {});
   viewedVideoKeys = new Set();
   const shouldUseEromeTwentyCardMode = window.PongEromeAutoAdvanceOnce === true;
+  const shouldUseRandom40AutoAdvanceMode =
+    window.PongRandom40AutoAdvanceOnce === true ||
+    window.PongLoadedSavedMode === 'random40';
   const shouldUseRegularSlidingMode = !shouldUseEromeTwentyCardMode &&
     (newUrls.length > BATCH_SIZE || shuffledLoad.pasteEvents.length > 0);
   const shouldUseSlidingMode = shouldUseEromeTwentyCardMode || shouldUseRegularSlidingMode;
 
   window.PongEromeAutoAdvanceOnce = false;
+  window.PongRandom40AutoAdvanceOnce = false;
   setEromeTwentyCardMode(shouldUseSlidingMode, {
-    respectRange: shouldUseRegularSlidingMode
+    respectRange: shouldUseRegularSlidingMode || shouldUseRandom40AutoAdvanceMode
   });
   if (!shouldUseSlidingMode) {
     setCurrentRenderBatchSize(BATCH_SIZE);
   }
-  window.PongLoadedSavedMode = shouldUseEromeTwentyCardMode ? 'erome' : 'normal';
+  window.PongLoadedSavedMode = shouldUseRandom40AutoAdvanceMode
+    ? 'random40'
+    : shouldUseEromeTwentyCardMode
+      ? 'erome'
+      : 'normal';
 
   while (allVideoMetadata.length < allVideoUrls.length) {
     allVideoMetadata.push({});
@@ -6056,7 +6065,7 @@ const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
 const RANDOM40_AI_CONCURRENCY = 28;
-const RANDOM40_LOCAL_CONCURRENCY = 20;
+const RANDOM40_LOCAL_CONCURRENCY = 32;
 const RANDOM40_POST_CONCURRENCY = 14;
 const RANDOM40_PAGE_BATCH_SIZE = 8;
 const RANDOM40_LISTING_PAGE_BATCH_SIZE = 4;
@@ -6073,7 +6082,7 @@ const RANDOM40_REJECT_CACHE_MAX = 4000;
 const RANDOM40_REJECT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_ACCEPT_CONFIDENCE = 0.9;
-const RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE = 0.62;
+const RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE = 0.6;
 const RANDOM40_MIN_SCREENED_IMAGES = 3;
 const RANDOM40_MAX_REVIEW_IMAGES = 3;
 const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 3;
@@ -7201,8 +7210,9 @@ function random40IsAcceptedDecision(decision) {
   const requiredImageMajority = Math.ceil(screenedImages / 2);
 
   if (visionSource === 'local_trained_embedding_classifier') {
+    if (decision.hard_verified !== true) return false;
     if (Number(decision.confidence || 0) < RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE) return false;
-    return visualMatches >= 1 && acceptGrades >= requiredImageMajority;
+    return acceptGrades >= 1 || visualMatches >= 1;
   }
 
   const requiredConfidence = visionSource === 'ollama_primary'
@@ -7222,6 +7232,33 @@ function random40IsAcceptedDecision(decision) {
   if (!provenSafe) return false;
 
   return visualMatches >= requiredImageMajority && acceptGrades >= requiredImageMajority;
+}
+
+function random40VisionProofFromDecision(decision) {
+  return decision?.qwen_hard_check || decision?.qwen_decision || decision || {};
+}
+
+function random40DecisionHasVisualPreferenceVeto(decision) {
+  const text = [
+    decision?.reason,
+    decision?.qwen_decision?.reason,
+    decision?.qwen_hard_check?.reason
+  ].filter(Boolean).join(' ');
+  return /\b(midsection|abdominal|abdomen|folds?|overhang|apron|visual preference mismatch)\b/i.test(text);
+}
+
+function random40HardVisionChecksPass(decision) {
+  const proof = random40VisionProofFromDecision(decision);
+  const checks = proof.checks || decision?.checks || {};
+  if (random40DecisionHasVisualPreferenceVeto(decision)) return false;
+  if (proof.decision === 'reject' && Number(proof.confidence || 0) >= 0.82) return false;
+  return checks.photograph !== false &&
+    checks.female_presenting_adult === true &&
+    checks.male_present === false &&
+    checks.male_only === false &&
+    checks.appears_over_50 !== true &&
+    checks.feet_dominant !== true &&
+    checks.logo_or_placeholder !== true;
 }
 
 async function random40ClassifyArtist(artist, apiKey, imageUrls) {
@@ -7886,6 +7923,8 @@ function random40PublishEntries(entries) {
     updatePendingPasteButton();
     if (videoUrlsInput) videoUrlsInput.value = `Cached Random 40: ${payload.urls.length} videos`;
     setEromeTwentyCardMode(true);
+    window.PongLoadedSavedMode = 'random40';
+    window.PongRandom40AutoAdvanceOnce = true;
     window.PongEromeAutoAdvanceOnce = true;
     window.PongLoadAllVideosOnce = false;
     loadVideosButton.click();
@@ -8089,6 +8128,44 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
       })
     : await random40ClassifyArtist(workingArtist, apiKey, initialImages);
   random40State.api++;
+
+  if (mode === 'local' && decision?.decision === 'accept') {
+    const hardVerification = await random40WithTimeout(
+      random40ClassifyArtistLocal(workingArtist, options.localEndpoint, initialImages, {
+        visionModel: RANDOM40_LOCAL2_VISION_MODEL,
+        mode: 'local2',
+        maxImages: RANDOM40_LOCAL_MAX_REVIEW_IMAGES
+      }),
+      18000,
+      'Local1 hard-filter verification timed out'
+    ).catch(error => ({
+      decision: 'reject',
+      confidence: 0,
+      reason: error.message,
+      checks: {}
+    }));
+    random40State.api++;
+
+    if (!random40HardVisionChecksPass(hardVerification)) {
+      return {
+        ...hardVerification,
+        decision: 'reject',
+        confidence: Math.max(Number(hardVerification.confidence || 0), 0.9),
+        reason: `Local1 hard verification blocked: ${hardVerification.reason || 'visual hard check failed'}`.slice(0, 120)
+      };
+    }
+
+    const proof = random40VisionProofFromDecision(hardVerification);
+    decision = {
+      ...decision,
+      hard_verified: true,
+      checks: proof.checks || hardVerification.checks || decision.checks,
+      qwen_decision: proof,
+      hard_verification: hardVerification,
+      reason: `hard-verified ${initialImages.length} images: ${decision.reason || ''}`.slice(0, 120)
+    };
+  }
+
   const needsSecondLook = !localMode && (
     decision.decision === 'unsure' ||
     (decision.decision === 'accept' && Number(decision.confidence || 0) < RANDOM40_CONFIDENCE_REVIEW)
@@ -8262,7 +8339,7 @@ async function startRandom40(mode = 'nano') {
           return;
         }
 
-        if (runMode !== 'local2') {
+        if (runMode !== 'local2' && runMode !== 'local') {
           updateRandom40Progress({ detail: `${classifierLabel} thumbnail check: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
           stageStarted = performance.now();
           const triage = await random40ThumbnailTriage(artistWithPrecheckText, apiKey, runMode, localEndpoint).catch(() => ({ skip: false }));
