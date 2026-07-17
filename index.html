@@ -401,11 +401,9 @@
       user-select: none; -webkit-tap-highlight-color: transparent; cursor: grab;
     }
     .train-ai-card::after {
-      content: ''; position: absolute; inset: 0; z-index: 4; pointer-events: none;
-      background: transparent; opacity: 0; transition: opacity 140ms ease, background-color 140ms ease;
+      content: ''; position: absolute; inset: 0; z-index: 1; pointer-events: none;
+      background: var(--train-ai-swipe-color, transparent); opacity: var(--train-ai-swipe-opacity, 0);
     }
-    .train-ai-card.swipe-good::after { background: rgba(34,197,94,0.32); opacity: 1; }
-    .train-ai-card.swipe-bad::after { background: rgba(244,63,94,0.32); opacity: 1; }
     .train-ai-images { height: 100%; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; overflow: hidden; pointer-events: none; }
     .train-ai-image-tile { position: relative; min-height: 0; overflow: hidden; background: #020617; }
     .train-ai-image-tile { border: 1px solid rgba(255,255,255,0.12); }
@@ -427,8 +425,6 @@
       position: absolute; inset: 0; z-index: 5; display: grid; place-content: center; gap: 10px; padding: 24px;
       text-align: center; background: rgba(2,6,23,0.90); opacity: 0; pointer-events: none; transition: opacity 180ms ease;
     }
-    .train-ai-card.swipe-good .train-ai-reveal { background: rgba(5,46,22,0.86); }
-    .train-ai-card.swipe-bad .train-ai-reveal { background: rgba(76,5,25,0.86); }
     .train-ai-reveal.visible { opacity: 1; }
     .train-ai-reveal-title { font-size: 20px; font-weight: 850; }
     .train-ai-model-result { min-width: 230px; padding: 11px 14px; border-radius: 12px; background: rgba(255,255,255,0.08); font-size: 16px; font-weight: 850; }
@@ -809,7 +805,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.84</div>
+  <div class="version-number">23.85</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8413,13 +8409,18 @@ function trainAiSetStatus(text) {
   if (subtitle) subtitle.textContent = text || 'Swipe left = like · Swipe right = dislike';
 }
 
-function trainAiResetCardTransform(keepSwipeTint = false) {
+function trainAiClearSwipeTint(card = document.getElementById('train-ai-card')) {
+  card?.style.removeProperty('--train-ai-swipe-color');
+  card?.style.removeProperty('--train-ai-swipe-opacity');
+}
+
+function trainAiResetCardTransform() {
   const card = document.getElementById('train-ai-card');
   if (!card) return;
   card.style.transition = 'transform 220ms cubic-bezier(0.2,0.82,0.2,1), opacity 160ms ease';
   card.style.transform = 'translate3d(0,0,0) rotate(0deg)';
   card.style.opacity = '1';
-  if (!keepSwipeTint) card.classList.remove('swipe-good', 'swipe-bad');
+  trainAiClearSwipeTint(card);
   document.getElementById('train-ai-good-stamp').style.opacity = '0';
   document.getElementById('train-ai-bad-stamp').style.opacity = '0';
 }
@@ -8679,13 +8680,11 @@ async function trainAiChoose(label) {
   const card = document.getElementById('train-ai-card');
   if (card) {
     const direction = label === 'accept' ? -1 : 1;
-    card.classList.remove('swipe-good', 'swipe-bad');
-    card.classList.add(label === 'accept' ? 'swipe-good' : 'swipe-bad');
     card.style.transition = 'transform 150ms cubic-bezier(0.2,0.82,0.2,1), opacity 150ms ease';
     card.style.transform = `translate3d(${direction * 64}px,0,0) rotate(${direction * 4}deg) scale(0.985)`;
     card.style.opacity = '0.82';
     await sleep(150);
-    trainAiResetCardTransform(true);
+    trainAiResetCardTransform();
   }
   const candidate = trainAiState.candidate;
   trainAiSetStatus('Checking your choice…');
@@ -8807,6 +8806,9 @@ function installTrainAiSwipe() {
     const vertical = Math.max(-18, Math.min(18, gesture.dy * 0.12));
     const rotation = gesture.dx / 24;
     card.style.transform = `translate3d(${gesture.dx}px,${vertical}px,0) rotate(${rotation}deg)`;
+    const tintStrength = Math.min(0.42, Math.abs(gesture.dx) / 200);
+    card.style.setProperty('--train-ai-swipe-color', gesture.dx < 0 ? 'rgb(34,197,94)' : gesture.dx > 0 ? 'rgb(244,63,94)' : 'transparent');
+    card.style.setProperty('--train-ai-swipe-opacity', String(tintStrength));
     document.getElementById('train-ai-good-stamp').style.opacity = String(Math.max(0, Math.min(1, -gesture.dx / 72)));
     document.getElementById('train-ai-bad-stamp').style.opacity = String(Math.max(0, Math.min(1, gesture.dx / 72)));
   };
@@ -8823,10 +8825,12 @@ function installTrainAiSwipe() {
     const threshold = Math.max(54, Math.min(78, card.clientWidth * 0.18));
     const quickSwipe = Math.abs(gesture.velocityX) >= 0.45 && Math.abs(gesture.dx) >= 30;
     if (gesture.dx <= -threshold || (quickSwipe && gesture.velocityX < 0)) {
+      trainAiClearSwipeTint(card);
       trainAiChoose('accept');
       return;
     }
     if (gesture.dx >= threshold || (quickSwipe && gesture.velocityX > 0)) {
+      trainAiClearSwipeTint(card);
       trainAiChoose('reject');
       return;
     }
