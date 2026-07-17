@@ -729,7 +729,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.67</div>
+  <div class="version-number">23.68</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2453,8 +2453,8 @@ async function rejectCurrentRandom40Artist(reason) {
     return;
   }
 
-  const learned = await rejectFn(currentRandom40RejectBundleInfo(reason));
-  if (learned !== false && typeof window.PongNavigateToNextPasteEvent === 'function') {
+  await rejectFn(currentRandom40RejectBundleInfo(reason)).catch(() => false);
+  if (typeof window.PongNavigateToNextPasteEvent === 'function') {
     setTimeout(() => window.PongNavigateToNextPasteEvent(), 120);
   }
 }
