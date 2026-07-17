@@ -729,7 +729,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.66</div>
+  <div class="version-number">23.67</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1991,8 +1991,9 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   }
   if (artistLabel) {
     const artistName = getArtistDisplayName(nextMetadata);
+    const artistCounterText = getArtistLabelCounterText(`0/${videoUrls.length}`);
     artistLabel.dataset.artistName = artistName || '';
-    artistLabel.textContent = artistName ? `${artistName}  0/${videoUrls.length}` : `0/${videoUrls.length}`;
+    artistLabel.textContent = artistName ? `${artistName}  ${artistCounterText}` : artistCounterText;
     artistLabel.style.display = videoUrls.length ? '' : 'none';
   }
 
@@ -2107,6 +2108,37 @@ function getVideoCounterText(localIndex) {
     : Math.max(0, localIndex) + 1;
 
   return `${Math.max(1, position)}/${Math.max(1, total)} (${getCounterBatchText()})`;
+}
+
+function isRandom40PlaybackActive() {
+  if (window.PongLoadedSavedMode === 'random40' || window.PongRandom40AutoAdvanceOnce === true) return true;
+  if (!Array.isArray(pasteEvents) || !pasteEvents.length) return false;
+
+  const visibleEventIndex = typeof syncCurrentPasteIndexFromVisibleVideo === 'function'
+    ? syncCurrentPasteIndexFromVisibleVideo()
+    : -1;
+  const eventIndex = visibleEventIndex >= 0 ? visibleEventIndex : currentPasteIndex;
+  const event = eventIndex >= 0 ? pasteEvents[eventIndex] : null;
+  if (event?.source === 'random40' || event?.random40Mode) return true;
+
+  const start = Number(event?.startIndex ?? activePlaybackRange?.start ?? currentLoadedRangeStart ?? 0);
+  const meta = allVideoMetadata[start] || videoMetadata[0] || {};
+  return meta?.source === 'random40' || !!meta?.random40Mode;
+}
+
+function getPaperclipCounterText() {
+  const pending = typeof getPendingPasteBundleCount === 'function' ? getPendingPasteBundleCount() : 0;
+  if (pending) return `${pending}p`;
+
+  const total = typeof getPaperclipTotalBundleCount === 'function' ? getPaperclipTotalBundleCount() : 0;
+  if (!total) return '0/0';
+
+  const current = typeof getPaperclipProgressCount === 'function' ? getPaperclipProgressCount() : 1;
+  return `${current}/${total}`;
+}
+
+function getArtistLabelCounterText(fallbackText = '') {
+  return isRandom40PlaybackActive() ? getPaperclipCounterText() : fallbackText;
 }
 
 function getViewedVideoKeyForGlobalIndex(globalIndex) {
@@ -2799,7 +2831,7 @@ function updateBatchReadyCounter() {
   const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
   const total = wrappers.length || videoUrls.length || 0;
   const ready = wrappers.filter(wrapper => wrapper.dataset.readyPlayable === 'true').length;
-  const countText = `${ready}/${total}`;
+  const countText = getArtistLabelCounterText(`${ready}/${total}`);
 
   wrappers.forEach(wrapper => {
     const label = wrapper.querySelector('.artist-label');
@@ -3487,8 +3519,9 @@ function createVideoElements() {
     const artistLabel = document.createElement('div');
     artistLabel.className = 'artist-label';
     const artistLabelText = getArtistDisplayName(videoMetadata[index]);
+    const artistCounterText = getArtistLabelCounterText(`0/${videoUrls.length}`);
     artistLabel.dataset.artistName = artistLabelText;
-    artistLabel.textContent = artistLabelText ? `${artistLabelText}  0/${videoUrls.length}` : `0/${videoUrls.length}`;
+    artistLabel.textContent = artistLabelText ? `${artistLabelText}  ${artistCounterText}` : artistCounterText;
     artistLabel.style.display = videoUrls.length ? '' : 'none';
 
     const audioBtn = document.createElement('div');
@@ -4530,6 +4563,7 @@ function updatePasteNavigationButton(){
   }
 
   updateViewedRemainingCounter();
+  updateBatchReadyCounter();
 }
 
 // ─── Control buttons ──────────────────────────────────────────────────────────
