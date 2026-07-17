@@ -250,7 +250,9 @@
     }
     .url-input textarea:focus,
     .url-input input[type="url"]:focus { border-color: rgba(103,232,249,0.65); background: rgba(255,255,255,0.08); }
-    .button-container { display: flex; gap: 7px; }
+    .button-container {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px;
+    }
     .url-input button {
       flex: 1; padding: 7px 8px; border-radius: 7px; color: var(--ui-text);
       border: 1px solid var(--ui-border);
@@ -390,13 +392,22 @@
     .train-ai-card {
       position: absolute; inset: 0; overflow: hidden; border-radius: 20px; touch-action: none;
       background: #020617; border: 1px solid rgba(255,255,255,0.12);
-      box-shadow: 0 16px 38px rgba(0,0,0,0.38); transition: transform 180ms ease, opacity 180ms ease;
-      user-select: none;
+      box-shadow: 0 16px 38px rgba(0,0,0,0.38);
+      transition: transform 220ms cubic-bezier(0.2,0.82,0.2,1), opacity 160ms ease;
+      will-change: transform, opacity; transform: translate3d(0,0,0); backface-visibility: hidden;
+      user-select: none; -webkit-tap-highlight-color: transparent; cursor: grab;
     }
-    .train-ai-images { height: 100%; display: grid; grid-auto-flow: column; grid-auto-columns: 100%; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
-    .train-ai-images::-webkit-scrollbar { display: none; }
-    .train-ai-images img { width: 100%; height: 100%; object-fit: cover; scroll-snap-align: center; background: #020617; }
-    .train-ai-gradient { position: absolute; inset: 45% 0 0; background: linear-gradient(transparent,rgba(2,6,23,0.94)); pointer-events: none; }
+    .train-ai-images { height: 100%; display: grid; grid-template-rows: 1fr 1fr; overflow: hidden; pointer-events: none; }
+    .train-ai-image-tile { position: relative; min-height: 0; overflow: hidden; background: #020617; }
+    .train-ai-image-tile + .train-ai-image-tile { border-top: 2px solid rgba(255,255,255,0.16); }
+    .train-ai-image-tile img { width: 100%; height: 100%; display: block; object-fit: cover; background: #020617; }
+    .train-ai-image-label {
+      position: absolute; top: 10px; left: 10px; padding: 5px 9px; border-radius: 999px;
+      background: rgba(2,6,23,0.72); border: 1px solid rgba(255,255,255,0.17);
+      font-size: 10px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase;
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    }
+    .train-ai-gradient { position: absolute; inset: 56% 0 0; background: linear-gradient(transparent,rgba(2,6,23,0.94)); pointer-events: none; }
     .train-ai-card-info { position: absolute; left: 16px; right: 16px; bottom: 14px; pointer-events: none; }
     .train-ai-card-name { font-size: 24px; font-weight: 850; text-shadow: 0 2px 10px #000; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .train-ai-card-meta { margin-top: 4px; color: rgba(255,255,255,0.72); font-size: 11px; }
@@ -415,7 +426,7 @@
     .train-ai-reason { flex: 0 0 auto; border-radius: 999px; padding: 7px 10px; font-size: 10px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); }
     .train-ai-reason.selected { color: #fff; background: rgba(244,63,94,0.28); border-color: rgba(251,113,133,0.7); }
     .train-ai-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 10px 16px 15px; }
-    .train-ai-action { min-height: 48px; border-radius: 16px; font-weight: 850; font-size: 14px; }
+    .train-ai-action { min-height: 48px; border-radius: 16px; font-weight: 850; font-size: 14px; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
     .train-ai-good { color: #86efac; border: 1px solid rgba(74,222,128,0.45); background: rgba(34,197,94,0.15); }
     .train-ai-bad { color: #fda4af; border: 1px solid rgba(251,113,133,0.45); background: rgba(244,63,94,0.15); }
     .train-ai-empty { display: grid; place-content: center; height: 100%; padding: 28px; text-align: center; color: rgba(255,255,255,0.72); }
@@ -783,7 +794,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.79</div>
+  <div class="version-number">23.80</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8308,8 +8319,8 @@ function trainAiSetStatus(text) {
 function trainAiResetCardTransform() {
   const card = document.getElementById('train-ai-card');
   if (!card) return;
-  card.style.transition = 'transform 180ms ease, opacity 180ms ease';
-  card.style.transform = '';
+  card.style.transition = 'transform 220ms cubic-bezier(0.2,0.82,0.2,1), opacity 160ms ease';
+  card.style.transform = 'translate3d(0,0,0) rotate(0deg)';
   card.style.opacity = '1';
   document.getElementById('train-ai-good-stamp').style.opacity = '0';
   document.getElementById('train-ai-bad-stamp').style.opacity = '0';
@@ -8318,16 +8329,28 @@ function trainAiResetCardTransform() {
 function trainAiRenderCurrentImage() {
   const container = document.getElementById('train-ai-images');
   const candidate = trainAiState.candidate;
-  if (!container || !candidate?.imageUrls?.length) return;
-  const index = Math.max(0, Math.min(trainAiState.imageIndex, candidate.imageUrls.length - 1));
+  if (!container || !candidate?.profileImageUrl || !candidate?.postImageUrl) return;
   container.replaceChildren();
-  const image = document.createElement('img');
-  image.src = candidate.imageUrls[index];
-  image.alt = `${candidate.artistName} photo ${index + 1}`;
-  image.draggable = false;
-  container.appendChild(image);
+  [
+    { url: candidate.profileImageUrl, label: 'Profile picture' },
+    { url: candidate.postImageUrl, label: 'Random post picture' }
+  ].forEach((item, index) => {
+    const tile = document.createElement('div');
+    tile.className = 'train-ai-image-tile';
+    const image = document.createElement('img');
+    image.src = item.url;
+    image.alt = `${candidate.artistName} ${item.label.toLowerCase()}`;
+    image.draggable = false;
+    image.decoding = 'async';
+    if (index === 1) image.loading = 'eager';
+    const label = document.createElement('span');
+    label.className = 'train-ai-image-label';
+    label.textContent = item.label;
+    tile.append(image, label);
+    container.appendChild(tile);
+  });
   const meta = document.getElementById('train-ai-meta');
-  if (meta) meta.textContent = `Random page ${trainAiState.page} · photo ${index + 1}/${candidate.imageUrls.length} · tap for next photo`;
+  if (meta) meta.textContent = `Random page ${trainAiState.page} · profile + random post · both sent to AI`;
 }
 
 function trainAiRenderCandidate(candidate) {
@@ -8381,17 +8404,18 @@ async function trainAiBuildCandidate(artist) {
   try {
     const doc = await random40FetchDoc(artist.artistUrl, { timeoutMs: 18000 });
     const profileImage = random40FindProfileImageFromDoc(doc, artist, artist.artistUrl) || artist.imageUrl;
-    const reviewImages = [
-      profileImage,
-      ...random40ExtractReviewImages(doc, artist.artistUrl, artist.imageUrl),
-      ...random40ExtractScraperPostImages(doc, artist.artistUrl, artist).map(item => item.imageUrl)
-    ].filter(Boolean);
-    const imageUrls = random40SelectCandidateImages(reviewImages, profileImage, 2, 3);
-    if (!imageUrls.length) return null;
+    const postEntries = random40DeduplicateImageEntries(
+      random40ExtractScraperPostImages(doc, artist.artistUrl, artist)
+    ).filter(item => item.imageUrl && item.imageUrl !== profileImage);
+    const postImage = random40ShuffleUrls(postEntries.map(item => item.imageUrl))[0] || '';
+    if (!profileImage || !postImage) return null;
+    const imageUrls = [profileImage, postImage];
     return {
       ...artist,
       artistName: artist.artistName || random40ArtistNameFromUrl(artist.artistUrl),
       pageText: `${artist.pageText || ''} ${doc.body?.innerText || ''}`.replace(/\s+/g, ' ').slice(0, 20000),
+      profileImageUrl: profileImage,
+      postImageUrl: postImage,
       imageUrls
     };
   } catch (_) {
@@ -8482,6 +8506,15 @@ async function trainAiChoose(label) {
   trainAiState.busy = true;
   document.getElementById('train-ai-good').disabled = true;
   document.getElementById('train-ai-bad').disabled = true;
+  const card = document.getElementById('train-ai-card');
+  if (card) {
+    const direction = label === 'accept' ? -1 : 1;
+    card.style.transition = 'transform 150ms cubic-bezier(0.2,0.82,0.2,1), opacity 150ms ease';
+    card.style.transform = `translate3d(${direction * 64}px,0,0) rotate(${direction * 4}deg) scale(0.985)`;
+    card.style.opacity = '0.82';
+    await sleep(150);
+    trainAiResetCardTransform();
+  }
   const candidate = trainAiState.candidate;
   trainAiSetStatus('Revealing the predictions made before your swipe…');
   const predictions = await trainAiState.predictionPromise;
@@ -8501,7 +8534,7 @@ async function trainAiChoose(label) {
   learningStatus.textContent = learned
     ? 'Learned immediately. The next hidden prediction uses this swipe.'
     : 'Saved in this browser; PC learning service was unavailable.';
-  await sleep(1500);
+  await sleep(600);
   if (!trainAiState.open) return;
   document.getElementById('train-ai-reveal').classList.remove('visible');
   trainAiState.busy = false;
@@ -8536,44 +8569,72 @@ function closeTrainAiPanel() {
 
 function installTrainAiSwipe() {
   const card = document.getElementById('train-ai-card');
+  const renderGesture = () => {
+    const gesture = trainAiState.gesture;
+    if (!gesture || !card) return;
+    gesture.frame = 0;
+    const vertical = Math.max(-18, Math.min(18, gesture.dy * 0.12));
+    const rotation = gesture.dx / 24;
+    card.style.transform = `translate3d(${gesture.dx}px,${vertical}px,0) rotate(${rotation}deg)`;
+    document.getElementById('train-ai-good-stamp').style.opacity = String(Math.max(0, Math.min(1, -gesture.dx / 72)));
+    document.getElementById('train-ai-bad-stamp').style.opacity = String(Math.max(0, Math.min(1, gesture.dx / 72)));
+  };
+  const finishGesture = (event, cancelled = false) => {
+    const gesture = trainAiState.gesture;
+    trainAiState.gesture = null;
+    if (!gesture || gesture.id !== event.pointerId) return;
+    if (gesture.frame) cancelAnimationFrame(gesture.frame);
+    try { card.releasePointerCapture?.(event.pointerId); } catch (_) {}
+    if (cancelled || trainAiState.busy) {
+      trainAiResetCardTransform();
+      return;
+    }
+    const threshold = Math.max(54, Math.min(78, card.clientWidth * 0.18));
+    const quickSwipe = Math.abs(gesture.velocityX) >= 0.45 && Math.abs(gesture.dx) >= 30;
+    if (gesture.dx <= -threshold || (quickSwipe && gesture.velocityX < 0)) {
+      trainAiChoose('accept');
+      return;
+    }
+    if (gesture.dx >= threshold || (quickSwipe && gesture.velocityX > 0)) {
+      trainAiChoose('reject');
+      return;
+    }
+    trainAiResetCardTransform();
+  };
   card?.addEventListener('pointerdown', event => {
     if (trainAiState.busy) return;
-    trainAiState.gesture = { id: event.pointerId, startX: event.clientX, startY: event.clientY, dx: 0 };
+    event.preventDefault();
+    trainAiState.gesture = {
+      id: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      dx: 0,
+      dy: 0,
+      lastX: event.clientX,
+      lastAt: performance.now(),
+      velocityX: 0,
+      frame: 0
+    };
     card.setPointerCapture?.(event.pointerId);
     card.style.transition = 'none';
   });
   card?.addEventListener('pointermove', event => {
     const gesture = trainAiState.gesture;
     if (!gesture || gesture.id !== event.pointerId || trainAiState.busy) return;
+    event.preventDefault();
+    const now = performance.now();
+    const elapsed = Math.max(1, now - gesture.lastAt);
     gesture.dx = event.clientX - gesture.startX;
-    const rotation = gesture.dx / 18;
-    card.style.transform = `translateX(${gesture.dx}px) rotate(${rotation}deg)`;
-    document.getElementById('train-ai-good-stamp').style.opacity = String(Math.max(0, Math.min(1, -gesture.dx / 90)));
-    document.getElementById('train-ai-bad-stamp').style.opacity = String(Math.max(0, Math.min(1, gesture.dx / 90)));
+    gesture.dy = event.clientY - gesture.startY;
+    gesture.velocityX = (event.clientX - gesture.lastX) / elapsed;
+    gesture.lastX = event.clientX;
+    gesture.lastAt = now;
+    if (!gesture.frame) gesture.frame = requestAnimationFrame(renderGesture);
   });
-  card?.addEventListener('pointerup', event => {
-    const gesture = trainAiState.gesture;
-    trainAiState.gesture = null;
-    if (!gesture || gesture.id !== event.pointerId || trainAiState.busy) return;
-    if (gesture.dx <= -85) {
-      card.style.transition = 'transform 180ms ease, opacity 180ms ease';
-      card.style.transform = 'translateX(-120vw) rotate(-18deg)';
-      card.style.opacity = '0';
-      trainAiChoose('accept');
-      return;
-    }
-    if (gesture.dx >= 85) {
-      card.style.transition = 'transform 180ms ease, opacity 180ms ease';
-      card.style.transform = 'translateX(120vw) rotate(18deg)';
-      card.style.opacity = '0';
-      trainAiChoose('reject');
-      return;
-    }
-    if (Math.abs(gesture.dx) < 12 && trainAiState.candidate?.imageUrls?.length > 1) {
-      trainAiState.imageIndex = (trainAiState.imageIndex + 1) % trainAiState.candidate.imageUrls.length;
-      trainAiRenderCurrentImage();
-    }
-    trainAiResetCardTransform();
+  card?.addEventListener('pointerup', event => finishGesture(event));
+  card?.addEventListener('pointercancel', event => finishGesture(event, true));
+  card?.addEventListener('lostpointercapture', event => {
+    if (trainAiState.gesture?.id === event.pointerId) finishGesture(event, true);
   });
 }
 
