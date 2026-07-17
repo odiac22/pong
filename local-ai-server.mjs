@@ -14,7 +14,7 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
 const QWEN_ACCEPT_EXAMPLES = Number(process.env.PONG_QWEN_ACCEPT_EXAMPLE_IMAGES || 0);
 const QWEN_REJECT_EXAMPLES = Number(process.env.PONG_QWEN_REJECT_EXAMPLE_IMAGES || 0);
-const QWEN_CANDIDATE_IMAGES = Number(process.env.PONG_QWEN_CANDIDATE_IMAGES || 2);
+const QWEN_CANDIDATE_IMAGES = Number(process.env.PONG_QWEN_CANDIDATE_IMAGES || 3);
 const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD || 40);
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const LEARNED_STORE_PATH = path.join(LOCAL_AI_DIR, 'learned-examples.json');
@@ -28,7 +28,8 @@ const LORA_INFERENCE_URL = (process.env.PONG_LORA_INFERENCE_URL || 'http://127.0
 const LORA_ADAPTER_DIR = path.join(LOCAL_AI_DIR, 'qwen-lora', 'latest');
 const FINETUNE_AUTO_RUN = process.env.PONG_LORA_AUTOTRAIN !== '0';
 const FINETUNE_MAX_IMAGE_BYTES = Number(process.env.PONG_LORA_MAX_IMAGE_BYTES || 12 * 1024 * 1024);
-const OLLAMA_VISION_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.PONG_OLLAMA_VISION_CONCURRENCY || 2)));
+const FINETUNE_AUTO_IDLE_MS = Math.max(30000, Number(process.env.PONG_LORA_AUTOTRAIN_IDLE_MS || 180000));
+const OLLAMA_VISION_CONCURRENCY = Math.max(1, Math.min(4, Number(process.env.PONG_OLLAMA_VISION_CONCURRENCY || 3)));
 const MAX_LEARNED_RECORDS = 2000;
 
 env.allowLocalModels = false;
@@ -47,6 +48,10 @@ let loraInferenceProcess = null;
 let loraInferenceStarting = null;
 let ollamaVisionActive = 0;
 const ollamaVisionQueue = [];
+let activeClassifyRequests = 0;
+let lastClassifyAt = 0;
+let pendingFineTuneTimer = null;
+let pendingFineTuneTrigger = '';
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -289,7 +294,7 @@ async function loadLearnedStore() {
   if (!learnedStorePromise) {
     learnedStorePromise = fs.readFile(LEARNED_STORE_PATH, 'utf8')
       .then(text => JSON.parse(text))
-      .catch(() => ({ version: 1, records: [] }))
+      .catch(() => fs.readFile(`${LEARNED_STORE_PATH}.bak`, 'utf8').then(text => JSON.parse(text)).catch(() => ({ version: 1, records: [] })))
       .then(store => ({
         version: 1,
         records: Array.isArray(store?.records) ? store.records : []
@@ -305,7 +310,13 @@ async function saveLearnedStore(store) {
     updatedAt: new Date().toISOString(),
     records: (store.records || []).slice(0, MAX_LEARNED_RECORDS)
   };
-  await fs.writeFile(LEARNED_STORE_PATH, JSON.stringify(clean, null, 2), 'utf8');
+  const tempPath = `${LEARNED_STORE_PATH}.tmp`;
+  const backupPath = `${LEARNED_STORE_PATH}.bak`;
+  try {
+    await fs.copyFile(LEARNED_STORE_PATH, backupPath);
+  } catch (_) {}
+  await fs.writeFile(tempPath, JSON.stringify(clean, null, 2), 'utf8');
+  await fs.rename(tempPath, LEARNED_STORE_PATH);
   learnedStorePromise = Promise.resolve(clean);
   return clean;
 }
@@ -624,15 +635,47 @@ async function rebuildFineTuneDatasetFromLearnedStore() {
 }
 
 async function queueFineTuneRun(trigger = 'manual') {
+  const autoLearnTrigger = String(trigger || '').startsWith('learn:');
   await writeFineTuneStatus({
     status: fineTuneProcess ? 'queued' : 'queued',
     trigger,
+    idleDelayMs: autoLearnTrigger ? FINETUNE_AUTO_IDLE_MS : 0,
     queuedAt: new Date().toISOString(),
     datasetPath: FINETUNE_DATASET_PATH,
     jsonlPath: FINETUNE_JSONL_PATH
   });
 
-  if (!FINETUNE_AUTO_RUN || fineTuneProcess) return false;
+  if (!FINETUNE_AUTO_RUN) return false;
+  if (autoLearnTrigger) {
+    scheduleFineTuneWhenIdle(trigger);
+    return false;
+  }
+  return startFineTuneRun(trigger);
+}
+
+function scheduleFineTuneWhenIdle(trigger = 'learn') {
+  pendingFineTuneTrigger = trigger || pendingFineTuneTrigger || 'learn';
+  clearTimeout(pendingFineTuneTimer);
+
+  pendingFineTuneTimer = setTimeout(async () => {
+    pendingFineTuneTimer = null;
+    const stillBusy = activeClassifyRequests > 0 || Date.now() - Number(lastClassifyAt || 0) < FINETUNE_AUTO_IDLE_MS;
+    if (stillBusy) {
+      scheduleFineTuneWhenIdle(pendingFineTuneTrigger);
+      return;
+    }
+    const selectedTrigger = pendingFineTuneTrigger || 'learn';
+    pendingFineTuneTrigger = '';
+    await startFineTuneRun(selectedTrigger).catch(error => writeFineTuneStatus({
+      status: 'blocked',
+      message: error.message || String(error),
+      trigger: selectedTrigger
+    }).catch(() => {}));
+  }, FINETUNE_AUTO_IDLE_MS);
+}
+
+async function startFineTuneRun(trigger = 'manual') {
+  if (fineTuneProcess) return false;
 
   try {
     await fs.access(FINETUNE_RUN_SCRIPT);
@@ -971,7 +1014,10 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
     'Do not reject the whole artist just because one candidate image is weak, blank, cropped, or unclear if another candidate clearly supplies enough face/body evidence.',
     'Only after hard checks pass, use the saved preference signal to judge fit. SigLIP is a weak preference hint, never a hard-rule authority.',
     'Do not reject solely because SigLIP says reject. If SigLIP conflicts with clear visual evidence, trust the attached candidate images.',
-    'When hard checks pass and the candidate image set is broadly conventionally attractive, polished, slim/lean, fit/athletic, or youthful-adult styled, accept even if SigLIP is only unsure or weakly negative.',
+    'Be conservative with accepts. Reject unsure or merely average matches.',
+    'When hard checks pass, accept only if the candidate image set is clearly conventionally attractive, polished, slim/lean, fit/athletic, or youthful-adult styled.',
+    'Reject as visual preference mismatch when the candidate does not clearly fit at least one of those preferred patterns. Keep the reason neutral and do not mention body weight or health.',
+    'If SigLIP is negative, still judge the images, but require an especially clear visual match before accepting.',
     'The saved preference signal was computed against every locally stored accepted/rejected embedding, not just a nearest-example subset.',
     'Accept only when the image set clearly shows a female-presenting adult and fits the visible preference pattern: conventionally attractive styling, fit/athletic/slim/lean presentation, polished appearance, or youthful adult presentation.',
     'User reject reasons may include Fat, Male, Trans, and Ugly. Use Male as a hard visual rejection reason. Use Trans only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health.',
@@ -995,7 +1041,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
     'Judge only the candidate artist images for the final decision. Use accepted/rejected example images only to understand user preference.'
   ].join('\n');
 
-  const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+  const payload = await fetchJsonWithTimeout(`${OLLAMA_URL}/api/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1011,12 +1057,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
         num_predict: Number(process.env.PONG_OLLAMA_NUM_PREDICT || 160)
       }
     })
-  });
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => '');
-    throw new Error(`Ollama HTTP ${response.status}: ${errorText.slice(0, 180)}`);
-  }
-  const payload = await response.json();
+  }, Number(process.env.PONG_OLLAMA_CLASSIFY_TIMEOUT_MS || 45000));
   const rawOutput = payload.response || payload.thinking || '';
   let parsed;
   try {
@@ -1098,7 +1139,7 @@ async function classifyWithLoraVision({ artist, candidateUrls, siglipDecision, i
   }, Number(process.env.PONG_LORA_CLASSIFY_TIMEOUT_MS || 90000));
 }
 
-async function classify(payload) {
+async function classifyInner(payload) {
   const artist = payload.artist || {};
   const visionModel = requestedVisionModel(payload.visionModel);
   const localVariant = String(payload.localVariant || '').toLowerCase();
@@ -1178,7 +1219,7 @@ async function classify(payload) {
     const visualPrimarySignal = {
       decision: 'unsure',
       confidence: 0.5,
-      reason: 'Local2 qwen3 primary judges candidate images directly; embedding score is not a veto'
+      reason: 'Local2 qwen3 primary judges candidate images directly; embedding score is advisory only'
     };
     const visualPrimaryGrades = imageGrades.map(item => ({
       ...item,
@@ -1196,8 +1237,8 @@ async function classify(payload) {
         candidateUrls,
         siglipDecision: visualPrimarySignal,
         imageGrades: visualPrimaryGrades,
-        acceptedExampleUrls: nearestExampleUrls(candidateVectors, acceptedVectors, QWEN_ACCEPT_EXAMPLES),
-        rejectedExampleUrls: nearestExampleUrls(candidateVectors, rejectedVectors, QWEN_REJECT_EXAMPLES),
+        acceptedExampleUrls: [],
+        rejectedExampleUrls: [],
         rejectionSummary,
         visionModel,
       });
@@ -1345,6 +1386,20 @@ async function classify(payload) {
   };
 }
 
+async function classify(payload) {
+  activeClassifyRequests++;
+  lastClassifyAt = Date.now();
+  try {
+    return await classifyInner(payload);
+  } finally {
+    activeClassifyRequests = Math.max(0, activeClassifyRequests - 1);
+    lastClassifyAt = Date.now();
+    if (!activeClassifyRequests && pendingFineTuneTrigger && !pendingFineTuneTimer) {
+      scheduleFineTuneWhenIdle(pendingFineTuneTrigger);
+    }
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     json(res, 204, {});
@@ -1383,7 +1438,13 @@ const server = http.createServer(async (req, res) => {
         finetune: {
           status: fineTuneProcess ? 'running' : fineTuneStatus.status || 'idle',
           message: fineTuneStatus.message || '',
-          updatedAt: fineTuneStatus.updatedAt || ''
+          updatedAt: fineTuneStatus.updatedAt || '',
+          pending: Boolean(pendingFineTuneTrigger || pendingFineTuneTimer),
+          idleDelayMs: FINETUNE_AUTO_IDLE_MS
+        },
+        classify: {
+          active: activeClassifyRequests,
+          lastAt: lastClassifyAt ? new Date(lastClassifyAt).toISOString() : ''
         },
         lora_inference: {
           adapter_present: adapterPresent,
@@ -1489,4 +1550,14 @@ server.listen(PORT, HOST, () => {
   getExtractor()
     .then(() => console.log('Embedding model ready'))
     .catch(error => console.error(`Embedding model failed to preload: ${error.message || error}`));
+  if (process.env.PONG_LORA_PRELOAD !== '0') {
+    setTimeout(() => {
+      ensureLoraInferenceService()
+        .then(health => {
+          if (health?.ready) console.log('LoRA inference model ready');
+          else console.log('LoRA inference model not ready yet');
+        })
+        .catch(error => console.error(`LoRA inference preload failed: ${error.message || error}`));
+    }, 1200);
+  }
 });

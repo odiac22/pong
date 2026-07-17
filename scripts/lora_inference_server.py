@@ -31,7 +31,7 @@ BATCH_CONDITION = threading.Condition()
 BATCH_QUEUE = []
 BATCH_MAX_SIZE = max(1, min(8, int(os.environ.get("PONG_LORA_BATCH_SIZE", "6"))))
 BATCH_WAIT_MS = max(0, min(1000, int(os.environ.get("PONG_LORA_BATCH_WAIT_MS", "160"))))
-MAX_CANDIDATE_IMAGES = max(1, min(6, int(os.environ.get("PONG_LORA_CANDIDATE_IMAGES", "2"))))
+MAX_CANDIDATE_IMAGES = max(1, min(6, int(os.environ.get("PONG_LORA_CANDIDATE_IMAGES", "3"))))
 
 
 def write_status(local_dir: Path, status: str, message: str, **extra):
