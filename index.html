@@ -801,7 +801,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.82</div>
+  <div class="version-number">23.83</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8330,7 +8330,12 @@ const trainAiState = {
   selectedReason: 'Not my taste',
   gesture: null,
   stats: null,
-  resetStatsArmedUntil: 0
+  resetStatsArmedUntil: 0,
+  queue: [],
+  queueWaiters: [],
+  queueFilling: false,
+  queueFillPromise: null,
+  queueGeneration: 0
 };
 
 function trainAiLoadStats() {
@@ -8434,7 +8439,7 @@ function trainAiRenderCurrentImage() {
     container.appendChild(tile);
   });
   const meta = document.getElementById('train-ai-meta');
-  if (meta) meta.textContent = `Page ${trainAiState.page} · 4 full-quality photos checked by AI`;
+  if (meta) meta.textContent = `Page ${candidate.trainingPage || trainAiState.page} · 4 full-quality photos checked by AI`;
 }
 
 function trainAiRenderCandidate(candidate) {
@@ -8507,6 +8512,7 @@ async function trainAiBuildCandidate(artist) {
       ...artist,
       artistName: artist.artistName || random40ArtistNameFromUrl(artist.artistUrl),
       pageText: `${artist.pageText || ''} ${doc.body?.innerText || ''}`.replace(/\s+/g, ' ').slice(0, 20000),
+      trainingPage: trainAiState.page,
       profileImageUrl: profileImage,
       postImageUrls,
       imageUrls
@@ -8516,14 +8522,18 @@ async function trainAiBuildCandidate(artist) {
   }
 }
 
-async function trainAiLoadRandomPage() {
+async function trainAiLoadRandomPage({ quiet = false, generation = trainAiState.queueGeneration } = {}) {
   for (let attempt = 0; attempt < 8 && trainAiState.open; attempt++) {
-    trainAiState.page = random40RandomPage();
-    trainAiSetStatus(`Loading page ${trainAiState.page}…`);
+    if (generation !== trainAiState.queueGeneration) return false;
+    const page = random40RandomPage();
+    if (!quiet) trainAiSetStatus(`Loading page ${page}…`);
     try {
-      const pageUrl = random40PageUrl(trainAiState.page);
+      const pageUrl = random40PageUrl(page);
       const doc = await random40FetchDoc(pageUrl, { timeoutMs: 22000 });
-      trainAiState.artists = shuffleInPlace(random40FindArtistsOnListing(doc, pageUrl).filter(artist => artist.imageUrl)).slice(0, 36);
+      if (generation !== trainAiState.queueGeneration) return false;
+      const artists = shuffleInPlace(random40FindArtistsOnListing(doc, pageUrl).filter(artist => artist.imageUrl)).slice(0, 36);
+      trainAiState.page = page;
+      trainAiState.artists = artists;
       trainAiState.index = 0;
       if (trainAiState.artists.length) return true;
     } catch (_) {}
@@ -8531,30 +8541,68 @@ async function trainAiLoadRandomPage() {
   return false;
 }
 
+function trainAiDeliverQueuedCandidate(candidate, generation) {
+  if (!candidate || !trainAiState.open || generation !== trainAiState.queueGeneration) return;
+  const waiter = trainAiState.queueWaiters.shift();
+  if (waiter) waiter(candidate);
+  else trainAiState.queue.push(candidate);
+}
+
+function trainAiEnsureQueue(target = 3) {
+  if (!trainAiState.open) return Promise.resolve();
+  if (trainAiState.queueFilling && trainAiState.queueFillPromise) return trainAiState.queueFillPromise;
+  const generation = trainAiState.queueGeneration;
+  trainAiState.queueFilling = true;
+  trainAiState.queueFillPromise = (async () => {
+    while (trainAiState.open && generation === trainAiState.queueGeneration && trainAiState.queue.length < target) {
+      if (trainAiState.index >= trainAiState.artists.length) {
+        const loaded = await trainAiLoadRandomPage({ quiet: true, generation });
+        if (!loaded) break;
+      }
+      const artist = trainAiState.artists[trainAiState.index++];
+      const candidate = await trainAiBuildCandidate(artist);
+      if (!candidate || random40HardFilter(candidate)) continue;
+      trainAiDeliverQueuedCandidate(candidate, generation);
+    }
+  })().finally(() => {
+    if (generation !== trainAiState.queueGeneration) return;
+    trainAiState.queueFilling = false;
+    trainAiState.queueFillPromise = null;
+    if (!trainAiState.queue.length) {
+      trainAiState.queueWaiters.splice(0).forEach(resolve => resolve(null));
+    }
+  });
+  return trainAiState.queueFillPromise;
+}
+
+function trainAiTakeQueuedCandidate() {
+  if (trainAiState.queue.length) {
+    const candidate = trainAiState.queue.shift();
+    void trainAiEnsureQueue(3);
+    return Promise.resolve(candidate);
+  }
+  return new Promise(resolve => {
+    trainAiState.queueWaiters.push(resolve);
+    void trainAiEnsureQueue(3);
+  });
+}
+
 async function trainAiNextCandidate() {
   if (!trainAiState.open) return;
   trainAiState.busy = true;
   trainAiSetActionsDisabled(true);
-  while (trainAiState.open) {
-    if (trainAiState.index >= trainAiState.artists.length) {
-      const loaded = await trainAiLoadRandomPage();
-      if (!loaded) {
-        trainAiSetStatus('Could not load photos. Close and try again.');
-        trainAiState.busy = false;
-        return;
-      }
-    }
-    const artist = trainAiState.artists[trainAiState.index++];
-    trainAiSetStatus('Loading four full-quality photos…');
-    const candidate = await trainAiBuildCandidate(artist);
-    if (!candidate) continue;
-    if (random40HardFilter(candidate)) continue;
-    trainAiRenderCandidate(candidate);
-    trainAiState.predictionPromise = trainAiPreparePredictions(candidate);
+  if (!trainAiState.queue.length) trainAiSetStatus('Loading four full-quality photos…');
+  const candidate = await trainAiTakeQueuedCandidate();
+  if (!candidate || !trainAiState.open) {
+    if (trainAiState.open) trainAiSetStatus('Could not load photos. Close and try again.');
     trainAiState.busy = false;
-    trainAiSetActionsDisabled(false);
     return;
   }
+  trainAiRenderCandidate(candidate);
+  trainAiState.predictionPromise = trainAiPreparePredictions(candidate);
+  trainAiState.busy = false;
+  trainAiSetActionsDisabled(false);
+  void trainAiEnsureQueue(3);
 }
 
 function trainAiSetActionsDisabled(disabled) {
@@ -8641,7 +8689,7 @@ async function trainAiChoose(label) {
     }
     document.getElementById('train-ai-learning-status').textContent = 'Your swipe was ignored. Text hard filters always win.';
     document.getElementById('train-ai-reveal').classList.add('visible');
-    await sleep(800);
+    await sleep(1000);
     if (!trainAiState.open) return;
     document.getElementById('train-ai-reveal').classList.remove('visible');
     trainAiState.busy = false;
@@ -8652,19 +8700,16 @@ async function trainAiChoose(label) {
   trainAiRecordPrediction('local2', predictions.local2, label);
   trainAiSaveStats();
 
-  document.getElementById('train-ai-reveal-title').textContent = 'Choice saved';
+  document.getElementById('train-ai-reveal-title').textContent = '';
   trainAiShowModelAgreement('train-ai-local-result', 'Local1', predictions.local, label);
   trainAiShowModelAgreement('train-ai-local2-result', 'Local2', predictions.local2, label);
   const learningStatus = document.getElementById('train-ai-learning-status');
-  learningStatus.textContent = 'Teaching both local models…';
+  learningStatus.textContent = '';
   document.getElementById('train-ai-reveal').classList.add('visible');
 
   const record = trainAiStoreBrowserFeedback(label, candidate, trainAiState.selectedReason);
-  const learned = await random40SendLocalLearningExample(label, record);
-  learningStatus.textContent = learned
-    ? 'Learned from this choice.'
-    : 'Saved here. Start Local AI to sync it.';
-  await sleep(800);
+  void random40SendLocalLearningExample(label, record).catch(() => {});
+  await sleep(1000);
   if (!trainAiState.open) return;
   document.getElementById('train-ai-reveal').classList.remove('visible');
   trainAiState.busy = false;
@@ -8674,6 +8719,7 @@ async function trainAiChoose(label) {
 async function openTrainAiPanel() {
   if (trainAiState.open) return;
   trainAiState.open = true;
+  trainAiResetQueue();
   trainAiState.stats = trainAiLoadStats();
   trainAiRenderStats();
   document.getElementById('train-ai-panel').hidden = false;
@@ -8694,23 +8740,24 @@ function closeTrainAiPanel() {
   trainAiState.busy = false;
   trainAiState.candidate = null;
   trainAiState.predictionPromise = null;
+  trainAiResetQueue();
   document.getElementById('train-ai-panel').hidden = true;
+}
+
+function trainAiResetQueue() {
+  trainAiState.queueGeneration++;
+  trainAiState.queue = [];
+  trainAiState.queueFilling = false;
+  trainAiState.queueFillPromise = null;
+  trainAiState.queueWaiters.splice(0).forEach(resolve => resolve(null));
 }
 
 async function trainAiSkip() {
   if (!trainAiState.open || trainAiState.busy || !trainAiState.candidate) return;
   trainAiState.busy = true;
   trainAiSetActionsDisabled(true);
-  const card = document.getElementById('train-ai-card');
-  if (card) {
-    card.style.transition = 'transform 140ms ease, opacity 140ms ease';
-    card.style.transform = 'translate3d(0,18px,0) scale(0.985)';
-    card.style.opacity = '0.5';
-    await sleep(140);
-  }
   trainAiState.candidate = null;
   trainAiState.predictionPromise = null;
-  trainAiResetCardTransform();
   trainAiSetStatus('Loading another artist…');
   trainAiState.busy = false;
   await trainAiNextCandidate();
