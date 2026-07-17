@@ -677,7 +677,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.49</div>
+  <div class="version-number">23.55</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7623,6 +7623,7 @@ function random40RandomPage() {
 function random40ExtractVideoPostLinks(doc, baseUrl) {
   const links = [];
   doc.querySelectorAll('div.post').forEach(post => {
+    if (post.querySelector('img, picture')) return;
     const link = post.querySelector('a.view-post, a[href*="/p/"], a[href*="/post/"]');
     const href = link?.getAttribute('href') || '';
     if (href) links.push(random40NormalizeUrl(href, baseUrl));
@@ -7685,21 +7686,51 @@ async function random40VideoEntriesFromPost(postUrl, artistInfo) {
 }
 
 async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = Infinity) {
-  const results = new Array(links.length);
+  const selectedLinks = [...new Set((links || []).filter(Boolean))];
+  if (!selectedLinks.length) return [];
+
   let index = 0;
-  let found = 0;
+  let active = 0;
+  let settled = false;
+  const results = [];
+  const limit = Math.min(RANDOM40_POST_CONCURRENCY, selectedLinks.length);
 
-  async function worker() {
-    while (index < links.length && !random40State?.stop && found < stopAtVideos) {
-      const current = index++;
-      const entries = await random40VideoEntriesFromPost(links[current], artistInfo).catch(() => []);
-      results[current] = entries;
-      found += entries.length;
-    }
-  }
+  return await new Promise(resolve => {
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve(results.slice(0, stopAtVideos));
+    };
 
-  await Promise.all(Array.from({ length: Math.min(RANDOM40_POST_CONCURRENCY, links.length || 1) }, worker));
-  return results.flat().filter(Boolean).slice(0, stopAtVideos);
+    const launch = () => {
+      if (settled) return;
+      if (random40State?.stop || results.length >= stopAtVideos || (index >= selectedLinks.length && active <= 0)) {
+        finish();
+        return;
+      }
+
+      while (active < limit && index < selectedLinks.length && !random40State?.stop && results.length < stopAtVideos) {
+        const link = selectedLinks[index++];
+        active++;
+        random40VideoEntriesFromPost(link, artistInfo)
+          .catch(() => [])
+          .then(entries => {
+            if (!settled && entries?.length) {
+              for (const entry of entries) {
+                results.push(entry);
+                if (results.length >= stopAtVideos) break;
+              }
+            }
+          })
+          .finally(() => {
+            active--;
+            launch();
+          });
+      }
+    };
+
+    launch();
+  });
 }
 
 async function random40ScrapeArtistVideos(artist, options = {}) {
@@ -8169,6 +8200,15 @@ async function startRandom40(mode = 'nano') {
           }
         }
 
+        const initialVideoEntriesPromise = random40WithTimeout(
+          random40ScrapeArtistVideos(artistWithPrecheckText, {
+            collected: precheck,
+            stopAtVideos: RANDOM40_FAST_PUBLISH_VIDEOS
+          }),
+          22000,
+          'initial video scrape timed out'
+        ).catch(() => []);
+
         const reviewImageCount = random40IsLocalMode(runMode) ? RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST : RANDOM40_INITIAL_IMAGES_PER_ARTIST;
         updateRandom40Progress({ detail: `${classifierLabel} ${artistLabel} - ${precheck.links.length}+ videos, ${reviewImageCount} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         stageStarted = performance.now();
@@ -8188,14 +8228,7 @@ async function startRandom40(mode = 'nano') {
         if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
         updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Loading first playable videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
         stageStarted = performance.now();
-        const entries = await random40WithTimeout(
-          random40ScrapeArtistVideos(artistWithPrecheckText, {
-            collected: precheck,
-            stopAtVideos: RANDOM40_FAST_PUBLISH_VIDEOS
-          }),
-          22000,
-          'initial video scrape timed out'
-        ).catch(() => []);
+        const entries = await initialVideoEntriesPromise;
         random40RecordStageTiming('initial-video-scrape', performance.now() - stageStarted);
         if (!entries.length) {
           random40State.skippedLowVideo = (random40State.skippedLowVideo || 0) + 1;

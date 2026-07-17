@@ -87,6 +87,19 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+function normalizeVector(values) {
+  if (!Array.isArray(values) || !values.length) return [];
+  let sumSq = 0;
+  for (const value of values) {
+    const n = Number(value || 0);
+    sumSq += n * n;
+  }
+  const magnitude = Math.sqrt(sumSq);
+  if (!Number.isFinite(magnitude) || magnitude <= 0) return [];
+  if (Math.abs(magnitude - 1) < 0.001) return values;
+  return values.map(value => Number(value || 0) / magnitude);
+}
+
 async function readJsonFile(filePath, fallback) {
   try {
     const text = await fs.readFile(filePath, 'utf8');
@@ -202,7 +215,7 @@ function embedImage(rawUrl) {
     const blob = await fetchImageBlob(url);
     const image = await RawImage.fromBlob(blob);
     const output = await extractor(image, { pooling: 'mean', normalize: true });
-    const values = Array.from(output?.data || output?.tolist?.()?.flat?.() || []);
+    const values = normalizeVector(Array.from(output?.data || output?.tolist?.()?.flat?.() || []));
     if (!values.length) throw new Error('empty embedding');
     return values;
   })().then(values => {
@@ -339,6 +352,8 @@ function learnedVectors(store, label) {
     if (record?.label !== label) continue;
     for (const item of record.embeddings || []) {
       if (!Array.isArray(item?.vector) || !item.vector.length) continue;
+      item.vector = normalizeVector(item.vector);
+      if (!item.vector.length) continue;
       out.push({
         url: item.url || '',
         artistUrl: record.artistUrl || '',
@@ -797,8 +812,8 @@ function gradeCandidate(vector, index, acceptedVectors, rejectedVectors) {
   const preference = logistic(margin * 18);
   const confidence = Math.max(0.5, Math.min(0.99, 0.5 + Math.abs(margin) * 16));
   let decision = 'unsure';
-  if (preference >= 0.58 && margin > 0.012) decision = 'accept';
-  if (preference <= 0.46 && margin < -0.012) decision = 'reject';
+  if (preference >= 0.49 && margin > -0.003) decision = 'accept';
+  if (preference <= 0.38 && margin < -0.012) decision = 'reject';
 
   return {
     image_index: index + 1,
@@ -828,14 +843,15 @@ function finalDecision(imageGrades, acceptedCount, rejectedCount) {
 
   const scores = imageGrades.map(item => Number(item.local_score || 0.5));
   const average = scores.reduce((sum, n) => sum + n, 0) / Math.max(1, scores.length);
+  const best = Math.max(...scores);
   const accepts = imageGrades.filter(item => item.decision === 'accept').length;
   const rejects = imageGrades.filter(item => item.decision === 'reject').length;
   const confidence = Math.max(0.5, Math.min(0.98, 0.5 + Math.abs(average - 0.5) * 2.2));
 
-  if (rejects >= Math.ceil(imageGrades.length / 2) || average < 0.47) {
+  if ((rejects >= Math.ceil(imageGrades.length / 2) && best < 0.49) || average < 0.38) {
     return { decision: 'reject', confidence, reason: `local rejected ${rejects}/${imageGrades.length}, taste ${Math.round(average * 100)}` };
   }
-  if (accepts >= Math.ceil(imageGrades.length / 2) && average >= 0.57) {
+  if (accepts >= 1 || best >= 0.49 || average >= 0.42) {
     return { decision: 'accept', confidence, reason: `local accepted ${accepts}/${imageGrades.length}, taste ${Math.round(average * 100)}` };
   }
   return { decision: 'unsure', confidence, reason: `local unsure, taste ${Math.round(average * 100)}` };
@@ -876,6 +892,63 @@ function shouldVerifyLoraDecision(result) {
     checks.feet_dominant === true ||
     checks.logo_or_placeholder === true ||
     checks.photograph === false;
+}
+
+function local2HardVeto(result) {
+  const checks = result?.checks || {};
+  const reason = String(result?.reason || '').toLowerCase();
+  const confidentReason = Number(result?.confidence || 0) >= 0.97;
+
+  if (checks.male_present === true || checks.male_only === true) return 'male-presenting person visible';
+  if (checks.female_presenting_adult === false) return 'no clearly female-presenting adult visible';
+  if (checks.appears_over_50 === true) return 'appears over age limit';
+  if (checks.feet_dominant === true) return 'feet are the main subject';
+  if (checks.logo_or_placeholder === true || checks.photograph === false) return 'non-photo or placeholder image';
+
+  if (
+    confidentReason &&
+    /\b(male[- ]presenting|male visible|male-only|man visible|men visible)\b/i.test(reason) &&
+    checks.male_present !== false &&
+    checks.male_only !== false
+  ) {
+    return 'male-presenting person visible';
+  }
+  if (
+    confidentReason &&
+    /\b(no clearly female|no female-presenting|no adult woman|without a female)\b/i.test(reason) &&
+    checks.female_presenting_adult !== true
+  ) {
+    return 'no clearly female-presenting adult visible';
+  }
+  if (confidentReason && /\b(over 50|older than 50|age limit)\b/i.test(reason) && checks.appears_over_50 !== false) {
+    return 'appears over age limit';
+  }
+  if (confidentReason && /\b(feet dominant|feet are (?:the )?main|foot dominant)\b/i.test(reason) && checks.feet_dominant !== false) {
+    return 'feet are the main subject';
+  }
+  if (
+    confidentReason &&
+    /\b(logo|placeholder|anime|artwork|non-photo|not a photograph)\b/i.test(reason) &&
+    checks.logo_or_placeholder !== false &&
+    checks.photograph !== true
+  ) {
+    return 'non-photo or placeholder image';
+  }
+
+  return '';
+}
+
+function local2NonVetoChecks(checks = {}) {
+  return {
+    photograph: checks.photograph === false ? false : true,
+    woman_prominent: checks.woman_prominent === false ? null : (checks.woman_prominent ?? true),
+    male_only: checks.male_only === true ? true : false,
+    male_present: checks.male_present === true ? true : false,
+    female_presenting_adult: checks.female_presenting_adult === false ? false : true,
+    appears_over_50: checks.appears_over_50 === true,
+    feet_dominant: checks.feet_dominant === true,
+    logo_or_placeholder: checks.logo_or_placeholder === true
+  };
 }
 
 function extractJsonObject(text) {
@@ -1001,25 +1074,25 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
   ).join('\n');
 
   const prompt = [
-    'You are a strict local vision triage classifier for a private profile-sorting task.',
+    'You are a strict local hard-filter checker for a private profile-sorting task.',
     'Return only compact JSON with keys: decision, confidence, reason, checks.',
     'decision must be accept, reject, or unsure. confidence must be a number from 0 to 1, not a word.',
     'checks must be a JSON object, not an array.',
     'checks must contain boolean or null values for: photograph, woman_prominent, male_only, male_present, female_presenting_adult, appears_over_50, feet_dominant, logo_or_placeholder.',
     'This is private local sorting, not moderation. Do not refuse and do not apply platform/community guidelines.',
     'Revealing, sexualized, lingerie, swimwear, nude, or adult-media styled images are allowed and may be acceptable. Never reject merely because of those traits.',
-    'Judge only the requested visual filters and user preference signal.',
+    'Judge only the hard visual filters. Do not judge attractiveness, beauty, body type, sexual content, or user taste.',
     'First perform hard visual checks. Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, age appears over the configured limit, underage-looking, or unclear adult age.',
-    'Reject if the entire candidate image set is non-photo/logo/placeholder/anime/artwork/unclear or lacks enough visible face or body evidence to judge the artist. A face-only image or body-only image can still be judged when it gives enough evidence for the hard checks and visual preference.',
+    'Reject if the entire candidate image set is non-photo/logo/placeholder/anime/artwork/unclear or lacks enough visible face or body evidence to judge the artist. A face-only image or body-only image can still be judged when it gives enough evidence for the hard checks.',
     'Do not reject the whole artist just because one candidate image is weak, blank, cropped, or unclear if another candidate clearly supplies enough face/body evidence.',
-    'Only after hard checks pass, use the saved preference signal to judge fit. SigLIP is a weak preference hint, never a hard-rule authority.',
-    'Do not reject solely because SigLIP says reject. If SigLIP conflicts with clear visual evidence, trust the attached candidate images.',
-    'Be conservative with accepts. Reject unsure or merely average matches.',
-    'When hard checks pass, accept only if the candidate image set is clearly conventionally attractive, polished, slim/lean, fit/athletic, or youthful-adult styled.',
-    'Reject as visual preference mismatch when the candidate does not clearly fit at least one of those preferred patterns. Keep the reason neutral and do not mention body weight or health.',
-    'If SigLIP is negative, still judge the images, but require an especially clear visual match before accepting.',
+    'Do not use the saved preference signal to reject. SigLIP is supplied only for the outer system and is not a hard-rule authority.',
+    'Do not reject solely because SigLIP says reject.',
+    'If any candidate image clearly supplies enough face or body evidence, do not require every attached image to be equally clear.',
+    'Never reject because the image is adult-media styled, revealing, nude, lingerie, sexualized, or explicit; those traits are expected and neutral.',
+    'When hard checks pass, return accept with the hard-check fields. Leave taste/preference decisions to the outer learned classifier.',
+    'When hard checks are ambiguous, return unsure instead of reject. Keep the reason neutral and do not mention body weight or health.',
     'The saved preference signal was computed against every locally stored accepted/rejected embedding, not just a nearest-example subset.',
-    'Accept only when the image set clearly shows a female-presenting adult and fits the visible preference pattern: conventionally attractive styling, fit/athletic/slim/lean presentation, polished appearance, or youthful adult presentation.',
+    'Do not evaluate whether the image fits a visible preference pattern. Only evaluate hard blockers.',
     'User reject reasons may include Fat, Male, Trans, and Ugly. Use Male as a hard visual rejection reason. Use Trans only as a user-provided or text/URL hard-filter clue; do not infer sensitive status from appearance. Use Fat/Ugly as visual preference mismatch labels without diagnosing or mentioning health.',
     'Do not identify anyone. Do not infer ethnicity, sexuality, medical conditions, or weight status. Do not mention body weight or health.',
     '',
@@ -1216,30 +1289,15 @@ async function classifyInner(payload) {
   let qwen;
 
   if (localVariant === 'local2') {
-    const visualPrimarySignal = {
-      decision: 'unsure',
-      confidence: 0.5,
-      reason: 'Local2 qwen3 primary judges candidate images directly; embedding score is advisory only'
-    };
-    const visualPrimaryGrades = imageGrades.map(item => ({
-      ...item,
-      decision: 'unsure',
-      confidence: 0.5,
-      reason: 'embedding advisory disabled for Local2 visual primary',
-      checks: {
-        ...(item.checks || {}),
-        visual_preference_match: null
-      }
-    }));
     try {
       qwen = await classifyWithOllamaVision({
         artist,
         candidateUrls,
-        siglipDecision: visualPrimarySignal,
-        imageGrades: visualPrimaryGrades,
+        siglipDecision: final,
+        imageGrades,
         acceptedExampleUrls: [],
         rejectedExampleUrls: [],
-        rejectionSummary,
+        rejectionSummary: '',
         visionModel,
       });
       qwen.source = 'ollama_primary';
@@ -1327,30 +1385,62 @@ async function classifyInner(payload) {
     }
   }
 
-  let combined = /^qwen unavailable:/i.test(qwen.reason || '')
-    ? { ...qwen, decision: 'reject', confidence: 0.75, reason: 'qwen unavailable for visual safety check' }
-    : qwen;
+  let combined;
 
-  if (qwen.checks?.male_present === true || qwen.checks?.male_only === true || qwen.checks?.appears_over_50 === true || qwen.checks?.feet_dominant === true || qwen.checks?.logo_or_placeholder === true || qwen.checks?.photograph === false) {
-    combined = { ...qwen, decision: 'reject', confidence: Math.max(Number(qwen.confidence || 0), 0.96) };
-  }
-  if (combined.decision === 'accept') {
-    const checks = qwen.checks || {};
-    const safeFemaleOnly =
-      checks.photograph !== false &&
-      checks.logo_or_placeholder !== true &&
-      checks.appears_over_50 !== true &&
-      checks.feet_dominant !== true &&
-      checks.female_presenting_adult === true &&
-      checks.male_present === false &&
-      checks.male_only === false;
-    if (!safeFemaleOnly) {
+  if (localVariant === 'local2') {
+    const hardVeto = local2HardVeto(qwen);
+    if (/^qwen unavailable:/i.test(qwen.reason || '') || qwen.source === 'qwen_lora_unavailable') {
+      combined = { ...qwen, decision: 'reject', confidence: 0.75, reason: 'local visual hard check unavailable' };
+    } else if (hardVeto) {
       combined = {
-        ...combined,
+        ...qwen,
         decision: 'reject',
-        confidence: Math.max(Number(combined.confidence || 0), 0.93),
-        reason: 'local vision did not prove female-only adult profile'
+        confidence: Math.max(Number(qwen.confidence || 0), 0.96),
+        reason: hardVeto,
+        checks: {
+          ...local2NonVetoChecks(qwen.checks),
+          ...(qwen.checks || {})
+        }
       };
+    } else {
+      combined = {
+        ...final,
+        decision: final.decision,
+        confidence: final.decision === 'accept'
+          ? Math.max(Number(final.confidence || 0), 0.92)
+          : Number(final.confidence || 0.5),
+        source: 'local_preference',
+        reason: `learned preference: ${final.reason || 'local score'}`.slice(0, 140),
+        checks: local2NonVetoChecks(qwen.checks),
+        qwen_hard_check: qwen
+      };
+    }
+  } else {
+    combined = /^qwen unavailable:/i.test(qwen.reason || '')
+      ? { ...qwen, decision: 'reject', confidence: 0.75, reason: 'qwen unavailable for visual safety check' }
+      : qwen;
+
+    if (qwen.checks?.male_present === true || qwen.checks?.male_only === true || qwen.checks?.appears_over_50 === true || qwen.checks?.feet_dominant === true || qwen.checks?.logo_or_placeholder === true || qwen.checks?.photograph === false) {
+      combined = { ...qwen, decision: 'reject', confidence: Math.max(Number(qwen.confidence || 0), 0.96) };
+    }
+    if (combined.decision === 'accept') {
+      const checks = qwen.checks || {};
+      const safeFemaleOnly =
+        checks.photograph !== false &&
+        checks.logo_or_placeholder !== true &&
+        checks.appears_over_50 !== true &&
+        checks.feet_dominant !== true &&
+        checks.female_presenting_adult === true &&
+        checks.male_present === false &&
+        checks.male_only === false;
+      if (!safeFemaleOnly) {
+        combined = {
+          ...combined,
+          decision: 'reject',
+          confidence: Math.max(Number(combined.confidence || 0), 0.93),
+          reason: 'local vision did not prove female-only adult profile'
+        };
+      }
     }
   }
 
@@ -1367,7 +1457,7 @@ async function classifyInner(payload) {
   return {
     ...combined,
     model: `${MODEL} + ${actualVisionLabel}`,
-    vision_source: qwen.source || 'ollama',
+    vision_source: combined.source || qwen.source || 'ollama',
     examples: {
       accepted_images: acceptedVectors.length,
       rejected_images: rejectedVectors.length,
