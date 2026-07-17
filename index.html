@@ -371,7 +371,7 @@
     }
 
     .train-ai-panel {
-      position: fixed; inset: 0; z-index: 1800; display: grid; place-items: center;
+      position: fixed; inset: 0; z-index: 10100; display: grid; place-items: center;
       padding: 14px; background: rgba(2,6,23,0.82); backdrop-filter: blur(14px);
     }
     .train-ai-panel[hidden] { display: none; }
@@ -400,10 +400,10 @@
       will-change: transform, opacity; transform: translate3d(0,0,0); backface-visibility: hidden;
       user-select: none; -webkit-tap-highlight-color: transparent; cursor: grab;
     }
-    .train-ai-images { height: 100%; display: grid; grid-template-rows: 1fr 1fr; overflow: hidden; pointer-events: none; }
+    .train-ai-images { height: 100%; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; overflow: hidden; pointer-events: none; }
     .train-ai-image-tile { position: relative; min-height: 0; overflow: hidden; background: #020617; }
-    .train-ai-image-tile + .train-ai-image-tile { border-top: 2px solid rgba(255,255,255,0.16); }
-    .train-ai-image-tile img { width: 100%; height: 100%; display: block; object-fit: cover; background: #020617; }
+    .train-ai-image-tile { border: 1px solid rgba(255,255,255,0.12); }
+    .train-ai-image-tile img { width: 100%; height: 100%; display: block; object-fit: contain; background: #020617; }
     .train-ai-image-label {
       position: absolute; top: 10px; left: 10px; padding: 5px 9px; border-radius: 999px;
       background: rgba(2,6,23,0.72); border: 1px solid rgba(255,255,255,0.17);
@@ -430,10 +430,12 @@
     .train-ai-reasons { display: flex; gap: 6px; padding: 10px 14px 4px; overflow-x: auto; scrollbar-width: none; }
     .train-ai-reason { flex: 0 0 auto; border-radius: 999px; padding: 7px 10px; font-size: 10px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); }
     .train-ai-reason.selected { color: #fff; background: rgba(244,63,94,0.28); border-color: rgba(251,113,133,0.7); }
-    .train-ai-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 10px 16px 15px; }
+    .train-ai-actions { display: grid; grid-template-columns: 1fr 0.72fr 1fr; gap: 8px; padding: 10px 16px 15px; }
     .train-ai-action { min-height: 48px; border-radius: 16px; font-weight: 850; font-size: 14px; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
     .train-ai-good { color: #86efac; border: 1px solid rgba(74,222,128,0.45); background: rgba(34,197,94,0.15); }
+    .train-ai-skip { color: #e2e8f0; border: 1px solid rgba(148,163,184,0.38); background: rgba(148,163,184,0.12); }
     .train-ai-bad { color: #fda4af; border: 1px solid rgba(251,113,133,0.45); background: rgba(244,63,94,0.15); }
+    .train-ai-reset { flex: 0 0 auto; padding: 7px 10px; border-radius: 999px; color: #cbd5e1; border: 1px solid rgba(148,163,184,0.34); background: rgba(148,163,184,0.10); font-size: 10px; font-weight: 750; }
     .train-ai-empty { display: grid; place-content: center; height: 100%; padding: 28px; text-align: center; color: rgba(255,255,255,0.72); }
     #auth-helper {
       display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -799,7 +801,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.81</div>
+  <div class="version-number">23.82</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -823,6 +825,7 @@
     <section class="train-ai-shell" aria-label="Train personal AI">
       <header class="train-ai-header">
         <div class="train-ai-title">Train AI<span id="train-ai-subtitle" class="train-ai-subtitle">Swipe left = like &middot; Swipe right = dislike</span></div>
+        <button id="train-ai-reset-stats" class="train-ai-reset" type="button">Reset scores</button>
         <button id="train-ai-close" class="train-ai-close" type="button" aria-label="Close">×</button>
       </header>
       <div class="train-ai-scores">
@@ -857,6 +860,7 @@
       </div>
       <div class="train-ai-actions">
         <button id="train-ai-good" class="train-ai-action train-ai-good" type="button">← Good</button>
+        <button id="train-ai-skip" class="train-ai-action train-ai-skip" type="button">Skip</button>
         <button id="train-ai-bad" class="train-ai-action train-ai-bad" type="button">Bad →</button>
       </div>
     </section>
@@ -8154,7 +8158,7 @@ function random40ImageCandidateFromElement(node, baseUrl) {
 
   for (const candidate of candidates) {
     const url = random40NormalizeUrl(candidate, baseUrl);
-    if (url) return url;
+    if (url && (random40IsPreferredImageExtension(url) || random40IsGifImage(url) || random40IsStorageImage(url))) return url;
   }
   return '';
 }
@@ -8240,6 +8244,48 @@ function random40ExtractScraperPostImages(doc, pageUrl, artist) {
   return entries;
 }
 
+function random40ExtractHighQualityPostImages(doc, baseUrl) {
+  const ranked = new Map();
+  const add = (raw, node, baseScore) => {
+    const url = random40NormalizeUrl(raw, baseUrl);
+    if (!url || !random40IsAllowedImageHost(url) || !random40IsStorageImage(url) || url.toLowerCase().includes('/istorage/')) return;
+    if (!random40IsPreferredImageExtension(url) || random40IsLikelyUnwantedImage(url, node)) return;
+    const lower = url.toLowerCase();
+    let score = baseScore;
+    if (/\b(original|full|source|download)\b/.test(lower)) score += 30;
+    if (/\b(thumb|thumbnail|preview|small|medium)\b/.test(lower)) score -= 80;
+    const width = Number(node?.getAttribute?.('width')) || 0;
+    const height = Number(node?.getAttribute?.('height')) || 0;
+    if (width >= 800 || height >= 800) score += 15;
+    ranked.set(url, Math.max(score, ranked.get(url) ?? -Infinity));
+  };
+
+  doc?.querySelectorAll?.('a[href]')?.forEach(anchor => add(anchor.getAttribute('href'), anchor, 120));
+  doc?.querySelectorAll?.('meta[property="og:image"], meta[name="twitter:image"]')?.forEach(meta => add(meta.getAttribute('content'), meta, 105));
+  doc?.querySelectorAll?.('img')?.forEach(image => {
+    add(image.getAttribute('data-original'), image, 110);
+    add(image.getAttribute('data-src'), image, 90);
+    add(image.getAttribute('data-lazy-src'), image, 85);
+    const srcset = image.getAttribute('srcset') || image.getAttribute('data-srcset') || '';
+    srcset.split(',').forEach(item => {
+      const [raw, descriptor = ''] = item.trim().split(/\s+/);
+      add(raw, image, 80 + Math.min(30, (Number.parseInt(descriptor, 10) || 0) / 100));
+    });
+    add(image.getAttribute('src'), image, 60);
+  });
+
+  return [...ranked.entries()].sort((a, b) => b[1] - a[1]).map(([url]) => url);
+}
+
+async function trainAiResolvePostImage(entry) {
+  try {
+    const doc = await random40FetchDoc(entry.postUrl, { timeoutMs: 16000 });
+    return random40ExtractHighQualityPostImages(doc, entry.postUrl)[0] || entry.imageUrl;
+  } catch (_) {
+    return entry.imageUrl;
+  }
+}
+
 function random40DeduplicateImageEntries(entries) {
   const seen = new Set();
   const deduped = [];
@@ -8283,7 +8329,8 @@ const trainAiState = {
   predictionPromise: null,
   selectedReason: 'Not my taste',
   gesture: null,
-  stats: null
+  stats: null,
+  resetStatsArmedUntil: 0
 };
 
 function trainAiLoadStats() {
@@ -8366,11 +8413,11 @@ function trainAiResetCardTransform() {
 function trainAiRenderCurrentImage() {
   const container = document.getElementById('train-ai-images');
   const candidate = trainAiState.candidate;
-  if (!container || !candidate?.profileImageUrl || !candidate?.postImageUrl) return;
+  if (!container || !candidate?.profileImageUrl || candidate?.postImageUrls?.length !== 3) return;
   container.replaceChildren();
   [
-    { url: candidate.profileImageUrl, label: 'Profile picture' },
-    { url: candidate.postImageUrl, label: 'Random post picture' }
+    { url: candidate.profileImageUrl, label: 'Profile' },
+    ...candidate.postImageUrls.map((url, index) => ({ url, label: `Post ${index + 1}` }))
   ].forEach((item, index) => {
     const tile = document.createElement('div');
     tile.className = 'train-ai-image-tile';
@@ -8379,7 +8426,7 @@ function trainAiRenderCurrentImage() {
     image.alt = `${candidate.artistName} ${item.label.toLowerCase()}`;
     image.draggable = false;
     image.decoding = 'async';
-    if (index === 1) image.loading = 'eager';
+    image.loading = 'eager';
     const label = document.createElement('span');
     label.className = 'train-ai-image-label';
     label.textContent = item.label;
@@ -8387,7 +8434,7 @@ function trainAiRenderCurrentImage() {
     container.appendChild(tile);
   });
   const meta = document.getElementById('train-ai-meta');
-  if (meta) meta.textContent = `Page ${trainAiState.page} · both photos checked by AI`;
+  if (meta) meta.textContent = `Page ${trainAiState.page} · 4 full-quality photos checked by AI`;
 }
 
 function trainAiRenderCandidate(candidate) {
@@ -8416,7 +8463,7 @@ async function trainAiClassify(candidate, mode) {
         pageText: candidate.pageText || '',
         imageUrl: candidate.imageUrls[0] || ''
       },
-      candidateImageUrls: candidate.imageUrls.slice(0, RANDOM40_LOCAL_MAX_REVIEW_IMAGES),
+      candidateImageUrls: candidate.imageUrls.slice(0, 4),
       acceptedArtists: [],
       rejectedArtists: []
     })
@@ -8449,15 +8496,19 @@ async function trainAiBuildCandidate(artist) {
     const postEntries = random40DeduplicateImageEntries(
       random40ExtractScraperPostImages(doc, artist.artistUrl, artist)
     ).filter(item => item.imageUrl && item.imageUrl !== profileImage);
-    const postImage = random40ShuffleUrls(postEntries.map(item => item.imageUrl))[0] || '';
-    if (!profileImage || !postImage) return null;
-    const imageUrls = [profileImage, postImage];
+    const uniquePosts = [...new Map(postEntries.map(entry => [entry.postUrl, entry])).values()];
+    const selectedPosts = shuffleInPlace([...uniquePosts]).slice(0, 3);
+    if (!profileImage || selectedPosts.length < 3) return null;
+    const resolvedPostImages = await Promise.all(selectedPosts.map(trainAiResolvePostImage));
+    const postImageUrls = [...new Set(resolvedPostImages.filter(Boolean))];
+    if (postImageUrls.length < 3) return null;
+    const imageUrls = [profileImage, ...postImageUrls];
     return {
       ...artist,
       artistName: artist.artistName || random40ArtistNameFromUrl(artist.artistUrl),
       pageText: `${artist.pageText || ''} ${doc.body?.innerText || ''}`.replace(/\s+/g, ' ').slice(0, 20000),
       profileImageUrl: profileImage,
-      postImageUrl: postImage,
+      postImageUrls,
       imageUrls
     };
   } catch (_) {
@@ -8483,8 +8534,7 @@ async function trainAiLoadRandomPage() {
 async function trainAiNextCandidate() {
   if (!trainAiState.open) return;
   trainAiState.busy = true;
-  document.getElementById('train-ai-good').disabled = true;
-  document.getElementById('train-ai-bad').disabled = true;
+  trainAiSetActionsDisabled(true);
   while (trainAiState.open) {
     if (trainAiState.index >= trainAiState.artists.length) {
       const loaded = await trainAiLoadRandomPage();
@@ -8495,16 +8545,22 @@ async function trainAiNextCandidate() {
       }
     }
     const artist = trainAiState.artists[trainAiState.index++];
-    trainAiSetStatus('Loading two photos…');
+    trainAiSetStatus('Loading four full-quality photos…');
     const candidate = await trainAiBuildCandidate(artist);
     if (!candidate) continue;
     if (random40HardFilter(candidate)) continue;
     trainAiRenderCandidate(candidate);
     trainAiState.predictionPromise = trainAiPreparePredictions(candidate);
     trainAiState.busy = false;
-    document.getElementById('train-ai-good').disabled = false;
-    document.getElementById('train-ai-bad').disabled = false;
+    trainAiSetActionsDisabled(false);
     return;
+  }
+}
+
+function trainAiSetActionsDisabled(disabled) {
+  for (const id of ['train-ai-good', 'train-ai-skip', 'train-ai-bad']) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = disabled;
   }
 }
 
@@ -8561,8 +8617,7 @@ function trainAiStoreBrowserFeedback(label, candidate, reasonLabel) {
 async function trainAiChoose(label) {
   if (!trainAiState.open || trainAiState.busy || !trainAiState.candidate) return;
   trainAiState.busy = true;
-  document.getElementById('train-ai-good').disabled = true;
-  document.getElementById('train-ai-bad').disabled = true;
+  trainAiSetActionsDisabled(true);
   const card = document.getElementById('train-ai-card');
   if (card) {
     const direction = label === 'accept' ? -1 : 1;
@@ -8640,6 +8695,48 @@ function closeTrainAiPanel() {
   trainAiState.candidate = null;
   trainAiState.predictionPromise = null;
   document.getElementById('train-ai-panel').hidden = true;
+}
+
+async function trainAiSkip() {
+  if (!trainAiState.open || trainAiState.busy || !trainAiState.candidate) return;
+  trainAiState.busy = true;
+  trainAiSetActionsDisabled(true);
+  const card = document.getElementById('train-ai-card');
+  if (card) {
+    card.style.transition = 'transform 140ms ease, opacity 140ms ease';
+    card.style.transform = 'translate3d(0,18px,0) scale(0.985)';
+    card.style.opacity = '0.5';
+    await sleep(140);
+  }
+  trainAiState.candidate = null;
+  trainAiState.predictionPromise = null;
+  trainAiResetCardTransform();
+  trainAiSetStatus('Loading another artist…');
+  trainAiState.busy = false;
+  await trainAiNextCandidate();
+}
+
+function trainAiResetStats() {
+  const button = document.getElementById('train-ai-reset-stats');
+  const now = Date.now();
+  if (trainAiState.resetStatsArmedUntil < now) {
+    trainAiState.resetStatsArmedUntil = now + 3500;
+    if (button) button.textContent = 'Tap again';
+    setTimeout(() => {
+      if (Date.now() >= trainAiState.resetStatsArmedUntil && button) button.textContent = 'Reset scores';
+    }, 3600);
+    return;
+  }
+  trainAiState.resetStatsArmedUntil = 0;
+  trainAiState.stats = {
+    local: { correct: 0, total: 0, history: [] },
+    local2: { correct: 0, total: 0, history: [] },
+    updatedAt: new Date().toISOString()
+  };
+  localStorage.removeItem(TRAIN_AI_ACCURACY_KEY);
+  trainAiRenderStats();
+  if (button) button.textContent = 'Scores cleared';
+  setTimeout(() => { if (button) button.textContent = 'Reset scores'; }, 1200);
 }
 
 function installTrainAiSwipe() {
@@ -10274,7 +10371,9 @@ document.getElementById('random-40-nano')?.addEventListener('click',()=>startRan
 document.getElementById('train-ai')?.addEventListener('click', openTrainAiPanel);
 document.getElementById('train-ai-close')?.addEventListener('click', closeTrainAiPanel);
 document.getElementById('train-ai-good')?.addEventListener('click', () => trainAiChoose('accept'));
+document.getElementById('train-ai-skip')?.addEventListener('click', trainAiSkip);
 document.getElementById('train-ai-bad')?.addEventListener('click', () => trainAiChoose('reject'));
+document.getElementById('train-ai-reset-stats')?.addEventListener('click', trainAiResetStats);
 document.getElementById('train-ai-reasons')?.addEventListener('click', event => {
   const button = event.target.closest('.train-ai-reason');
   if (!button) return;
@@ -10285,6 +10384,7 @@ document.addEventListener('keydown', event => {
   if (!trainAiState.open || trainAiState.busy) return;
   if (event.key === 'ArrowLeft') trainAiChoose('accept');
   if (event.key === 'ArrowRight') trainAiChoose('reject');
+  if (event.key.toLowerCase() === 's') trainAiSkip();
   if (event.key === 'Escape') closeTrainAiPanel();
 });
 installTrainAiSwipe();
