@@ -805,7 +805,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.85</div>
+  <div class="version-number">23.86</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -833,8 +833,8 @@
         <button id="train-ai-close" class="train-ai-close" type="button" aria-label="Close">×</button>
       </header>
       <div class="train-ai-scores">
-        <div class="train-ai-score">Local1 accuracy<b id="train-ai-local-score">&mdash;</b><span id="train-ai-local-count">No swipes yet</span><small id="train-ai-local-trend" class="train-ai-trend">Trend starts after 50</small></div>
-        <div class="train-ai-score">Local2 accuracy<b id="train-ai-local2-score">&mdash;</b><span id="train-ai-local2-count">No swipes yet</span><small id="train-ai-local2-trend" class="train-ai-trend">Trend starts after 50</small></div>
+        <div class="train-ai-score">Local1 accuracy<b id="train-ai-local-score">&mdash;</b><span id="train-ai-local-count">0/50 in this batch</span><small id="train-ai-local-trend" class="train-ai-trend">Finish 50 to save the score</small></div>
+        <div class="train-ai-score">Local2 accuracy<b id="train-ai-local2-score">&mdash;</b><span id="train-ai-local2-count">0/50 in this batch</span><small id="train-ai-local2-trend" class="train-ai-trend">Finish 50 to save the score</small></div>
       </div>
       <div id="train-ai-deck" class="train-ai-deck">
         <article id="train-ai-card" class="train-ai-card">
@@ -8347,21 +8347,54 @@ function trainAiLoadStats() {
     const parsed = JSON.parse(localStorage.getItem(TRAIN_AI_ACCURACY_KEY) || 'null');
     if (parsed?.local && parsed?.local2) {
       for (const mode of ['local', 'local2']) {
-        const item = parsed[mode];
-        item.total = Math.max(0, Math.floor(Number(item.total) || 0));
-        item.correct = Math.max(0, Math.min(item.total, Math.floor(Number(item.correct) || 0)));
-        item.history = Array.isArray(item.history)
-          ? item.history.map(value => value ? 1 : 0).slice(-500)
-          : [];
+        parsed[mode] = trainAiNormalizeStatItem(parsed[mode]);
       }
       return parsed;
     }
   } catch (_) {}
   return {
-    local: { correct: 0, total: 0, history: [] },
-    local2: { correct: 0, total: 0, history: [] },
+    local: trainAiEmptyStatItem(),
+    local2: trainAiEmptyStatItem(),
     updatedAt: ''
   };
+}
+
+function trainAiEmptyStatItem() {
+  return {
+    correct: 0,
+    total: 0,
+    history: [],
+    batchCorrect: 0,
+    batchTotal: 0,
+    last50Percent: null,
+    previous50Percent: null
+  };
+}
+
+function trainAiNormalizeStatItem(raw = {}) {
+  const item = { ...trainAiEmptyStatItem(), ...raw };
+  item.total = Math.max(0, Math.floor(Number(item.total) || 0));
+  item.correct = Math.max(0, Math.min(item.total, Math.floor(Number(item.correct) || 0)));
+  item.history = Array.isArray(item.history) ? item.history.map(value => value ? 1 : 0).slice(-500) : [];
+  if (!Number.isFinite(Number(raw.batchTotal)) || !Number.isFinite(Number(raw.batchCorrect))) {
+    const remainder = item.history.length % 50;
+    const activeBatch = remainder ? item.history.slice(-remainder) : [];
+    const completed = item.history.length - remainder;
+    const lastBatch = completed >= 50 ? item.history.slice(completed - 50, completed) : [];
+    const previousBatch = completed >= 100 ? item.history.slice(completed - 100, completed - 50) : [];
+    item.batchTotal = remainder || (!item.history.length && item.total < 50 ? item.total : 0);
+    item.batchCorrect = activeBatch.length
+      ? activeBatch.reduce((sum, value) => sum + value, 0)
+      : (!item.history.length && item.total < 50 ? item.correct : 0);
+    item.last50Percent = lastBatch.length ? Math.round(lastBatch.reduce((sum, value) => sum + value, 0) * 2) : null;
+    item.previous50Percent = previousBatch.length ? Math.round(previousBatch.reduce((sum, value) => sum + value, 0) * 2) : null;
+  } else {
+    item.batchTotal = Math.max(0, Math.min(49, Math.floor(Number(raw.batchTotal) || 0)));
+    item.batchCorrect = Math.max(0, Math.min(item.batchTotal, Math.floor(Number(raw.batchCorrect) || 0)));
+    item.last50Percent = raw.last50Percent != null && Number.isFinite(Number(raw.last50Percent)) ? Math.max(0, Math.min(100, Math.round(Number(raw.last50Percent)))) : null;
+    item.previous50Percent = raw.previous50Percent != null && Number.isFinite(Number(raw.previous50Percent)) ? Math.max(0, Math.min(100, Math.round(Number(raw.previous50Percent)))) : null;
+  }
+  return item;
 }
 
 function trainAiSaveStats() {
@@ -8373,32 +8406,26 @@ function trainAiSaveStats() {
 function trainAiRenderStats() {
   const stats = trainAiState.stats || trainAiLoadStats();
   for (const mode of ['local', 'local2']) {
-    const item = stats[mode] || { correct: 0, total: 0, history: [] };
-    const percent = item.total ? `${Math.round(item.correct * 100 / item.total)}%` : '—';
+    const item = trainAiNormalizeStatItem(stats[mode]);
+    stats[mode] = item;
+    const percent = item.batchTotal ? `${Math.round(item.batchCorrect * 100 / item.batchTotal)}%` : '—';
     const score = document.getElementById(mode === 'local' ? 'train-ai-local-score' : 'train-ai-local2-score');
     const count = document.getElementById(mode === 'local' ? 'train-ai-local-count' : 'train-ai-local2-count');
     const trend = document.getElementById(mode === 'local' ? 'train-ai-local-trend' : 'train-ai-local2-trend');
     if (score) score.textContent = percent;
-    if (count) count.textContent = item.total ? `${item.correct} of ${item.total} correct` : 'No swipes yet';
+    if (count) count.textContent = `${item.batchTotal}/50 in this batch · ${item.batchCorrect} correct`;
     if (trend) {
       trend.className = 'train-ai-trend';
-      const history = Array.isArray(item.history) ? item.history : [];
-      if (history.length < 50) {
-        trend.textContent = `${history.length}/50 new checks for first trend`;
+      if (item.last50Percent == null) {
+        trend.textContent = 'Finish 50 to save the score';
+      } else if (item.previous50Percent == null) {
+        trend.textContent = `Last 50: ${item.last50Percent}%`;
       } else {
-        const latest = history.slice(-50);
-        const latestPercent = Math.round(latest.reduce((sum, value) => sum + value, 0) * 100 / 50);
-        if (history.length < 100) {
-          trend.textContent = `Last 50: ${latestPercent}% · ${100 - history.length} more to compare`;
-        } else {
-          const previous = history.slice(-100, -50);
-          const previousPercent = Math.round(previous.reduce((sum, value) => sum + value, 0) * 100 / 50);
-          const change = latestPercent - previousPercent;
-          if (change > 0) trend.classList.add('improving');
-          if (change < 0) trend.classList.add('declining');
-          const direction = change > 0 ? `↑ ${change}` : change < 0 ? `↓ ${Math.abs(change)}` : 'No change';
-          trend.textContent = `Last 50: ${latestPercent}% · ${direction}${change ? ' points' : ''} vs prior 50`;
-        }
+        const change = item.last50Percent - item.previous50Percent;
+        if (change > 0) trend.classList.add('improving');
+        if (change < 0) trend.classList.add('declining');
+        const direction = change > 0 ? `↑ ${change}` : change < 0 ? `↓ ${Math.abs(change)}` : 'No change';
+        trend.textContent = `Last 50: ${item.last50Percent}% · ${direction}${change ? ' points' : ''} vs prior 50`;
       }
     }
   }
@@ -8504,6 +8531,22 @@ function trainAiPreparePredictions(candidate, { quiet = false } = {}) {
   });
 }
 
+function trainAiPredictionFlagsMale(prediction) {
+  const checkSets = [
+    prediction?.checks,
+    prediction?.qwen_decision?.checks,
+    ...(Array.isArray(prediction?.image_grades) ? prediction.image_grades.map(grade => grade?.checks) : [])
+  ].filter(Boolean);
+  if (checkSets.some(checks => checks.male_present === true || checks.male_only === true)) return true;
+  const reason = String(prediction?.reason || '').toLowerCase();
+  if (/\b(no|without)\s+(?:male|man|men)\b/.test(reason)) return false;
+  return /\b(?:male[- ]presenting|male[- ]only|male visible|man visible|men visible|learned male)\b/.test(reason);
+}
+
+function trainAiPredictionsFlagMale(predictions) {
+  return [predictions?.local, predictions?.local2].some(trainAiPredictionFlagsMale);
+}
+
 async function trainAiBuildCandidate(artist) {
   try {
     const doc = await random40FetchDoc(artist.artistUrl, { timeoutMs: 18000 });
@@ -8573,6 +8616,9 @@ function trainAiEnsureQueue(target = 3) {
       const artist = trainAiState.artists[trainAiState.index++];
       const candidate = await trainAiBuildCandidate(artist);
       if (!candidate || random40HardFilter(candidate)) continue;
+      candidate.predictionPromise ||= trainAiPreparePredictions(candidate, { quiet: true });
+      const predictions = await candidate.predictionPromise;
+      if (trainAiPredictionsFlagMale(predictions)) continue;
       trainAiDeliverQueuedCandidate(candidate, generation);
     }
   })().finally(() => {
@@ -8627,13 +8673,21 @@ function trainAiRecordPrediction(mode, prediction, label) {
   if (String(prediction?.source || '').toLowerCase() === 'hard_filter') return null;
   const predictedLabel = prediction?.decision === 'accept' ? 'accept' : prediction?.decision === 'reject' ? 'reject' : '';
   if (!predictedLabel) return null;
-  const stats = trainAiState.stats[mode] || (trainAiState.stats[mode] = { correct: 0, total: 0, history: [] });
-  if (!Array.isArray(stats.history)) stats.history = [];
+  const stats = trainAiNormalizeStatItem(trainAiState.stats[mode]);
+  trainAiState.stats[mode] = stats;
   const matched = predictedLabel === label;
   stats.total++;
   if (matched) stats.correct++;
   stats.history.push(matched ? 1 : 0);
   stats.history = stats.history.slice(-500);
+  stats.batchTotal++;
+  if (matched) stats.batchCorrect++;
+  if (stats.batchTotal === 50) {
+    stats.previous50Percent = stats.last50Percent;
+    stats.last50Percent = Math.round(stats.batchCorrect * 2);
+    stats.batchTotal = 0;
+    stats.batchCorrect = 0;
+  }
   return matched;
 }
 
@@ -8787,8 +8841,8 @@ function trainAiResetStats() {
   }
   trainAiState.resetStatsArmedUntil = 0;
   trainAiState.stats = {
-    local: { correct: 0, total: 0, history: [] },
-    local2: { correct: 0, total: 0, history: [] },
+    local: trainAiEmptyStatItem(),
+    local2: trainAiEmptyStatItem(),
     updatedAt: new Date().toISOString()
   };
   localStorage.removeItem(TRAIN_AI_ACCURACY_KEY);
