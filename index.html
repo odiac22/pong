@@ -404,9 +404,10 @@
       content: ''; position: absolute; inset: 0; z-index: 1; pointer-events: none;
       background: var(--train-ai-swipe-color, transparent); opacity: var(--train-ai-swipe-opacity, 0);
     }
-    .train-ai-images { height: 100%; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; overflow: hidden; pointer-events: none; }
+    .train-ai-images { height: 100%; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: repeat(3, 1fr); overflow: hidden; pointer-events: none; }
     .train-ai-image-tile { position: relative; min-height: 0; overflow: hidden; background: #020617; }
     .train-ai-image-tile { border: 1px solid rgba(255,255,255,0.12); }
+    .train-ai-image-tile:first-child { grid-row: span 2; }
     .train-ai-image-tile img { width: 100%; height: 100%; display: block; object-fit: contain; background: #020617; }
     .train-ai-image-label {
       position: absolute; top: 10px; left: 10px; padding: 5px 9px; border-radius: 999px;
@@ -805,7 +806,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.88</div>
+  <div class="version-number">23.89</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8358,6 +8359,8 @@ async function random40SelectRepresentativeCandidateImages({
 }
 
 const TRAIN_AI_ACCURACY_KEY = 'pong_train_ai_accuracy_v1';
+const TRAIN_AI_TOTAL_IMAGES = 5;
+const TRAIN_AI_POST_IMAGE_COUNT = TRAIN_AI_TOTAL_IMAGES - 1;
 const TRAIN_AI_SWIPE_COMMIT_MS = 80;
 const TRAIN_AI_RESULT_FLASH_MS = 200;
 const trainAiState = {
@@ -8494,7 +8497,7 @@ function trainAiResetCardTransform() {
 function trainAiRenderCurrentImage() {
   const container = document.getElementById('train-ai-images');
   const candidate = trainAiState.candidate;
-  if (!container || !candidate?.profileImageUrl || candidate?.postImageUrls?.length !== 3) return;
+  if (!container || !candidate?.profileImageUrl || candidate?.postImageUrls?.length !== TRAIN_AI_POST_IMAGE_COUNT) return;
   container.replaceChildren();
   [
     { url: candidate.profileImageUrl, label: 'Profile' },
@@ -8515,7 +8518,7 @@ function trainAiRenderCurrentImage() {
     container.appendChild(tile);
   });
   const meta = document.getElementById('train-ai-meta');
-  if (meta) meta.textContent = `Page ${candidate.trainingPage || trainAiState.page} · 4 full-quality photos checked by AI`;
+  if (meta) meta.textContent = `Page ${candidate.trainingPage || trainAiState.page} · ${TRAIN_AI_TOTAL_IMAGES} full-quality photos checked by AI`;
 }
 
 function trainAiRenderCandidate(candidate) {
@@ -8544,7 +8547,7 @@ async function trainAiClassify(candidate, mode) {
         pageText: candidate.pageText || '',
         imageUrl: candidate.imageUrls[0] || ''
       },
-      candidateImageUrls: candidate.imageUrls.slice(0, 4),
+      candidateImageUrls: candidate.imageUrls.slice(0, TRAIN_AI_TOTAL_IMAGES),
       acceptedArtists: [],
       rejectedArtists: []
     })
@@ -8586,7 +8589,7 @@ async function trainAiHardVisualCheck(candidate) {
         pageText: candidate.pageText || '',
         imageUrl: candidate.imageUrls[0] || ''
       },
-      candidateImageUrls: candidate.imageUrls.slice(0, 4),
+      candidateImageUrls: candidate.imageUrls.slice(0, TRAIN_AI_TOTAL_IMAGES),
       acceptedArtists: [],
       rejectedArtists: []
     })
@@ -8630,11 +8633,11 @@ async function trainAiBuildCandidate(artist) {
       random40ExtractScraperPostImages(doc, artist.artistUrl, artist)
     ).filter(item => item.imageUrl && item.imageUrl !== profileImage);
     const uniquePosts = [...new Map(postEntries.map(entry => [entry.postUrl, entry])).values()];
-    const selectedPosts = shuffleInPlace([...uniquePosts]).slice(0, 3);
-    if (!profileImage || selectedPosts.length < 3) return null;
+    const selectedPosts = shuffleInPlace([...uniquePosts]).slice(0, TRAIN_AI_POST_IMAGE_COUNT);
+    if (!profileImage || selectedPosts.length < TRAIN_AI_POST_IMAGE_COUNT) return null;
     const resolvedPostImages = await Promise.all(selectedPosts.map(trainAiResolvePostImage));
     const postImageUrls = [...new Set(resolvedPostImages.filter(Boolean))];
-    if (postImageUrls.length < 3) return null;
+    if (postImageUrls.length < TRAIN_AI_POST_IMAGE_COUNT) return null;
     const imageUrls = [profileImage, ...postImageUrls];
     return {
       ...artist,
@@ -8728,7 +8731,7 @@ async function trainAiNextCandidate() {
   if (!trainAiState.open) return;
   trainAiState.busy = true;
   trainAiSetActionsDisabled(true);
-  if (!trainAiState.queue.length) trainAiSetStatus('Loading four full-quality photos…');
+  if (!trainAiState.queue.length) trainAiSetStatus(`Loading ${TRAIN_AI_TOTAL_IMAGES} full-quality photos…`);
   const candidate = await trainAiTakeQueuedCandidate();
   if (!candidate || !trainAiState.open) {
     if (trainAiState.open) trainAiSetStatus('Could not load photos. Close and try again.');
