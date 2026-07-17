@@ -400,6 +400,12 @@
       will-change: transform, opacity; transform: translate3d(0,0,0); backface-visibility: hidden;
       user-select: none; -webkit-tap-highlight-color: transparent; cursor: grab;
     }
+    .train-ai-card::after {
+      content: ''; position: absolute; inset: 0; z-index: 4; pointer-events: none;
+      background: transparent; opacity: 0; transition: opacity 140ms ease, background-color 140ms ease;
+    }
+    .train-ai-card.swipe-good::after { background: rgba(34,197,94,0.32); opacity: 1; }
+    .train-ai-card.swipe-bad::after { background: rgba(244,63,94,0.32); opacity: 1; }
     .train-ai-images { height: 100%; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; overflow: hidden; pointer-events: none; }
     .train-ai-image-tile { position: relative; min-height: 0; overflow: hidden; background: #020617; }
     .train-ai-image-tile { border: 1px solid rgba(255,255,255,0.12); }
@@ -411,16 +417,18 @@
       backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     }
     .train-ai-gradient { position: absolute; inset: 56% 0 0; background: linear-gradient(transparent,rgba(2,6,23,0.94)); pointer-events: none; }
-    .train-ai-card-info { position: absolute; left: 16px; right: 16px; bottom: 14px; pointer-events: none; }
+    .train-ai-card-info { position: absolute; left: 16px; right: 16px; bottom: 14px; z-index: 2; pointer-events: none; }
     .train-ai-card-name { font-size: 24px; font-weight: 850; text-shadow: 0 2px 10px #000; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .train-ai-card-meta { margin-top: 4px; color: rgba(255,255,255,0.72); font-size: 11px; }
-    .train-ai-stamp { position: absolute; top: 22px; padding: 7px 12px; border: 4px solid; border-radius: 8px; font-size: 24px; font-weight: 900; opacity: 0; pointer-events: none; }
+    .train-ai-stamp { position: absolute; top: 22px; z-index: 3; padding: 7px 12px; border: 4px solid; border-radius: 8px; font-size: 24px; font-weight: 900; opacity: 0; pointer-events: none; }
     .train-ai-stamp.good { left: 18px; color: #4ade80; border-color: #4ade80; transform: rotate(-9deg); }
     .train-ai-stamp.bad { right: 18px; color: #fb7185; border-color: #fb7185; transform: rotate(9deg); }
     .train-ai-reveal {
-      position: absolute; inset: 0; display: grid; place-content: center; gap: 10px; padding: 24px;
+      position: absolute; inset: 0; z-index: 5; display: grid; place-content: center; gap: 10px; padding: 24px;
       text-align: center; background: rgba(2,6,23,0.90); opacity: 0; pointer-events: none; transition: opacity 180ms ease;
     }
+    .train-ai-card.swipe-good .train-ai-reveal { background: rgba(5,46,22,0.86); }
+    .train-ai-card.swipe-bad .train-ai-reveal { background: rgba(76,5,25,0.86); }
     .train-ai-reveal.visible { opacity: 1; }
     .train-ai-reveal-title { font-size: 20px; font-weight: 850; }
     .train-ai-model-result { min-width: 230px; padding: 11px 14px; border-radius: 12px; background: rgba(255,255,255,0.08); font-size: 16px; font-weight: 850; }
@@ -801,7 +809,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.83</div>
+  <div class="version-number">23.84</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8405,12 +8413,13 @@ function trainAiSetStatus(text) {
   if (subtitle) subtitle.textContent = text || 'Swipe left = like · Swipe right = dislike';
 }
 
-function trainAiResetCardTransform() {
+function trainAiResetCardTransform(keepSwipeTint = false) {
   const card = document.getElementById('train-ai-card');
   if (!card) return;
   card.style.transition = 'transform 220ms cubic-bezier(0.2,0.82,0.2,1), opacity 160ms ease';
   card.style.transform = 'translate3d(0,0,0) rotate(0deg)';
   card.style.opacity = '1';
+  if (!keepSwipeTint) card.classList.remove('swipe-good', 'swipe-bad');
   document.getElementById('train-ai-good-stamp').style.opacity = '0';
   document.getElementById('train-ai-bad-stamp').style.opacity = '0';
 }
@@ -8478,8 +8487,8 @@ async function trainAiClassify(candidate, mode) {
   return JSON.parse(raw);
 }
 
-function trainAiPreparePredictions(candidate) {
-  trainAiSetStatus('AI is deciding…');
+function trainAiPreparePredictions(candidate, { quiet = false } = {}) {
+  if (!quiet) trainAiSetStatus('AI is deciding…');
   return Promise.allSettled([
     trainAiClassify(candidate, 'local'),
     trainAiClassify(candidate, 'local2')
@@ -8487,7 +8496,7 @@ function trainAiPreparePredictions(candidate) {
     local: results[0].status === 'fulfilled' ? results[0].value : { decision: 'unavailable', confidence: 0, reason: results[0].reason?.message || '' },
     local2: results[1].status === 'fulfilled' ? results[1].value : { decision: 'unavailable', confidence: 0, reason: results[1].reason?.message || '' }
   })).then(predictions => {
-    if (trainAiState.candidate === candidate && !trainAiState.busy) {
+    if (!quiet && trainAiState.candidate === candidate && !trainAiState.busy) {
       trainAiSetStatus('Swipe left = like · Swipe right = dislike');
     }
     return predictions;
@@ -8543,6 +8552,7 @@ async function trainAiLoadRandomPage({ quiet = false, generation = trainAiState.
 
 function trainAiDeliverQueuedCandidate(candidate, generation) {
   if (!candidate || !trainAiState.open || generation !== trainAiState.queueGeneration) return;
+  candidate.predictionPromise ||= trainAiPreparePredictions(candidate, { quiet: true });
   const waiter = trainAiState.queueWaiters.shift();
   if (waiter) waiter(candidate);
   else trainAiState.queue.push(candidate);
@@ -8599,7 +8609,7 @@ async function trainAiNextCandidate() {
     return;
   }
   trainAiRenderCandidate(candidate);
-  trainAiState.predictionPromise = trainAiPreparePredictions(candidate);
+  trainAiState.predictionPromise = candidate.predictionPromise || trainAiPreparePredictions(candidate);
   trainAiState.busy = false;
   trainAiSetActionsDisabled(false);
   void trainAiEnsureQueue(3);
@@ -8669,11 +8679,13 @@ async function trainAiChoose(label) {
   const card = document.getElementById('train-ai-card');
   if (card) {
     const direction = label === 'accept' ? -1 : 1;
+    card.classList.remove('swipe-good', 'swipe-bad');
+    card.classList.add(label === 'accept' ? 'swipe-good' : 'swipe-bad');
     card.style.transition = 'transform 150ms cubic-bezier(0.2,0.82,0.2,1), opacity 150ms ease';
     card.style.transform = `translate3d(${direction * 64}px,0,0) rotate(${direction * 4}deg) scale(0.985)`;
     card.style.opacity = '0.82';
     await sleep(150);
-    trainAiResetCardTransform();
+    trainAiResetCardTransform(true);
   }
   const candidate = trainAiState.candidate;
   trainAiSetStatus('Checking your choice…');
