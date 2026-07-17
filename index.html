@@ -729,7 +729,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.68</div>
+  <div class="version-number">23.69</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8147,7 +8147,7 @@ function random40PublishEntries(entries) {
       random40RecordFirstVideoTime(random40State.mode, random40State.firstVideoRecordedAt - random40State.startedAt);
     }
     scheduleRandom40PreloadPool(900);
-    showSortingIndicator(`Loaded first ${payload.urls.length} Random 40 videos. Continuing in background...`);
+    showSortingIndicator(`Loaded ${payload.urls.length} verified Random 40 videos. Continuing full scan...`);
   } else {
     allVideoUrls.push(...payload.urls);
     allVideoMetadata.push(...payload.metadata);
@@ -8244,6 +8244,21 @@ function random40AppendEntriesToExistingArtist(entries) {
   return urls.length;
 }
 
+async function random40AppendEntriesToExistingArtistWhenReady(entries, attempts = 12) {
+  const cleanEntries = (entries || []).filter(entry => entry?.videoUrl);
+  if (!cleanEntries.length) return 0;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const found = random40FindArtistEventForEntries(cleanEntries);
+    if (found.event && found.index >= 0) {
+      return random40AppendEntriesToExistingArtist(cleanEntries);
+    }
+    await sleep(350 + attempt * 120);
+  }
+
+  return random40AppendEntriesToExistingArtist(cleanEntries);
+}
+
 function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries) {
   if (!artist?.artistUrl || random40State?.stop) return;
   const firstPostUrls = [...new Set((firstEntries || []).map(entry => entry?.postUrl).filter(Boolean))];
@@ -8256,7 +8271,7 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
         skipPostUrls: firstPostUrls,
         stopAtVideos: Infinity
       });
-      const added = random40AppendEntriesToExistingArtist(moreEntries);
+      const added = await random40AppendEntriesToExistingArtistWhenReady(moreEntries);
       if (added) {
         updateRandom40Progress({
           detail: `Added ${added} more videos for ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} from 100-page scan`,
@@ -8567,10 +8582,10 @@ async function startRandom40(mode = 'nano') {
         const initialVideoEntriesPromise = random40WithTimeout(
           random40ScrapeArtistVideos(artistWithPrecheckText, {
             collected: precheck,
-            stopAtVideos: RANDOM40_FAST_PUBLISH_VIDEOS
+            stopAtVideos: RANDOM40_MIN_VIDEOS_PER_ARTIST
           }),
-          22000,
-          'initial video scrape timed out'
+          42000,
+          '25 playable video check timed out'
         ).catch(() => []);
 
         const reviewImageCount = random40IsLocalMode(runMode) ? RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST : RANDOM40_INITIAL_IMAGES_PER_ARTIST;
@@ -8590,14 +8605,14 @@ async function startRandom40(mode = 'nano') {
           return;
         }
         if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
-        updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Loading first playable videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+        updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Verifying 25 playable videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
         stageStarted = performance.now();
         const entries = await initialVideoEntriesPromise;
         random40RecordStageTiming('initial-video-scrape', performance.now() - stageStarted);
-        if (!entries.length) {
+        if (entries.length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
           random40State.skippedLowVideo = (random40State.skippedLowVideo || 0) + 1;
           updateRandom40Progress({
-            detail: `Skipped accepted ${artist.artistName}: no playable videos found quickly`,
+            detail: `Skipped accepted ${artist.artistName}: only ${entries.length}/${RANDOM40_MIN_VIDEOS_PER_ARTIST} playable videos`,
             accepted: random40State.accepted,
             videos: random40State.videos,
             pages: random40State.pages,
