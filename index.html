@@ -730,7 +730,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.77</div>
+  <div class="version-number">23.78</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4458,12 +4458,22 @@ function getFirstActivePasteEventIndex() {
 }
 
 function retireCurrentPasteEventForPaperclip() {
-  if (currentPasteIndex < 0 || !pasteEvents[currentPasteIndex]) return false;
-  const key = getPasteEventPaperclipKey(pasteEvents[currentPasteIndex], currentPasteIndex);
-  if (!key) return false;
-  const wasNew = !paperclipRetiredBundleKeys.has(key);
-  paperclipRetiredBundleKeys.add(key);
-  return wasNew;
+  const indexes = new Set();
+  const visibleIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
+  if (visibleIndex >= 0) indexes.add(visibleIndex);
+  if (currentPasteIndex >= 0) indexes.add(currentPasteIndex);
+
+  let retired = false;
+  indexes.forEach(index => {
+    const event = pasteEvents[index];
+    if (!event) return;
+    const key = getPasteEventPaperclipKey(event, index);
+    if (!key) return;
+    if (!paperclipRetiredBundleKeys.has(key)) retired = true;
+    paperclipRetiredBundleKeys.add(key);
+  });
+
+  return retired;
 }
 
 function shouldNextBatchAdvanceSavedArtist() {
@@ -6264,7 +6274,7 @@ const RANDOM40_PASSWORD = '22';
 const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
-const RANDOM40_AI_CONCURRENCY = 18;
+const RANDOM40_AI_CONCURRENCY = 36;
 const RANDOM40_LOCAL_CONCURRENCY = 48;
 const RANDOM40_POST_CONCURRENCY = 28;
 const RANDOM40_PAGE_BATCH_SIZE = 20;
@@ -6279,6 +6289,7 @@ const RANDOM40_LOCAL_MODEL_NAME = 'local-image-embeddings';
 const RANDOM40_LOCAL2_VISION_MODEL = 'qwen3-vl:4b';
 const RANDOM40_PROMPT_VERSION = 'cf-vision-v11';
 const RANDOM40_THUMBNAIL_REJECT_CONFIDENCE = 0.95;
+const RANDOM40_NANO_THUMBNAIL_TRIAGE = false;
 const RANDOM40_REJECT_CACHE_KEY = 'pong_random40_model_reject_cache_v1';
 const RANDOM40_REJECT_CACHE_MAX = 4000;
 const RANDOM40_REJECT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
@@ -8856,7 +8867,7 @@ async function startRandom40(mode = 'nano') {
           return;
         }
 
-        if (runMode !== 'local2' && runMode !== 'local') {
+        if (RANDOM40_NANO_THUMBNAIL_TRIAGE && runMode !== 'local2' && runMode !== 'local') {
           updateRandom40Progress({ detail: `${classifierLabel} thumbnail check: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
           stageStarted = performance.now();
           const triage = await random40ThumbnailTriage(artistWithPrecheckText, apiKey, runMode, localEndpoint).catch(() => ({ skip: false }));
@@ -8871,6 +8882,19 @@ async function startRandom40(mode = 'nano') {
 
         const reviewImageCount = random40IsLocalMode(runMode) ? RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST : RANDOM40_INITIAL_IMAGES_PER_ARTIST;
         updateRandom40Progress({ detail: `${classifierLabel} ${artistLabel} - ${precheck.links.length}+ videos, ${reviewImageCount} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        let entriesPromise = null;
+        let initialVideoStageStarted = 0;
+        if (runMode !== 'local') {
+          initialVideoStageStarted = performance.now();
+          entriesPromise = random40WithTimeout(
+            random40ScrapeArtistVideos(artistWithPrecheckText, {
+              collected: precheck,
+              stopAtVideos: RANDOM40_FAST_PUBLISH_VIDEOS
+            }),
+            30000,
+            'first video scrape timed out'
+          ).catch(() => []);
+        }
         stageStarted = performance.now();
         const decision = await random40WithTimeout(
           random40AnalyzeArtist(artistWithPrecheckText, apiKey, { firstDoc: precheck.firstDoc, collected: precheck, mode: runMode, localEndpoint, deferLocalHardVerification: true }),
@@ -8893,15 +8917,17 @@ async function startRandom40(mode = 'nano') {
         if (random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
         updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Loading first videos...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
 
-        const initialVideoStageStarted = performance.now();
-        const entriesPromise = random40WithTimeout(
-          random40ScrapeArtistVideos(artistWithPrecheckText, {
-            collected: precheck,
-            stopAtVideos: RANDOM40_FAST_PUBLISH_VIDEOS
-          }),
-          30000,
-          'first video scrape timed out'
-        ).catch(() => []);
+        if (!entriesPromise) {
+          initialVideoStageStarted = performance.now();
+          entriesPromise = random40WithTimeout(
+            random40ScrapeArtistVideos(artistWithPrecheckText, {
+              collected: precheck,
+              stopAtVideos: RANDOM40_FAST_PUBLISH_VIDEOS
+            }),
+            30000,
+            'first video scrape timed out'
+          ).catch(() => []);
+        }
 
         if (runMode === 'local' && decision.requires_local_hard_verification) {
           updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Verifying hard filters...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
