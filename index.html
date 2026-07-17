@@ -730,7 +730,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.72</div>
+  <div class="version-number">23.73</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6506,8 +6506,18 @@ function random40NormalizeLocalEndpoint(raw) {
   return String(raw || 'http://127.0.0.1:8787').trim().replace(/\/+$/, '');
 }
 
-async function random40PingLocalEndpoint(endpoint) {
-  const res = await fetch(`${endpoint}/health?t=${Date.now()}`, { cache: 'no-store' });
+async function random40PingLocalEndpoint(endpoint, timeoutMs = 2200) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(`${endpoint}/health?t=${Date.now()}`, {
+      cache: 'no-store',
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) throw new Error(`Local HTTP ${res.status}`);
   return res.json().catch(() => ({}));
 }
@@ -6535,7 +6545,7 @@ async function getRandom40LocalEndpoint() {
     RANDOM40_LOCAL_ENDPOINTS[RANDOM40_LOCAL_ENDPOINTS.length - 1] || 'http://127.0.0.1:8787'
   );
   if (pasted === null) return '';
-  endpoint = random40NormalizeLocalEndpoint(pasted);
+  const endpoint = random40NormalizeLocalEndpoint(pasted);
 
   try {
     await random40PingLocalEndpoint(endpoint);
@@ -8660,24 +8670,11 @@ async function startRandom40(mode = 'nano') {
 
   const runMode = random40NormalizeMode(mode);
   const apiKey = runMode === 'nano' ? getRandom40ApiKey() : '';
-  const localEndpoint = random40IsLocalMode(runMode)
-    ? await getRandom40LocalEndpoint()
-    : await random40FindReadyLocalEndpointSilently();
   if (runMode === 'nano' && !apiKey) return;
-  if (random40IsLocalMode(runMode) && !localEndpoint) return;
-
-  if (localEndpoint) {
-    await random40LoadPcLearningMemory(localEndpoint).catch(error => {
-      if (random40IsLocalMode(runMode)) {
-        showSortingIndicator(`PC memory unavailable: ${error.message}`);
-      }
-      return false;
-    });
-  }
 
   random40State = {
     mode: runMode,
-    localEndpoint,
+    localEndpoint: '',
     startedAt: Date.now(),
     firstVideoRecordedAt: 0,
     accepted: 0,
@@ -8697,6 +8694,25 @@ async function startRandom40(mode = 'nano') {
   };
 
   updateRandom40Progress({ detail: `Starting ${random40ModeLabel(runMode)} random scan...`, force: true });
+
+  let localEndpoint = '';
+  if (random40IsLocalMode(runMode)) {
+    updateRandom40Progress({ detail: `Connecting ${random40ModeLabel(runMode)} local AI...`, force: true });
+    localEndpoint = await getRandom40LocalEndpoint();
+    if (!localEndpoint) {
+      random40State.done = true;
+      updateRandom40Progress({ detail: `${random40ModeLabel(runMode)} local AI unavailable`, force: true });
+      return;
+    }
+    random40State.localEndpoint = localEndpoint;
+  }
+
+  if (localEndpoint) {
+    await random40LoadPcLearningMemory(localEndpoint).catch(error => {
+      showSortingIndicator(`PC memory unavailable: ${error.message}`);
+      return false;
+    });
+  }
 
   try {
     while (!random40State.stop && random40State.accepted < RANDOM40_TARGET_ACCEPTED) {
