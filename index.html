@@ -806,7 +806,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.94</div>
+  <div class="version-number">23.95</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8593,6 +8593,8 @@ const TRAIN_AI_HARD_CHECK_TIMEOUT_MS = 40000;
 const TRAIN_AI_MAX_CANDIDATES_PER_FILL = 48;
 const TRAIN_AI_GATE_CONCURRENCY = 4;
 const TRAIN_AI_QUEUE_TARGET = 10;
+const TRAIN_AI_DISPLAY_RESERVE = 3;
+const TRAIN_AI_IMAGE_PRELOAD_TIMEOUT_MS = 8000;
 const trainAiState = {
   open: false,
   busy: false,
@@ -8817,6 +8819,48 @@ function trainAiPreparePredictions(candidate, { quiet = false } = {}) {
   });
 }
 
+function trainAiPreloadCandidateImages(candidate) {
+  if (candidate.imagePreloadPromise) return candidate.imagePreloadPromise;
+  candidate.preloadedImages = [];
+  candidate.imagePreloadPromise = Promise.allSettled(candidate.imageUrls.slice(0, TRAIN_AI_TOTAL_IMAGES).map(url => (
+    new Promise(resolve => {
+      const image = new Image();
+      candidate.preloadedImages.push(image);
+      image.decoding = 'async';
+      image.loading = 'eager';
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, TRAIN_AI_IMAGE_PRELOAD_TIMEOUT_MS);
+      image.addEventListener('load', finish, { once: true });
+      image.addEventListener('error', finish, { once: true });
+      image.src = url;
+      if (image.complete) finish();
+    })
+  ))).then(() => candidate);
+  return candidate.imagePreloadPromise;
+}
+
+function trainAiPrepareCandidateForDisplay(candidate) {
+  if (!candidate) return Promise.resolve(null);
+  candidate.predictionPromise ||= trainAiPreparePredictions(candidate, { quiet: true });
+  candidate.displayReadyPromise ||= Promise.allSettled([
+    candidate.predictionPromise,
+    trainAiPreloadCandidateImages(candidate)
+  ]).then(() => candidate);
+  return candidate.displayReadyPromise;
+}
+
+function trainAiWarmDisplayReserve() {
+  trainAiState.queue.slice(0, TRAIN_AI_DISPLAY_RESERVE).forEach(candidate => {
+    void trainAiPrepareCandidateForDisplay(candidate);
+  });
+}
+
 async function trainAiHardVisualCheck(candidate) {
   return trainAiFetchDecision({
     app: 'pong-train-ai',
@@ -8913,8 +8957,14 @@ function trainAiDeliverQueuedCandidate(candidate, generation) {
   if (!candidate || !trainAiState.open || generation !== trainAiState.queueGeneration) return;
   candidate.predictionPromise ||= trainAiPreparePredictions(candidate, { quiet: true });
   const waiter = trainAiState.queueWaiters.shift();
-  if (waiter) waiter(candidate);
-  else trainAiState.queue.push(candidate);
+  if (waiter) {
+    void trainAiPrepareCandidateForDisplay(candidate).then(prepared => {
+      waiter(trainAiState.open && generation === trainAiState.queueGeneration ? prepared : null);
+    });
+  } else {
+    trainAiState.queue.push(candidate);
+    trainAiWarmDisplayReserve();
+  }
 }
 
 function trainAiEnsureQueue(target = TRAIN_AI_QUEUE_TARGET) {
@@ -8971,8 +9021,9 @@ function trainAiEnsureQueue(target = TRAIN_AI_QUEUE_TARGET) {
 function trainAiTakeQueuedCandidate() {
   if (trainAiState.queue.length) {
     const candidate = trainAiState.queue.shift();
+    trainAiWarmDisplayReserve();
     void trainAiEnsureQueue(TRAIN_AI_QUEUE_TARGET);
-    return Promise.resolve(candidate);
+    return trainAiPrepareCandidateForDisplay(candidate);
   }
   return new Promise(resolve => {
     trainAiState.queueWaiters.push(resolve);
@@ -9149,6 +9200,13 @@ async function openTrainAiPanel() {
   }
   trainAiState.artists = [];
   trainAiState.index = 0;
+  trainAiSetStatus(`Preparing ${TRAIN_AI_DISPLAY_RESERVE} next artists…`);
+  await trainAiEnsureQueue(TRAIN_AI_DISPLAY_RESERVE + 1);
+  if (!trainAiState.open) return;
+  await Promise.allSettled(
+    trainAiState.queue.slice(0, TRAIN_AI_DISPLAY_RESERVE + 1).map(trainAiPrepareCandidateForDisplay)
+  );
+  if (!trainAiState.open) return;
   await trainAiNextCandidate();
 }
 
