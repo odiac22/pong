@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.05</div>
+  <div class="version-number">24.06</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7091,8 +7091,6 @@ const RANDOM40_MAX_REJECT_EXAMPLES = 4;
 const RANDOM40_REJECT_IMAGES_PER_EXAMPLE = 3;
 const RANDOM40_STORED_IMAGES_PER_ARTIST = 40;
 const RANDOM40_LOCAL_LEARN_IMAGES_PER_EXAMPLE = 6;
-const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.arianslade-pong.workers.dev';
-const RANDOM40_SOURCE_ROUTE_KEY = 'pong_random40_source_route_v1';
 const RANDOM40_PRELOAD_CURRENT_RESERVE = 30;
 let random40AcceptedArtistsMemory = [];
 let random40RejectedArtistsMemory = [];
@@ -7379,51 +7377,15 @@ async function random40TryKnownLocalEndpoint(timeoutMs = 2200) {
   return '';
 }
 
-function random40ProxyBase() {
-  let proxy = '';
-  try {
-    proxy = String(localStorage.getItem('pong_coomerfans_proxy_url_v1') || '').trim().replace(/\/+$/, '');
-    if (!proxy || /pong-coomerfans-proxy\.odiac22-pong-repair\.workers\.dev$/i.test(proxy)) {
-      proxy = RANDOM40_DEFAULT_PROXY;
-      localStorage.setItem('pong_coomerfans_proxy_url_v1', proxy);
-    }
-  } catch (_) {}
-  return proxy || RANDOM40_DEFAULT_PROXY;
-}
-
-function random40ProxyUrl(rawUrl) {
-  const proxy = random40ProxyBase();
-  if (!proxy) return rawUrl;
-  return `${proxy}${proxy.includes('?') ? '&' : '?'}url=${encodeURIComponent(rawUrl)}&t=${Date.now()}`;
-}
-
 function random40PcGatewayUrl(rawUrl) {
   const endpoint = random40GatewayEndpoint || random40State?.localEndpoint || '';
   if (!endpoint) return '';
   return `${endpoint}/proxy?url=${encodeURIComponent(rawUrl)}&t=${Date.now()}`;
 }
 
-function random40SourceRoute() {
-  try {
-    const configured = String(localStorage.getItem(RANDOM40_SOURCE_ROUTE_KEY) || '').trim().toLowerCase();
-    if (configured === 'cloudflare' || configured === 'pc') return configured;
-  } catch (_) {}
-  return 'pc';
-}
-
 function random40VideoVerifierEndpoints() {
-  const cloudflare = random40ProxyBase();
   const pc = random40GatewayEndpoint || random40State?.localEndpoint || '';
-  if (random40SourceRoute() === 'cloudflare') {
-    return [...new Set([
-      cloudflare ? `${cloudflare}/verify-videos` : '',
-      pc ? `${pc}/verify-videos` : ''
-    ].filter(Boolean))];
-  }
-  return [...new Set([
-    pc ? `${pc}/verify-videos` : '',
-    cloudflare ? `${cloudflare}/verify-videos` : ''
-  ].filter(Boolean))];
+  return pc ? [`${pc}/verify-videos`] : [];
 }
 
 async function random40VerifyPostLinksBatch(postLinks, artistInfo, stopAt, signal = null) {
@@ -7549,19 +7511,15 @@ function random40ScheduleSourceFetch(task, options = {}) {
 
 async function random40FetchTextNow(rawUrl, options = {}) {
   const pcGatewayUrl = random40PcGatewayUrl(rawUrl);
-  const cloudflareUrl = random40ProxyUrl(rawUrl);
-  const sourceRoute = random40SourceRoute();
   const localOnly = Boolean(pcGatewayUrl && (
     random40IsLocalMode(random40State?.mode) ||
     trainAiState?.open
   ));
-  const urls = sourceRoute === 'cloudflare'
-    ? [cloudflareUrl]
-    : localOnly
-    ? [pcGatewayUrl, cloudflareUrl]
+  const urls = localOnly
+    ? [pcGatewayUrl]
     : options.proxyOnly
-      ? [pcGatewayUrl, cloudflareUrl]
-      : [pcGatewayUrl, rawUrl, cloudflareUrl];
+      ? [pcGatewayUrl]
+      : [pcGatewayUrl, rawUrl];
   let lastError = null;
 
   for (const url of [...new Set(urls.filter(Boolean))]) {
