@@ -806,7 +806,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.89</div>
+  <div class="version-number">23.90</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6406,6 +6406,8 @@ const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
 const RANDOM40_PRECHECK_MAX_ARTIST_PAGES = 36;
 const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 72;
 const RANDOM40_FAST_PUBLISH_VIDEOS = 4;
+const RANDOM40_BACKGROUND_APPEND_BATCH = 4;
+const RANDOM40_BACKGROUND_APPEND_DELAY_MS = 180;
 const RANDOM40_MODEL = 'gpt-5.4-nano';
 const RANDOM40_LOCAL_MODEL_NAME = 'local-image-embeddings';
 const RANDOM40_LOCAL2_VISION_MODEL = 'qwen3-vl:4b';
@@ -9104,7 +9106,7 @@ async function random40VideoEntriesFromPost(postUrl, artistInfo) {
   }));
 }
 
-async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = Infinity, ignoreStop = false) {
+async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = Infinity, ignoreStop = false, onEntries = null) {
   const selectedLinks = [...new Set((links || []).filter(Boolean))];
   if (!selectedLinks.length) return [];
 
@@ -9135,9 +9137,14 @@ async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = I
           .catch(() => [])
           .then(entries => {
             if (!settled && entries?.length) {
+              const discovered = [];
               for (const entry of entries) {
                 results.push(entry);
+                discovered.push(entry);
                 if (results.length >= stopAtVideos) break;
+              }
+              if (discovered.length && typeof onEntries === 'function') {
+                try { onEntries(discovered); } catch (_) {}
               }
             }
           })
@@ -9382,18 +9389,70 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
   const firstPostUrls = [...new Set((firstEntries || []).map(entry => entry?.postUrl).filter(Boolean))];
 
   setTimeout(async () => {
+    let pendingEntries = [];
+    let flushTimer = null;
+    let appendChain = Promise.resolve();
+    let totalAdded = 0;
+
+    const flushPending = () => {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+      if (!pendingEntries.length) return appendChain;
+      const batch = pendingEntries.splice(0, pendingEntries.length);
+      appendChain = appendChain
+        .then(() => random40AppendEntriesToExistingArtistWhenReady(batch))
+        .then(added => {
+          totalAdded += Number(added || 0);
+          return added;
+        })
+        .catch(() => 0);
+      return appendChain;
+    };
+
+    const queueDiscoveredEntries = entries => {
+      if (!entries?.length) return;
+      pendingEntries.push(...entries);
+      if (pendingEntries.length >= RANDOM40_BACKGROUND_APPEND_BATCH) {
+        void flushPending();
+      } else if (!flushTimer) {
+        flushTimer = setTimeout(() => void flushPending(), RANDOM40_BACKGROUND_APPEND_DELAY_MS);
+      }
+    };
+
     try {
-      const moreEntries = await random40ScrapeArtistVideos(artist, {
-        collected: precheck,
-        fullScan: true,
-        skipPostUrls: firstPostUrls,
-        stopAtVideos: Infinity,
+      const knownLinks = [...new Set(precheck?.links || [])].filter(link => link && !firstPostUrls.includes(link));
+      const fullScanPromise = random40CollectVideoPostLinks(artist, {
+        stopAt: Infinity,
+        maxPages: RANDOM40_MAX_ARTIST_PAGES,
         ignoreStop: true
-      });
-      const added = await random40AppendEntriesToExistingArtistWhenReady(moreEntries);
-      if (added) {
+      }).catch(() => null);
+
+      await random40ScrapeVideoLinksUntil(
+        knownLinks,
+        random40ArtistInfo(artist.artistUrl, precheck?.firstDoc),
+        Infinity,
+        true,
+        queueDiscoveredEntries
+      );
+
+      const expanded = await fullScanPromise;
+      const alreadyQueued = new Set([...(precheck?.links || []), ...firstPostUrls]);
+      const extraLinks = [...new Set(expanded?.links || [])].filter(link => link && !alreadyQueued.has(link));
+      if (extraLinks.length) {
+        await random40ScrapeVideoLinksUntil(
+          extraLinks,
+          random40ArtistInfo(artist.artistUrl, expanded?.firstDoc || precheck?.firstDoc),
+          Infinity,
+          true,
+          queueDiscoveredEntries
+        );
+      }
+
+      await flushPending();
+      await appendChain;
+      if (totalAdded) {
         updateRandom40Progress({
-          detail: `Added ${added} more videos for ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} from 100-page scan`,
+          detail: `Added ${totalAdded} more videos for ${artist.artistName || random40ArtistNameFromUrl(artist.artistUrl)} from 100-page scan`,
           accepted: random40State?.accepted,
           videos: random40State?.videos,
           pages: random40State?.pages,
@@ -9401,8 +9460,10 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
           force: true
         });
       }
-    } catch (_) {}
-  }, 1200);
+    } catch (_) {
+      await flushPending();
+    }
+  }, 100);
 }
 
 async function random40Pool(items, limit, worker) {
