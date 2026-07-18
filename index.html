@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.03</div>
+  <div class="version-number">24.04</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -940,6 +940,7 @@ let random40PostFetchSlowActive = 0;
 let random40PostFetchQueue = [];
 let random40PostFetchSequence = 0;
 let random40PostEntriesCache = new Map();
+let random40ResolvedPostImageCache = new Map();
 let random40SourceFetchActive = 0;
 let random40SourceFetchSlowActive = 0;
 let random40SourceFetchQueue = [];
@@ -7042,21 +7043,21 @@ const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
 const RANDOM40_AI_CONCURRENCY = 12;
-const RANDOM40_LOCAL_CONCURRENCY = 60;
-const RANDOM40_SOURCE_CONCURRENCY = 64;
-const RANDOM40_SOURCE_BACKGROUND_CONCURRENCY = 8;
-const RANDOM40_POST_CONCURRENCY = 48;
-const RANDOM40_POST_PLAYING_CONCURRENCY = 40;
-const RANDOM40_POST_BUFFERING_CONCURRENCY = 32;
-const RANDOM40_POST_FOREGROUND_CONCURRENCY = 32;
-const RANDOM40_POST_SLOW_CONCURRENCY = 8;
+const RANDOM40_LOCAL_CONCURRENCY = 18;
+const RANDOM40_SOURCE_CONCURRENCY = 32;
+const RANDOM40_SOURCE_BACKGROUND_CONCURRENCY = 4;
+const RANDOM40_POST_CONCURRENCY = 18;
+const RANDOM40_POST_PLAYING_CONCURRENCY = 24;
+const RANDOM40_POST_BUFFERING_CONCURRENCY = 18;
+const RANDOM40_POST_FOREGROUND_CONCURRENCY = 18;
+const RANDOM40_POST_SLOW_CONCURRENCY = 4;
 const RANDOM40_POST_ENTRIES_CACHE_MAX = 6000;
-const RANDOM40_PAGE_BATCH_SIZE = 4;
+const RANDOM40_PAGE_BATCH_SIZE = 2;
 const RANDOM40_LISTING_PAGE_BATCH_SIZE = 8;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 15;
 const RANDOM40_PRECHECK_MAX_ARTIST_PAGES = 36;
-const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 120;
+const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 96;
 const RANDOM40_FAST_PUBLISH_VIDEOS = RANDOM40_MIN_VIDEOS_PER_ARTIST;
 const RANDOM40_BACKGROUND_APPEND_BATCH = 4;
 const RANDOM40_BACKGROUND_APPEND_DELAY_MS = 180;
@@ -7401,7 +7402,15 @@ function random40PumpSourceFetchQueue() {
     });
     if (!random40SourceFetchQueue.length) break;
 
-    let selectedIndex = random40SourceFetchQueue.findIndex(item => Number(item.priority ?? 1) <= 0);
+    let selectedIndex = -1;
+    let selectedPriority = Infinity;
+    random40SourceFetchQueue.forEach((item, index) => {
+      const priority = Number(item.priority ?? 1);
+      if (priority <= 0 && priority < selectedPriority) {
+        selectedPriority = priority;
+        selectedIndex = index;
+      }
+    });
     if (selectedIndex < 0) selectedIndex = random40SourceFetchQueue.findIndex(item => Number(item.priority ?? 1) === 1);
     if (selectedIndex < 0) {
       if (random40SourceFetchSlowActive >= RANDOM40_SOURCE_BACKGROUND_CONCURRENCY) break;
@@ -9060,12 +9069,35 @@ function random40ExtractHighQualityPostImages(doc, baseUrl) {
 }
 
 async function trainAiResolvePostImage(entry) {
-  try {
-    const doc = await random40FetchDoc(entry.postUrl, { timeoutMs: 16000 });
-    return random40ExtractHighQualityPostImages(doc, entry.postUrl)[0] || entry.imageUrl;
-  } catch (_) {
-    return entry.imageUrl;
+  const cacheKey = random40NormalizeUrl(entry?.postUrl, location.href) || entry?.postUrl || entry?.imageUrl || '';
+  if (cacheKey && random40ResolvedPostImageCache.has(cacheKey)) {
+    return random40ResolvedPostImageCache.get(cacheKey);
   }
+  const promise = (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5500);
+    try {
+      // A candidate that already passed the real-video gate must not wait
+      // behind speculative artist scans for its five visual inputs.
+      const doc = await random40FetchDoc(entry.postUrl, {
+        timeoutMs: 5500,
+        signal: controller.signal,
+        priority: -2
+      });
+      return random40ExtractHighQualityPostImages(doc, entry.postUrl)[0] || entry.imageUrl;
+    } catch (_) {
+      return entry.imageUrl;
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+  if (cacheKey) {
+    random40ResolvedPostImageCache.set(cacheKey, promise);
+    while (random40ResolvedPostImageCache.size > RANDOM40_POST_ENTRIES_CACHE_MAX) {
+      random40ResolvedPostImageCache.delete(random40ResolvedPostImageCache.keys().next().value);
+    }
+  }
+  return promise;
 }
 
 function random40DeduplicateImageEntries(entries) {
@@ -10037,6 +10069,9 @@ async function random40CollectVideoPostLinks(artist, {
     random40ExtractVideoPostLinks(firstDoc, base).forEach(url => postLinks.add(url));
     postImageEntries.push(...random40ExtractScraperPostImages(firstDoc, base, artist));
     if (firstDoc.body?.innerText) pageTextParts.push(firstDoc.body.innerText);
+    if (!firstDoc.querySelector('a[href*="?page="], a[href*="&page="]')) {
+      scanComplete = true;
+    }
   }
 
   const firstPageText = pageTextParts.join(' ').replace(/\s+/g, ' ');
@@ -10075,7 +10110,7 @@ async function random40CollectVideoPostLinks(artist, {
       verificationTarget - verifiedEntries.length,
       ignoreStop,
       null,
-      scannedThroughPage > 5 ? 2 : 1,
+      0,
       signal
     );
     const seenVideos = new Set(verifiedEntries.map(entry => entry?.videoUrl).filter(Boolean));
@@ -10967,7 +11002,7 @@ async function startRandom40(mode = 'nano') {
             signal: precheckController.signal,
             sourcePriority: 1
           }),
-          45000,
+          20000,
           `${RANDOM40_MIN_VIDEOS_PER_ARTIST}-video verification timed out`
         ).catch(() => ({ links: [], verifiedEntries: [] }))
           .finally(() => {
@@ -10982,8 +11017,13 @@ async function startRandom40(mode = 'nano') {
         }
         if ((precheck.verifiedEntries || []).length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
           random40State.skippedLowVideo = (random40State.skippedLowVideo || 0) + 1;
+          const possibleVideoPosts = Number(precheck.links?.length || 0);
+          const verifiedVideos = Number(precheck.verifiedEntries?.length || 0);
+          const lowVideoDetail = verifiedVideos === 0 && possibleVideoPosts < RANDOM40_MIN_VIDEOS_PER_ARTIST
+            ? `${possibleVideoPosts} possible video posts; needs ${RANDOM40_MIN_VIDEOS_PER_ARTIST}`
+            : `${verifiedVideos}/${RANDOM40_MIN_VIDEOS_PER_ARTIST} actual videos verified`;
           updateRandom40Progress({
-            detail: `Skipped ${artist.artistName || 'artist'}: ${precheck.verifiedEntries?.length || 0}/${RANDOM40_MIN_VIDEOS_PER_ARTIST} verified videos`,
+            detail: `Skipped ${artist.artistName || 'artist'}: ${lowVideoDetail}`,
             accepted: random40State.accepted,
             videos: random40State.videos,
             pages: random40State.pages,

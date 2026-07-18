@@ -720,10 +720,6 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
         decision = "accept"
         confidence = 0.96
         reason = "visual hard checks passed"
-    elif not fast_analysis["bodyAvailable"]:
-        decision = "reject"
-        confidence = 0.90
-        reason = "no usable body evidence for personal body preference"
     elif body_veto_grade is not None:
         decision = "reject"
         confidence = 0.94
