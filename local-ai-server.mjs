@@ -1,8 +1,8 @@
 import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
-import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { pipeline, RawImage, env } from '@xenova/transformers';
 
@@ -11,6 +11,7 @@ const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
 const MODEL = process.env.PONG_LOCAL_IMAGE_MODEL || 'Xenova/siglip-base-patch16-224';
 const OLLAMA_URL = (process.env.PONG_OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
 const OLLAMA_VISION_MODEL = process.env.PONG_OLLAMA_VISION_MODEL || 'qwen3-vl:4b';
+const OLLAMA_KEEP_ALIVE = process.env.PONG_OLLAMA_KEEP_ALIVE || -1;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
 const QWEN_ACCEPT_EXAMPLES = Number(process.env.PONG_QWEN_ACCEPT_EXAMPLE_IMAGES || 0);
@@ -39,6 +40,15 @@ const MAX_LEARNED_RECORDS = 2000;
 const GATEWAY_TIMEOUT_MS = Math.max(5000, Number(process.env.PONG_GATEWAY_TIMEOUT_MS || 30000));
 const GATEWAY_MAX_REDIRECTS = 5;
 const GATEWAY_ALLOWED_HOSTS = ['coomerfans.com', 'onlyfaphouse.com'];
+const GATEWAY_WARM_CONNECTIONS = Math.max(1, Math.min(8, Number(process.env.PONG_GATEWAY_WARM_CONNECTIONS || 4)));
+const GATEWAY_KEEP_WARM_MS = Math.max(10000, Number(process.env.PONG_GATEWAY_KEEP_WARM_MS || 20000));
+const GATEWAY_AGENT = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 15000,
+  maxSockets: Math.max(12, Number(process.env.PONG_GATEWAY_MAX_SOCKETS || 24)),
+  maxFreeSockets: Math.max(8, Number(process.env.PONG_GATEWAY_MAX_FREE_SOCKETS || 24)),
+  scheduling: 'lifo'
+});
 
 env.allowLocalModels = false;
 env.useBrowserCache = false;
@@ -65,6 +75,16 @@ let pendingFineTuneTimer = null;
 let pendingFineTuneTrigger = '';
 let preferenceAiLastHealth = null;
 let preferenceAiLastHealthAt = 0;
+let ollamaWarmPromise = null;
+const gatewayWarmState = {
+  ready: false,
+  warming: false,
+  lastAt: 0,
+  lastDurationMs: 0,
+  successes: 0,
+  failures: 0,
+  error: ''
+};
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -103,32 +123,82 @@ function gatewayTargetUrl(raw) {
   return target;
 }
 
-async function gatewayFetch(target, req, controller) {
-  let current = gatewayTargetUrl(target);
-  for (let redirect = 0; redirect <= GATEWAY_MAX_REDIRECTS; redirect++) {
+function gatewayRequest(current, req, controller, method = req.method === 'HEAD' ? 'HEAD' : 'GET') {
+  return new Promise((resolve, reject) => {
     const headers = {
-      'User-Agent': 'Mozilla/5.0 PongLocalGateway/1.0',
-      'Accept': String(req.headers.accept || '*/*'),
-      'Accept-Encoding': 'identity',
+      'User-Agent': 'Mozilla/5.0 PongLocalGateway/1.1',
+      'Accept': String(req.headers?.accept || '*/*'),
+      'Accept-Encoding': String(req.headers?.['accept-encoding'] || 'gzip, deflate, br'),
+      'Connection': 'keep-alive',
       'Referer': `${current.protocol}//${current.host}/`
     };
     for (const name of ['range', 'if-none-match', 'if-modified-since']) {
-      if (req.headers[name]) headers[name] = String(req.headers[name]);
+      if (req.headers?.[name]) headers[name] = String(req.headers[name]);
     }
-    const response = await fetch(current, {
-      method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+    const upstreamRequest = https.request(current, {
+      method,
       headers,
-      redirect: 'manual',
-      cache: 'no-store',
-      signal: controller.signal
-    });
-    if (response.status < 300 || response.status >= 400 || !response.headers.get('location')) {
+      agent: GATEWAY_AGENT,
+      timeout: GATEWAY_TIMEOUT_MS
+    }, resolve);
+    const abort = () => upstreamRequest.destroy(new Error('gateway request aborted'));
+    controller?.signal?.addEventListener('abort', abort, { once: true });
+    upstreamRequest.once('timeout', () => upstreamRequest.destroy(new Error('gateway request timed out')));
+    upstreamRequest.once('error', reject);
+    upstreamRequest.once('close', () => controller?.signal?.removeEventListener('abort', abort));
+    upstreamRequest.end();
+  });
+}
+
+async function gatewayFetch(target, req, controller, method) {
+  let current = gatewayTargetUrl(target);
+  for (let redirect = 0; redirect <= GATEWAY_MAX_REDIRECTS; redirect++) {
+    const response = await gatewayRequest(current, req, controller, method);
+    const status = Number(response.statusCode || 0);
+    const location = response.headers.location;
+    if (status < 300 || status >= 400 || !location) {
       return response;
     }
+    response.resume();
     if (redirect >= GATEWAY_MAX_REDIRECTS) throw new Error('too many gateway redirects');
-    current = gatewayTargetUrl(new URL(response.headers.get('location'), current).toString());
+    current = gatewayTargetUrl(new URL(location, current).toString());
   }
   throw new Error('gateway redirect failed');
+}
+
+async function warmGatewayConnections() {
+  if (gatewayWarmState.warming) return;
+  gatewayWarmState.warming = true;
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.min(GATEWAY_TIMEOUT_MS, 12000));
+  try {
+    const requestShape = { method: 'HEAD', headers: { accept: 'text/html', 'accept-encoding': 'gzip, deflate, br' } };
+    const tasks = GATEWAY_ALLOWED_HOSTS.flatMap(host => Array.from(
+      { length: GATEWAY_WARM_CONNECTIONS },
+      () => gatewayFetch(`https://${host}/`, requestShape, controller, 'HEAD')
+        .then(response => {
+          response.resume();
+          return { host, ok: Number(response.statusCode || 0) > 0 };
+        })
+    ));
+    const results = await Promise.allSettled(tasks);
+    const successfulResults = results.filter(item => item.status === 'fulfilled' && item.value?.ok);
+    const successes = successfulResults.length;
+    const warmHosts = new Set(successfulResults.map(item => item.value.host));
+    gatewayWarmState.successes = successes;
+    gatewayWarmState.failures = results.length - successes;
+    gatewayWarmState.ready = GATEWAY_ALLOWED_HOSTS.every(host => warmHosts.has(host));
+    gatewayWarmState.error = gatewayWarmState.ready ? '' : 'source connection warmup incomplete';
+  } catch (error) {
+    gatewayWarmState.ready = false;
+    gatewayWarmState.error = error.message || String(error);
+  } finally {
+    clearTimeout(timer);
+    gatewayWarmState.warming = false;
+    gatewayWarmState.lastAt = Date.now();
+    gatewayWarmState.lastDurationMs = Date.now() - started;
+  }
 }
 
 async function streamGatewayResponse(req, res, target) {
@@ -141,21 +211,21 @@ async function streamGatewayResponse(req, res, target) {
   try {
     const upstream = await gatewayFetch(target, req, controller);
     const headers = gatewayCorsHeaders();
-    for (const name of ['accept-ranges', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified']) {
-      const value = upstream.headers.get(name);
+    for (const name of ['accept-ranges', 'content-encoding', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified', 'vary']) {
+      const value = upstream.headers[name];
       if (value) headers[name] = value;
     }
-    res.writeHead(upstream.status, headers);
-    if (req.method === 'HEAD' || !upstream.body) {
+    res.writeHead(Number(upstream.statusCode || 502), headers);
+    if (req.method === 'HEAD') {
+      upstream.resume();
       res.end();
       return;
     }
     await new Promise((resolve, reject) => {
-      const stream = Readable.fromWeb(upstream.body);
-      stream.once('error', reject);
+      upstream.once('error', reject);
       res.once('error', reject);
       res.once('finish', resolve);
-      stream.pipe(res);
+      upstream.pipe(res);
     });
   } finally {
     clearTimeout(timer);
@@ -1330,6 +1400,31 @@ async function ollamaAvailable(modelName = OLLAMA_VISION_MODEL) {
   }
 }
 
+function warmOllamaVisionModel() {
+  if (ollamaWarmPromise) return ollamaWarmPromise;
+  ollamaWarmPromise = fetchJsonWithTimeout(`${OLLAMA_URL}/api/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OLLAMA_VISION_MODEL,
+      prompt: 'Return {"ready":true}.',
+      stream: false,
+      format: 'json',
+      think: false,
+      keep_alive: OLLAMA_KEEP_ALIVE,
+      options: {
+        temperature: 0,
+        num_ctx: Number(process.env.PONG_OLLAMA_NUM_CTX || 6144),
+        num_predict: 12
+      }
+    })
+  }, 90000).catch(error => {
+    ollamaWarmPromise = null;
+    throw error;
+  });
+  return ollamaWarmPromise;
+}
+
 async function withOllamaVisionSlot(task) {
   const generation = workloadGeneration;
   if (ollamaVisionActive >= OLLAMA_VISION_CONCURRENCY) {
@@ -1442,9 +1537,10 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
       stream: false,
       format: 'json',
       think: false,
+      keep_alive: OLLAMA_KEEP_ALIVE,
       options: {
         temperature: 0,
-        num_ctx: Number(process.env.PONG_OLLAMA_NUM_CTX || 4096),
+        num_ctx: Number(process.env.PONG_OLLAMA_NUM_CTX || 6144),
         num_predict: Number(process.env.PONG_OLLAMA_NUM_PREDICT || 160)
       }
     })
@@ -1556,7 +1652,10 @@ async function classifyInner(payload, generation = workloadGeneration) {
   }
 
   const personalCandidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))].slice(0, 5);
-  const candidateUrls = personalCandidateUrls.slice(0, payload.hardCheckOnly ? 5 : QWEN_CANDIDATE_IMAGES);
+  // The personal DINO/SigLIP/YOLO path evaluates all five images. Qwen is only
+  // the final hard-check verifier; three representative images keep its visual
+  // tokens inside the RTX 4070-friendly context budget.
+  const candidateUrls = personalCandidateUrls.slice(0, payload.hardCheckOnly ? 3 : QWEN_CANDIDATE_IMAGES);
   if (!personalCandidateUrls.length) throw new Error('No candidate image URLs supplied.');
 
   if (payload.fastHardCheckOnly) {
@@ -1990,11 +2089,19 @@ const server = http.createServer(async (req, res) => {
           queued: ollamaVisionQueue.length,
           concurrency: OLLAMA_VISION_CONCURRENCY
         },
-        ready: Boolean(preferenceAi?.ready || extractorReady),
+        ready: Boolean(preferenceAi?.ready && gatewayWarmState.ready),
         gateway: {
-          ready: true,
+          ready: gatewayWarmState.ready,
+          warming: gatewayWarmState.warming,
           storage: 'memory-only',
-          allowed_hosts: GATEWAY_ALLOWED_HOSTS
+          allowed_hosts: GATEWAY_ALLOWED_HOSTS,
+          warm_connections_per_host: GATEWAY_WARM_CONNECTIONS,
+          keep_warm_ms: GATEWAY_KEEP_WARM_MS,
+          last_warm_at: gatewayWarmState.lastAt ? new Date(gatewayWarmState.lastAt).toISOString() : '',
+          last_warm_duration_ms: gatewayWarmState.lastDurationMs,
+          successes: gatewayWarmState.successes,
+          failures: gatewayWarmState.failures,
+          error: gatewayWarmState.error
         },
         cached_images: embeddingCache.size,
         learned_accept_records: preferenceAi?.accepts ?? learnedStore.records.filter(record => record.label === 'accept').length,
@@ -2169,15 +2276,26 @@ server.listen(PORT, HOST, () => {
   console.log(`Pong local AI listening on http://${HOST}:${PORT}`);
   console.log(`Model: ${MODEL}`);
   console.log(`Vision model: ${OLLAMA_VISION_MODEL} via ${OLLAMA_URL}`);
-  preferenceAiHealth(true).then(health => {
+  warmGatewayConnections()
+    .then(() => console.log(`RAM gateway warm: ${gatewayWarmState.successes} connections ready`))
+    .catch(error => console.error(`RAM gateway warmup failed: ${error.message || error}`));
+  const gatewayKeepWarmTimer = setInterval(() => {
+    warmGatewayConnections().catch(() => {});
+  }, GATEWAY_KEEP_WARM_MS);
+  gatewayKeepWarmTimer.unref();
+
+  const reportPreferenceReady = async () => {
+    const health = await preferenceAiHealth(true);
     if (health?.ready) {
-      console.log(`Personal preference AI ready via ${PREFERENCE_AI_URL}`);
+      console.log(`Personal preference AI fully warmed via ${PREFERENCE_AI_URL}`);
+      warmOllamaVisionModel()
+        .then(() => console.log(`Ollama vision model kept warm: ${OLLAMA_VISION_MODEL}`))
+        .catch(error => console.error(`Ollama vision warmup failed: ${error.message || error}`));
       return;
     }
-    getExtractor()
-      .then(() => console.log('Fallback embedding model ready'))
-      .catch(error => console.error(`Fallback embedding model failed to preload: ${error.message || error}`));
-  });
+    setTimeout(reportPreferenceReady, 2000).unref?.();
+  };
+  reportPreferenceReady().catch(() => {});
   if (process.env.PONG_LORA_PRELOAD !== '0') {
     setTimeout(() => {
       ensureLoraInferenceService()

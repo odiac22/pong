@@ -70,6 +70,10 @@ BODY_STRONG_MARGIN = float(os.environ.get("PONG_BODY_STRONG_MARGIN", "0.18"))
 BODY_STRONG_PREFERENCE = float(os.environ.get("PONG_BODY_STRONG_PREFERENCE", "0.62"))
 FACE_HEAD_MIN_LOCAL1 = float(os.environ.get("PONG_FACE_REJECT_LOCAL1_MIN", "0.56"))
 FACE_HEAD_MIN_LOCAL2 = float(os.environ.get("PONG_FACE_REJECT_LOCAL2_MIN", "0.55"))
+IMAGE_SESSION = requests.Session()
+IMAGE_ADAPTER = requests.adapters.HTTPAdapter(pool_connections=32, pool_maxsize=32, max_retries=0, pool_block=False)
+IMAGE_SESSION.mount("https://", IMAGE_ADAPTER)
+IMAGE_SESSION.mount("http://", IMAGE_ADAPTER)
 
 
 def now_iso() -> str:
@@ -123,6 +127,7 @@ class Store:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.value = self._load()
+        self.revision = 0
 
     def _load(self) -> dict[str, Any]:
         try:
@@ -144,6 +149,8 @@ class Store:
             records.insert(0, record)
             self.value = {"version": 2, "updatedAt": now_iso(), "records": records[:MAX_RECORDS]}
             atomic_json(STORE_PATH, self.value)
+            self.revision += 1
+        invalidate_model_cache()
 
 
 STORE = Store()
@@ -183,14 +190,9 @@ class VisionRuntime:
                 self.siglip = (processor, model)
             return self.siglip
 
-    def detect_views(self, image: Image.Image) -> dict[str, Any]:
-        full = image.convert("RGB")
+    def _views_from_prediction(self, full: Image.Image, prediction: Any) -> dict[str, Any]:
         result = {"full": full, "face": None, "body": None, "people": 0}
         try:
-            prediction = self._pose().predict(
-                source=np.asarray(full), imgsz=384, conf=0.22,
-                device=0 if DEVICE == "cuda" else "cpu", verbose=False,
-            )[0]
             boxes = prediction.boxes.xyxy.detach().cpu().numpy() if prediction.boxes is not None else []
             if not len(boxes):
                 return result
@@ -232,6 +234,25 @@ class VisionRuntime:
         except Exception:
             return result
         return result
+
+    def detect_views_batch(self, images: list[Image.Image]) -> list[dict[str, Any]]:
+        full_images = [image.convert("RGB") for image in images]
+        if not full_images:
+            return []
+        empty = [{"full": image, "face": None, "body": None, "people": 0} for image in full_images]
+        try:
+            predictions = self._pose().predict(
+                source=[np.asarray(image) for image in full_images], imgsz=384, conf=0.22,
+                device=0 if DEVICE == "cuda" else "cpu", verbose=False,
+            )
+            if len(predictions) != len(full_images):
+                return empty
+            return [self._views_from_prediction(image, prediction) for image, prediction in zip(full_images, predictions)]
+        except Exception:
+            return empty
+
+    def detect_views(self, image: Image.Image) -> dict[str, Any]:
+        return self.detect_views_batch([image])[0]
 
     def dino_encode(self, images: list[Image.Image], variant: str) -> list[np.ndarray]:
         if not images:
@@ -279,7 +300,10 @@ class VisionRuntime:
         return embeddings_np, scores_for(SEMANTIC_PROMPTS, images), scores_for(BODY_PROMPTS, body_inputs)
 
     def analyze(self, images: list[Image.Image], variant: str, include_semantics: bool) -> dict[str, Any]:
-        views = [self.detect_views(image) for image in images]
+        # Ultralytics has substantial per-call setup overhead. Send the complete
+        # five-image artist set through one pose batch so crops and evidence stay
+        # identical while avoiding five serial GPU launches.
+        views = self.detect_views_batch(images)
         full_images = [v["full"] for v in views]
         body_prompt_images = [v["body"] if v["body"] is not None else v["full"] for v in views]
         body_images = [v["body"] for v in views if v["body"] is not None]
@@ -338,10 +362,22 @@ INFERENCE_LIMIT = max(1, min(6, int(os.environ.get("PONG_PREFERENCE_AI_CONCURREN
 INFERENCE_SEMAPHORE = threading.BoundedSemaphore(INFERENCE_LIMIT)
 ACTIVE_CLASSIFY_LOCK = threading.Lock()
 ACTIVE_CLASSIFY = 0
+MODEL_CACHE_LOCK = threading.RLock()
+MODEL_CACHE: dict[tuple[Any, ...], Any] = {}
+
+
+def invalidate_model_cache() -> None:
+    with MODEL_CACHE_LOCK:
+        MODEL_CACHE.clear()
+
+
+def store_revision() -> int:
+    with STORE.lock:
+        return STORE.revision
 
 
 def fetch_image(url: str, timeout: tuple[int, int] = (5, 10)) -> Image.Image:
-    response = requests.get(
+    response = IMAGE_SESSION.get(
         url, timeout=timeout,
         headers={"User-Agent": "Mozilla/5.0 PongPreferenceAI/2.0", "Referer": "https://coomerfans.com/"},
     )
@@ -368,6 +404,11 @@ def load_candidate_images(urls: list[str]) -> tuple[list[Image.Image], list[str]
 
 
 def feature_records(variant: str, view: str = "all") -> tuple[list[np.ndarray], list[int], list[dict[str, Any]]]:
+    cache_key = ("records", store_revision(), variant, view)
+    with MODEL_CACHE_LOCK:
+        cached = MODEL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     features: list[np.ndarray] = []
     labels: list[int] = []
     records: list[dict[str, Any]] = []
@@ -393,7 +434,10 @@ def feature_records(variant: str, view: str = "all") -> tuple[list[np.ndarray], 
         features.append(vector)
         labels.append(1 if record.get("label") == "accept" else 0)
         records.append(record)
-    return features, labels, records
+    result = (features, labels, records)
+    with MODEL_CACHE_LOCK:
+        MODEL_CACHE[cache_key] = result
+    return result
 
 
 def prototype_probability(vector: np.ndarray, features: list[np.ndarray], labels: list[int]) -> float:
@@ -407,17 +451,19 @@ def prototype_probability(vector: np.ndarray, features: list[np.ndarray], labels
     return sigmoid((pos - neg) * 14.0)
 
 
-def trained_probability(vector: np.ndarray, features: list[np.ndarray], labels: list[int]) -> float:
+def build_trained_head(features: list[np.ndarray], labels: list[int]) -> dict[str, Any]:
+    head: dict[str, Any] = {"features": features, "labels": labels, "trained": False}
     if len(features) < 6 or len(set(labels)) < 2:
-        return prototype_probability(vector, features, labels)
+        return head
     matrix = np.stack(features).astype(np.float32)
-    candidate = np.asarray(vector, dtype=np.float32)
-    if matrix.shape[1] != candidate.shape[0]:
-        return 0.5
     targets = np.asarray(labels, dtype=np.float32)
     positive_count = max(1, int(targets.sum()))
     negative_count = max(1, len(targets) - positive_count)
-    sample_weights = np.where(targets > 0.5, len(targets) / (2 * positive_count), len(targets) / (2 * negative_count)).astype(np.float32)
+    sample_weights = np.where(
+        targets > 0.5,
+        len(targets) / (2 * positive_count),
+        len(targets) / (2 * negative_count),
+    ).astype(np.float32)
     weights = np.zeros(matrix.shape[1], dtype=np.float32)
     bias = 0.0
     learning_rate = 0.18
@@ -428,25 +474,49 @@ def trained_probability(vector: np.ndarray, features: list[np.ndarray], labels: 
         error = (predictions - targets) * sample_weights
         weights -= learning_rate * ((matrix.T @ error) / len(targets) + regularization * weights)
         bias -= learning_rate * float(np.mean(error))
-    learned = sigmoid(float(candidate @ weights + bias))
+    head.update({"trained": True, "dimension": matrix.shape[1], "weights": weights, "bias": bias})
+    return head
+
+
+def score_trained_head(vector: np.ndarray, head: dict[str, Any]) -> float:
+    candidate = np.asarray(vector, dtype=np.float32)
+    features = head["features"]
+    labels = head["labels"]
+    if not head.get("trained"):
+        return prototype_probability(candidate, features, labels)
+    if int(head["dimension"]) != candidate.shape[0]:
+        return 0.5
+    learned = sigmoid(float(candidate @ head["weights"] + head["bias"]))
     prototype = prototype_probability(candidate, features, labels)
     return learned * 0.72 + prototype * 0.28
 
 
+def cached_head(variant: str, view: str = "all", pattern: str = "") -> dict[str, Any] | None:
+    cache_key = ("head", store_revision(), variant, view, pattern)
+    with MODEL_CACHE_LOCK:
+        if cache_key in MODEL_CACHE:
+            return MODEL_CACHE[cache_key]
+    features, preference_labels, records = feature_records(variant, view=view)
+    labels = preference_labels if not pattern else [
+        1 if re.search(pattern, str(record.get("rejectReasonLabel", "")), re.I) else 0
+        for record in records
+    ]
+    if pattern and (sum(labels) < 3 or len(labels) - sum(labels) < 3):
+        head = None
+    else:
+        head = build_trained_head(features, labels)
+    with MODEL_CACHE_LOCK:
+        MODEL_CACHE[cache_key] = head
+    return head
+
+
+def cached_probability(vector: np.ndarray, variant: str, view: str = "all", pattern: str = "") -> float | None:
+    head = cached_head(variant, view, pattern)
+    return score_trained_head(vector, head) if head is not None else None
+
+
 def reason_probability(vector: np.ndarray, variant: str, pattern: str, view: str = "all") -> float | None:
-    features, _, records = feature_records(variant, view=view)
-    return reason_probability_from_records(vector, features, records, pattern)
-
-
-def reason_probability_from_records(
-    vector: np.ndarray, features: list[np.ndarray], records: list[dict[str, Any]], pattern: str
-) -> float | None:
-    if not features:
-        return None
-    labels = [1 if re.search(pattern, str(record.get("rejectReasonLabel", "")), re.I) else 0 for record in records]
-    if sum(labels) < 3 or len(labels) - sum(labels) < 3:
-        return None
-    return trained_probability(vector, features, labels)
+    return cached_probability(vector, variant, view, pattern)
 
 
 def hard_checks(analysis: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
@@ -577,7 +647,8 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
     with INFERENCE_SEMAPHORE:
         fast_analysis = VISION.analyze(images, variant, include_semantics=include_semantics)
     features, labels, records = feature_records(variant)
-    preference = trained_probability(fast_analysis["feature"], features, labels)
+    preference = cached_probability(fast_analysis["feature"], variant)
+    preference = 0.5 if preference is None else preference
 
     if variant == "local2" and not include_semantics and (preference >= 0.48 or hard_only):
         with INFERENCE_SEMAPHORE:
@@ -602,13 +673,10 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
         image_grades = []
         hard_reason = ""
 
-    body_reason_features, _, body_reason_records = feature_records(variant, view="body")
-    body_head = reason_probability_from_records(
-        fast_analysis["bodyFeature"], body_reason_features, body_reason_records,
-        r"fat|body|weight|midsection"
-    )
+    body_pattern = r"fat|body|weight|midsection"
+    body_head = cached_probability(fast_analysis["bodyFeature"], variant, "body", body_pattern)
     body_heads_by_image = [
-        reason_probability_from_records(vector, body_reason_features, body_reason_records, r"fat|body|weight|midsection")
+        cached_probability(vector, variant, "body", body_pattern)
         if np.any(vector) else None
         for vector in fast_analysis.get("bodyFeaturesByImage", [])
     ]
@@ -703,6 +771,25 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
         )
     )
 
+    # Qwen is a verifier, not the personal taste model. Keep all five images in
+    # DINO/SigLIP/YOLO, then give Qwen the three strongest pieces of visible
+    # person evidence. This avoids context overflow without losing consensus.
+    semantic_rows = fast_analysis.get("semanticScores")
+    ranked_hard_images: list[tuple[float, int, str]] = []
+    for index, url in enumerate(used_urls):
+        body_visible = bool((fast_analysis.get("bodyVisibleByImage") or [False] * len(used_urls))[index])
+        face_visible = bool((fast_analysis.get("faceVisibleByImage") or [False] * len(used_urls))[index])
+        person_score = 0.0
+        clarity_penalty = 0.0
+        if semantic_rows is not None and len(semantic_rows) > index:
+            person_score = float(semantic_rows[index][4])
+            clarity_penalty = float(semantic_rows[index][3]) + float(semantic_rows[index][5])
+        evidence_score = (100.0 if body_visible else 0.0) + (35.0 if face_visible else 0.0)
+        evidence_score += person_score * 10.0 - clarity_penalty * 4.0 - index * 0.001
+        ranked_hard_images.append((evidence_score, index, url))
+    ranked_hard_images.sort(reverse=True)
+    hard_check_image_urls = [item[2] for item in ranked_hard_images[:3]]
+
     return {
         "decision": decision,
         "confidence": confidence,
@@ -730,6 +817,7 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
             "rejects": len(labels) - sum(labels),
         },
         "candidateImageUrls": used_urls,
+        "hard_check_image_urls": hard_check_image_urls,
     }
 
 
@@ -821,6 +909,49 @@ def examples() -> dict[str, Any]:
 
 
 BOOTSTRAP_STATE = {"running": False, "complete": STORE_PATH.exists(), "imported": 0, "error": ""}
+SERVICE_STATE: dict[str, Any] = {
+    "ready": False,
+    "warming": True,
+    "error": "",
+    "warmup_seconds": 0.0,
+}
+
+
+def warm_models() -> None:
+    started = time.perf_counter()
+    try:
+        write_status("warming", "Warming YOLO, DINOv2 Local1/Local2, SigLIP2, and personal heads.")
+        dummy = Image.new("RGB", (384, 384), (36, 36, 36))
+        with INFERENCE_SEMAPHORE:
+            # Actual inference (not just model construction) allocates CUDA
+            # kernels and catches missing weights before readiness is reported.
+            VISION.analyze([dummy.copy() for _ in range(5)], "local", include_semantics=True)
+            VISION.analyze([dummy.copy() for _ in range(5)], "local2", include_semantics=False)
+        for variant in ("local", "local2"):
+            cached_head(variant)
+            cached_head(variant, "body", r"fat|body|weight|midsection")
+            cached_head(variant, "all", r"ugly|face")
+            cached_head(variant, "all", r"male")
+            cached_head(variant, "all", r"feet|foot")
+        if DEVICE == "cuda":
+            torch.cuda.synchronize()
+        SERVICE_STATE.update({
+            "ready": True,
+            "warming": False,
+            "error": "",
+            "warmup_seconds": round(time.perf_counter() - started, 3),
+        })
+        write_status("ready", f"Preference models warmed in {SERVICE_STATE['warmup_seconds']} seconds.")
+        if not STORE.records() and LEGACY_STORE_PATH.exists():
+            threading.Timer(1.0, bootstrap_legacy).start()
+    except Exception as exc:
+        SERVICE_STATE.update({
+            "ready": False,
+            "warming": False,
+            "error": str(exc),
+            "warmup_seconds": round(time.perf_counter() - started, 3),
+        })
+        write_status("error", f"Preference model warmup failed: {exc}")
 
 
 def bootstrap_legacy() -> None:
@@ -894,7 +1025,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {
                     "ok": True,
                     "app": "pong-preference-ai",
-                    "ready": True,
+                    "ready": bool(SERVICE_STATE["ready"]),
+                    "warming": bool(SERVICE_STATE["warming"]),
+                    "warmup_seconds": SERVICE_STATE["warmup_seconds"],
+                    "warmup_error": SERVICE_STATE["error"],
                     "device": DEVICE,
                     "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "",
                     "local1_model": LOCAL1_DINO,
@@ -920,6 +1054,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json()
             path = self.path.split("?", 1)[0]
             if path == "/classify":
+                if not SERVICE_STATE["ready"]:
+                    self.send_json(503, {"ok": False, "error": "personal preference models are still warming"})
+                    return
                 global ACTIVE_CLASSIFY
                 with ACTIVE_CLASSIFY_LOCK:
                     ACTIVE_CLASSIFY += 1
@@ -931,6 +1068,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, result)
                 return
             if path == "/learn":
+                if not SERVICE_STATE["ready"]:
+                    self.send_json(503, {"ok": False, "error": "personal preference models are still warming"})
+                    return
                 self.send_json(200, learn(payload))
                 return
             self.send_json(404, {"ok": False, "error": "not found"})
@@ -941,11 +1081,10 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-    write_status("ready", f"Preference service listening on {HOST}:{PORT}.")
-    if not STORE.records() and LEGACY_STORE_PATH.exists():
-        threading.Timer(3.0, bootstrap_legacy).start()
+    write_status("warming", f"Preference service listening on {HOST}:{PORT}; models are warming.")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Pong preference AI listening at http://{HOST}:{PORT} ({DEVICE})", flush=True)
+    threading.Thread(target=warm_models, name="pong-model-warmup", daemon=True).start()
     server.serve_forever()
 
 

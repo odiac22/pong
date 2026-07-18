@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.01</div>
+  <div class="version-number">24.02</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7306,7 +7306,12 @@ async function random40PingLocalEndpoint(endpoint, timeoutMs = 2200) {
     clearTimeout(timer);
   }
   if (!res.ok) throw new Error(`Local HTTP ${res.status}`);
-  return res.json().catch(() => ({}));
+  const health = await res.json().catch(() => ({}));
+  if (health?.ready === false) {
+    const warming = health?.personal_preference?.ready === false || health?.gateway?.warming === true;
+    throw new Error(warming ? 'Local AI is still fully warming its models and source connections' : 'Local AI is not ready');
+  }
+  return health;
 }
 
 async function getRandom40LocalEndpoint() {
@@ -10600,16 +10605,19 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
   }
 
   if (mode === 'local' && decision?.decision === 'accept' && decision?.hard_verified !== true) {
+    const hardVerificationImages = Array.isArray(decision?.hard_check_image_urls) && decision.hard_check_image_urls.length
+      ? decision.hard_check_image_urls.slice(0, 3)
+      : initialImages.slice(0, 3);
     if (options.deferLocalHardVerification) {
       return {
         ...decision,
         requires_local_hard_verification: true,
-        local_hard_verification_images: initialImages
+        local_hard_verification_images: hardVerificationImages
       };
     }
 
     const hardVerification = await random40WithTimeout(
-      random40ClassifyArtistLocal(workingArtist, options.localEndpoint, initialImages, {
+      random40ClassifyArtistLocal(workingArtist, options.localEndpoint, hardVerificationImages, {
         visionModel: RANDOM40_LOCAL2_VISION_MODEL,
         mode: 'local2',
         hardCheckOnly: true,
@@ -10642,7 +10650,7 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
       checks: proof.checks || hardVerification.checks || decision.checks,
       qwen_decision: proof,
       hard_verification: hardVerification,
-      reason: `hard-verified ${initialImages.length} images: ${decision.reason || ''}`.slice(0, 120)
+      reason: `hard-verified ${hardVerificationImages.length} representative images after five-image personal review: ${decision.reason || ''}`.slice(0, 120)
     };
   }
 
