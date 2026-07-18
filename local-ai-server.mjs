@@ -29,6 +29,7 @@ const PREFERENCE_AI_URL = (process.env.PONG_PREFERENCE_AI_URL || 'http://127.0.0
 const LORA_ADAPTER_DIR = path.join(LOCAL_AI_DIR, 'qwen-lora', 'latest');
 const FINETUNE_AUTO_RUN = process.env.PONG_LORA_AUTOTRAIN !== '0';
 const FINETUNE_MAX_IMAGE_BYTES = Number(process.env.PONG_LORA_MAX_IMAGE_BYTES || 12 * 1024 * 1024);
+const IMAGE_FETCH_TIMEOUT_MS = Math.max(3000, Number(process.env.PONG_IMAGE_FETCH_TIMEOUT_MS || 10000));
 const FINETUNE_AUTO_IDLE_MS = Math.max(30000, Number(process.env.PONG_LORA_AUTOTRAIN_IDLE_MS || 180000));
 const OLLAMA_VISION_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.PONG_OLLAMA_VISION_CONCURRENCY || 4)));
 const LOCAL_LORA_FAST_TIMEOUT_MS = Math.max(1500, Number(process.env.PONG_LOCAL_LORA_FAST_TIMEOUT_MS || 3000));
@@ -138,15 +139,33 @@ function normalizeUrl(raw, base = 'https://coomerfans.com/') {
   }
 }
 
+async function fetchImageResponse(url, readBody, timeoutMs = IMAGE_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 PongLocalAI/1.0',
+        'Referer': 'https://coomerfans.com/'
+      },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`image HTTP ${response.status}`);
+    const declaredBytes = Number(response.headers.get('content-length') || 0);
+    if (declaredBytes > FINETUNE_MAX_IMAGE_BYTES) throw new Error(`image too large: ${declaredBytes} bytes`);
+    return await readBody(response);
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error(`image timed out after ${timeoutMs}ms`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchImageBlob(url) {
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 PongLocalAI/1.0',
-      'Referer': 'https://coomerfans.com/'
-    }
-  });
-  if (!response.ok) throw new Error(`image HTTP ${response.status}`);
-  return response.blob();
+  const blob = await fetchImageResponse(url, response => response.blob());
+  if (blob.size > FINETUNE_MAX_IMAGE_BYTES) throw new Error(`image too large: ${blob.size} bytes`);
+  return blob;
 }
 
 const imageBase64Cache = new Map();
@@ -163,14 +182,8 @@ function fetchImageBase64(rawUrl) {
   }
 
   const promise = (async () => {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 PongLocalAI/1.0',
-        'Referer': 'https://coomerfans.com/'
-      }
-    });
-    if (!response.ok) throw new Error(`image HTTP ${response.status}`);
-    const buffer = Buffer.from(await response.arrayBuffer());
+    const buffer = await fetchImageResponse(url, async response => Buffer.from(await response.arrayBuffer()));
+    if (buffer.length > FINETUNE_MAX_IMAGE_BYTES) throw new Error(`image too large: ${buffer.length} bytes`);
     return buffer.toString('base64');
   })().catch(error => {
     imageBase64Cache.delete(url);
@@ -192,21 +205,18 @@ async function fetchImagesBase64(urls = []) {
 async function fetchImageBuffer(rawUrl) {
   const url = normalizeUrl(rawUrl);
   if (!url) throw new Error('bad image url');
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 PongLocalAI/1.0',
-      'Referer': 'https://coomerfans.com/'
-    }
-  });
-  if (!response.ok) throw new Error(`image HTTP ${response.status}`);
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const result = await fetchImageResponse(url, async response => ({
+    buffer: Buffer.from(await response.arrayBuffer()),
+    contentType: response.headers.get('content-type') || 'application/octet-stream'
+  }));
+  const buffer = result.buffer;
   if (!buffer.length) throw new Error('empty image');
   if (buffer.length > FINETUNE_MAX_IMAGE_BYTES) {
     throw new Error(`image too large: ${buffer.length} bytes`);
   }
   return {
     buffer,
-    contentType: response.headers.get('content-type') || 'application/octet-stream'
+    contentType: result.contentType
   };
 }
 
@@ -1472,13 +1482,15 @@ async function classifyInner(payload) {
   }
 
   if (localVariant === 'local' || localVariant === 'local2') {
+    const trainAiRequest = /^pong-train-ai/i.test(String(payload.app || ''));
     try {
       return await preferenceAiRequest('/classify', {
         ...payload,
         localVariant,
         candidateImageUrls: personalCandidateUrls
-      }, 120000);
-    } catch (_) {
+      }, trainAiRequest ? 30000 : 120000);
+    } catch (error) {
+      if (trainAiRequest) throw error;
       // Continue through the previous local stack while v2 starts or downloads.
     }
   }

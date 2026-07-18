@@ -806,7 +806,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.90</div>
+  <div class="version-number">23.91</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8365,6 +8365,10 @@ const TRAIN_AI_TOTAL_IMAGES = 5;
 const TRAIN_AI_POST_IMAGE_COUNT = TRAIN_AI_TOTAL_IMAGES - 1;
 const TRAIN_AI_SWIPE_COMMIT_MS = 80;
 const TRAIN_AI_RESULT_FLASH_MS = 200;
+const TRAIN_AI_CLASSIFY_TIMEOUT_MS = 35000;
+const TRAIN_AI_HARD_CHECK_TIMEOUT_MS = 40000;
+const TRAIN_AI_MAX_CANDIDATES_PER_FILL = 24;
+const TRAIN_AI_GATE_CONCURRENCY = 4;
 const trainAiState = {
   open: false,
   busy: false,
@@ -8534,29 +8538,43 @@ function trainAiRenderCandidate(candidate) {
   trainAiSetStatus('Swipe left = like · Swipe right = dislike');
 }
 
+async function trainAiFetchDecision(payload, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${trainAiState.endpoint}/classify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    const raw = await response.text();
+    if (!response.ok) throw new Error(`Local AI HTTP ${response.status}: ${raw.slice(0, 180)}`);
+    return JSON.parse(raw);
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error(`Local AI timed out after ${Math.round(timeoutMs / 1000)} seconds`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function trainAiClassify(candidate, mode) {
-  const response = await fetch(`${trainAiState.endpoint}/classify`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      app: 'pong-train-ai',
-      model: RANDOM40_LOCAL_MODEL_NAME,
-      localVariant: mode,
-      promptVersion: `${RANDOM40_PROMPT_VERSION}-train-ai`,
-      artist: {
-        artistUrl: candidate.artistUrl,
-        artistName: candidate.artistName,
-        pageText: candidate.pageText || '',
-        imageUrl: candidate.imageUrls[0] || ''
-      },
-      candidateImageUrls: candidate.imageUrls.slice(0, TRAIN_AI_TOTAL_IMAGES),
-      acceptedArtists: [],
-      rejectedArtists: []
-    })
-  });
-  const raw = await response.text();
-  if (!response.ok) throw new Error(`Local ${mode} HTTP ${response.status}: ${raw.slice(0, 180)}`);
-  return JSON.parse(raw);
+  return trainAiFetchDecision({
+    app: 'pong-train-ai',
+    model: RANDOM40_LOCAL_MODEL_NAME,
+    localVariant: mode,
+    promptVersion: `${RANDOM40_PROMPT_VERSION}-train-ai`,
+    artist: {
+      artistUrl: candidate.artistUrl,
+      artistName: candidate.artistName,
+      pageText: candidate.pageText || '',
+      imageUrl: candidate.imageUrls[0] || ''
+    },
+    candidateImageUrls: candidate.imageUrls.slice(0, TRAIN_AI_TOTAL_IMAGES),
+    acceptedArtists: [],
+    rejectedArtists: []
+  }, TRAIN_AI_CLASSIFY_TIMEOUT_MS);
 }
 
 function trainAiPreparePredictions(candidate, { quiet = false } = {}) {
@@ -8576,29 +8594,22 @@ function trainAiPreparePredictions(candidate, { quiet = false } = {}) {
 }
 
 async function trainAiHardVisualCheck(candidate) {
-  const response = await fetch(`${trainAiState.endpoint}/classify`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      app: 'pong-train-ai',
-      model: RANDOM40_LOCAL_MODEL_NAME,
-      visionModel: RANDOM40_LOCAL2_VISION_MODEL,
-      hardCheckOnly: true,
-      promptVersion: `${RANDOM40_PROMPT_VERSION}-train-ai-gender-gate`,
-      artist: {
-        artistUrl: candidate.artistUrl,
-        artistName: candidate.artistName,
-        pageText: candidate.pageText || '',
-        imageUrl: candidate.imageUrls[0] || ''
-      },
-      candidateImageUrls: candidate.imageUrls.slice(0, TRAIN_AI_TOTAL_IMAGES),
-      acceptedArtists: [],
-      rejectedArtists: []
-    })
-  });
-  const raw = await response.text();
-  if (!response.ok) throw new Error(`Local hard check HTTP ${response.status}: ${raw.slice(0, 180)}`);
-  return JSON.parse(raw);
+  return trainAiFetchDecision({
+    app: 'pong-train-ai',
+    model: RANDOM40_LOCAL_MODEL_NAME,
+    visionModel: RANDOM40_LOCAL2_VISION_MODEL,
+    hardCheckOnly: true,
+    promptVersion: `${RANDOM40_PROMPT_VERSION}-train-ai-gender-gate`,
+    artist: {
+      artistUrl: candidate.artistUrl,
+      artistName: candidate.artistName,
+      pageText: candidate.pageText || '',
+      imageUrl: candidate.imageUrls[0] || ''
+    },
+    candidateImageUrls: candidate.imageUrls.slice(0, TRAIN_AI_TOTAL_IMAGES),
+    acceptedArtists: [],
+    rejectedArtists: []
+  }, TRAIN_AI_HARD_CHECK_TIMEOUT_MS);
 }
 
 function trainAiPredictionFlagsMale(prediction) {
@@ -8688,23 +8699,39 @@ function trainAiEnsureQueue(target = 3) {
   const generation = trainAiState.queueGeneration;
   trainAiState.queueFilling = true;
   trainAiState.queueFillPromise = (async () => {
-    while (trainAiState.open && generation === trainAiState.queueGeneration && trainAiState.queue.length < target) {
+    let candidatesChecked = 0;
+    while (
+      trainAiState.open &&
+      generation === trainAiState.queueGeneration &&
+      trainAiState.queue.length < target &&
+      candidatesChecked < TRAIN_AI_MAX_CANDIDATES_PER_FILL
+    ) {
       if (trainAiState.index >= trainAiState.artists.length) {
         const loaded = await trainAiLoadRandomPage({ quiet: true, generation });
         if (!loaded) break;
       }
-      const artist = trainAiState.artists[trainAiState.index++];
-      const candidate = await trainAiBuildCandidate(artist);
-      if (!candidate || random40HardFilter(candidate)) continue;
-      candidate.predictionPromise ||= trainAiPreparePredictions(candidate, { quiet: true });
-      candidate.hardCheckPromise ||= trainAiHardVisualCheck(candidate).catch(error => ({
-        decision: 'unavailable',
-        confidence: 0,
-        reason: error?.message || 'hard visual check unavailable'
+      const batchSize = Math.min(
+        TRAIN_AI_GATE_CONCURRENCY,
+        TRAIN_AI_MAX_CANDIDATES_PER_FILL - candidatesChecked,
+        trainAiState.artists.length - trainAiState.index
+      );
+      const artistBatch = trainAiState.artists.slice(trainAiState.index, trainAiState.index + batchSize);
+      trainAiState.index += artistBatch.length;
+      candidatesChecked += artistBatch.length;
+      await Promise.all(artistBatch.map(async artist => {
+        const candidate = await trainAiBuildCandidate(artist);
+        if (!candidate || random40HardFilter(candidate)) return;
+        candidate.hardCheckPromise ||= trainAiHardVisualCheck(candidate).catch(error => ({
+          decision: 'unavailable',
+          confidence: 0,
+          reason: error?.message || 'hard visual check unavailable'
+        }));
+        const hardCheck = await candidate.hardCheckPromise;
+        if (!trainAiHardVisualGatePasses(hardCheck)) return;
+        if (generation !== trainAiState.queueGeneration || !trainAiState.open) return;
+        if (trainAiState.queue.length >= target && !trainAiState.queueWaiters.length) return;
+        trainAiDeliverQueuedCandidate(candidate, generation);
       }));
-      const [predictions, hardCheck] = await Promise.all([candidate.predictionPromise, candidate.hardCheckPromise]);
-      if (trainAiPredictionsFlagMale(predictions) || !trainAiHardVisualGatePasses(hardCheck)) continue;
-      trainAiDeliverQueuedCandidate(candidate, generation);
     }
   })().finally(() => {
     if (generation !== trainAiState.queueGeneration) return;

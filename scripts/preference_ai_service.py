@@ -15,6 +15,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -313,7 +314,7 @@ INFERENCE_LIMIT = max(1, min(6, int(os.environ.get("PONG_PREFERENCE_AI_CONCURREN
 INFERENCE_SEMAPHORE = threading.BoundedSemaphore(INFERENCE_LIMIT)
 
 
-def fetch_image(url: str, timeout: int = 18) -> Image.Image:
+def fetch_image(url: str, timeout: tuple[int, int] = (5, 10)) -> Image.Image:
     response = requests.get(
         url, timeout=timeout,
         headers={"User-Agent": "Mozilla/5.0 PongPreferenceAI/2.0", "Referer": "https://coomerfans.com/"},
@@ -323,17 +324,20 @@ def fetch_image(url: str, timeout: int = 18) -> Image.Image:
 
 
 def load_candidate_images(urls: list[str]) -> tuple[list[Image.Image], list[str]]:
-    images: list[Image.Image] = []
-    accepted_urls: list[str] = []
-    for url in urls[:5]:
+    normalized_urls = list(dict.fromkeys(normalize_url(url) for url in urls[:5] if normalize_url(url)))
+
+    def load(url: str) -> tuple[Image.Image | None, str]:
         try:
-            normalized = normalize_url(url)
-            if not normalized:
-                continue
-            images.append(fetch_image(normalized))
-            accepted_urls.append(normalized)
+            return fetch_image(url), url
         except Exception:
-            continue
+            return None, url
+
+    if not normalized_urls:
+        return [], []
+    with ThreadPoolExecutor(max_workers=len(normalized_urls), thread_name_prefix="pong-image") as pool:
+        loaded = list(pool.map(load, normalized_urls))
+    images = [image for image, _ in loaded if image is not None]
+    accepted_urls = [url for image, url in loaded if image is not None]
     return images, accepted_urls
 
 
