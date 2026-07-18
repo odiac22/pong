@@ -21,6 +21,7 @@ const LEARNED_STORE_PATH = path.join(LOCAL_AI_DIR, 'learned-examples.json');
 const FINETUNE_DATASET_PATH = path.join(LOCAL_AI_DIR, 'finetune-dataset.json');
 const FINETUNE_JSONL_PATH = path.join(LOCAL_AI_DIR, 'qwen-lora-dataset.jsonl');
 const FINETUNE_STATUS_PATH = path.join(LOCAL_AI_DIR, 'finetune-status.json');
+const TRAIN_AI_AUDIT_PATH = path.join(LOCAL_AI_DIR, 'train-ai-verdict-audit.jsonl');
 const FINETUNE_IMAGE_DIR = path.join(LOCAL_AI_DIR, 'training-images');
 const FINETUNE_RUN_SCRIPT = path.join(process.cwd(), 'scripts', 'run-lora-train.ps1');
 const LORA_INFERENCE_RUN_SCRIPT = path.join(process.cwd(), 'scripts', 'run-lora-infer.ps1');
@@ -52,6 +53,8 @@ let loraInferenceProcess = null;
 let loraInferenceStarting = null;
 let ollamaVisionActive = 0;
 const ollamaVisionQueue = [];
+const activeWorkloadControllers = new Set();
+let workloadGeneration = 0;
 let activeClassifyRequests = 0;
 let lastClassifyAt = 0;
 let pendingFineTuneTimer = null;
@@ -570,8 +573,11 @@ async function loraAdapterExists() {
   }
 }
 
-async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 3000) {
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 3000, control = {}) {
   const controller = new AbortController();
+  const tracked = control.workload === true;
+  const generation = workloadGeneration;
+  if (tracked) activeWorkloadControllers.add(controller);
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
@@ -579,10 +585,12 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 3000) {
       signal: controller.signal
     });
     const text = await res.text();
+    if (tracked && generation !== workloadGeneration) throw new Error('workload reset');
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 180)}`);
     return text ? JSON.parse(text) : {};
   } finally {
     clearTimeout(timer);
+    if (tracked) activeWorkloadControllers.delete(controller);
   }
 }
 
@@ -600,14 +608,14 @@ async function preferenceAiHealth(force = false) {
   return preferenceAiLastHealth;
 }
 
-async function preferenceAiRequest(pathname, payload, timeoutMs = 90000) {
+async function preferenceAiRequest(pathname, payload, timeoutMs = 90000, control = {}) {
   const health = await preferenceAiHealth();
   if (!health?.ready) throw new Error('personal preference service unavailable');
   return fetchJsonWithTimeout(`${PREFERENCE_AI_URL}${pathname}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
-  }, timeoutMs);
+  }, timeoutMs, control);
 }
 
 async function loraInferenceHealth(timeoutMs = 2500) {
@@ -1232,16 +1240,18 @@ async function ollamaAvailable(modelName = OLLAMA_VISION_MODEL) {
 }
 
 async function withOllamaVisionSlot(task) {
+  const generation = workloadGeneration;
   if (ollamaVisionActive >= OLLAMA_VISION_CONCURRENCY) {
-    await new Promise(resolve => ollamaVisionQueue.push(resolve));
+    await new Promise(resolve => ollamaVisionQueue.push({ resolve, generation }));
   }
+  if (generation !== workloadGeneration) throw new Error('workload reset');
   ollamaVisionActive++;
   try {
     return await task();
   } finally {
     ollamaVisionActive = Math.max(0, ollamaVisionActive - 1);
     const next = ollamaVisionQueue.shift();
-    if (next) next();
+    if (next) next.resolve();
   }
 }
 
@@ -1294,7 +1304,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
       : 'Judge only the listed hard visual filters. The learned personal classifier already approved body and face preference, so do not second-guess attractiveness or body type.',
     'First perform hard visual checks. Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, age appears over the configured limit, underage-looking, or unclear adult age.',
     enforceBodyPreference
-      ? 'Reject pronounced midsection overhang, visible abdominal folds, or apron-like midsection as a visual preference mismatch. Mild curves, slight softness, or a smooth/non-overhanging midsection are allowed. Do not describe this as weight, health, or a medical status.'
+      ? 'Only reject this visual preference when at least two separate clear torso/body images agree on pronounced midsection overhang, visible abdominal folds, or an apron-like midsection. Never reject the artist from one suspicious image. Mild curves, slight softness, close crops, camera angle, or a smooth/non-overhanging midsection are allowed. Multiple acceptable images outweigh one suspicious image. Do not describe this as weight, health, or a medical status.'
       : 'Do not reject for body shape, curves, softness, or midsection appearance in this pass; those are handled by the learned personal classifier.',
     'Reject if the entire candidate image set is non-photo/logo/placeholder/anime/artwork/unclear or lacks enough visible face or body evidence to judge the artist. A face-only image or body-only image can still be judged when it gives enough evidence for the hard checks.',
     'Do not reject the whole artist just because one candidate image is weak, blank, cropped, or unclear if another candidate clearly supplies enough face/body evidence.',
@@ -1347,7 +1357,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
         num_predict: Number(process.env.PONG_OLLAMA_NUM_PREDICT || 160)
       }
     })
-  }, Number(process.env.PONG_OLLAMA_CLASSIFY_TIMEOUT_MS || 45000));
+  }, Number(process.env.PONG_OLLAMA_CLASSIFY_TIMEOUT_MS || 45000), { workload: true });
   const rawOutput = payload.response || payload.thinking || '';
   let parsed;
   try {
@@ -1426,10 +1436,10 @@ async function classifyWithLoraVision({ artist, candidateUrls, siglipDecision, i
       rejectionSummary,
       promptVersion: 'random40-lora-v1'
     })
-  }, timeoutMs);
+  }, timeoutMs, { workload: true });
 }
 
-async function classifyInner(payload) {
+async function classifyInner(payload, generation = workloadGeneration) {
   const artist = payload.artist || {};
   const visionModel = requestedVisionModel(payload.visionModel);
   const localVariant = String(payload.localVariant || '').toLowerCase();
@@ -1488,8 +1498,9 @@ async function classifyInner(payload) {
         ...payload,
         localVariant,
         candidateImageUrls: personalCandidateUrls
-      }, trainAiRequest ? 30000 : 120000);
+      }, trainAiRequest ? 30000 : 120000, { workload: true });
     } catch (error) {
+      if (generation !== workloadGeneration) throw new Error('workload reset');
       if (trainAiRequest) throw error;
       // Continue through the previous local stack while v2 starts or downloads.
     }
@@ -1817,10 +1828,13 @@ async function classifyInner(payload) {
 }
 
 async function classify(payload) {
+  const generation = workloadGeneration;
   activeClassifyRequests++;
   lastClassifyAt = Date.now();
   try {
-    return await classifyInner(payload);
+    const result = await classifyInner(payload, generation);
+    if (generation !== workloadGeneration) throw new Error('workload reset');
+    return result;
   } finally {
     activeClassifyRequests = Math.max(0, activeClassifyRequests - 1);
     lastClassifyAt = Date.now();
@@ -1875,6 +1889,7 @@ const server = http.createServer(async (req, res) => {
           local2_model: preferenceAi.local2_model || '',
           semantic_model: preferenceAi.semantic_model || '',
           records: Number(preferenceAi.records || 0),
+          active_classify: Number(preferenceAi.active_classify || 0),
           bootstrap: preferenceAi.bootstrap || {}
         } : { ready: false, url: PREFERENCE_AI_URL },
         finetune: preferenceAi?.ready ? {
@@ -1893,7 +1908,8 @@ const server = http.createServer(async (req, res) => {
         },
         classify: {
           active: activeClassifyRequests,
-          lastAt: lastClassifyAt ? new Date(lastClassifyAt).toISOString() : ''
+          lastAt: lastClassifyAt ? new Date(lastClassifyAt).toISOString() : '',
+          generation: workloadGeneration
         },
         lora_inference: {
           adapter_present: adapterPresent,
@@ -1904,6 +1920,34 @@ const server = http.createServer(async (req, res) => {
           adapter: adapterHealth?.adapter || ''
         }
       });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/workload/reset') {
+      workloadGeneration++;
+      const queued = ollamaVisionQueue.splice(0);
+      queued.forEach(item => item.resolve());
+      const controllers = [...activeWorkloadControllers];
+      controllers.forEach(controller => controller.abort());
+      json(res, 200, {
+        ok: true,
+        generation: workloadGeneration,
+        aborted: controllers.length,
+        cleared_queued: queued.length,
+        active: activeClassifyRequests
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/audit/train-ai') {
+      const payload = JSON.parse(await readBody(req));
+      const audit = {
+        ...payload,
+        receivedAt: new Date().toISOString()
+      };
+      await fs.mkdir(LOCAL_AI_DIR, { recursive: true });
+      await fs.appendFile(TRAIN_AI_AUDIT_PATH, `${JSON.stringify(audit)}\n`, 'utf8');
+      json(res, 200, { ok: true, stored: true, receivedAt: audit.receivedAt });
       return;
     }
 

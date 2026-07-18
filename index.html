@@ -806,7 +806,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.95</div>
+  <div class="version-number">23.96</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -926,6 +926,7 @@ let random40PostFetchActive = 0;
 let random40PostFetchQueue = [];
 let random40PostFetchSequence = 0;
 let random40PostEntriesCache = new Map();
+let pongWorkloadAbortControllers = new Set();
 
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
@@ -4876,6 +4877,75 @@ function stopRandom40WorkflowForRefresh() {
   } catch (_) {}
 }
 
+function trackPongWorkloadController(controller) {
+  if (!controller) return () => {};
+  pongWorkloadAbortControllers.add(controller);
+  return () => pongWorkloadAbortControllers.delete(controller);
+}
+
+function stopBrowserWorkloadForRefresh() {
+  stopRandom40WorkflowForRefresh();
+  if (trainAiState?.open) closeTrainAiPanel();
+  else trainAiResetQueue();
+
+  const queuedPostTasks = random40PostFetchQueue.splice(0);
+  queuedPostTasks.forEach(item => item.reject?.(new Error('Clean refresh')));
+  pongWorkloadAbortControllers.forEach(controller => {
+    try { controller.abort(); } catch (_) {}
+  });
+  pongWorkloadAbortControllers.clear();
+
+  clearTimeout(random40PreloadTimer);
+  clearTimeout(random40PreloadPumpTimer);
+  cleanupRandom40PreloadPool(new Set());
+  random40PreloadActive = 0;
+  try { window.currentlyPlayingVideo?.pause?.(); } catch (_) {}
+}
+
+async function resetLocalAiWorkloadForRefresh() {
+  const endpoints = [
+    random40State?.localEndpoint,
+    random40StoredLocalEndpoint(),
+    ...(Array.isArray(RANDOM40_LOCAL_ENDPOINTS) ? RANDOM40_LOCAL_ENDPOINTS : [])
+  ].map(random40NormalizeLocalEndpoint).filter(Boolean);
+
+  for (const endpoint of [...new Set(endpoints)]) {
+    try {
+      const resetResponse = await fetch(`${endpoint}/workload/reset?t=${Date.now()}`, {
+        method: 'POST',
+        cache: 'no-store'
+      });
+      if (!resetResponse.ok) continue;
+
+      let consecutiveIdleChecks = 0;
+      for (let attempt = 0; attempt < 24; attempt++) {
+        await sleep(attempt ? 220 : 80);
+        const healthResponse = await fetch(`${endpoint}/health?t=${Date.now()}`, { cache: 'no-store' });
+        if (!healthResponse.ok) break;
+        const health = await healthResponse.json();
+        const idle = Number(health?.classify?.active || 0) === 0 &&
+          Number(health?.ollama_queue?.active || 0) === 0 &&
+          Number(health?.ollama_queue?.queued || 0) === 0 &&
+          Number(health?.personal_preference?.active_classify || 0) === 0;
+        consecutiveIdleChecks = idle ? consecutiveIdleChecks + 1 : 0;
+        if (consecutiveIdleChecks >= 2) return true;
+      }
+      return false;
+    } catch (_) {}
+  }
+  return false;
+}
+
+async function cleanRefreshPongWorkload() {
+  showSortingIndicator('Stopping Pong workload…');
+  stopBrowserWorkloadForRefresh();
+  const localReset = await Promise.race([
+    resetLocalAiWorkloadForRefresh(),
+    sleep(6500).then(() => false)
+  ]);
+  showSortingIndicator(localReset ? 'Workload cleared · refreshing…' : 'Browser cleared · refreshing…');
+}
+
 function resetRandom40AiStatsBaseline() {
   random40SaveAccuracy(random40EmptyAccuracy());
   try { localStorage.removeItem(RANDOM40_TIMING_KEY); } catch (_) {}
@@ -4961,12 +5031,14 @@ function createGearButton(){
     document.body.appendChild(b);
   };
 
-  mk('refresh-button','↺','Refresh',()=>{
-    stopRandom40WorkflowForRefresh();
+  mk('refresh-button','↺','Clean refresh',async()=>{
+    await cleanRefreshPongWorkload();
     resetPasteEvents();
     clearSession();
     if(videoUrlsInput)videoUrlsInput.value='';
-    window.location.reload();
+    const url = new URL(window.location.href);
+    url.searchParams.set('pongRefresh', String(Date.now()));
+    window.location.replace(url.href);
   });
 
   mk('duration-sort-button','◷','Sort by duration',sortVideosByDuration);
@@ -6942,20 +7014,23 @@ async function random40FetchText(rawUrl, options = {}) {
   let lastError = null;
 
   for (const url of [...new Set(urls)]) {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const releaseController = trackPongWorkloadController(controller);
+    const timer = controller ? setTimeout(() => controller.abort(), Number(options.timeoutMs || 18000)) : null;
     try {
-      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timer = controller ? setTimeout(() => controller.abort(), Number(options.timeoutMs || 18000)) : null;
       const res = await fetch(url, {
         credentials: url === rawUrl ? 'include' : 'omit',
         mode: 'cors',
         cache: 'no-store',
         signal: controller?.signal
       });
-      if (timer) clearTimeout(timer);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.text();
     } catch (err) {
       lastError = err;
+    } finally {
+      if (timer) clearTimeout(timer);
+      releaseController();
     }
   }
 
@@ -8584,6 +8659,7 @@ async function random40SelectRepresentativeCandidateImages({
 }
 
 const TRAIN_AI_ACCURACY_KEY = 'pong_train_ai_accuracy_v1';
+const TRAIN_AI_AUDIT_KEY = 'pong_train_ai_verdict_audit_v1';
 const TRAIN_AI_TOTAL_IMAGES = 5;
 const TRAIN_AI_POST_IMAGE_COUNT = TRAIN_AI_TOTAL_IMAGES - 1;
 const TRAIN_AI_SWIPE_COMMIT_MS = 80;
@@ -8766,6 +8842,7 @@ function trainAiRenderCandidate(candidate) {
 
 async function trainAiFetchDecision(payload, timeoutMs) {
   const controller = new AbortController();
+  const releaseController = trackPongWorkloadController(controller);
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${trainAiState.endpoint}/classify`, {
@@ -8782,6 +8859,7 @@ async function trainAiFetchDecision(payload, timeoutMs) {
     throw error;
   } finally {
     clearTimeout(timer);
+    releaseController();
   }
 }
 
@@ -9114,10 +9192,42 @@ function trainAiStoreBrowserFeedback(label, candidate, reasonLabel) {
   return record;
 }
 
+function trainAiStoreVerdictAudit(label, candidate, predictions, reasonLabel, hardFilterOverride = null) {
+  const audit = {
+    auditedAt: new Date().toISOString(),
+    artistUrl: random40NormalizeArtistUrl(candidate.artistUrl),
+    artistName: candidate.artistName || random40ArtistNameFromUrl(candidate.artistUrl),
+    manualLabel: label,
+    manualReason: label === 'reject' ? String(reasonLabel || 'Not my taste') : '',
+    imageUrls: candidate.imageUrls.slice(0, TRAIN_AI_TOTAL_IMAGES),
+    hardFilterOverride: hardFilterOverride ? String(hardFilterOverride?.reason || hardFilterOverride) : '',
+    local1: predictions?.local || null,
+    local2: predictions?.local2 || null
+  };
+
+  try {
+    const previous = JSON.parse(localStorage.getItem(TRAIN_AI_AUDIT_KEY) || '[]');
+    localStorage.setItem(TRAIN_AI_AUDIT_KEY, JSON.stringify([audit, ...(Array.isArray(previous) ? previous : [])].slice(0, 25)));
+  } catch (_) {}
+
+  if (trainAiState.endpoint) {
+    const controller = new AbortController();
+    const releaseController = trackPongWorkloadController(controller);
+    void fetch(`${trainAiState.endpoint}/audit/train-ai`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(audit),
+      signal: controller.signal
+    }).catch(() => {}).finally(releaseController);
+  }
+  return audit;
+}
+
 async function trainAiFinalizeChoice(label, candidate, predictionPromise, reasonLabel) {
   const predictions = await predictionPromise;
   const hardFilterOverride = random40HardFilter(candidate) ||
     [predictions.local, predictions.local2].find(prediction => String(prediction?.source || '').toLowerCase() === 'hard_filter');
+  trainAiStoreVerdictAudit(label, candidate, predictions, reasonLabel, hardFilterOverride);
   if (hardFilterOverride) return { predictions, hardFilterOverride };
 
   trainAiRecordPrediction('local', predictions.local, label);
@@ -9986,7 +10096,7 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
         visionModel: RANDOM40_LOCAL2_VISION_MODEL,
         mode: 'local2',
         hardCheckOnly: true,
-        bodyPreferenceCheck: Number(decision?.reason_heads?.body_reject || 0) >= RANDOM40_LOCAL_BODY_QWEN_REVIEW_THRESHOLD,
+        bodyPreferenceCheck: Boolean(decision?.body_consensus?.veto),
         maxImages: RANDOM40_LOCAL_MAX_REVIEW_IMAGES
       }),
       18000,
@@ -10281,7 +10391,7 @@ async function startRandom40(mode = 'nano') {
               visionModel: RANDOM40_LOCAL2_VISION_MODEL,
               mode: 'local2',
               hardCheckOnly: true,
-              bodyPreferenceCheck: Number(decision?.reason_heads?.body_reject || 0) >= RANDOM40_LOCAL_BODY_QWEN_REVIEW_THRESHOLD,
+              bodyPreferenceCheck: Boolean(decision?.body_consensus?.veto),
               maxImages: RANDOM40_LOCAL_MAX_REVIEW_IMAGES
             }),
             18000,
@@ -10362,6 +10472,7 @@ async function fetchEromeJson(proxyBase, endpoint, targetUrl, options = {}) {
     const controller = typeof AbortController !== 'undefined'
       ? new AbortController()
       : null;
+    const releaseController = trackPongWorkloadController(controller);
     const timeoutId = controller
       ? setTimeout(() => controller.abort(), Number(options.timeoutMs || EROME_FETCH_TIMEOUT_MS))
       : null;
@@ -10387,6 +10498,7 @@ async function fetchEromeJson(proxyBase, endpoint, targetUrl, options = {}) {
       }
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
+      releaseController();
     }
   }
 

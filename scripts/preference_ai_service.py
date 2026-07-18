@@ -54,14 +54,20 @@ SEMANTIC_PROMPTS = [
     "an unclear, tiny, heavily cropped, or unusable image",
 ]
 BODY_PROMPTS = [
-    "a visibly slender or slim adult figure",
-    "an average adult figure",
-    "a visibly larger adult figure",
-    "the body shape is unclear or hidden",
+    "a clear adult torso with a smooth midsection and no pronounced abdominal overhang",
+    "a clear adult torso with ordinary softness but no pronounced abdominal overhang",
+    "a clear adult torso with pronounced abdominal overhang, multiple visible abdominal folds, or an apron-like midsection",
+    "the abdomen and midsection are hidden, cropped out, distorted by perspective, or impossible to judge",
 ]
-BODY_HEAD_MIN = float(os.environ.get("PONG_BODY_REJECT_HEAD_MIN", "0.43"))
-BODY_LARGER_MIN = float(os.environ.get("PONG_BODY_LARGER_MIN", "0.27"))
-BODY_LARGER_MARGIN = float(os.environ.get("PONG_BODY_LARGER_MARGIN", "0.05"))
+BODY_HEAD_MIN = float(os.environ.get("PONG_BODY_REJECT_HEAD_MIN", "0.58"))
+BODY_HEAD_IMAGE_MIN = float(os.environ.get("PONG_BODY_REJECT_IMAGE_MIN", "0.50"))
+BODY_HEAD_STRONG_MIN = float(os.environ.get("PONG_BODY_REJECT_HEAD_STRONG_MIN", "0.68"))
+BODY_CONSENSUS_MIN = max(2, int(os.environ.get("PONG_BODY_CONSENSUS_MIN", "2")))
+BODY_PRONOUNCED_MIN = float(os.environ.get("PONG_BODY_PRONOUNCED_MIN", "0.42"))
+BODY_PRONOUNCED_MARGIN = float(os.environ.get("PONG_BODY_PRONOUNCED_MARGIN", "0.12"))
+BODY_STRONG_MIN = float(os.environ.get("PONG_BODY_STRONG_MIN", "0.58"))
+BODY_STRONG_MARGIN = float(os.environ.get("PONG_BODY_STRONG_MARGIN", "0.18"))
+BODY_STRONG_PREFERENCE = float(os.environ.get("PONG_BODY_STRONG_PREFERENCE", "0.62"))
 FACE_HEAD_MIN_LOCAL1 = float(os.environ.get("PONG_FACE_REJECT_LOCAL1_MIN", "0.56"))
 FACE_HEAD_MIN_LOCAL2 = float(os.environ.get("PONG_FACE_REJECT_LOCAL2_MIN", "0.55"))
 
@@ -245,7 +251,9 @@ class VisionRuntime:
             values.extend(unit(row) for row in pooled.float().cpu().numpy())
         return values
 
-    def siglip_features(self, images: list[Image.Image]) -> tuple[list[np.ndarray], np.ndarray, np.ndarray]:
+    def siglip_features(
+        self, images: list[Image.Image], body_prompt_images: list[Image.Image] | None = None
+    ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray]:
         if not images:
             return [], np.zeros((0, len(SEMANTIC_PROMPTS)), dtype=np.float32), np.zeros((0, len(BODY_PROMPTS)), dtype=np.float32)
         processor, model = self._siglip()
@@ -259,19 +267,21 @@ class VisionRuntime:
                 embeddings = pooled_tensor(getattr(output, "image_embeds", output))
         embeddings_np = [unit(row) for row in embeddings.float().cpu().numpy()]
 
-        def scores_for(prompts: list[str]) -> np.ndarray:
-            inputs = processor(text=prompts, images=images, padding="max_length", return_tensors="pt")
+        def scores_for(prompts: list[str], score_images: list[Image.Image]) -> np.ndarray:
+            inputs = processor(text=prompts, images=score_images, padding="max_length", return_tensors="pt")
             inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
             with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=DTYPE, enabled=DEVICE == "cuda"):
                 output = model(**inputs)
                 logits = output.logits_per_image.float()
                 return torch.softmax(logits, dim=-1).cpu().numpy().astype(np.float32)
 
-        return embeddings_np, scores_for(SEMANTIC_PROMPTS), scores_for(BODY_PROMPTS)
+        body_inputs = body_prompt_images if body_prompt_images and len(body_prompt_images) == len(images) else images
+        return embeddings_np, scores_for(SEMANTIC_PROMPTS, images), scores_for(BODY_PROMPTS, body_inputs)
 
     def analyze(self, images: list[Image.Image], variant: str, include_semantics: bool) -> dict[str, Any]:
         views = [self.detect_views(image) for image in images]
         full_images = [v["full"] for v in views]
+        body_prompt_images = [v["body"] if v["body"] is not None else v["full"] for v in views]
         body_images = [v["body"] for v in views if v["body"] is not None]
         face_images = [v["face"] for v in views if v["face"] is not None]
         all_crops = full_images + body_images + face_images
@@ -288,12 +298,20 @@ class VisionRuntime:
         def mean_or_zero(items: list[np.ndarray]) -> np.ndarray:
             return unit(np.mean(items, axis=0)) if items else np.zeros(dimension, dtype=np.float32)
 
-        feature_parts = [mean_or_zero(full_vectors), mean_or_zero(body_vectors), mean_or_zero(face_vectors)]
+        full_feature = mean_or_zero(full_vectors)
+        body_feature = mean_or_zero(body_vectors)
+        face_feature = mean_or_zero(face_vectors)
+        body_vector_iter = iter(body_vectors)
+        body_features_by_image = [
+            next(body_vector_iter) if view["body"] is not None else np.zeros(dimension, dtype=np.float32)
+            for view in views
+        ]
+        feature_parts = [full_feature, body_feature, face_feature]
         semantic_scores = np.zeros((len(images), len(SEMANTIC_PROMPTS)), dtype=np.float32)
         body_scores = np.zeros((len(images), len(BODY_PROMPTS)), dtype=np.float32)
         siglip_vectors: list[np.ndarray] = []
         if include_semantics:
-            siglip_vectors, semantic_scores, body_scores = self.siglip_features(full_images)
+            siglip_vectors, semantic_scores, body_scores = self.siglip_features(full_images, body_prompt_images)
             siglip_dim = len(siglip_vectors[0]) if siglip_vectors else 768
             feature_parts.append(unit(np.mean(siglip_vectors, axis=0)) if siglip_vectors else np.zeros(siglip_dim, dtype=np.float32))
             feature_parts.append(np.mean(semantic_scores, axis=0) if len(semantic_scores) else np.zeros(len(SEMANTIC_PROMPTS), dtype=np.float32))
@@ -301,8 +319,14 @@ class VisionRuntime:
         feature_parts.append(np.asarray([1.0 if face_images else 0.0, 1.0 if body_images else 0.0], dtype=np.float32))
         return {
             "feature": np.concatenate(feature_parts).astype(np.float32),
+            "bodyFeature": body_feature.astype(np.float32),
+            "bodyFeaturesByImage": [vector.astype(np.float32) for vector in body_features_by_image],
+            "faceFeature": face_feature.astype(np.float32),
             "faceAvailable": bool(face_images),
             "bodyAvailable": bool(body_images),
+            "faceVisibleByImage": [view["face"] is not None for view in views],
+            "bodyVisibleByImage": [view["body"] is not None for view in views],
+            "bodyPromptImages": body_prompt_images,
             "people": max((int(v["people"]) for v in views), default=0),
             "semanticScores": semantic_scores,
             "bodyScores": body_scores,
@@ -312,6 +336,8 @@ class VisionRuntime:
 VISION = VisionRuntime()
 INFERENCE_LIMIT = max(1, min(6, int(os.environ.get("PONG_PREFERENCE_AI_CONCURRENCY", "4"))))
 INFERENCE_SEMAPHORE = threading.BoundedSemaphore(INFERENCE_LIMIT)
+ACTIVE_CLASSIFY_LOCK = threading.Lock()
+ACTIVE_CLASSIFY = 0
 
 
 def fetch_image(url: str, timeout: tuple[int, int] = (5, 10)) -> Image.Image:
@@ -341,7 +367,7 @@ def load_candidate_images(urls: list[str]) -> tuple[list[Image.Image], list[str]
     return images, accepted_urls
 
 
-def feature_records(variant: str) -> tuple[list[np.ndarray], list[int], list[dict[str, Any]]]:
+def feature_records(variant: str, view: str = "all") -> tuple[list[np.ndarray], list[int], list[dict[str, Any]]]:
     features: list[np.ndarray] = []
     labels: list[int] = []
     records: list[dict[str, Any]] = []
@@ -351,6 +377,19 @@ def feature_records(variant: str) -> tuple[list[np.ndarray], list[int], list[dic
         if not isinstance(raw, list) or not raw:
             continue
         vector = np.asarray(raw, dtype=np.float32)
+        dimension = 768 if variant == "local" else 384
+        if view == "body":
+            if len(vector) < dimension * 2:
+                continue
+            vector = unit(vector[dimension:dimension * 2])
+            if not np.any(vector):
+                continue
+        elif view == "face":
+            if len(vector) < dimension * 3:
+                continue
+            vector = unit(vector[dimension * 2:dimension * 3])
+            if not np.any(vector):
+                continue
         features.append(vector)
         labels.append(1 if record.get("label") == "accept" else 0)
         records.append(record)
@@ -394,8 +433,14 @@ def trained_probability(vector: np.ndarray, features: list[np.ndarray], labels: 
     return learned * 0.72 + prototype * 0.28
 
 
-def reason_probability(vector: np.ndarray, variant: str, pattern: str) -> float | None:
-    features, _, records = feature_records(variant)
+def reason_probability(vector: np.ndarray, variant: str, pattern: str, view: str = "all") -> float | None:
+    features, _, records = feature_records(variant, view=view)
+    return reason_probability_from_records(vector, features, records, pattern)
+
+
+def reason_probability_from_records(
+    vector: np.ndarray, features: list[np.ndarray], records: list[dict[str, Any]], pattern: str
+) -> float | None:
     if not features:
         return None
     labels = [1 if re.search(pattern, str(record.get("rejectReasonLabel", "")), re.I) else 0 for record in records]
@@ -434,11 +479,12 @@ def hard_checks(analysis: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str
             "reason": hard_reason or "visual evidence checked",
             "checks": checks,
             "body_profile": {
-                "slender": float(body_scores[index][0]) if len(body_scores) > index else 0,
-                "average": float(body_scores[index][1]) if len(body_scores) > index else 0,
-                "larger": float(body_scores[index][2]) if len(body_scores) > index else 0,
+                "smooth_midsection": float(body_scores[index][0]) if len(body_scores) > index else 0,
+                "ordinary_softness": float(body_scores[index][1]) if len(body_scores) > index else 0,
+                "pronounced_overhang": float(body_scores[index][2]) if len(body_scores) > index else 0,
                 "unclear": float(body_scores[index][3]) if len(body_scores) > index else 0,
             },
+            "body_visible": bool((analysis.get("bodyVisibleByImage") or [False] * len(semantic))[index]),
         })
     usable_person_evidence = bool(analysis.get("faceAvailable") or analysis.get("bodyAvailable"))
     all_logo = (
@@ -461,22 +507,62 @@ def hard_checks(analysis: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str
     return combined, grades, hard_reason
 
 
-def body_preference_veto(image_grades: list[dict[str, Any]], body_head: float | None) -> dict[str, Any] | None:
-    for grade in image_grades:
+def body_preference_veto(
+    image_grades: list[dict[str, Any]], body_head: float | None,
+    body_heads_by_image: list[float | None], preference: float
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    supporters: list[dict[str, Any]] = []
+    strong_supporters: list[dict[str, Any]] = []
+    acceptable = 0
+    clear = 0
+    for index, grade in enumerate(image_grades):
         profile = grade.get("body_profile") or {}
-        larger = float(profile.get("larger") or 0)
-        slender = float(profile.get("slender") or 0)
-        average = float(profile.get("average") or 0)
+        if not grade.get("body_visible"):
+            continue
+        image_head = body_heads_by_image[index] if index < len(body_heads_by_image) else None
+        smooth = float(profile.get("smooth_midsection") or 0)
+        soft = float(profile.get("ordinary_softness") or 0)
+        pronounced = float(profile.get("pronounced_overhang") or 0)
         unclear = float(profile.get("unclear") or 0)
-        margin = larger - max(slender, average)
-        strong_visual = larger >= 0.45 and margin >= 0.12 and unclear < 0.55
+        semantic_available = smooth + soft + pronounced + unclear > 0.001
+        if semantic_available and unclear >= 0.45 and not (image_head is not None and image_head >= BODY_HEAD_IMAGE_MIN):
+            continue
+        clear += 1
+        normal = max(smooth, soft)
+        margin = pronounced - normal
+        if normal >= pronounced + 0.04 or (image_head is not None and image_head <= 0.46):
+            acceptable += 1
+        strong_visual = (
+            pronounced >= BODY_STRONG_MIN and margin >= BODY_STRONG_MARGIN
+        ) or (image_head is not None and image_head >= BODY_HEAD_STRONG_MIN)
         learned_visual = (
+            image_head is not None and image_head >= BODY_HEAD_IMAGE_MIN
+        ) or (
             body_head is not None and body_head >= BODY_HEAD_MIN and
-            larger >= BODY_LARGER_MIN and margin >= BODY_LARGER_MARGIN and unclear < 0.55
+            pronounced >= BODY_PRONOUNCED_MIN and margin >= BODY_PRONOUNCED_MARGIN
         )
         if strong_visual or learned_visual:
-            return grade
-    return None
+            supporters.append(grade)
+        if strong_visual:
+            strong_supporters.append(grade)
+
+    learned_consensus = len(supporters) >= BODY_CONSENSUS_MIN and len(supporters) > acceptable
+    strong_consensus = len(strong_supporters) >= BODY_CONSENSUS_MIN and len(strong_supporters) > acceptable
+    preference_override = preference >= BODY_STRONG_PREFERENCE and not strong_consensus
+    veto = strong_consensus or (learned_consensus and not preference_override)
+    details = {
+        "clear_body_images": clear,
+        "supporting_images": len(supporters),
+        "strong_supporting_images": len(strong_supporters),
+        "acceptable_images": acceptable,
+        "required_supporting_images": BODY_CONSENSUS_MIN,
+        "body_head": body_head,
+        "body_heads_by_image": body_heads_by_image,
+        "overall_preference": preference,
+        "preference_override": preference_override,
+        "veto": veto,
+    }
+    return (supporters[0] if veto and supporters else None), details
 
 
 def classify(payload: dict[str, Any]) -> dict[str, Any]:
@@ -495,7 +581,7 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
 
     if variant == "local2" and not include_semantics and (preference >= 0.48 or hard_only):
         with INFERENCE_SEMAPHORE:
-            _, semantic_scores, body_scores = VISION.siglip_features(images)
+            _, semantic_scores, body_scores = VISION.siglip_features(images, fast_analysis.get("bodyPromptImages"))
         semantic_analysis = {
             **fast_analysis,
             "semanticScores": semantic_scores,
@@ -516,13 +602,26 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
         image_grades = []
         hard_reason = ""
 
+    body_reason_features, _, body_reason_records = feature_records(variant, view="body")
+    body_head = reason_probability_from_records(
+        fast_analysis["bodyFeature"], body_reason_features, body_reason_records,
+        r"fat|body|weight|midsection"
+    )
+    body_heads_by_image = [
+        reason_probability_from_records(vector, body_reason_features, body_reason_records, r"fat|body|weight|midsection")
+        if np.any(vector) else None
+        for vector in fast_analysis.get("bodyFeaturesByImage", [])
+    ]
     reason_heads = {
         "face_reject": reason_probability(fast_analysis["feature"], variant, r"ugly|face"),
-        "body_reject": reason_probability(fast_analysis["feature"], variant, r"fat|body|weight|midsection"),
+        "body_reject": body_head,
+        "body_reject_by_image": body_heads_by_image,
         "male_reject": reason_probability(fast_analysis["feature"], variant, r"male"),
         "feet_reject": reason_probability(fast_analysis["feature"], variant, r"feet|foot"),
     }
-    body_veto_grade = body_preference_veto(image_grades, reason_heads["body_reject"])
+    body_veto_grade, body_consensus = body_preference_veto(
+        image_grades, body_head, body_heads_by_image, preference
+    )
     face_threshold = FACE_HEAD_MIN_LOCAL1 if variant == "local" else FACE_HEAD_MIN_LOCAL2
     face_veto = bool(
         fast_analysis["faceAvailable"] and
@@ -624,6 +723,7 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
             "images": len(images),
         },
         "reason_heads": reason_heads,
+        "body_consensus": body_consensus,
         "training": {
             "artists": len(records),
             "accepts": sum(labels),
@@ -785,6 +885,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path.split("?", 1)[0] == "/health":
                 records = STORE.records()
+                with ACTIVE_CLASSIFY_LOCK:
+                    active_classify = ACTIVE_CLASSIFY
                 self.send_json(200, {
                     "ok": True,
                     "app": "pong-preference-ai",
@@ -798,6 +900,7 @@ class Handler(BaseHTTPRequestHandler):
                     "records": len(records),
                     "accepts": sum(1 for r in records if r.get("label") == "accept"),
                     "rejects": sum(1 for r in records if r.get("label") == "reject"),
+                    "active_classify": active_classify,
                     "bootstrap": BOOTSTRAP_STATE,
                 })
                 return
@@ -813,7 +916,15 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json()
             path = self.path.split("?", 1)[0]
             if path == "/classify":
-                self.send_json(200, classify(payload))
+                global ACTIVE_CLASSIFY
+                with ACTIVE_CLASSIFY_LOCK:
+                    ACTIVE_CLASSIFY += 1
+                try:
+                    result = classify(payload)
+                finally:
+                    with ACTIVE_CLASSIFY_LOCK:
+                        ACTIVE_CLASSIFY = max(0, ACTIVE_CLASSIFY - 1)
+                self.send_json(200, result)
                 return
             if path == "/learn":
                 self.send_json(200, learn(payload))
