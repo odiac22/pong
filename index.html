@@ -806,7 +806,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.91</div>
+  <div class="version-number">23.92</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -918,6 +918,12 @@ let viewedVideoKeys = new Set();
 let random40PreloadTimer = null;
 let random40PreloadContainer = null;
 let random40PreloadMap = new Map();
+let random40PreloadActive = 0;
+let random40PreloadPumpTimer = null;
+let random40PostFetchActive = 0;
+let random40PostFetchQueue = [];
+let random40PostFetchSequence = 0;
+let random40PostEntriesCache = new Map();
 
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
@@ -3819,10 +3825,27 @@ function createVideoElements() {
 
     video.addEventListener('play', () => {
       prepareVideoForPlayback(video);
+      random40PauseHiddenPreloadsForPlayback();
+      random40PumpPostFetchQueue();
+      random40PumpPreloadQueue(350);
       setTimeout(()=>{ if(video.muted){video.muted=false;video.volume=1.0;} },100);
     });
-    video.addEventListener('pause', () => { wrapper.classList.remove('video-playing'); if(window.currentlyPlayingVideo===video) window.currentlyPlayingVideo=null; loadingIndicator.style.display='none'; });
-    video.addEventListener('waiting', () => { loadingIndicator.style.display='none'; updateVideoReadyLoader(video); });
+    video.addEventListener('pause', () => {
+      const wasCurrent = window.currentlyPlayingVideo === video;
+      wrapper.classList.remove('video-playing');
+      if (wasCurrent) window.currentlyPlayingVideo = null;
+      loadingIndicator.style.display='none';
+      if (wasCurrent) {
+        random40PumpPostFetchQueue();
+        random40PumpPreloadQueue(100);
+      }
+    });
+    video.addEventListener('waiting', () => {
+      random40PauseHiddenPreloadsForPlayback();
+      random40PumpPostFetchQueue();
+      loadingIndicator.style.display='none';
+      updateVideoReadyLoader(video);
+    });
     video.addEventListener('progress', () => { updateVideoReadyLoader(video); });
     video.addEventListener('canplay', () => {
       markVideoAutoRetryDone(video, 'canplay');
@@ -3834,6 +3857,8 @@ function createVideoElements() {
     video.addEventListener('playing', () => {
       markVideoAutoRetryDone(video, 'playing');
       markVideoViewed(wrapper);
+      random40PumpPostFetchQueue();
+      random40PumpPreloadQueue(500);
     });
     video.addEventListener('loadedmetadata', () => { updateVideoReadyLoader(video); });
     video.addEventListener('playing', () => { loadingIndicator.style.display='none'; if(video.muted){video.muted=false;video.volume=1.0;audioBtn.innerHTML='🔊';audioBtn.setAttribute('data-muted','false');} });
@@ -4346,15 +4371,107 @@ function countReadyVideosForPasteEvent(event, index = -1) {
   return getRandom40PreloadBundleStats(event, index).ready;
 }
 
-function random40PreloadVideo(bundleKey, globalIndex, url) {
+function random40VisibleVideoIsBuffering() {
+  const video = window.currentlyPlayingVideo;
+  return Boolean(video && !video.paused && video.readyState < 3);
+}
+
+function random40PreloadConcurrencyLimit() {
+  const video = window.currentlyPlayingVideo;
+  if (random40VisibleVideoIsBuffering()) return 0;
+  if (video && !video.paused) return RANDOM40_PRELOAD_PLAYING_CONCURRENCY;
+  return RANDOM40_PRELOAD_IDLE_CONCURRENCY;
+}
+
+function random40FinishPreloadRecord(record, status) {
+  if (!record) return;
+  clearTimeout(record.loadTimer);
+  record.loadTimer = null;
+  if (record.status === 'loading') {
+    random40PreloadActive = Math.max(0, random40PreloadActive - 1);
+  }
+  record.status = status;
+  record.ready = status === 'ready';
+  record.touchedAt = Date.now();
+}
+
+function random40StartPreloadRecord(record) {
+  if (!record || record.status !== 'queued' || !document.body.contains(record.video)) return;
+  const video = record.video;
+  record.status = 'loading';
+  record.attempts = Number(record.attempts || 0) + 1;
+  record.retryAt = 0;
+  record.touchedAt = Date.now();
+  random40PreloadActive++;
+  video.preload = 'auto';
+  if (video.src !== record.url) video.src = record.url;
+  try { video.load(); } catch (_) {}
+  record.loadTimer = setTimeout(() => {
+    if (record.status !== 'loading') return;
+    random40FinishPreloadRecord(record, record.attempts < 2 ? 'queued' : 'error');
+    if (record.status === 'queued') {
+      record.retryAt = Date.now() + RANDOM40_PRELOAD_RETRY_DELAY_MS * record.attempts;
+      try {
+        video.removeAttribute('src');
+        video.load();
+      } catch (_) {}
+    }
+    random40PumpPreloadQueue(50);
+  }, RANDOM40_PRELOAD_LOAD_TIMEOUT_MS);
+}
+
+function random40PumpPreloadQueue(delay = 0) {
+  clearTimeout(random40PreloadPumpTimer);
+  random40PreloadPumpTimer = setTimeout(() => {
+    random40PreloadPumpTimer = null;
+    const limit = random40PreloadConcurrencyLimit();
+    if (limit <= 0) return;
+    const now = Date.now();
+    const waiting = [...random40PreloadMap.values()].filter(record => record.status === 'queued');
+    const queued = waiting
+      .filter(record => Number(record.retryAt || 0) <= now)
+      .sort((a, b) => a.priority - b.priority || a.order - b.order || a.touchedAt - b.touchedAt);
+    while (random40PreloadActive < limit && queued.length) {
+      random40StartPreloadRecord(queued.shift());
+    }
+    const delayed = waiting.filter(record => record.status === 'queued' && Number(record.retryAt || 0) > Date.now());
+    if (random40PreloadActive < limit && delayed.length) {
+      const nextRetryAt = Math.min(...delayed.map(record => Number(record.retryAt || 0)));
+      random40PumpPreloadQueue(Math.max(50, nextRetryAt - Date.now()));
+    }
+  }, Math.max(0, Number(delay) || 0));
+}
+
+function random40PauseHiddenPreloadsForPlayback() {
+  random40PreloadMap.forEach(record => {
+    if (record.status !== 'loading') return;
+    random40FinishPreloadRecord(record, 'queued');
+    record.retryAt = Date.now() + 500;
+    try {
+      record.video.removeAttribute('src');
+      record.video.load();
+    } catch (_) {}
+  });
+}
+
+function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order = 0 } = {}) {
   const key = `${bundleKey}|${globalIndex}|${url}`;
   let record = random40PreloadMap.get(key);
-  if (record) return record;
+  if (record) {
+    record.priority = Math.min(record.priority, priority);
+    record.order = Math.min(record.order, order);
+    record.touchedAt = Date.now();
+    if (record.status === 'error' && priority === 0) {
+      record.status = 'queued';
+      record.attempts = 0;
+      record.retryAt = 0;
+    }
+    return record;
+  }
 
   const container = ensureRandom40PreloadContainer();
   const video = document.createElement('video');
-  video.src = url;
-  video.preload = 'auto';
+  video.preload = 'none';
   video.muted = true;
   video.volume = 0;
   video.playsInline = true;
@@ -4369,29 +4486,41 @@ function random40PreloadVideo(bundleKey, globalIndex, url) {
     url,
     video,
     ready: false,
+    status: 'queued',
+    priority,
+    order,
+    attempts: 0,
+    retryAt: 0,
+    loadTimer: null,
     touchedAt: Date.now()
   };
 
   const markReady = () => {
-    record.ready = video.readyState >= 2 || true;
-    record.touchedAt = Date.now();
+    if (record.status === 'ready') return;
+    random40FinishPreloadRecord(record, 'ready');
+    video.preload = 'metadata';
     updatePasteNavigationButton();
+    random40PumpPreloadQueue(0);
   };
   const markTouched = () => {
-    record.ready = video.readyState >= 2;
     record.touchedAt = Date.now();
+  };
+  const markError = () => {
+    if (record.status !== 'loading') return;
+    random40FinishPreloadRecord(record, record.attempts < 2 ? 'queued' : 'error');
+    if (record.status === 'queued') {
+      record.retryAt = Date.now() + RANDOM40_PRELOAD_RETRY_DELAY_MS * record.attempts;
+    }
+    random40PumpPreloadQueue(0);
   };
 
   video.addEventListener('loadeddata', markReady, { once: true });
   video.addEventListener('canplay', markReady, { once: true });
   video.addEventListener('progress', markTouched);
-  video.addEventListener('error', markTouched);
+  video.addEventListener('error', markError);
 
   container.appendChild(video);
   random40PreloadMap.set(key, record);
-  setTimeout(() => {
-    try { video.load(); } catch (_) {}
-  }, Math.min(random40PreloadMap.size * 45, 2400));
 
   return record;
 }
@@ -4399,6 +4528,7 @@ function random40PreloadVideo(bundleKey, globalIndex, url) {
 function cleanupRandom40PreloadPool(neededKeys) {
   random40PreloadMap.forEach((record, key) => {
     if (neededKeys.has(key)) return;
+    random40FinishPreloadRecord(record, 'removed');
     try {
       record.video.pause();
       record.video.removeAttribute('src');
@@ -4414,6 +4544,7 @@ function cleanupRandom40PreloadPool(neededKeys) {
     .sort((a, b) => (a[1].ready === b[1].ready ? a[1].touchedAt - b[1].touchedAt : Number(a[1].ready) - Number(b[1].ready)))
     .slice(0, random40PreloadMap.size - RANDOM40_PRELOAD_MAX_ELEMENTS)
     .forEach(([key, record]) => {
+      random40FinishPreloadRecord(record, 'removed');
       try {
         record.video.pause();
         record.video.removeAttribute('src');
@@ -4422,6 +4553,7 @@ function cleanupRandom40PreloadPool(neededKeys) {
       } catch (_) {}
       random40PreloadMap.delete(key);
     });
+  random40PumpPreloadQueue(0);
 }
 
 function runRandom40PreloadPool() {
@@ -4431,36 +4563,53 @@ function runRandom40PreloadPool() {
     return;
   }
 
-  const startIndex = currentPasteIndex >= 0 ? currentPasteIndex : -1;
-  const candidates = [];
-  for (let offset = 1; offset <= pasteEvents.length && candidates.length < RANDOM40_PRELOAD_ARTIST_BUFFER; offset++) {
-    const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
-    const event = pasteEvents[index];
-    if (!isRandom40PasteEvent(event)) continue;
-    if (isPasteEventRetiredForPaperclip(event, index)) continue;
-    candidates.push({ event, index });
-  }
-
-  if (!candidates.length && currentPasteIndex >= 0 && isRandom40PasteEvent(pasteEvents[currentPasteIndex])) {
-    candidates.push({ event: pasteEvents[currentPasteIndex], index: currentPasteIndex });
-  }
-
+  const visibleEventIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
+  const currentIndex = visibleEventIndex >= 0 ? visibleEventIndex : currentPasteIndex;
+  const candidates = pasteEvents
+    .map((event, index) => ({ event, index }))
+    .filter(({ event, index }) => isRandom40PasteEvent(event) && (
+      index === currentIndex || !isPasteEventRetiredForPaperclip(event, index)
+    ));
+  const currentCandidate = candidates.find(candidate => candidate.index === currentIndex) || null;
+  const backgroundCandidates = candidates.filter(candidate => candidate.index !== currentIndex);
+  random40PreloadMap.forEach(record => {
+    record.priority = 2;
+    record.order = Number.MAX_SAFE_INTEGER;
+  });
   const neededKeys = new Set();
-  candidates.forEach(({ event, index }) => {
+  let preloadOrder = 0;
+  const addCandidateVideo = ({ event, index }, offset, priority) => {
     const bundleKey = getPasteEventPaperclipKey(event, index);
     const bounds = getPasteEventVideoBounds(event);
-    if (!bundleKey || !bounds) return;
-    const end = Math.min(bounds.end, bounds.start + RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST);
-    for (let globalIndex = bounds.start; globalIndex < end; globalIndex++) {
-      const url = allVideoUrls[globalIndex];
-      if (!url) continue;
-      const key = `${bundleKey}|${globalIndex}|${url}`;
-      neededKeys.add(key);
-      random40PreloadVideo(bundleKey, globalIndex, url);
+    if (!bundleKey || !bounds) return false;
+    const globalIndex = bounds.start + offset;
+    if (globalIndex >= bounds.end || offset >= RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST) return false;
+    if (priority === 0 && globalIndex >= currentLoadedRangeStart && globalIndex < currentLoadedRangeEnd) return true;
+    const url = allVideoUrls[globalIndex];
+    if (!url) return true;
+    const key = `${bundleKey}|${globalIndex}|${url}`;
+    neededKeys.add(key);
+    random40PreloadVideo(bundleKey, globalIndex, url, { priority, order: preloadOrder++ });
+    return true;
+  };
+
+  if (currentCandidate) {
+    for (let offset = 0; offset < RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST; offset++) {
+      addCandidateVideo(currentCandidate, offset, 0);
     }
-  });
+  }
+
+  for (let offset = 0; neededKeys.size < RANDOM40_PRELOAD_MAX_ELEMENTS; offset++) {
+    let addedAny = false;
+    for (const candidate of backgroundCandidates) {
+      if (neededKeys.size >= RANDOM40_PRELOAD_MAX_ELEMENTS) break;
+      if (addCandidateVideo(candidate, offset, 1)) addedAny = true;
+    }
+    if (!addedAny || offset >= RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST - 1) break;
+  }
 
   cleanupRandom40PreloadPool(neededKeys);
+  random40PumpPreloadQueue(0);
   updatePasteNavigationButton();
 }
 
@@ -4530,10 +4679,9 @@ function countLoadedVideosForPasteEvent(event) {
 function getBestLoadedPasteEventIndex() {
   if (!Array.isArray(pasteEvents) || pasteEvents.length < 2) return -1;
   const startIndex = currentPasteIndex >= 0 ? currentPasteIndex : -1;
-  let bestReadyIndex = -1;
-  let bestReadyCount = 0;
-  let bestLoadedIndex = -1;
-  let bestLoadedCount = 0;
+  let bestIndex = -1;
+  let bestReadyCount = -1;
+  let bestLoadedCount = -1;
 
   for (let offset = 1; offset <= pasteEvents.length; offset++) {
     const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
@@ -4542,19 +4690,15 @@ function getBestLoadedPasteEventIndex() {
     if (isPasteEventRetiredForPaperclip(pasteEvents[index], index)) continue;
 
     const ready = countReadyVideosForPasteEvent(pasteEvents[index], index);
-    if (ready > bestReadyCount) {
-      bestReadyCount = ready;
-      bestReadyIndex = index;
-    }
-
     const loaded = countLoadedVideosForPasteEvent(pasteEvents[index]);
-    if (loaded > bestLoadedCount) {
+    if (ready > bestReadyCount || (ready === bestReadyCount && loaded > bestLoadedCount)) {
+      bestReadyCount = ready;
       bestLoadedCount = loaded;
-      bestLoadedIndex = index;
+      bestIndex = index;
     }
   }
 
-  return bestReadyIndex >= 0 ? bestReadyIndex : bestLoadedIndex;
+  return bestIndex;
 }
 
 function getNextActivePasteEventIndex() {
@@ -4632,6 +4776,7 @@ function navigateToNextPasteEvent(){
 
   if (retired) paperclipStepCount++;
   setActivePlaybackRangeForPasteEvent(nextActiveIndex);
+  random40PumpPostFetchQueue();
   scheduleRandom40PreloadPool(50);
   updatePasteNavigationButton();
   scheduleSessionSave(700);
@@ -6399,6 +6544,9 @@ const RANDOM40_PAGE_MAX = 3500;
 const RANDOM40_AI_CONCURRENCY = 32;
 const RANDOM40_LOCAL_CONCURRENCY = 32;
 const RANDOM40_POST_CONCURRENCY = 28;
+const RANDOM40_POST_PLAYING_CONCURRENCY = 8;
+const RANDOM40_POST_BUFFERING_CONCURRENCY = 3;
+const RANDOM40_POST_ENTRIES_CACHE_MAX = 6000;
 const RANDOM40_PAGE_BATCH_SIZE = 8;
 const RANDOM40_LISTING_PAGE_BATCH_SIZE = 8;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
@@ -6437,13 +6585,16 @@ const RANDOM40_REJECT_IMAGES_PER_EXAMPLE = 3;
 const RANDOM40_STORED_IMAGES_PER_ARTIST = 40;
 const RANDOM40_LOCAL_LEARN_IMAGES_PER_EXAMPLE = 6;
 const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
-const RANDOM40_PRELOAD_ARTIST_BUFFER = 5;
 const RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST = 25;
 let random40AcceptedArtistsMemory = [];
 let random40RejectedArtistsMemory = [];
 let random40MemoryLoadPromise = null;
 let random40MemoryEndpoint = '';
 const RANDOM40_PRELOAD_MAX_ELEMENTS = 140;
+const RANDOM40_PRELOAD_IDLE_CONCURRENCY = 6;
+const RANDOM40_PRELOAD_PLAYING_CONCURRENCY = 2;
+const RANDOM40_PRELOAD_LOAD_TIMEOUT_MS = 14000;
+const RANDOM40_PRELOAD_RETRY_DELAY_MS = 5000;
 let random40State = null;
 let random40ProgressHideTimer = null;
 
@@ -9114,34 +9265,107 @@ async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPag
 }
 
 async function random40VideoEntriesFromPost(postUrl, artistInfo) {
-  const doc = await random40FetchDoc(postUrl, { timeoutMs: 22000 });
-  const body = doc.querySelector('div.post-body') || doc.body;
-  const urls = [];
-  body.querySelectorAll('video source[src], video[src], a[href]').forEach(node => {
-    const raw = node.getAttribute('src') || node.getAttribute('href');
-    if (raw && /\.(mp4|m4v|mov|webm)(\?|$)/i.test(raw)) {
-      urls.push(random40NormalizeUrl(raw, postUrl));
-    }
+  const cacheKey = random40NormalizeUrl(postUrl, location.href) || postUrl;
+  if (random40PostEntriesCache.has(cacheKey)) return random40PostEntriesCache.get(cacheKey);
+  const promise = (async () => {
+    const doc = await random40FetchDoc(postUrl, { timeoutMs: 22000 });
+    const body = doc.querySelector('div.post-body') || doc.body;
+    const urls = [];
+    body.querySelectorAll('video source[src], video[src], a[href]').forEach(node => {
+      const raw = node.getAttribute('src') || node.getAttribute('href');
+      if (raw && /\.(mp4|m4v|mov|webm)(\?|$)/i.test(raw)) {
+        urls.push(random40NormalizeUrl(raw, postUrl));
+      }
+    });
+    return [...new Set(urls.filter(Boolean))].map((videoUrl, postIndex) => ({
+      ...artistInfo,
+      type: 'video',
+      videoUrl,
+      mediaKey: extractArtistKeyFromUrl(videoUrl) || videoUrl,
+      postUrl,
+      postIndex
+    }));
+  })().catch(error => {
+    random40PostEntriesCache.delete(cacheKey);
+    throw error;
   });
-  return [...new Set(urls.filter(Boolean))].map((videoUrl, postIndex) => ({
-    ...artistInfo,
-    type: 'video',
-    videoUrl,
-    mediaKey: extractArtistKeyFromUrl(videoUrl) || videoUrl,
-    postUrl,
-    postIndex
-  }));
+  random40PostEntriesCache.set(cacheKey, promise);
+  while (random40PostEntriesCache.size > RANDOM40_POST_ENTRIES_CACHE_MAX) {
+    random40PostEntriesCache.delete(random40PostEntriesCache.keys().next().value);
+  }
+  return promise;
+}
+
+function random40ActiveArtistIdentity() {
+  const visibleIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
+  const eventIndex = visibleIndex >= 0 ? visibleIndex : currentPasteIndex;
+  const event = eventIndex >= 0 ? pasteEvents[eventIndex] : null;
+  return {
+    artistUrl: event?.artistUrl ? random40NormalizeArtistUrl(event.artistUrl) : '',
+    artistKey: String(event?.artistKey || '').toLowerCase()
+  };
+}
+
+function random40PostFetchConcurrencyLimit() {
+  const video = window.currentlyPlayingVideo;
+  if (video && !video.paused) {
+    return video.readyState < 3
+      ? RANDOM40_POST_BUFFERING_CONCURRENCY
+      : RANDOM40_POST_PLAYING_CONCURRENCY;
+  }
+  return RANDOM40_POST_CONCURRENCY;
+}
+
+function random40PostTaskMatchesActiveArtist(item, activeArtist) {
+  if (!item || !activeArtist) return false;
+  if (activeArtist.artistKey && item.artistKey === activeArtist.artistKey) return true;
+  return Boolean(activeArtist.artistUrl && item.artistUrl === activeArtist.artistUrl);
+}
+
+function random40PumpPostFetchQueue() {
+  const limit = random40PostFetchConcurrencyLimit();
+  const activeArtist = random40ActiveArtistIdentity();
+  while (random40PostFetchActive < limit && random40PostFetchQueue.length) {
+    let selectedIndex = random40PostFetchQueue.findIndex(item => random40PostTaskMatchesActiveArtist(item, activeArtist));
+    if (selectedIndex < 0) selectedIndex = 0;
+    const item = random40PostFetchQueue.splice(selectedIndex, 1)[0];
+    random40PostFetchActive++;
+    Promise.resolve()
+      .then(item.task)
+      .then(item.resolve, item.reject)
+      .finally(() => {
+        random40PostFetchActive = Math.max(0, random40PostFetchActive - 1);
+        random40PumpPostFetchQueue();
+      });
+  }
+}
+
+function random40WithPostFetchPriority(task, artistInfo = {}) {
+  return new Promise((resolve, reject) => {
+    random40PostFetchQueue.push({
+      task,
+      resolve,
+      reject,
+      artistUrl: artistInfo.artistUrl ? random40NormalizeArtistUrl(artistInfo.artistUrl) : '',
+      artistKey: String(artistInfo.artistKey || '').toLowerCase(),
+      sequence: random40PostFetchSequence++
+    });
+    random40PumpPostFetchQueue();
+  });
 }
 
 async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = Infinity, ignoreStop = false, onEntries = null) {
-  const selectedLinks = [...new Set((links || []).filter(Boolean))];
+  const selectedLinks = shuffleInPlace([...new Set((links || []).filter(Boolean))]);
   if (!selectedLinks.length) return [];
 
   let index = 0;
   let active = 0;
   let settled = false;
   const results = [];
-  const limit = Math.min(RANDOM40_POST_CONCURRENCY, selectedLinks.length);
+  const requestedLimit = Number.isFinite(stopAtVideos)
+    ? Math.max(4, Math.ceil(Math.max(1, stopAtVideos) * 1.5))
+    : RANDOM40_POST_CONCURRENCY;
+  const limit = Math.min(RANDOM40_POST_CONCURRENCY, requestedLimit, selectedLinks.length);
 
   return await new Promise(resolve => {
     const finish = () => {
@@ -9158,9 +9382,16 @@ async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = I
       }
 
       while (active < limit && index < selectedLinks.length && (!random40State?.stop || ignoreStop) && results.length < stopAtVideos) {
+        const remainingTarget = Number.isFinite(stopAtVideos)
+          ? Math.max(0, stopAtVideos - results.length)
+          : Infinity;
+        const dynamicLimit = Number.isFinite(remainingTarget)
+          ? Math.min(limit, Math.max(1, Math.ceil(remainingTarget * 1.5)))
+          : limit;
+        if (active >= dynamicLimit) break;
         const link = selectedLinks[index++];
         active++;
-        random40VideoEntriesFromPost(link, artistInfo)
+        random40WithPostFetchPriority(() => random40VideoEntriesFromPost(link, artistInfo), artistInfo)
           .catch(() => [])
           .then(entries => {
             if (!settled && entries?.length) {
@@ -9237,9 +9468,10 @@ function random40BuildImportPayload(entries, globalStartIndex = 0, mode = random
   const modelMode = random40NormalizeMode(mode);
 
   for (const artistEntries of byArtist.values()) {
-    const first = artistEntries[0];
+    const randomizedArtistEntries = shuffleInPlace([...artistEntries]);
+    const first = randomizedArtistEntries[0];
     const start = urls.length;
-    artistEntries.forEach(entry => {
+    randomizedArtistEntries.forEach(entry => {
       urls.push(entry.videoUrl);
       metadata.push({
         ...entry,
@@ -9334,7 +9566,7 @@ function random40FindArtistEventForEntries(entries) {
 }
 
 function random40AppendEntriesToExistingArtist(entries) {
-  const cleanEntries = (entries || []).filter(entry => entry?.videoUrl);
+  const cleanEntries = shuffleInPlace((entries || []).filter(entry => entry?.videoUrl));
   if (!cleanEntries.length) return 0;
 
   const found = random40FindArtistEventForEntries(cleanEntries);
