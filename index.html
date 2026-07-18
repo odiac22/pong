@@ -319,7 +319,7 @@
     }
     .unwatched-videos-button:hover, .unwatched-videos-button:active { opacity: 0.85; transform: translateY(-50%) scale(1.06); }
     .paste-prev-button {
-      position: fixed; left: 12px; top: 50%; transform: translateY(-50%);
+      position: fixed; left: 12px; top: calc(50% - 8px); transform: translateY(-50%);
       width: 28px; height: 28px; background: var(--ui-bg); opacity: 0.2;
       font-size: 15px; border-radius: 999px; display: flex; align-items: center;
       justify-content: center; z-index: 1000; cursor: pointer; border: 1px solid var(--ui-border);
@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.97</div>
+  <div class="version-number">23.98</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -840,13 +840,13 @@
   <div id="train-ai-panel" class="train-ai-panel" hidden>
     <section class="train-ai-shell" aria-label="Train personal AI">
       <header class="train-ai-header">
-        <div class="train-ai-title">Train AI<span id="train-ai-subtitle" class="train-ai-subtitle">Swipe left = like &middot; Swipe right = dislike</span></div>
+        <div class="train-ai-title">Train AI<span id="train-ai-subtitle" class="train-ai-subtitle">Swipe freely &middot; AI scores each group of 50 in the background</span></div>
         <button id="train-ai-reset-stats" class="train-ai-reset" type="button">Reset scores</button>
         <button id="train-ai-close" class="train-ai-close" type="button" aria-label="Close">×</button>
       </header>
       <div class="train-ai-scores">
-        <div class="train-ai-score">Local1 accuracy<b id="train-ai-local-score">&mdash;</b><span id="train-ai-local-count">0/50 in this batch</span><small id="train-ai-local-trend" class="train-ai-trend">Finish 50 to save the score</small></div>
-        <div class="train-ai-score">Local2 accuracy<b id="train-ai-local2-score">&mdash;</b><span id="train-ai-local2-count">0/50 in this batch</span><small id="train-ai-local2-trend" class="train-ai-trend">Finish 50 to save the score</small></div>
+        <div class="train-ai-score">Local1 accuracy<b id="train-ai-local-score">&mdash;</b><span id="train-ai-local-count">AI scored 0/50</span><small id="train-ai-local-trend" class="train-ai-trend">Final score appears after 50</small></div>
+        <div class="train-ai-score">Local2 accuracy<b id="train-ai-local2-score">&mdash;</b><span id="train-ai-local2-count">AI scored 0/50</span><small id="train-ai-local2-trend" class="train-ai-trend">Final score appears after 50</small></div>
       </div>
       <div id="train-ai-deck" class="train-ai-deck">
         <article id="train-ai-card" class="train-ai-card">
@@ -6770,10 +6770,10 @@ const RANDOM40_POST_ENTRIES_CACHE_MAX = 6000;
 const RANDOM40_PAGE_BATCH_SIZE = 8;
 const RANDOM40_LISTING_PAGE_BATCH_SIZE = 8;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
-const RANDOM40_MIN_VIDEOS_PER_ARTIST = 25;
+const RANDOM40_MIN_VIDEOS_PER_ARTIST = 15;
 const RANDOM40_PRECHECK_MAX_ARTIST_PAGES = 36;
 const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 72;
-const RANDOM40_FAST_PUBLISH_VIDEOS = 4;
+const RANDOM40_FAST_PUBLISH_VIDEOS = RANDOM40_MIN_VIDEOS_PER_ARTIST;
 const RANDOM40_BACKGROUND_APPEND_BATCH = 4;
 const RANDOM40_BACKGROUND_APPEND_DELAY_MS = 180;
 const RANDOM40_MODEL = 'gpt-5.4-nano';
@@ -8739,13 +8739,14 @@ const TRAIN_AI_AUDIT_KEY = 'pong_train_ai_verdict_audit_v1';
 const TRAIN_AI_TOTAL_IMAGES = 5;
 const TRAIN_AI_POST_IMAGE_COUNT = TRAIN_AI_TOTAL_IMAGES - 1;
 const TRAIN_AI_SWIPE_COMMIT_MS = 80;
-const TRAIN_AI_RESULT_FLASH_MS = 200;
 const TRAIN_AI_CLASSIFY_TIMEOUT_MS = 35000;
+const TRAIN_AI_FAST_HARD_CHECK_TIMEOUT_MS = 20000;
 const TRAIN_AI_HARD_CHECK_TIMEOUT_MS = 40000;
 const TRAIN_AI_MAX_CANDIDATES_PER_FILL = 48;
 const TRAIN_AI_GATE_CONCURRENCY = 4;
 const TRAIN_AI_QUEUE_TARGET = 10;
 const TRAIN_AI_DISPLAY_RESERVE = 3;
+const TRAIN_AI_PREDICTION_CONCURRENCY = 1;
 const TRAIN_AI_IMAGE_PRELOAD_TIMEOUT_MS = 8000;
 const trainAiState = {
   open: false,
@@ -8765,7 +8766,11 @@ const trainAiState = {
   queueWaiters: [],
   queueFilling: false,
   queueFillPromise: null,
-  queueGeneration: 0
+  queueGeneration: 0,
+  predictionQueue: [],
+  predictionActive: 0,
+  pendingEvaluations: 0,
+  statsGeneration: 0
 };
 
 function trainAiLoadStats() {
@@ -8834,16 +8839,28 @@ function trainAiRenderStats() {
   for (const mode of ['local', 'local2']) {
     const item = trainAiNormalizeStatItem(stats[mode]);
     stats[mode] = item;
-    const percent = item.batchTotal ? `${Math.round(item.batchCorrect * 100 / item.batchTotal)}%` : '—';
+    const hasActiveScoring = item.batchTotal > 0 || trainAiState.pendingEvaluations > 0;
+    const percent = hasActiveScoring
+      ? '…'
+      : item.last50Percent != null
+      ? `${item.last50Percent}%`
+      : '—';
     const score = document.getElementById(mode === 'local' ? 'train-ai-local-score' : 'train-ai-local2-score');
     const count = document.getElementById(mode === 'local' ? 'train-ai-local-count' : 'train-ai-local2-count');
     const trend = document.getElementById(mode === 'local' ? 'train-ai-local-trend' : 'train-ai-local2-trend');
     if (score) score.textContent = percent;
-    if (count) count.textContent = `${item.batchTotal}/50 in this batch · ${item.batchCorrect} correct`;
+    if (count) {
+      const pending = trainAiState.pendingEvaluations ? ` · ${trainAiState.pendingEvaluations} pending` : '';
+      count.textContent = item.batchTotal
+        ? `AI scored ${item.batchTotal}/50${pending}`
+        : item.last50Percent != null && !pending
+        ? `${Math.round(item.last50Percent / 2)}/50 correct in last batch`
+        : `AI scored 0/50${pending}`;
+    }
     if (trend) {
       trend.className = 'train-ai-trend';
       if (item.last50Percent == null) {
-        trend.textContent = 'Finish 50 to save the score';
+        trend.textContent = 'Final score appears after 50';
       } else if (item.previous50Percent == null) {
         trend.textContent = `Last 50: ${item.last50Percent}%`;
       } else {
@@ -8859,7 +8876,7 @@ function trainAiRenderStats() {
 
 function trainAiSetStatus(text) {
   const subtitle = document.getElementById('train-ai-subtitle');
-  if (subtitle) subtitle.textContent = text || 'Swipe left = like · Swipe right = dislike';
+  if (subtitle) subtitle.textContent = text || 'Swipe freely · AI scores each group of 50 in the background';
 }
 
 function trainAiClearSwipeTint(card = document.getElementById('train-ai-card')) {
@@ -8913,7 +8930,7 @@ function trainAiRenderCandidate(candidate) {
   document.getElementById('train-ai-reveal')?.classList.remove('visible');
   trainAiResetCardTransform();
   trainAiRenderCurrentImage();
-  trainAiSetStatus('Swipe left = like · Swipe right = dislike');
+  trainAiSetStatus('Swipe freely · AI scores each group of 50 in the background');
 }
 
 async function trainAiFetchDecision(payload, timeoutMs) {
@@ -8973,6 +8990,48 @@ function trainAiPreparePredictions(candidate, { quiet = false } = {}) {
   });
 }
 
+function trainAiPumpPredictionQueue() {
+  while (
+    trainAiState.predictionActive < TRAIN_AI_PREDICTION_CONCURRENCY &&
+    trainAiState.predictionQueue.length
+  ) {
+    const job = trainAiState.predictionQueue.shift();
+    if (job.generation !== trainAiState.queueGeneration && !job.candidate?.evaluationCommitted) {
+      job.resolve({
+        local: { decision: 'unavailable', confidence: 0, reason: 'unused queued candidate' },
+        local2: { decision: 'unavailable', confidence: 0, reason: 'unused queued candidate' }
+      });
+      continue;
+    }
+    trainAiState.predictionActive++;
+    Promise.resolve()
+      .then(() => trainAiPreparePredictions(job.candidate, { quiet: true }))
+      .then(job.resolve, job.reject)
+      .finally(() => {
+        trainAiState.predictionActive = Math.max(0, trainAiState.predictionActive - 1);
+        trainAiPumpPredictionQueue();
+      });
+  }
+}
+
+function trainAiSchedulePredictions(candidate) {
+  if (!candidate) return Promise.resolve({
+    local: { decision: 'unavailable', confidence: 0, reason: 'missing candidate' },
+    local2: { decision: 'unavailable', confidence: 0, reason: 'missing candidate' }
+  });
+  if (candidate.predictionPromise) return candidate.predictionPromise;
+  candidate.predictionPromise = new Promise((resolve, reject) => {
+    trainAiState.predictionQueue.push({
+      candidate,
+      resolve,
+      reject,
+      generation: trainAiState.queueGeneration
+    });
+    trainAiPumpPredictionQueue();
+  });
+  return candidate.predictionPromise;
+}
+
 function trainAiPreloadCandidateImages(candidate) {
   if (candidate.imagePreloadPromise) return candidate.imagePreloadPromise;
   candidate.preloadedImages = [];
@@ -9001,11 +9060,8 @@ function trainAiPreloadCandidateImages(candidate) {
 
 function trainAiPrepareCandidateForDisplay(candidate) {
   if (!candidate) return Promise.resolve(null);
-  candidate.predictionPromise ||= trainAiPreparePredictions(candidate, { quiet: true });
-  candidate.displayReadyPromise ||= Promise.allSettled([
-    candidate.predictionPromise,
-    trainAiPreloadCandidateImages(candidate)
-  ]).then(() => candidate);
+  trainAiSchedulePredictions(candidate);
+  candidate.displayReadyPromise ||= trainAiPreloadCandidateImages(candidate).then(() => candidate);
   return candidate.displayReadyPromise;
 }
 
@@ -9016,12 +9072,9 @@ function trainAiWarmDisplayReserve() {
 }
 
 async function trainAiHardVisualCheck(candidate) {
-  return trainAiFetchDecision({
+  const shared = {
     app: 'pong-train-ai',
     model: RANDOM40_LOCAL_MODEL_NAME,
-    visionModel: RANDOM40_LOCAL2_VISION_MODEL,
-    hardCheckOnly: true,
-    promptVersion: `${RANDOM40_PROMPT_VERSION}-train-ai-gender-gate`,
     artist: {
       artistUrl: candidate.artistUrl,
       artistName: candidate.artistName,
@@ -9031,6 +9084,35 @@ async function trainAiHardVisualCheck(candidate) {
     candidateImageUrls: candidate.imageUrls.slice(0, TRAIN_AI_TOTAL_IMAGES),
     acceptedArtists: [],
     rejectedArtists: []
+  };
+
+  const fast = await trainAiFetchDecision({
+    ...shared,
+    localVariant: 'local2',
+    fastHardCheckOnly: true,
+    promptVersion: `${RANDOM40_PROMPT_VERSION}-train-ai-fast-gender-gate`
+  }, TRAIN_AI_FAST_HARD_CHECK_TIMEOUT_MS).catch(error => ({
+    decision: 'unavailable',
+    confidence: 0,
+    reason: error?.message || 'fast hard check unavailable',
+    checks: {}
+  }));
+
+  if (trainAiHardVisualGatePasses(fast)) return fast;
+  const fastChecks = fast?.checks || {};
+  const definiteFastReject =
+    String(fast?.source || '').toLowerCase() === 'hard_filter' ||
+    trainAiPredictionFlagsMale(fast) ||
+    fastChecks.feet_dominant === true ||
+    fastChecks.logo_or_placeholder === true ||
+    fastChecks.appears_over_50 === true;
+  if (definiteFastReject) return fast;
+
+  return trainAiFetchDecision({
+    ...shared,
+    visionModel: RANDOM40_LOCAL2_VISION_MODEL,
+    hardCheckOnly: true,
+    promptVersion: `${RANDOM40_PROMPT_VERSION}-train-ai-qwen-fallback-gate`
   }, TRAIN_AI_HARD_CHECK_TIMEOUT_MS);
 }
 
@@ -9109,7 +9191,6 @@ async function trainAiLoadRandomPage({ quiet = false, generation = trainAiState.
 
 function trainAiDeliverQueuedCandidate(candidate, generation) {
   if (!candidate || !trainAiState.open || generation !== trainAiState.queueGeneration) return;
-  candidate.predictionPromise ||= trainAiPreparePredictions(candidate, { quiet: true });
   const waiter = trainAiState.queueWaiters.shift();
   if (waiter) {
     void trainAiPrepareCandidateForDisplay(candidate).then(prepared => {
@@ -9197,7 +9278,7 @@ async function trainAiNextCandidate(candidatePromise = null) {
     return;
   }
   trainAiRenderCandidate(candidate);
-  trainAiState.predictionPromise = candidate.predictionPromise || trainAiPreparePredictions(candidate);
+  trainAiState.predictionPromise = trainAiSchedulePredictions(candidate);
   trainAiState.busy = false;
   trainAiSetActionsDisabled(false);
   void trainAiEnsureQueue(TRAIN_AI_QUEUE_TARGET);
@@ -9213,10 +9294,9 @@ function trainAiSetActionsDisabled(disabled) {
 function trainAiRecordPrediction(mode, prediction, label) {
   if (String(prediction?.source || '').toLowerCase() === 'hard_filter') return null;
   const predictedLabel = prediction?.decision === 'accept' ? 'accept' : prediction?.decision === 'reject' ? 'reject' : '';
-  if (!predictedLabel) return null;
   const stats = trainAiNormalizeStatItem(trainAiState.stats[mode]);
   trainAiState.stats[mode] = stats;
-  const matched = predictedLabel === label;
+  const matched = Boolean(predictedLabel) && predictedLabel === label;
   stats.total++;
   if (matched) stats.correct++;
   stats.history.push(matched ? 1 : 0);
@@ -9299,16 +9379,18 @@ function trainAiStoreVerdictAudit(label, candidate, predictions, reasonLabel, ha
   return audit;
 }
 
-async function trainAiFinalizeChoice(label, candidate, predictionPromise, reasonLabel) {
+async function trainAiFinalizeChoice(label, candidate, predictionPromise, reasonLabel, statsGeneration) {
   const predictions = await predictionPromise;
   const hardFilterOverride = random40HardFilter(candidate) ||
     [predictions.local, predictions.local2].find(prediction => String(prediction?.source || '').toLowerCase() === 'hard_filter');
   trainAiStoreVerdictAudit(label, candidate, predictions, reasonLabel, hardFilterOverride);
   if (hardFilterOverride) return { predictions, hardFilterOverride };
 
-  trainAiRecordPrediction('local', predictions.local, label);
-  trainAiRecordPrediction('local2', predictions.local2, label);
-  trainAiSaveStats();
+  if (statsGeneration === trainAiState.statsGeneration) {
+    trainAiRecordPrediction('local', predictions.local, label);
+    trainAiRecordPrediction('local2', predictions.local2, label);
+    trainAiSaveStats();
+  }
   const record = trainAiStoreBrowserFeedback(label, candidate, reasonLabel);
   void random40SendLocalLearningExample(label, record).catch(() => {});
   return { predictions, hardFilterOverride: null };
@@ -9320,10 +9402,19 @@ async function trainAiChoose(label) {
   trainAiSetActionsDisabled(true);
 
   const candidate = trainAiState.candidate;
-  const predictionPromise = trainAiState.predictionPromise || candidate.predictionPromise || trainAiPreparePredictions(candidate, { quiet: true });
+  candidate.evaluationCommitted = true;
+  const predictionPromise = trainAiState.predictionPromise || trainAiSchedulePredictions(candidate);
   const selectedReason = trainAiState.selectedReason;
   const nextCandidatePromise = trainAiTakeQueuedCandidate();
-  const finalizationPromise = trainAiFinalizeChoice(label, candidate, predictionPromise, selectedReason).catch(() => null);
+  const statsGeneration = trainAiState.statsGeneration;
+  trainAiState.pendingEvaluations++;
+  trainAiRenderStats();
+  void trainAiFinalizeChoice(label, candidate, predictionPromise, selectedReason, statsGeneration)
+    .catch(() => null)
+    .finally(() => {
+      trainAiState.pendingEvaluations = Math.max(0, trainAiState.pendingEvaluations - 1);
+      trainAiRenderStats();
+    });
   const card = document.getElementById('train-ai-card');
   if (card) {
     const direction = label === 'accept' ? -1 : 1;
@@ -9332,26 +9423,6 @@ async function trainAiChoose(label) {
     card.style.opacity = '0.82';
     await sleep(TRAIN_AI_SWIPE_COMMIT_MS);
     trainAiResetCardTransform();
-  }
-
-  const quickResult = await finalizationPromise;
-  if (quickResult?.hardFilterOverride) {
-    document.getElementById('train-ai-reveal-title').textContent = 'Not used for training';
-    for (const [elementId, modelName] of [['train-ai-local-result', 'Local1'], ['train-ai-local2-result', 'Local2']]) {
-      const element = document.getElementById(elementId);
-      element.className = 'train-ai-model-result unavailable';
-      element.textContent = `${modelName}: Text filter`;
-    }
-    document.getElementById('train-ai-learning-status').textContent = 'Your swipe was ignored. Text hard filters always win.';
-    document.getElementById('train-ai-reveal').classList.add('visible');
-    await sleep(TRAIN_AI_RESULT_FLASH_MS);
-  } else if (quickResult?.predictions) {
-    document.getElementById('train-ai-reveal-title').textContent = '';
-    trainAiShowModelAgreement('train-ai-local-result', 'Local1', quickResult.predictions.local, label);
-    trainAiShowModelAgreement('train-ai-local2-result', 'Local2', quickResult.predictions.local2, label);
-    document.getElementById('train-ai-learning-status').textContent = '';
-    document.getElementById('train-ai-reveal').classList.add('visible');
-    await sleep(TRAIN_AI_RESULT_FLASH_MS);
   }
 
   if (!trainAiState.open) return;
@@ -9365,7 +9436,7 @@ async function trainAiChoose(label) {
     const images = document.getElementById('train-ai-images');
     if (name) name.textContent = 'Loading next artist…';
     if (images) images.replaceChildren();
-  }, 160);
+  }, 120);
   await trainAiNextCandidate(nextCandidatePromise);
   clearTimeout(loadingFallback);
 }
@@ -9436,6 +9507,7 @@ function trainAiResetStats() {
     return;
   }
   trainAiState.resetStatsArmedUntil = 0;
+  trainAiState.statsGeneration++;
   trainAiState.stats = {
     local: trainAiEmptyStatItem(),
     local2: trainAiEmptyStatItem(),
@@ -9542,16 +9614,29 @@ function random40ExtractVideoPostLinks(doc, baseUrl) {
   return [...new Set(links.filter(Boolean))];
 }
 
-async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPages = RANDOM40_MAX_ARTIST_PAGES, ignoreStop = false } = {}) {
+async function random40CollectVideoPostLinks(artist, {
+  stopAt = Infinity,
+  maxPages = RANDOM40_MAX_ARTIST_PAGES,
+  ignoreStop = false,
+  verifyVideosAt = 0,
+  seed = null
+} = {}) {
   const base = artist.artistUrl;
-  const postLinks = new Set();
-  const pageTextParts = [];
-  const postImageEntries = [];
-  const firstDoc = await random40FetchDoc(base, { timeoutMs: 22000 });
+  const postLinks = new Set(seed?.links || []);
+  const pageTextParts = seed?.pageText ? [seed.pageText] : [];
+  const postImageEntries = [...(seed?.postImageEntries || [])];
+  const verifiedEntries = [...(seed?.verifiedEntries || [])];
+  const checkedPostLinks = new Set(seed?.checkedPostLinks || []);
+  const verificationTarget = Math.max(0, Number(verifyVideosAt) || 0);
+  const firstDoc = seed?.firstDoc || await random40FetchDoc(base, { timeoutMs: 22000 });
+  let scannedThroughPage = Math.max(1, Number(seed?.scannedThroughPage || 1));
+  let scanComplete = Boolean(seed?.scanComplete);
 
-  random40ExtractVideoPostLinks(firstDoc, base).forEach(url => postLinks.add(url));
-  postImageEntries.push(...random40ExtractScraperPostImages(firstDoc, base, artist));
-  if (firstDoc.body?.innerText) pageTextParts.push(firstDoc.body.innerText);
+  if (!seed) {
+    random40ExtractVideoPostLinks(firstDoc, base).forEach(url => postLinks.add(url));
+    postImageEntries.push(...random40ExtractScraperPostImages(firstDoc, base, artist));
+    if (firstDoc.body?.innerText) pageTextParts.push(firstDoc.body.innerText);
+  }
 
   const firstPageText = pageTextParts.join(' ').replace(/\s+/g, ' ');
   const firstPageHard = random40HardFilter({
@@ -9564,13 +9649,42 @@ async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPag
       links: [...postLinks],
       profileImageUrl: random40FindProfileImageFromDoc(firstDoc, artist, base),
       postImageEntries: random40DeduplicateImageEntries(postImageEntries),
+      verifiedEntries,
+      checkedPostLinks: [...checkedPostLinks],
+      scannedThroughPage,
+      nextPage: scannedThroughPage + 1,
+      scanComplete,
       pageText: firstPageText.slice(0, 60000),
       hardReject: firstPageHard
     };
   }
 
-  let page = 2;
-  while (page <= maxPages && postLinks.size < stopAt) {
+  const verifyPendingPostLinks = async () => {
+    if (!verificationTarget || verifiedEntries.length >= verificationTarget) return;
+    const pendingLinks = [...postLinks].filter(link => link && !checkedPostLinks.has(link));
+    if (!pendingLinks.length) return;
+    pendingLinks.forEach(link => checkedPostLinks.add(link));
+    const found = await random40ScrapeVideoLinksUntil(
+      pendingLinks,
+      random40ArtistInfo(base, firstDoc),
+      verificationTarget - verifiedEntries.length,
+      ignoreStop
+    );
+    const seenVideos = new Set(verifiedEntries.map(entry => entry?.videoUrl).filter(Boolean));
+    found.forEach(entry => {
+      if (!entry?.videoUrl || seenVideos.has(entry.videoUrl)) return;
+      seenVideos.add(entry.videoUrl);
+      verifiedEntries.push(entry);
+    });
+  };
+
+  await verifyPendingPostLinks();
+
+  let page = Math.max(2, Number(seed?.nextPage || scannedThroughPage + 1));
+  const needsMore = () => verificationTarget
+    ? verifiedEntries.length < verificationTarget
+    : postLinks.size < stopAt;
+  while (!scanComplete && page <= maxPages && needsMore()) {
     if (random40State?.stop && !ignoreStop) break;
     const pages = Array.from({ length: Math.min(RANDOM40_PAGE_BATCH_SIZE, maxPages - page + 1) }, (_, i) => page + i);
     const docs = await Promise.all(pages.map(n =>
@@ -9584,7 +9698,12 @@ async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPag
       postImageEntries.push(...random40ExtractScraperPostImages(doc, `${base}?page=${pages[index]}`, artist));
       if (doc.body?.innerText) pageTextParts.push(doc.body.innerText);
     });
-    if (!hasPosts) break;
+    scannedThroughPage = pages[pages.length - 1] || scannedThroughPage;
+    if (!hasPosts) {
+      scanComplete = true;
+      break;
+    }
+    await verifyPendingPostLinks();
     page += RANDOM40_PAGE_BATCH_SIZE;
   }
 
@@ -9593,6 +9712,11 @@ async function random40CollectVideoPostLinks(artist, { stopAt = Infinity, maxPag
     links: [...postLinks],
     profileImageUrl: random40FindProfileImageFromDoc(firstDoc, artist, base),
     postImageEntries: random40DeduplicateImageEntries(postImageEntries),
+    verifiedEntries,
+    checkedPostLinks: [...checkedPostLinks],
+    scannedThroughPage,
+    nextPage: scannedThroughPage + 1,
+    scanComplete,
     pageText: pageTextParts.join(' ').replace(/\s+/g, ' ').slice(0, 60000)
   };
 }
@@ -9696,7 +9820,7 @@ async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = I
   let settled = false;
   const results = [];
   const requestedLimit = Number.isFinite(stopAtVideos)
-    ? Math.max(4, Math.ceil(Math.max(1, stopAtVideos) * 1.5))
+    ? Math.min(8, Math.max(4, Math.ceil(Math.max(1, stopAtVideos) * 0.75)))
     : RANDOM40_POST_CONCURRENCY;
   const limit = Math.min(RANDOM40_POST_CONCURRENCY, requestedLimit, selectedLinks.length);
 
@@ -9770,7 +9894,8 @@ async function random40ScrapeArtistVideos(artist, options = {}) {
 
   const expanded = await random40CollectVideoPostLinks(artist, {
     stopAt: Math.max(links.length + RANDOM40_MIN_VIDEOS_PER_ARTIST, RANDOM40_MIN_VIDEOS_PER_ARTIST * 2),
-    ignoreStop
+    ignoreStop,
+    seed: collected
   }).catch(() => null);
   if (!expanded?.links?.length) return entries;
 
@@ -10012,11 +10137,12 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
     };
 
     try {
-      const knownLinks = [...new Set(precheck?.links || [])].filter(link => link && !firstPostUrls.includes(link));
+      const knownLinks = [...new Set(precheck?.links || [])].filter(Boolean);
       const fullScanPromise = random40CollectVideoPostLinks(artist, {
         stopAt: Infinity,
         maxPages: RANDOM40_MAX_ARTIST_PAGES,
-        ignoreStop: true
+        ignoreStop: true,
+        seed: precheck
       }).catch(() => null);
 
       await random40ScrapeVideoLinksUntil(
@@ -10362,22 +10488,23 @@ async function startRandom40(mode = 'nano') {
         let stageStarted = performance.now();
         const precheck = await random40WithTimeout(
           random40CollectVideoPostLinks(artist, {
-            stopAt: RANDOM40_MIN_VIDEOS_PER_ARTIST,
-            maxPages: RANDOM40_PRECHECK_MAX_ARTIST_PAGES
+            stopAt: Infinity,
+            maxPages: RANDOM40_PRECHECK_MAX_ARTIST_PAGES,
+            verifyVideosAt: RANDOM40_MIN_VIDEOS_PER_ARTIST
           }),
-          30000,
-          '25-video precheck timed out'
-        ).catch(() => ({ links: [] }));
+          45000,
+          `${RANDOM40_MIN_VIDEOS_PER_ARTIST}-video verification timed out`
+        ).catch(() => ({ links: [], verifiedEntries: [] }));
         random40RecordStageTiming('video-precheck', performance.now() - stageStarted);
         if (precheck.hardReject) {
           random40CacheHardReject(artist.artistUrl, precheck.hardReject.reason || 'hard reject');
           random40State.cachedSkips = (random40State.cachedSkips || 0) + 1;
           return;
         }
-        if ((precheck.links || []).length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
+        if ((precheck.verifiedEntries || []).length < RANDOM40_MIN_VIDEOS_PER_ARTIST) {
           random40State.skippedLowVideo = (random40State.skippedLowVideo || 0) + 1;
           updateRandom40Progress({
-            detail: `Skipped ${artist.artistName || 'artist'}: ${precheck.links?.length || 0}/${RANDOM40_MIN_VIDEOS_PER_ARTIST} video posts`,
+            detail: `Skipped ${artist.artistName || 'artist'}: ${precheck.verifiedEntries?.length || 0}/${RANDOM40_MIN_VIDEOS_PER_ARTIST} verified videos`,
             accepted: random40State.accepted,
             videos: random40State.videos,
             pages: random40State.pages,
@@ -10411,19 +10538,14 @@ async function startRandom40(mode = 'nano') {
         }
 
         const reviewImageCount = random40IsLocalMode(runMode) ? RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST : RANDOM40_INITIAL_IMAGES_PER_ARTIST;
-        updateRandom40Progress({ detail: `${classifierLabel} ${artistLabel} - ${precheck.links.length}+ videos, ${reviewImageCount} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        updateRandom40Progress({ detail: `${classifierLabel} ${artistLabel} - ${precheck.verifiedEntries.length}+ verified videos, ${reviewImageCount} images`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         let entriesPromise = null;
         let initialVideoStageStarted = 0;
         if (runMode !== 'local') {
           initialVideoStageStarted = performance.now();
-          entriesPromise = random40WithTimeout(
-            random40ScrapeArtistVideos(artistWithPrecheckText, {
-              collected: precheck,
-              stopAtVideos: RANDOM40_FAST_PUBLISH_VIDEOS
-            }),
-            30000,
-            'first video scrape timed out'
-          ).catch(() => []);
+          entriesPromise = Promise.resolve(
+            shuffleInPlace([...(precheck.verifiedEntries || [])]).slice(0, RANDOM40_FAST_PUBLISH_VIDEOS)
+          );
         }
         stageStarted = performance.now();
         const decision = await random40WithTimeout(
@@ -10449,14 +10571,9 @@ async function startRandom40(mode = 'nano') {
 
         if (!entriesPromise) {
           initialVideoStageStarted = performance.now();
-          entriesPromise = random40WithTimeout(
-            random40ScrapeArtistVideos(artistWithPrecheckText, {
-              collected: precheck,
-              stopAtVideos: RANDOM40_FAST_PUBLISH_VIDEOS
-            }),
-            30000,
-            'first video scrape timed out'
-          ).catch(() => []);
+          entriesPromise = Promise.resolve(
+            shuffleInPlace([...(precheck.verifiedEntries || [])]).slice(0, RANDOM40_FAST_PUBLISH_VIDEOS)
+          );
         }
 
         if (runMode === 'local' && decision.requires_local_hard_verification) {

@@ -475,7 +475,7 @@ def hard_checks(analysis: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str
         grades.append({
             "image_index": index + 1,
             "decision": "reject" if checks["male_present"] or checks["feet_dominant"] or checks["logo_or_placeholder"] else "unsure",
-            "confidence": min(0.99, max(row)),
+            "confidence": float(min(0.99, max(row))),
             "reason": hard_reason or "visual evidence checked",
             "checks": checks,
             "body_profile": {
@@ -862,7 +862,11 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[{self.log_date_time_string()}] {fmt % args}", flush=True)
 
     def send_json(self, status: int, value: Any) -> None:
-        payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        payload = json.dumps(
+            value,
+            separators=(",", ":"),
+            default=lambda item: item.item() if isinstance(item, np.generic) else str(item),
+        ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))

@@ -1468,6 +1468,16 @@ async function classifyInner(payload, generation = workloadGeneration) {
   const candidateUrls = personalCandidateUrls.slice(0, payload.hardCheckOnly ? 5 : QWEN_CANDIDATE_IMAGES);
   if (!personalCandidateUrls.length) throw new Error('No candidate image URLs supplied.');
 
+  if (payload.fastHardCheckOnly) {
+    return await preferenceAiRequest('/classify', {
+      ...payload,
+      localVariant: 'local2',
+      hardCheckOnly: true,
+      fastHardCheckOnly: false,
+      candidateImageUrls: personalCandidateUrls
+    }, 30000, { workload: true });
+  }
+
   if (payload.hardCheckOnly) {
     const qwen = await classifyWithOllamaVision({
       artist,
