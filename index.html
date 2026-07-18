@@ -806,7 +806,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.92</div>
+  <div class="version-number">23.93</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -918,6 +918,8 @@ let viewedVideoKeys = new Set();
 let random40PreloadTimer = null;
 let random40PreloadContainer = null;
 let random40PreloadMap = new Map();
+let random40PreloadWarmedKeys = new Set();
+let random40PreloadWarmedByBundle = new Map();
 let random40PreloadActive = 0;
 let random40PreloadPumpTimer = null;
 let random40PostFetchActive = 0;
@@ -2583,17 +2585,18 @@ function currentRandom40RejectBundleInfo(reason) {
   };
 }
 
-async function rejectCurrentRandom40Artist(reason) {
+function rejectCurrentRandom40Artist(reason) {
   const rejectFn = window.PongRandom40RejectCurrentArtist;
   if (typeof rejectFn !== 'function') {
     showSortingIndicator('Random 40 reject learning is not ready');
-    return;
+    return Promise.resolve(false);
   }
 
-  await rejectFn(currentRandom40RejectBundleInfo(reason)).catch(() => false);
+  const bundleInfo = currentRandom40RejectBundleInfo(reason);
   if (typeof window.PongNavigateToNextPasteEvent === 'function') {
-    setTimeout(() => window.PongNavigateToNextPasteEvent(), 120);
+    window.PongNavigateToNextPasteEvent();
   }
+  return Promise.resolve(rejectFn(bundleInfo)).catch(() => false);
 }
 
 function createSaveButtons() {
@@ -2656,11 +2659,11 @@ function createSaveButtons() {
     reasonBtn.type = 'button';
     reasonBtn.className = 'random40-reject-reason';
     reasonBtn.textContent = reason.label;
-    reasonBtn.addEventListener('click', async e => {
+    reasonBtn.addEventListener('click', e => {
       e.preventDefault();
       e.stopPropagation();
       rejectMenu.classList.remove('open');
-      await rejectCurrentRandom40Artist(reason);
+      void rejectCurrentRandom40Artist(reason);
     });
     rejectMenu.appendChild(reasonBtn);
   });
@@ -4312,6 +4315,38 @@ function getPasteEventPaperclipKey(event, index = -1) {
   ).toLowerCase();
 }
 
+function getPasteEventArtistIdentityTokens(event, index = -1) {
+  if (!event) return new Set();
+  const tokens = new Set();
+  const artistUrl = event.artistUrl ? random40NormalizeArtistUrl(event.artistUrl) : '';
+  const artistKey = String(event.artistKey || '').trim().toLowerCase();
+  const bundleKey = String(event.bundleKey || '').trim().toLowerCase();
+  const paperclipKey = getPasteEventPaperclipKey(event, index);
+  if (artistUrl) tokens.add(`url:${artistUrl.toLowerCase()}`);
+  if (artistKey) tokens.add(`artist:${artistKey}`);
+  if (bundleKey) tokens.add(`bundle:${bundleKey}`);
+  if (paperclipKey) tokens.add(`paperclip:${paperclipKey}`);
+  return tokens;
+}
+
+function getCurrentPaperclipArtistIdentity() {
+  const indexes = new Set();
+  const tokens = new Set();
+  const visibleIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
+  if (visibleIndex >= 0) indexes.add(visibleIndex);
+  if (currentPasteIndex >= 0) indexes.add(currentPasteIndex);
+  indexes.forEach(index => {
+    getPasteEventArtistIdentityTokens(pasteEvents[index], index).forEach(token => tokens.add(token));
+  });
+  return { indexes, tokens };
+}
+
+function paperclipIdentityExcludesEvent(identity, event, index) {
+  if (!identity) return false;
+  if (identity.indexes?.has(index)) return true;
+  return [...getPasteEventArtistIdentityTokens(event, index)].some(token => identity.tokens?.has(token));
+}
+
 function isRandom40PasteEvent(event) {
   return String(event?.source || '').toLowerCase() === 'random40';
 }
@@ -4353,17 +4388,14 @@ function getRandom40PreloadBundleStats(event, index = -1) {
   const bundleKey = getPasteEventPaperclipKey(event, index);
   if (!bundleKey) return { ready: 0, loading: 0, total: 0 };
 
-  let ready = 0;
+  const ready = random40PreloadWarmedByBundle.get(bundleKey)?.size || 0;
   let loading = 0;
-  let total = 0;
   random40PreloadMap.forEach(record => {
     if (record.bundleKey !== bundleKey) return;
-    total++;
-    if (record.ready) ready++;
-    else loading++;
+    if (!record.ready) loading++;
   });
 
-  return { ready, loading, total };
+  return { ready, loading, total: ready + loading };
 }
 
 function countReadyVideosForPasteEvent(event, index = -1) {
@@ -4455,7 +4487,7 @@ function random40PauseHiddenPreloadsForPlayback() {
 }
 
 function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order = 0 } = {}) {
-  const key = `${bundleKey}|${globalIndex}|${url}`;
+  const key = `${bundleKey}|${url}`;
   let record = random40PreloadMap.get(key);
   if (record) {
     record.priority = Math.min(record.priority, priority);
@@ -4498,9 +4530,15 @@ function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order
   const markReady = () => {
     if (record.status === 'ready') return;
     random40FinishPreloadRecord(record, 'ready');
+    random40PreloadWarmedKeys.add(record.key);
+    if (!random40PreloadWarmedByBundle.has(record.bundleKey)) {
+      random40PreloadWarmedByBundle.set(record.bundleKey, new Set());
+    }
+    random40PreloadWarmedByBundle.get(record.bundleKey).add(record.key);
     video.preload = 'metadata';
     updatePasteNavigationButton();
     random40PumpPreloadQueue(0);
+    scheduleRandom40PreloadPool(300);
   };
   const markTouched = () => {
     record.touchedAt = Date.now();
@@ -4578,34 +4616,40 @@ function runRandom40PreloadPool() {
   });
   const neededKeys = new Set();
   let preloadOrder = 0;
-  const addCandidateVideo = ({ event, index }, offset, priority) => {
+  const addCandidateVideo = ({ event, index }, offset, priority, { includeWarmed = false } = {}) => {
     const bundleKey = getPasteEventPaperclipKey(event, index);
     const bounds = getPasteEventVideoBounds(event);
     if (!bundleKey || !bounds) return false;
     const globalIndex = bounds.start + offset;
-    if (globalIndex >= bounds.end || offset >= RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST) return false;
+    if (globalIndex >= bounds.end) return false;
     if (priority === 0 && globalIndex >= currentLoadedRangeStart && globalIndex < currentLoadedRangeEnd) return true;
     const url = allVideoUrls[globalIndex];
     if (!url) return true;
-    const key = `${bundleKey}|${globalIndex}|${url}`;
+    const key = `${bundleKey}|${url}`;
+    if (!includeWarmed && random40PreloadWarmedKeys.has(key)) return true;
     neededKeys.add(key);
     random40PreloadVideo(bundleKey, globalIndex, url, { priority, order: preloadOrder++ });
     return true;
   };
 
   if (currentCandidate) {
-    for (let offset = 0; offset < RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST; offset++) {
-      addCandidateVideo(currentCandidate, offset, 0);
+    for (let offset = 0; offset < RANDOM40_PRELOAD_CURRENT_RESERVE; offset++) {
+      if (!addCandidateVideo(currentCandidate, offset, 0, { includeWarmed: true })) break;
     }
   }
 
-  for (let offset = 0; neededKeys.size < RANDOM40_PRELOAD_MAX_ELEMENTS; offset++) {
+  const warmingCandidates = currentCandidate ? [currentCandidate, ...backgroundCandidates] : backgroundCandidates;
+  const maxCandidateVideos = warmingCandidates.reduce((max, candidate) => {
+    const bounds = getPasteEventVideoBounds(candidate.event);
+    return Math.max(max, bounds ? bounds.end - bounds.start : 0);
+  }, 0);
+  for (let offset = 0; neededKeys.size < RANDOM40_PRELOAD_MAX_ELEMENTS && offset < maxCandidateVideos; offset++) {
     let addedAny = false;
-    for (const candidate of backgroundCandidates) {
+    for (const candidate of warmingCandidates) {
       if (neededKeys.size >= RANDOM40_PRELOAD_MAX_ELEMENTS) break;
       if (addCandidateVideo(candidate, offset, 1)) addedAny = true;
     }
-    if (!addedAny || offset >= RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST - 1) break;
+    if (!addedAny) break;
   }
 
   cleanupRandom40PreloadPool(neededKeys);
@@ -4676,7 +4720,7 @@ function countLoadedVideosForPasteEvent(event) {
   return loaded;
 }
 
-function getBestLoadedPasteEventIndex() {
+function getBestLoadedPasteEventIndex(excludedIdentity = getCurrentPaperclipArtistIdentity()) {
   if (!Array.isArray(pasteEvents) || pasteEvents.length < 2) return -1;
   const startIndex = currentPasteIndex >= 0 ? currentPasteIndex : -1;
   let bestIndex = -1;
@@ -4685,7 +4729,7 @@ function getBestLoadedPasteEventIndex() {
 
   for (let offset = 1; offset <= pasteEvents.length; offset++) {
     const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
-    if (index === currentPasteIndex) continue;
+    if (paperclipIdentityExcludesEvent(excludedIdentity, pasteEvents[index], index)) continue;
     if (!isPasteEventViewableForPaperclip(pasteEvents[index])) continue;
     if (isPasteEventRetiredForPaperclip(pasteEvents[index], index)) continue;
 
@@ -4701,13 +4745,13 @@ function getBestLoadedPasteEventIndex() {
   return bestIndex;
 }
 
-function getNextActivePasteEventIndex() {
+function getNextActivePasteEventIndex(excludedIdentity = getCurrentPaperclipArtistIdentity()) {
   if (!Array.isArray(pasteEvents) || !pasteEvents.length) return -1;
   const startIndex = currentPasteIndex >= 0 ? currentPasteIndex : -1;
 
   for (let offset = 1; offset <= pasteEvents.length; offset++) {
     const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
-    if (index === currentPasteIndex) continue;
+    if (paperclipIdentityExcludesEvent(excludedIdentity, pasteEvents[index], index)) continue;
     if (!isPasteEventViewableForPaperclip(pasteEvents[index])) continue;
     if (!isPasteEventRetiredForPaperclip(pasteEvents[index], index)) return index;
   }
@@ -4715,10 +4759,11 @@ function getNextActivePasteEventIndex() {
   return -1;
 }
 
-function getFirstActivePasteEventIndex() {
+function getFirstActivePasteEventIndex(excludedIdentity = getCurrentPaperclipArtistIdentity()) {
   if (!Array.isArray(pasteEvents) || !pasteEvents.length) return -1;
   return pasteEvents.findIndex((event, index) => (
     isPasteEventViewableForPaperclip(event) &&
+    !paperclipIdentityExcludesEvent(excludedIdentity, event, index) &&
     !isPasteEventRetiredForPaperclip(event, index)
   ));
 }
@@ -4756,10 +4801,11 @@ function navigateToNextPasteEvent(){
 
   syncCurrentPasteIndexFromVisibleVideo();
 
+  const excludedIdentity = getCurrentPaperclipArtistIdentity();
   const retired = retireCurrentPasteEventForPaperclip();
-  const nextLoadedIndex = getBestLoadedPasteEventIndex();
-  const nextRegularIndex = getNextActivePasteEventIndex();
-  const nextFallbackIndex = getFirstActivePasteEventIndex();
+  const nextLoadedIndex = getBestLoadedPasteEventIndex(excludedIdentity);
+  const nextRegularIndex = getNextActivePasteEventIndex(excludedIdentity);
+  const nextFallbackIndex = getFirstActivePasteEventIndex(excludedIdentity);
   const nextActiveIndex = nextLoadedIndex >= 0
     ? nextLoadedIndex
     : nextRegularIndex >= 0
@@ -4815,6 +4861,8 @@ function resetRandom40AiStatsBaseline() {
 
 function resetPasteEvents(){
   pasteEvents=[];
+  random40PreloadWarmedKeys = new Set();
+  random40PreloadWarmedByBundle = new Map();
   pendingPastes=[];
   syncPendingPasteCacheState();
   currentPasteIndex=-1;
@@ -6585,7 +6633,7 @@ const RANDOM40_REJECT_IMAGES_PER_EXAMPLE = 3;
 const RANDOM40_STORED_IMAGES_PER_ARTIST = 40;
 const RANDOM40_LOCAL_LEARN_IMAGES_PER_EXAMPLE = 6;
 const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
-const RANDOM40_PRELOAD_MAX_VIDEOS_PER_ARTIST = 25;
+const RANDOM40_PRELOAD_CURRENT_RESERVE = 30;
 let random40AcceptedArtistsMemory = [];
 let random40RejectedArtistsMemory = [];
 let random40MemoryLoadPromise = null;
@@ -8518,8 +8566,9 @@ const TRAIN_AI_SWIPE_COMMIT_MS = 80;
 const TRAIN_AI_RESULT_FLASH_MS = 200;
 const TRAIN_AI_CLASSIFY_TIMEOUT_MS = 35000;
 const TRAIN_AI_HARD_CHECK_TIMEOUT_MS = 40000;
-const TRAIN_AI_MAX_CANDIDATES_PER_FILL = 24;
+const TRAIN_AI_MAX_CANDIDATES_PER_FILL = 48;
 const TRAIN_AI_GATE_CONCURRENCY = 4;
+const TRAIN_AI_QUEUE_TARGET = 10;
 const trainAiState = {
   open: false,
   busy: false,
@@ -8844,7 +8893,7 @@ function trainAiDeliverQueuedCandidate(candidate, generation) {
   else trainAiState.queue.push(candidate);
 }
 
-function trainAiEnsureQueue(target = 3) {
+function trainAiEnsureQueue(target = TRAIN_AI_QUEUE_TARGET) {
   if (!trainAiState.open) return Promise.resolve();
   if (trainAiState.queueFilling && trainAiState.queueFillPromise) return trainAiState.queueFillPromise;
   const generation = trainAiState.queueGeneration;
@@ -8898,21 +8947,21 @@ function trainAiEnsureQueue(target = 3) {
 function trainAiTakeQueuedCandidate() {
   if (trainAiState.queue.length) {
     const candidate = trainAiState.queue.shift();
-    void trainAiEnsureQueue(3);
+    void trainAiEnsureQueue(TRAIN_AI_QUEUE_TARGET);
     return Promise.resolve(candidate);
   }
   return new Promise(resolve => {
     trainAiState.queueWaiters.push(resolve);
-    void trainAiEnsureQueue(3);
+    void trainAiEnsureQueue(TRAIN_AI_QUEUE_TARGET);
   });
 }
 
-async function trainAiNextCandidate() {
+async function trainAiNextCandidate(candidatePromise = null) {
   if (!trainAiState.open) return;
   trainAiState.busy = true;
   trainAiSetActionsDisabled(true);
   if (!trainAiState.queue.length) trainAiSetStatus(`Loading ${TRAIN_AI_TOTAL_IMAGES} full-quality photos…`);
-  const candidate = await trainAiTakeQueuedCandidate();
+  const candidate = await (candidatePromise || trainAiTakeQueuedCandidate());
   if (!candidate || !trainAiState.open) {
     if (trainAiState.open) trainAiSetStatus('Could not load photos. Close and try again.');
     trainAiState.busy = false;
@@ -8922,7 +8971,7 @@ async function trainAiNextCandidate() {
   trainAiState.predictionPromise = candidate.predictionPromise || trainAiPreparePredictions(candidate);
   trainAiState.busy = false;
   trainAiSetActionsDisabled(false);
-  void trainAiEnsureQueue(3);
+  void trainAiEnsureQueue(TRAIN_AI_QUEUE_TARGET);
 }
 
 function trainAiSetActionsDisabled(disabled) {
@@ -8990,10 +9039,30 @@ function trainAiStoreBrowserFeedback(label, candidate, reasonLabel) {
   return record;
 }
 
+async function trainAiFinalizeChoice(label, candidate, predictionPromise, reasonLabel) {
+  const predictions = await predictionPromise;
+  const hardFilterOverride = random40HardFilter(candidate) ||
+    [predictions.local, predictions.local2].find(prediction => String(prediction?.source || '').toLowerCase() === 'hard_filter');
+  if (hardFilterOverride) return { predictions, hardFilterOverride };
+
+  trainAiRecordPrediction('local', predictions.local, label);
+  trainAiRecordPrediction('local2', predictions.local2, label);
+  trainAiSaveStats();
+  const record = trainAiStoreBrowserFeedback(label, candidate, reasonLabel);
+  void random40SendLocalLearningExample(label, record).catch(() => {});
+  return { predictions, hardFilterOverride: null };
+}
+
 async function trainAiChoose(label) {
   if (!trainAiState.open || trainAiState.busy || !trainAiState.candidate) return;
   trainAiState.busy = true;
   trainAiSetActionsDisabled(true);
+
+  const candidate = trainAiState.candidate;
+  const predictionPromise = trainAiState.predictionPromise || candidate.predictionPromise || trainAiPreparePredictions(candidate, { quiet: true });
+  const selectedReason = trainAiState.selectedReason;
+  const nextCandidatePromise = trainAiTakeQueuedCandidate();
+  const finalizationPromise = trainAiFinalizeChoice(label, candidate, predictionPromise, selectedReason).catch(() => null);
   const card = document.getElementById('train-ai-card');
   if (card) {
     const direction = label === 'accept' ? -1 : 1;
@@ -9003,12 +9072,9 @@ async function trainAiChoose(label) {
     await sleep(TRAIN_AI_SWIPE_COMMIT_MS);
     trainAiResetCardTransform();
   }
-  const candidate = trainAiState.candidate;
-  trainAiSetStatus('Checking your choice…');
-  const predictions = await trainAiState.predictionPromise;
-  const hardFilterOverride = random40HardFilter(candidate) ||
-    [predictions.local, predictions.local2].find(prediction => String(prediction?.source || '').toLowerCase() === 'hard_filter');
-  if (hardFilterOverride) {
+
+  const quickResult = await finalizationPromise;
+  if (quickResult?.hardFilterOverride) {
     document.getElementById('train-ai-reveal-title').textContent = 'Not used for training';
     for (const [elementId, modelName] of [['train-ai-local-result', 'Local1'], ['train-ai-local2-result', 'Local2']]) {
       const element = document.getElementById(elementId);
@@ -9018,30 +9084,29 @@ async function trainAiChoose(label) {
     document.getElementById('train-ai-learning-status').textContent = 'Your swipe was ignored. Text hard filters always win.';
     document.getElementById('train-ai-reveal').classList.add('visible');
     await sleep(TRAIN_AI_RESULT_FLASH_MS);
-    if (!trainAiState.open) return;
-    document.getElementById('train-ai-reveal').classList.remove('visible');
-    trainAiState.busy = false;
-    await trainAiNextCandidate();
-    return;
+  } else if (quickResult?.predictions) {
+    document.getElementById('train-ai-reveal-title').textContent = '';
+    trainAiShowModelAgreement('train-ai-local-result', 'Local1', quickResult.predictions.local, label);
+    trainAiShowModelAgreement('train-ai-local2-result', 'Local2', quickResult.predictions.local2, label);
+    document.getElementById('train-ai-learning-status').textContent = '';
+    document.getElementById('train-ai-reveal').classList.add('visible');
+    await sleep(TRAIN_AI_RESULT_FLASH_MS);
   }
-  trainAiRecordPrediction('local', predictions.local, label);
-  trainAiRecordPrediction('local2', predictions.local2, label);
-  trainAiSaveStats();
 
-  document.getElementById('train-ai-reveal-title').textContent = '';
-  trainAiShowModelAgreement('train-ai-local-result', 'Local1', predictions.local, label);
-  trainAiShowModelAgreement('train-ai-local2-result', 'Local2', predictions.local2, label);
-  const learningStatus = document.getElementById('train-ai-learning-status');
-  learningStatus.textContent = '';
-  document.getElementById('train-ai-reveal').classList.add('visible');
-
-  const record = trainAiStoreBrowserFeedback(label, candidate, trainAiState.selectedReason);
-  void random40SendLocalLearningExample(label, record).catch(() => {});
-  await sleep(TRAIN_AI_RESULT_FLASH_MS);
   if (!trainAiState.open) return;
   document.getElementById('train-ai-reveal').classList.remove('visible');
+  trainAiState.candidate = null;
+  trainAiState.predictionPromise = null;
   trainAiState.busy = false;
-  await trainAiNextCandidate();
+  const loadingFallback = setTimeout(() => {
+    if (!trainAiState.open || trainAiState.candidate) return;
+    const name = document.getElementById('train-ai-name');
+    const images = document.getElementById('train-ai-images');
+    if (name) name.textContent = 'Loading next artist…';
+    if (images) images.replaceChildren();
+  }, 160);
+  await trainAiNextCandidate(nextCandidatePromise);
+  clearTimeout(loadingFallback);
 }
 
 async function openTrainAiPanel() {
