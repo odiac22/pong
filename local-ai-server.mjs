@@ -2,6 +2,7 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
+import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { pipeline, RawImage, env } from '@xenova/transformers';
 
@@ -35,6 +36,9 @@ const FINETUNE_AUTO_IDLE_MS = Math.max(30000, Number(process.env.PONG_LORA_AUTOT
 const OLLAMA_VISION_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.PONG_OLLAMA_VISION_CONCURRENCY || 4)));
 const LOCAL_LORA_FAST_TIMEOUT_MS = Math.max(1500, Number(process.env.PONG_LOCAL_LORA_FAST_TIMEOUT_MS || 3000));
 const MAX_LEARNED_RECORDS = 2000;
+const GATEWAY_TIMEOUT_MS = Math.max(5000, Number(process.env.PONG_GATEWAY_TIMEOUT_MS || 30000));
+const GATEWAY_MAX_REDIRECTS = 5;
+const GATEWAY_ALLOWED_HOSTS = ['coomerfans.com', 'onlyfaphouse.com'];
 
 env.allowLocalModels = false;
 env.useBrowserCache = false;
@@ -72,6 +76,93 @@ function json(res, status, payload) {
     'Cache-Control': 'no-store'
   });
   res.end(body);
+}
+
+function gatewayCorsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET,HEAD,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type,Range,If-None-Match,If-Modified-Since',
+    'Access-Control-Expose-Headers': 'Accept-Ranges,Content-Length,Content-Range,Content-Type,ETag,Last-Modified',
+    'Cache-Control': 'no-store'
+  };
+}
+
+function gatewayTargetUrl(raw) {
+  let target;
+  try {
+    target = new URL(String(raw || ''));
+  } catch (_) {
+    throw new Error('invalid gateway URL');
+  }
+  const hostname = target.hostname.toLowerCase();
+  const allowed = target.protocol === 'https:' && GATEWAY_ALLOWED_HOSTS.some(host => (
+    hostname === host || hostname.endsWith(`.${host}`)
+  ));
+  if (!allowed || target.username || target.password) throw new Error('gateway host not allowed');
+  return target;
+}
+
+async function gatewayFetch(target, req, controller) {
+  let current = gatewayTargetUrl(target);
+  for (let redirect = 0; redirect <= GATEWAY_MAX_REDIRECTS; redirect++) {
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 PongLocalGateway/1.0',
+      'Accept': String(req.headers.accept || '*/*'),
+      'Accept-Encoding': 'identity',
+      'Referer': `${current.protocol}//${current.host}/`
+    };
+    for (const name of ['range', 'if-none-match', 'if-modified-since']) {
+      if (req.headers[name]) headers[name] = String(req.headers[name]);
+    }
+    const response = await fetch(current, {
+      method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+      headers,
+      redirect: 'manual',
+      cache: 'no-store',
+      signal: controller.signal
+    });
+    if (response.status < 300 || response.status >= 400 || !response.headers.get('location')) {
+      return response;
+    }
+    if (redirect >= GATEWAY_MAX_REDIRECTS) throw new Error('too many gateway redirects');
+    current = gatewayTargetUrl(new URL(response.headers.get('location'), current).toString());
+  }
+  throw new Error('gateway redirect failed');
+}
+
+async function streamGatewayResponse(req, res, target) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GATEWAY_TIMEOUT_MS);
+  activeWorkloadControllers.add(controller);
+  const abort = () => controller.abort();
+  req.once('aborted', abort);
+  res.once('close', abort);
+  try {
+    const upstream = await gatewayFetch(target, req, controller);
+    const headers = gatewayCorsHeaders();
+    for (const name of ['accept-ranges', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified']) {
+      const value = upstream.headers.get(name);
+      if (value) headers[name] = value;
+    }
+    res.writeHead(upstream.status, headers);
+    if (req.method === 'HEAD' || !upstream.body) {
+      res.end();
+      return;
+    }
+    await new Promise((resolve, reject) => {
+      const stream = Readable.fromWeb(upstream.body);
+      stream.once('error', reject);
+      res.once('error', reject);
+      res.once('finish', resolve);
+      stream.pipe(res);
+    });
+  } finally {
+    clearTimeout(timer);
+    activeWorkloadControllers.delete(controller);
+    req.off('aborted', abort);
+    res.off('close', abort);
+  }
 }
 
 function readBody(req) {
@@ -1856,12 +1947,25 @@ async function classify(payload) {
 
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
-    json(res, 204, {});
+    res.writeHead(204, gatewayCorsHeaders());
+    res.end();
     return;
   }
 
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/proxy') {
+      const target = url.searchParams.get('url') || '';
+      try {
+        gatewayTargetUrl(target);
+      } catch (error) {
+        json(res, 400, { error: error.message || 'bad gateway request' });
+        return;
+      }
+      await streamGatewayResponse(req, res, target);
+      return;
+    }
+
     if (req.method === 'GET' && url.pathname === '/health') {
       const preferenceAi = await preferenceAiHealth(true);
       const learnedStore = preferenceAi ? { records: [] } : await loadLearnedStore();
@@ -1887,6 +1991,11 @@ const server = http.createServer(async (req, res) => {
           concurrency: OLLAMA_VISION_CONCURRENCY
         },
         ready: Boolean(preferenceAi?.ready || extractorReady),
+        gateway: {
+          ready: true,
+          storage: 'memory-only',
+          allowed_hosts: GATEWAY_ALLOWED_HOSTS
+        },
         cached_images: embeddingCache.size,
         learned_accept_records: preferenceAi?.accepts ?? learnedStore.records.filter(record => record.label === 'accept').length,
         learned_reject_records: preferenceAi?.rejects ?? learnedStore.records.filter(record => record.label === 'reject').length,
@@ -2048,6 +2157,10 @@ const server = http.createServer(async (req, res) => {
 
     json(res, 404, { error: 'not found' });
   } catch (error) {
+    if (res.headersSent) {
+      if (!res.destroyed) res.destroy(error);
+      return;
+    }
     json(res, 500, { error: error.message || String(error) });
   }
 });
