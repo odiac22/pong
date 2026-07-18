@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.98</div>
+  <div class="version-number">23.99</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -913,6 +913,7 @@ let deckForwardHistory = [];
 const DECK_HISTORY_LIMIT = 80;
 const DECK_PRELOAD_RADIUS = 2;
 const DECK_INITIAL_WARM_COUNT = 5;
+const FOREGROUND_VIDEO_BUFFER_TARGET_SECONDS = 10;
 const EROME_SESSION_SAVE_MIN_DELAY_MS = 6000;
 const EROME_LARGE_SESSION_SAVE_MIN_DELAY_MS = 22000;
 const EROME_LARGE_SESSION_URL_THRESHOLD = 600;
@@ -933,6 +934,7 @@ let random40PreloadWarmedKeys = new Set();
 let random40PreloadWarmedByBundle = new Map();
 let random40PreloadActive = 0;
 let random40PreloadPumpTimer = null;
+let foregroundPriorityVideo = null;
 let random40PostFetchActive = 0;
 let random40PostFetchQueue = [];
 let random40PostFetchSequence = 0;
@@ -2881,9 +2883,103 @@ function pauseOtherVideos(activeVideo) {
   });
 }
 
+function getVideoBufferedAheadSeconds(video) {
+  if (!video || !video.buffered || !video.buffered.length) return 0;
+
+  const currentTime = Math.max(0, Number(video.currentTime || 0));
+
+  try {
+    for (let i = 0; i < video.buffered.length; i++) {
+      const start = video.buffered.start(i);
+      const end = video.buffered.end(i);
+      if (currentTime + 0.08 >= start && currentTime <= end + 0.08) {
+        return Math.max(0, end - currentTime);
+      }
+    }
+  } catch (_) {}
+
+  return 0;
+}
+
+function videoNeedsForegroundPriority(video) {
+  if (!video || video.error || video.ended) return false;
+  if (video.readyState < 3) return true;
+  if (video.readyState >= 4) return false;
+
+  const duration = Number(video.duration || 0);
+  const remaining = Number.isFinite(duration) && duration > 0
+    ? Math.max(0, duration - Number(video.currentTime || 0))
+    : FOREGROUND_VIDEO_BUFFER_TARGET_SECONDS;
+  const target = Math.min(FOREGROUND_VIDEO_BUFFER_TARGET_SECONDS, Math.max(2, remaining));
+
+  return getVideoBufferedAheadSeconds(video) < target;
+}
+
+function getForegroundPriorityVideo() {
+  if (foregroundPriorityVideo && document.body.contains(foregroundPriorityVideo)) {
+    return foregroundPriorityVideo;
+  }
+
+  return window.currentlyPlayingVideo && document.body.contains(window.currentlyPlayingVideo)
+    ? window.currentlyPlayingVideo
+    : null;
+}
+
+function refreshForegroundVideoPriority(video, force = false) {
+  if (!video || foregroundPriorityVideo !== video || !document.body.contains(video)) return;
+
+  const wrapper = video.closest('.video-wrapper');
+  if (!wrapper) return;
+
+  const needsPriority = videoNeedsForegroundPriority(video);
+  const nextState = needsPriority ? 'boosted' : 'buffered';
+  if (!force && video.dataset.foregroundPriorityState === nextState) return;
+
+  video.dataset.foregroundPriorityState = nextState;
+  tuneVideoPreloadAround(wrapper);
+
+  if (needsPriority) random40PauseHiddenPreloadsForPlayback();
+  random40PumpPostFetchQueue();
+  random40PumpPreloadQueue(needsPriority ? 450 : 50);
+}
+
+function transferForegroundVideoPriority(video) {
+  const nextVideo = video && document.body.contains(video) ? video : null;
+  if (foregroundPriorityVideo && foregroundPriorityVideo !== nextVideo) {
+    delete foregroundPriorityVideo.dataset.foregroundPriority;
+    delete foregroundPriorityVideo.dataset.foregroundPriorityState;
+  }
+
+  foregroundPriorityVideo = nextVideo;
+  if (!nextVideo) {
+    random40PumpPostFetchQueue();
+    random40PumpPreloadQueue(50);
+    return;
+  }
+
+  nextVideo.dataset.foregroundPriority = 'true';
+  nextVideo.preload = 'auto';
+
+  const now = Date.now();
+  const lastLoadKick = Number(nextVideo.dataset.lastLoadKick || 0);
+  if (nextVideo.networkState === 0 && now - lastLoadKick > 500) {
+    nextVideo.dataset.lastLoadKick = String(now);
+    try { nextVideo.load(); } catch (_) {}
+  }
+
+  refreshForegroundVideoPriority(nextVideo, true);
+}
+
 function tuneVideoPreloadAround(activeWrapper) {
   const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
   const activeIndex = wrappers.indexOf(activeWrapper);
+  const priorityVideo = getForegroundPriorityVideo();
+  const foregroundIsStarving = Boolean(
+    priorityVideo && priorityVideo.closest('.video-wrapper') === activeWrapper && videoNeedsForegroundPriority(priorityVideo)
+  );
+  const effectiveRadius = foregroundIsStarving
+    ? Math.max(1, DECK_PRELOAD_RADIUS - 1)
+    : DECK_PRELOAD_RADIUS;
   const now = Date.now();
 
   wrappers.forEach((w, index) => {
@@ -2894,7 +2990,7 @@ function tuneVideoPreloadAround(activeWrapper) {
     const shouldWarm = DECK_MODE_ENABLED
       ? activeIndex < 0
         ? index < DECK_INITIAL_WARM_COUNT
-        : distance <= DECK_PRELOAD_RADIUS
+        : distance <= effectiveRadius
       : distance <= 1;
     const desiredPreload = shouldWarm ? 'auto' : 'metadata';
     const lastLoadKick = Number(v.dataset.lastLoadKick || 0);
@@ -2915,6 +3011,7 @@ function prepareVideoForPlayback(video) {
   tuneVideoPreloadAround(wrapper);
   wrapper.classList.add('video-playing');
   window.currentlyPlayingVideo = video;
+  transferForegroundVideoPriority(video);
 }
 
 function playVideoCleanly(video) {
@@ -3335,7 +3432,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
 
   if (!target || targetIndex < 0) return false;
   if (oldIndex === targetIndex && target.classList.contains('deck-active')) {
-    tuneVideoPreloadAround(target);
+    transferForegroundVideoPriority(target.querySelector('video'));
     updateBatchReadyCounter();
     updateViewedRemainingCounter();
     return true;
@@ -3375,14 +3472,14 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   currentVideoIndex = targetIndex;
   if (eromeBatchAutoAdvance) syncCurrentPasteIndexFromVisibleVideo();
   ensureVideoCounter().textContent = getVideoCounterText(currentVideoIndex);
-  tuneVideoPreloadAround(target);
+  const video = target.querySelector('video');
+  transferForegroundVideoPriority(video);
   if (DECK_MODE_ENABLED && !visibleBatchRetryTimer) startVisibleBatchAutoRetry();
   updateBatchReadyCounter();
   updateViewedRemainingCounter();
 
   if (oldIndex !== targetIndex) scheduleSessionSave(450);
 
-  const video = target.querySelector('video');
   if (window.autoplayEnabled && isWrapperReady(target) && video && video.paused) {
     playVideoCleanly(video);
   }
@@ -3619,6 +3716,7 @@ function setupDeckSwipeController() {
 // ─── Video elements ───────────────────────────────────────────────────────────
 function createVideoElements() {
   stopVisibleBatchAutoRetry();
+  transferForegroundVideoPriority(null);
   videoContainer.innerHTML = '';
   videoContainer.classList.toggle('deck-mode', DECK_MODE_ENABLED);
   deckOrder = [];
@@ -3854,19 +3952,25 @@ function createVideoElements() {
       if (wasCurrent) window.currentlyPlayingVideo = null;
       loadingIndicator.style.display='none';
       if (wasCurrent) {
+        refreshForegroundVideoPriority(video, true);
         random40PumpPostFetchQueue();
         random40PumpPreloadQueue(100);
       }
     });
     video.addEventListener('waiting', () => {
+      refreshForegroundVideoPriority(video, true);
       random40PauseHiddenPreloadsForPlayback();
       random40PumpPostFetchQueue();
       loadingIndicator.style.display='none';
       updateVideoReadyLoader(video);
     });
-    video.addEventListener('progress', () => { updateVideoReadyLoader(video); });
+    video.addEventListener('progress', () => {
+      updateVideoReadyLoader(video);
+      refreshForegroundVideoPriority(video);
+    });
     video.addEventListener('canplay', () => {
       markVideoAutoRetryDone(video, 'canplay');
+      refreshForegroundVideoPriority(video);
       loadingIndicator.style.display='none';
       if (DECK_MODE_ENABLED && window.autoplayEnabled && wrapper.classList.contains('deck-active') && video.paused) {
         playVideoCleanly(video);
@@ -3875,6 +3979,7 @@ function createVideoElements() {
     video.addEventListener('playing', () => {
       markVideoAutoRetryDone(video, 'playing');
       markVideoViewed(wrapper);
+      refreshForegroundVideoPriority(video, true);
       random40PumpPostFetchQueue();
       random40PumpPreloadQueue(500);
     });
@@ -3884,6 +3989,7 @@ function createVideoElements() {
       if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`;
       const viewThreshold = video.duration ? 0.01 : 0.75;
       if (!video.paused && video.currentTime >= viewThreshold) markVideoViewed(wrapper);
+      refreshForegroundVideoPriority(video);
     });
     video.addEventListener('loadedmetadata', () => {
       const metadataIndex = Number(wrapper.dataset.index || index);
@@ -3891,7 +3997,12 @@ function createVideoElements() {
       videoMetadata[metadataIndex]={...videoMetadata[metadataIndex],duration:video.duration||0};
       updateVideoReadyLoader(video);
     });
-    video.addEventListener('error', () => { loadingIndicator.style.display='none'; updateVideoReadyLoader(video); });
+    video.addEventListener('ended', () => { refreshForegroundVideoPriority(video, true); });
+    video.addEventListener('error', () => {
+      loadingIndicator.style.display='none';
+      updateVideoReadyLoader(video);
+      refreshForegroundVideoPriority(video, true);
+    });
 
     wrapper.appendChild(video);
     wrapper.appendChild(loadingIndicator);
@@ -3961,15 +4072,14 @@ function setupVisibilityObserver() {
       w.setAttribute('data-playable', w === mostVisible ? 'true' : 'false');
     });
 
-    tuneVideoPreloadAround(mostVisible);
+    const mostVisibleVideo = mostVisible.querySelector('video');
+    transferForegroundVideoPriority(mostVisibleVideo);
     const nextVideoIndex = parseInt(mostVisible.dataset.index || 0);
     const indexChanged = nextVideoIndex !== currentVideoIndex;
     currentVideoIndex = nextVideoIndex;
     counter.textContent = getVideoCounterText(currentVideoIndex);
 
     if (indexChanged) scheduleSessionSave(450);
-
-    const mostVisibleVideo = mostVisible.querySelector('video');
 
     if (highestVis > 0.7) {
       wrappers.forEach(w => {
@@ -4441,13 +4551,14 @@ function countReadyVideosForPasteEvent(event, index = -1) {
 }
 
 function random40VisibleVideoIsBuffering() {
-  const video = window.currentlyPlayingVideo;
-  return Boolean(video && !video.paused && video.readyState < 3);
+  const video = getForegroundPriorityVideo();
+  return Boolean(video && !video.paused && videoNeedsForegroundPriority(video));
 }
 
 function random40PreloadConcurrencyLimit() {
-  const video = window.currentlyPlayingVideo;
+  const video = getForegroundPriorityVideo();
   if (random40VisibleVideoIsBuffering()) return 0;
+  if (video && videoNeedsForegroundPriority(video)) return RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY;
   if (video && !video.paused) return RANDOM40_PRELOAD_PLAYING_CONCURRENCY;
   return RANDOM40_PRELOAD_IDLE_CONCURRENCY;
 }
@@ -6766,6 +6877,7 @@ const RANDOM40_LOCAL_CONCURRENCY = 32;
 const RANDOM40_POST_CONCURRENCY = 28;
 const RANDOM40_POST_PLAYING_CONCURRENCY = 8;
 const RANDOM40_POST_BUFFERING_CONCURRENCY = 3;
+const RANDOM40_POST_FOREGROUND_CONCURRENCY = 6;
 const RANDOM40_POST_ENTRIES_CACHE_MAX = 6000;
 const RANDOM40_PAGE_BATCH_SIZE = 8;
 const RANDOM40_LISTING_PAGE_BATCH_SIZE = 8;
@@ -6813,6 +6925,7 @@ let random40MemoryEndpoint = '';
 const RANDOM40_PRELOAD_MAX_ELEMENTS = 140;
 const RANDOM40_PRELOAD_IDLE_CONCURRENCY = 6;
 const RANDOM40_PRELOAD_PLAYING_CONCURRENCY = 2;
+const RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY = 1;
 const RANDOM40_PRELOAD_LOAD_TIMEOUT_MS = 14000;
 const RANDOM40_PRELOAD_RETRY_DELAY_MS = 5000;
 let random40State = null;
@@ -9764,11 +9877,14 @@ function random40ActiveArtistIdentity() {
 }
 
 function random40PostFetchConcurrencyLimit() {
-  const video = window.currentlyPlayingVideo;
+  const video = getForegroundPriorityVideo();
+  if (video && videoNeedsForegroundPriority(video)) {
+    return video.paused
+      ? RANDOM40_POST_FOREGROUND_CONCURRENCY
+      : RANDOM40_POST_BUFFERING_CONCURRENCY;
+  }
   if (video && !video.paused) {
-    return video.readyState < 3
-      ? RANDOM40_POST_BUFFERING_CONCURRENCY
-      : RANDOM40_POST_PLAYING_CONCURRENCY;
+    return RANDOM40_POST_PLAYING_CONCURRENCY;
   }
   return RANDOM40_POST_CONCURRENCY;
 }
