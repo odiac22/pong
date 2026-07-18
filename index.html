@@ -806,7 +806,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.93</div>
+  <div class="version-number">23.94</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -931,6 +931,7 @@ let random40PostEntriesCache = new Map();
 let pasteEvents = [];
 let currentPasteIndex = -1;
 let paperclipRetiredBundleKeys = new Set();
+let paperclipVisitedArtistTokens = new Set();
 let paperclipStepCount = 1;
 let pendingPastes = [];
 let _prevUrlCount = 0;
@@ -4289,6 +4290,7 @@ function setActivePlaybackRangeForPasteEvent(index) {
   };
   currentBatch = 0;
   currentVideoIndex = 0;
+  markPasteEventVisitedForPaperclip(target, safeIndex);
 
   return target;
 }
@@ -4345,6 +4347,14 @@ function paperclipIdentityExcludesEvent(identity, event, index) {
   if (!identity) return false;
   if (identity.indexes?.has(index)) return true;
   return [...getPasteEventArtistIdentityTokens(event, index)].some(token => identity.tokens?.has(token));
+}
+
+function markPasteEventVisitedForPaperclip(event, index = -1) {
+  getPasteEventArtistIdentityTokens(event, index).forEach(token => paperclipVisitedArtistTokens.add(token));
+}
+
+function isPasteEventPreviouslyVisitedForPaperclip(event, index = -1) {
+  return [...getPasteEventArtistIdentityTokens(event, index)].some(token => paperclipVisitedArtistTokens.has(token));
 }
 
 function isRandom40PasteEvent(event) {
@@ -4606,7 +4616,10 @@ function runRandom40PreloadPool() {
   const candidates = pasteEvents
     .map((event, index) => ({ event, index }))
     .filter(({ event, index }) => isRandom40PasteEvent(event) && (
-      index === currentIndex || !isPasteEventRetiredForPaperclip(event, index)
+      index === currentIndex || (
+        !isPasteEventRetiredForPaperclip(event, index) &&
+        !isPasteEventPreviouslyVisitedForPaperclip(event, index)
+      )
     ));
   const currentCandidate = candidates.find(candidate => candidate.index === currentIndex) || null;
   const backgroundCandidates = candidates.filter(candidate => candidate.index !== currentIndex);
@@ -4688,8 +4701,14 @@ function getPaperclipTotalBundleCount() {
 
 function getPaperclipActiveBundleCount() {
   if (!Array.isArray(pasteEvents) || !pasteEvents.length) return 0;
+  const visibleIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
+  const currentIndex = visibleIndex >= 0 ? visibleIndex : currentPasteIndex;
   return pasteEvents.reduce((count, event, index) => (
-    !isPasteEventViewableForPaperclip(event) || isPasteEventRetiredForPaperclip(event, index) ? count : count + 1
+    !isPasteEventViewableForPaperclip(event) ||
+    isPasteEventRetiredForPaperclip(event, index) ||
+    (index !== currentIndex && isPasteEventPreviouslyVisitedForPaperclip(event, index))
+      ? count
+      : count + 1
   ), 0);
 }
 
@@ -4702,6 +4721,7 @@ function getPaperclipProgressCount() {
 
 function resetPaperclipQueue() {
   paperclipRetiredBundleKeys = new Set();
+  paperclipVisitedArtistTokens = new Set();
   paperclipStepCount = 1;
 }
 
@@ -4730,6 +4750,7 @@ function getBestLoadedPasteEventIndex(excludedIdentity = getCurrentPaperclipArti
   for (let offset = 1; offset <= pasteEvents.length; offset++) {
     const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
     if (paperclipIdentityExcludesEvent(excludedIdentity, pasteEvents[index], index)) continue;
+    if (isPasteEventPreviouslyVisitedForPaperclip(pasteEvents[index], index)) continue;
     if (!isPasteEventViewableForPaperclip(pasteEvents[index])) continue;
     if (isPasteEventRetiredForPaperclip(pasteEvents[index], index)) continue;
 
@@ -4752,6 +4773,7 @@ function getNextActivePasteEventIndex(excludedIdentity = getCurrentPaperclipArti
   for (let offset = 1; offset <= pasteEvents.length; offset++) {
     const index = (startIndex + offset + pasteEvents.length) % pasteEvents.length;
     if (paperclipIdentityExcludesEvent(excludedIdentity, pasteEvents[index], index)) continue;
+    if (isPasteEventPreviouslyVisitedForPaperclip(pasteEvents[index], index)) continue;
     if (!isPasteEventViewableForPaperclip(pasteEvents[index])) continue;
     if (!isPasteEventRetiredForPaperclip(pasteEvents[index], index)) return index;
   }
@@ -4764,6 +4786,7 @@ function getFirstActivePasteEventIndex(excludedIdentity = getCurrentPaperclipArt
   return pasteEvents.findIndex((event, index) => (
     isPasteEventViewableForPaperclip(event) &&
     !paperclipIdentityExcludesEvent(excludedIdentity, event, index) &&
+    !isPasteEventPreviouslyVisitedForPaperclip(event, index) &&
     !isPasteEventRetiredForPaperclip(event, index)
   ));
 }
@@ -4778,6 +4801,7 @@ function retireCurrentPasteEventForPaperclip() {
   indexes.forEach(index => {
     const event = pasteEvents[index];
     if (!event) return;
+    markPasteEventVisitedForPaperclip(event, index);
     const key = getPasteEventPaperclipKey(event, index);
     if (!key) return;
     if (!paperclipRetiredBundleKeys.has(key)) retired = true;
