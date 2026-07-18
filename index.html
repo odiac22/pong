@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.99</div>
+  <div class="version-number">24.00</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -936,6 +936,7 @@ let random40PreloadActive = 0;
 let random40PreloadPumpTimer = null;
 let foregroundPriorityVideo = null;
 let random40PostFetchActive = 0;
+let random40PostFetchSlowActive = 0;
 let random40PostFetchQueue = [];
 let random40PostFetchSequence = 0;
 let random40PostEntriesCache = new Map();
@@ -2589,6 +2590,114 @@ function saveCurrentArtistVideos() {
   }
 }
 
+function loadSavedVideosForRandomPlayback() {
+  const records = shuffleInPlace(Object.values(loadSavedMap(SAVED_VIDEOS_KEY))
+    .filter(record => record?.url));
+  if (!records.length) {
+    showSortingIndicator('No saved videos yet');
+    return false;
+  }
+
+  parsedVideoUrlsCache = records.map(record => record.url);
+  parsedVideoMetadataCache = records.map(record => ({
+    type: 'video',
+    source: 'savedVideos',
+    artistKey: record.artistKey || extractArtistKeyFromUrl(record.url) || '',
+    mediaKey: record.url
+  }));
+  pendingPastes = [];
+  _prevUrlCount = parsedVideoUrlsCache.length;
+  parseCacheDirty = false;
+  syncPendingPasteCacheState();
+  window.PongSavedArtistsAutoAdvanceOnce = false;
+  window.PongLoadedSavedMode = 'savedVideos';
+  if (videoUrlsInput) videoUrlsInput.value = `Cached saved videos: ${records.length}`;
+  loadVideosButton.click();
+  showSortingIndicator(`Playing ${records.length} saved videos randomly`);
+  return true;
+}
+
+function loadSavedArtistsForRandomPlayback() {
+  const groups = shuffleInPlace(Object.values(loadSavedMap(SAVED_ARTISTS_KEY))
+    .filter(record => Array.isArray(record?.videos) && record.videos.length)
+    .map(record => ({
+      ...record,
+      videos: shuffleInPlace([...new Set(record.videos.filter(Boolean))])
+    })));
+  if (!groups.length) {
+    showSortingIndicator('No saved artists yet');
+    return false;
+  }
+
+  const urls = [];
+  const metadata = [];
+  const events = [];
+  groups.forEach((group, groupIndex) => {
+    const startIndex = urls.length;
+    group.videos.forEach((url, videoIndex) => {
+      urls.push(url);
+      metadata.push({
+        type: 'video',
+        source: 'savedArtists',
+        artistKey: group.artistKey || '',
+        artistName: group.artistName || group.artistKey || `Saved artist ${groupIndex + 1}`,
+        artistDisplayName: group.artistName || group.artistKey || `Saved artist ${groupIndex + 1}`,
+        postIndex: videoIndex,
+        mediaKey: url
+      });
+    });
+    events.push({
+      startIndex,
+      count: urls.length - startIndex,
+      artistKey: group.artistKey || `saved-${groupIndex}`,
+      bundleKey: `saved-artist:${group.artistKey || groupIndex}`,
+      source: 'savedArtists',
+      artistDisplayName: group.artistName || group.artistKey || `Saved artist ${groupIndex + 1}`,
+      bundleLabel: group.artistName || group.artistKey || `Saved artist ${groupIndex + 1}`,
+      loadAll: false,
+      ready: true,
+      pending: false
+    });
+  });
+
+  parsedVideoUrlsCache = urls;
+  parsedVideoMetadataCache = metadata;
+  pendingPastes = events;
+  _prevUrlCount = urls.length;
+  parseCacheDirty = false;
+  syncPendingPasteCacheState();
+  window.PongSavedArtistsAutoAdvanceOnce = true;
+  window.PongLoadedSavedMode = 'savedArtists';
+  if (videoUrlsInput) videoUrlsInput.value = `Cached saved artists: ${urls.length} videos in ${events.length} artists`;
+  loadVideosButton.click();
+  showSortingIndicator(`Playing ${events.length} saved artists randomly`);
+  return true;
+}
+
+function installSavedPlaybackHold(button, playbackFn) {
+  if (!button || button.dataset.savedPlaybackHold === 'true') return;
+  button.dataset.savedPlaybackHold = 'true';
+  let holdTimer = null;
+
+  const cancel = () => {
+    clearTimeout(holdTimer);
+    holdTimer = null;
+  };
+  button.addEventListener('pointerdown', event => {
+    if (event.button !== undefined && event.button !== 0) return;
+    cancel();
+    holdTimer = setTimeout(() => {
+      holdTimer = null;
+      button.dataset.suppressNextClick = 'true';
+      playbackFn();
+    }, 850);
+  });
+  button.addEventListener('pointerup', cancel);
+  button.addEventListener('pointercancel', cancel);
+  button.addEventListener('pointerleave', cancel);
+  button.addEventListener('contextmenu', event => event.preventDefault());
+}
+
 function currentRandom40RejectBundleInfo(reason) {
   const meta = typeof random40CurrentVideoMeta === 'function' ? random40CurrentVideoMeta() : {};
   return {
@@ -2638,6 +2747,10 @@ function createSaveButtons() {
   videoBtn.addEventListener('click', e => {
     e.preventDefault();
     e.stopPropagation();
+    if (videoBtn.dataset.suppressNextClick === 'true') {
+      videoBtn.dataset.suppressNextClick = 'false';
+      return;
+    }
     saveCurrentVideoLink();
   });
 
@@ -2653,6 +2766,10 @@ function createSaveButtons() {
   artistBtn.addEventListener('click', e => {
     e.preventDefault();
     e.stopPropagation();
+    if (artistBtn.dataset.suppressNextClick === 'true') {
+      artistBtn.dataset.suppressNextClick = 'false';
+      return;
+    }
     saveCurrentArtistVideos();
   });
 
@@ -2698,6 +2815,11 @@ function createSaveButtons() {
   panel.appendChild(artistBtn);
   panel.appendChild(rejectWrap);
   document.body.appendChild(panel);
+
+  videoBtn.title = 'Tap to save this video. Hold to play all saved videos randomly.';
+  artistBtn.title = 'Tap to save this artist. Hold to play saved artists and their videos randomly.';
+  installSavedPlaybackHold(videoBtn, loadSavedVideosForRandomPlayback);
+  installSavedPlaybackHold(artistBtn, loadSavedArtistsForRandomPlayback);
 
   updateSaveCounters();
 }
@@ -4446,6 +4568,9 @@ function getNextPasteEventPreviewCount() {
 function getPasteEventPaperclipKey(event, index = -1) {
   if (!event) return '';
   const normalizedArtistUrl = event.artistUrl ? random40NormalizeArtistUrl(event.artistUrl) : '';
+  if (isEromePasteEvent(event) && event.bundleKey) {
+    return String(event.bundleKey).toLowerCase();
+  }
   return String(
     normalizedArtistUrl ||
     event.bundleKey ||
@@ -4461,6 +4586,11 @@ function getPasteEventArtistIdentityTokens(event, index = -1) {
   const artistKey = String(event.artistKey || '').trim().toLowerCase();
   const bundleKey = String(event.bundleKey || '').trim().toLowerCase();
   const paperclipKey = getPasteEventPaperclipKey(event, index);
+  if (isEromePasteEvent(event)) {
+    if (bundleKey) tokens.add(`bundle:${bundleKey}`);
+    if (paperclipKey) tokens.add(`paperclip:${paperclipKey}`);
+    return tokens;
+  }
   if (artistUrl) tokens.add(`url:${artistUrl.toLowerCase()}`);
   if (artistKey) tokens.add(`artist:${artistKey}`);
   if (bundleKey) tokens.add(`bundle:${bundleKey}`);
@@ -4496,6 +4626,10 @@ function isPasteEventPreviouslyVisitedForPaperclip(event, index = -1) {
 
 function isRandom40PasteEvent(event) {
   return String(event?.source || '').toLowerCase() === 'random40';
+}
+
+function isEromePasteEvent(event) {
+  return String(event?.source || '').toLowerCase() === 'erome';
 }
 
 function ensureRandom40PreloadContainer() {
@@ -4934,6 +5068,21 @@ function getFirstActivePasteEventIndex(excludedIdentity = getCurrentPaperclipArt
   ));
 }
 
+function getRandomActiveEromePasteEventIndex(excludedIdentity = getCurrentPaperclipArtistIdentity()) {
+  if (!Array.isArray(pasteEvents) || !pasteEvents.length) return -1;
+  const candidates = pasteEvents
+    .map((event, index) => ({ event, index }))
+    .filter(({ event, index }) => (
+      isEromePasteEvent(event) &&
+      isPasteEventViewableForPaperclip(event) &&
+      !paperclipIdentityExcludesEvent(excludedIdentity, event, index) &&
+      !isPasteEventPreviouslyVisitedForPaperclip(event, index) &&
+      !isPasteEventRetiredForPaperclip(event, index)
+    ));
+  if (!candidates.length) return -1;
+  return candidates[Math.floor(Math.random() * candidates.length)].index;
+}
+
 function retireCurrentPasteEventForPaperclip() {
   const indexes = new Set();
   const visibleIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
@@ -4998,6 +5147,9 @@ function navigateToNextPasteEvent(){
   }
 
   syncCurrentPasteIndexFromVisibleVideo();
+  if (paperclipHistoryPosition < 0 && currentPasteIndex >= 0) {
+    recordPaperclipHistoryIndex(currentPasteIndex);
+  }
 
   // After Previous, Paperclip moves forward through the exact viewed history.
   // Once caught up, it resumes selecting artists that have never been visited.
@@ -5009,20 +5161,27 @@ function navigateToNextPasteEvent(){
 
   const excludedIdentity = getCurrentPaperclipArtistIdentity();
   const retired = retireCurrentPasteEventForPaperclip();
-  const nextLoadedIndex = getBestLoadedPasteEventIndex(excludedIdentity);
-  const nextRegularIndex = getNextActivePasteEventIndex(excludedIdentity);
-  const nextFallbackIndex = getFirstActivePasteEventIndex(excludedIdentity);
-  const nextActiveIndex = nextLoadedIndex >= 0
-    ? nextLoadedIndex
-    : nextRegularIndex >= 0
-      ? nextRegularIndex
-      : nextFallbackIndex;
+  const eromeBundleMode = isEromePasteEvent(pasteEvents[currentPasteIndex]) || window.PongLoadedSavedMode === 'erome';
+  const nextActiveIndex = eromeBundleMode
+    ? getRandomActiveEromePasteEventIndex(excludedIdentity)
+    : (() => {
+        const nextLoadedIndex = getBestLoadedPasteEventIndex(excludedIdentity);
+        const nextRegularIndex = getNextActivePasteEventIndex(excludedIdentity);
+        const nextFallbackIndex = getFirstActivePasteEventIndex(excludedIdentity);
+        return nextLoadedIndex >= 0
+          ? nextLoadedIndex
+          : nextRegularIndex >= 0
+            ? nextRegularIndex
+            : nextFallbackIndex;
+      })();
 
   if (nextActiveIndex < 0) {
     const total = getPaperclipTotalBundleCount();
     if (total) paperclipStepCount = total;
     updatePasteNavigationButton();
-    showSortingIndicator(total ? `All ${total} paperclip artists viewed` : 'No new paperclip artists loaded yet');
+    showSortingIndicator(total
+      ? `All ${total} ${eromeBundleMode ? 'Erome bundles' : 'paperclip artists'} viewed`
+      : 'No new paperclip artists loaded yet');
     return;
   }
 
@@ -5313,6 +5472,7 @@ loadVideosButton.addEventListener('click', async ()=>{
   allVideoMetadata = shuffledLoad.metadata.map(meta => meta || {});
   viewedVideoKeys = new Set();
   const shouldUseEromeTwentyCardMode = window.PongEromeAutoAdvanceOnce === true;
+  const shouldUseSavedArtistsMode = window.PongSavedArtistsAutoAdvanceOnce === true;
   const shouldUseRandom40AutoAdvanceMode =
     window.PongRandom40AutoAdvanceOnce === true ||
     window.PongLoadedSavedMode === 'random40';
@@ -5321,9 +5481,10 @@ loadVideosButton.addEventListener('click', async ()=>{
   const shouldUseSlidingMode = shouldUseEromeTwentyCardMode || shouldUseRegularSlidingMode;
 
   window.PongEromeAutoAdvanceOnce = false;
+  window.PongSavedArtistsAutoAdvanceOnce = false;
   window.PongRandom40AutoAdvanceOnce = false;
   setEromeTwentyCardMode(shouldUseSlidingMode, {
-    respectRange: shouldUseRegularSlidingMode || shouldUseRandom40AutoAdvanceMode
+    respectRange: shouldUseRegularSlidingMode || shouldUseRandom40AutoAdvanceMode || shouldUseSavedArtistsMode
   });
   if (!shouldUseSlidingMode) {
     setCurrentRenderBatchSize(BATCH_SIZE);
@@ -5332,7 +5493,9 @@ loadVideosButton.addEventListener('click', async ()=>{
     ? 'random40'
     : shouldUseEromeTwentyCardMode
       ? 'erome'
-      : 'normal';
+      : shouldUseSavedArtistsMode
+        ? 'savedArtists'
+        : 'normal';
 
   while (allVideoMetadata.length < allVideoUrls.length) {
     allVideoMetadata.push({});
@@ -6809,7 +6972,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
 }
 
 function cacheEromeCardImport(groups, proxyBase) {
-  const payload = buildEromeCardImportPayload(groups, proxyBase, 0);
+  const payload = buildEromeCardImportPayload(shuffleEromeGroupsForPlayback(groups), proxyBase, 0);
   const { urls, metadata, events } = payload;
 
   parsedVideoUrlsCache = urls;
@@ -6831,7 +6994,7 @@ function cacheEromeCardImport(groups, proxyBase) {
 
 function appendEromeGroupsToCurrentCards(groups, proxyBase) {
   const startIndex = allVideoUrls.length;
-  const payload = buildEromeCardImportPayload(groups, proxyBase, startIndex);
+  const payload = buildEromeCardImportPayload(shuffleEromeGroupsForPlayback(groups), proxyBase, startIndex);
 
   if (!payload.urls.length) return payload;
 
@@ -6872,14 +7035,15 @@ const RANDOM40_PASSWORD = '22';
 const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
-const RANDOM40_AI_CONCURRENCY = 32;
-const RANDOM40_LOCAL_CONCURRENCY = 32;
-const RANDOM40_POST_CONCURRENCY = 28;
-const RANDOM40_POST_PLAYING_CONCURRENCY = 8;
-const RANDOM40_POST_BUFFERING_CONCURRENCY = 3;
-const RANDOM40_POST_FOREGROUND_CONCURRENCY = 6;
+const RANDOM40_AI_CONCURRENCY = 12;
+const RANDOM40_LOCAL_CONCURRENCY = 12;
+const RANDOM40_POST_CONCURRENCY = 24;
+const RANDOM40_POST_PLAYING_CONCURRENCY = 16;
+const RANDOM40_POST_BUFFERING_CONCURRENCY = 12;
+const RANDOM40_POST_FOREGROUND_CONCURRENCY = 12;
+const RANDOM40_POST_SLOW_CONCURRENCY = 8;
 const RANDOM40_POST_ENTRIES_CACHE_MAX = 6000;
-const RANDOM40_PAGE_BATCH_SIZE = 8;
+const RANDOM40_PAGE_BATCH_SIZE = 4;
 const RANDOM40_LISTING_PAGE_BATCH_SIZE = 8;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 15;
@@ -9781,7 +9945,9 @@ async function random40CollectVideoPostLinks(artist, {
       pendingLinks,
       random40ArtistInfo(base, firstDoc),
       verificationTarget - verifiedEntries.length,
-      ignoreStop
+      ignoreStop,
+      null,
+      scannedThroughPage > 5 ? 2 : 1
     );
     const seenVideos = new Set(verifiedEntries.map(entry => entry?.videoUrl).filter(Boolean));
     found.forEach(entry => {
@@ -9900,25 +10066,37 @@ function random40PumpPostFetchQueue() {
   const activeArtist = random40ActiveArtistIdentity();
   while (random40PostFetchActive < limit && random40PostFetchQueue.length) {
     let selectedIndex = random40PostFetchQueue.findIndex(item => random40PostTaskMatchesActiveArtist(item, activeArtist));
-    if (selectedIndex < 0) selectedIndex = 0;
+    if (selectedIndex < 0) {
+      selectedIndex = random40PostFetchQueue.findIndex(item => Number(item.priority || 1) < 2);
+    }
+    if (selectedIndex < 0) {
+      if (random40PostFetchSlowActive >= RANDOM40_POST_SLOW_CONCURRENCY) break;
+      selectedIndex = random40PostFetchQueue.findIndex(item => Number(item.priority || 1) >= 2);
+    }
+    if (selectedIndex < 0) break;
     const item = random40PostFetchQueue.splice(selectedIndex, 1)[0];
+    const isActiveArtistTask = random40PostTaskMatchesActiveArtist(item, activeArtist);
+    const countsAsSlowTask = !isActiveArtistTask && Number(item.priority || 1) >= 2;
     random40PostFetchActive++;
+    if (countsAsSlowTask) random40PostFetchSlowActive++;
     Promise.resolve()
       .then(item.task)
       .then(item.resolve, item.reject)
       .finally(() => {
         random40PostFetchActive = Math.max(0, random40PostFetchActive - 1);
+        if (countsAsSlowTask) random40PostFetchSlowActive = Math.max(0, random40PostFetchSlowActive - 1);
         random40PumpPostFetchQueue();
       });
   }
 }
 
-function random40WithPostFetchPriority(task, artistInfo = {}) {
+function random40WithPostFetchPriority(task, artistInfo = {}, priority = 1) {
   return new Promise((resolve, reject) => {
     random40PostFetchQueue.push({
       task,
       resolve,
       reject,
+      priority: Number(priority) >= 2 ? 2 : 1,
       artistUrl: artistInfo.artistUrl ? random40NormalizeArtistUrl(artistInfo.artistUrl) : '',
       artistKey: String(artistInfo.artistKey || '').toLowerCase(),
       sequence: random40PostFetchSequence++
@@ -9927,7 +10105,7 @@ function random40WithPostFetchPriority(task, artistInfo = {}) {
   });
 }
 
-async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = Infinity, ignoreStop = false, onEntries = null) {
+async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = Infinity, ignoreStop = false, onEntries = null, queuePriority = 1) {
   const selectedLinks = shuffleInPlace([...new Set((links || []).filter(Boolean))]);
   if (!selectedLinks.length) return [];
 
@@ -9964,7 +10142,7 @@ async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = I
         if (active >= dynamicLimit) break;
         const link = selectedLinks[index++];
         active++;
-        random40WithPostFetchPriority(() => random40VideoEntriesFromPost(link, artistInfo), artistInfo)
+        random40WithPostFetchPriority(() => random40VideoEntriesFromPost(link, artistInfo), artistInfo, queuePriority)
           .catch(() => [])
           .then(entries => {
             if (!settled && entries?.length) {
@@ -10266,7 +10444,8 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
         random40ArtistInfo(artist.artistUrl, precheck?.firstDoc),
         Infinity,
         true,
-        queueDiscoveredEntries
+        queueDiscoveredEntries,
+        2
       );
 
       const expanded = await fullScanPromise;
@@ -10278,7 +10457,8 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
           random40ArtistInfo(artist.artistUrl, expanded?.firstDoc || precheck?.firstDoc),
           Infinity,
           true,
-          queueDiscoveredEntries
+          queueDiscoveredEntries,
+          2
         );
       }
 
