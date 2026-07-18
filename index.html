@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.02</div>
+  <div class="version-number">24.03</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -940,6 +940,10 @@ let random40PostFetchSlowActive = 0;
 let random40PostFetchQueue = [];
 let random40PostFetchSequence = 0;
 let random40PostEntriesCache = new Map();
+let random40SourceFetchActive = 0;
+let random40SourceFetchSlowActive = 0;
+let random40SourceFetchQueue = [];
+let random40SourceFetchSequence = 0;
 let pongWorkloadAbortControllers = new Set();
 
 // ─── Paste tracking ───────────────────────────────────────────────────────────
@@ -5217,6 +5221,8 @@ function stopBrowserWorkloadForRefresh() {
 
   const queuedPostTasks = random40PostFetchQueue.splice(0);
   queuedPostTasks.forEach(item => item.reject?.(new Error('Clean refresh')));
+  const queuedSourceTasks = random40SourceFetchQueue.splice(0);
+  queuedSourceTasks.forEach(item => item.reject?.(new Error('Clean refresh')));
   pongWorkloadAbortControllers.forEach(controller => {
     try { controller.abort(); } catch (_) {}
   });
@@ -7036,11 +7042,13 @@ const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
 const RANDOM40_AI_CONCURRENCY = 12;
-const RANDOM40_LOCAL_CONCURRENCY = 12;
-const RANDOM40_POST_CONCURRENCY = 24;
-const RANDOM40_POST_PLAYING_CONCURRENCY = 16;
-const RANDOM40_POST_BUFFERING_CONCURRENCY = 12;
-const RANDOM40_POST_FOREGROUND_CONCURRENCY = 12;
+const RANDOM40_LOCAL_CONCURRENCY = 60;
+const RANDOM40_SOURCE_CONCURRENCY = 64;
+const RANDOM40_SOURCE_BACKGROUND_CONCURRENCY = 8;
+const RANDOM40_POST_CONCURRENCY = 48;
+const RANDOM40_POST_PLAYING_CONCURRENCY = 40;
+const RANDOM40_POST_BUFFERING_CONCURRENCY = 32;
+const RANDOM40_POST_FOREGROUND_CONCURRENCY = 32;
 const RANDOM40_POST_SLOW_CONCURRENCY = 8;
 const RANDOM40_POST_ENTRIES_CACHE_MAX = 6000;
 const RANDOM40_PAGE_BATCH_SIZE = 4;
@@ -7048,7 +7056,7 @@ const RANDOM40_LISTING_PAGE_BATCH_SIZE = 8;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 15;
 const RANDOM40_PRECHECK_MAX_ARTIST_PAGES = 36;
-const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 72;
+const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 120;
 const RANDOM40_FAST_PUBLISH_VIDEOS = RANDOM40_MIN_VIDEOS_PER_ARTIST;
 const RANDOM40_BACKGROUND_APPEND_BATCH = 4;
 const RANDOM40_BACKGROUND_APPEND_DELAY_MS = 180;
@@ -7063,7 +7071,9 @@ const RANDOM40_REJECT_CACHE_MAX = 4000;
 const RANDOM40_REJECT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_ACCEPT_CONFIDENCE = 0.9;
-const RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE = 0.6;
+// personal_preference_v2 makes its own 0.52 probability decision; 0.58 is the
+// corresponding confidence floor from that model's margin calibration.
+const RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE = 0.58;
 const RANDOM40_LOCAL_BODY_QWEN_REVIEW_THRESHOLD = 0.43;
 const RANDOM40_MIN_SCREENED_IMAGES = 5;
 const RANDOM40_MAX_REVIEW_IMAGES = 5;
@@ -7382,17 +7392,97 @@ function random40PcGatewayUrl(rawUrl) {
   return `${endpoint}/proxy?url=${encodeURIComponent(rawUrl)}&t=${Date.now()}`;
 }
 
-async function random40FetchText(rawUrl, options = {}) {
+function random40PumpSourceFetchQueue() {
+  while (random40SourceFetchActive < RANDOM40_SOURCE_CONCURRENCY && random40SourceFetchQueue.length) {
+    random40SourceFetchQueue = random40SourceFetchQueue.filter(item => {
+      if (!item.signal?.aborted) return true;
+      item.reject(new DOMException('Source request aborted', 'AbortError'));
+      return false;
+    });
+    if (!random40SourceFetchQueue.length) break;
+
+    let selectedIndex = random40SourceFetchQueue.findIndex(item => Number(item.priority ?? 1) <= 0);
+    if (selectedIndex < 0) selectedIndex = random40SourceFetchQueue.findIndex(item => Number(item.priority ?? 1) === 1);
+    if (selectedIndex < 0) {
+      if (random40SourceFetchSlowActive >= RANDOM40_SOURCE_BACKGROUND_CONCURRENCY) break;
+      selectedIndex = 0;
+    }
+
+    const item = random40SourceFetchQueue.splice(selectedIndex, 1)[0];
+    if (item.signal?.aborted) {
+      item.reject(new DOMException('Source request aborted', 'AbortError'));
+      continue;
+    }
+    const slow = Number(item.priority ?? 1) >= 2;
+    random40SourceFetchActive++;
+    if (slow) random40SourceFetchSlowActive++;
+    item.started = true;
+    Promise.resolve()
+      .then(item.task)
+      .then(item.resolve, item.reject)
+      .finally(() => {
+        random40SourceFetchActive = Math.max(0, random40SourceFetchActive - 1);
+        if (slow) random40SourceFetchSlowActive = Math.max(0, random40SourceFetchSlowActive - 1);
+        random40PumpSourceFetchQueue();
+      });
+  }
+}
+
+function random40ScheduleSourceFetch(task, options = {}) {
+  const signal = options.signal || null;
+  if (signal?.aborted) return Promise.reject(new DOMException('Source request aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const item = {
+      task,
+      resolve,
+      reject,
+      signal,
+      started: false,
+      priority: Number(options.priority ?? 1),
+      sequence: random40SourceFetchSequence++
+    };
+    const abortQueued = () => {
+      if (item.started) return;
+      const index = random40SourceFetchQueue.indexOf(item);
+      if (index >= 0) random40SourceFetchQueue.splice(index, 1);
+      reject(new DOMException('Source request aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', abortQueued, { once: true });
+    const cleanResolve = value => {
+      signal?.removeEventListener('abort', abortQueued);
+      resolve(value);
+    };
+    const cleanReject = error => {
+      signal?.removeEventListener('abort', abortQueued);
+      reject(error);
+    };
+    item.resolve = cleanResolve;
+    item.reject = cleanReject;
+    random40SourceFetchQueue.push(item);
+    random40PumpSourceFetchQueue();
+  });
+}
+
+async function random40FetchTextNow(rawUrl, options = {}) {
   const pcGatewayUrl = random40PcGatewayUrl(rawUrl);
   const cloudflareUrl = random40ProxyUrl(rawUrl);
-  const urls = options.proxyOnly
-    ? [pcGatewayUrl, cloudflareUrl]
-    : [pcGatewayUrl, rawUrl, cloudflareUrl];
+  const localOnly = Boolean(pcGatewayUrl && (
+    random40IsLocalMode(random40State?.mode) ||
+    trainAiState?.open
+  ));
+  const urls = localOnly
+    ? [pcGatewayUrl]
+    : options.proxyOnly
+      ? [pcGatewayUrl, cloudflareUrl]
+      : [pcGatewayUrl, rawUrl, cloudflareUrl];
   let lastError = null;
 
   for (const url of [...new Set(urls.filter(Boolean))]) {
+    if (options.signal?.aborted) throw new DOMException('Source request aborted', 'AbortError');
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const releaseController = trackPongWorkloadController(controller);
+    const abortFromParent = () => controller?.abort();
+    options.signal?.addEventListener('abort', abortFromParent, { once: true });
     const timer = controller ? setTimeout(() => controller.abort(), Number(options.timeoutMs || 18000)) : null;
     try {
       const res = await fetch(url, {
@@ -7407,11 +7497,19 @@ async function random40FetchText(rawUrl, options = {}) {
       lastError = err;
     } finally {
       if (timer) clearTimeout(timer);
+      options.signal?.removeEventListener('abort', abortFromParent);
       releaseController();
     }
   }
 
   throw lastError || new Error('Fetch failed');
+}
+
+function random40FetchText(rawUrl, options = {}) {
+  return random40ScheduleSourceFetch(
+    () => random40FetchTextNow(rawUrl, options),
+    options
+  );
 }
 
 async function random40FetchDoc(rawUrl, options = {}) {
@@ -9920,7 +10018,9 @@ async function random40CollectVideoPostLinks(artist, {
   maxPages = RANDOM40_MAX_ARTIST_PAGES,
   ignoreStop = false,
   verifyVideosAt = 0,
-  seed = null
+  seed = null,
+  signal = null,
+  sourcePriority = 0
 } = {}) {
   const base = artist.artistUrl;
   const postLinks = new Set(seed?.links || []);
@@ -9929,7 +10029,7 @@ async function random40CollectVideoPostLinks(artist, {
   const verifiedEntries = [...(seed?.verifiedEntries || [])];
   const checkedPostLinks = new Set(seed?.checkedPostLinks || []);
   const verificationTarget = Math.max(0, Number(verifyVideosAt) || 0);
-  const firstDoc = seed?.firstDoc || await random40FetchDoc(base, { timeoutMs: 22000 });
+  const firstDoc = seed?.firstDoc || await random40FetchDoc(base, { timeoutMs: 22000, signal, priority: sourcePriority });
   let scannedThroughPage = Math.max(1, Number(seed?.scannedThroughPage || 1));
   let scanComplete = Boolean(seed?.scanComplete);
 
@@ -9963,7 +10063,11 @@ async function random40CollectVideoPostLinks(artist, {
   const verifyPendingPostLinks = async () => {
     if (!verificationTarget || verifiedEntries.length >= verificationTarget) return;
     const pendingLinks = [...postLinks].filter(link => link && !checkedPostLinks.has(link));
-    if (!pendingLinks.length) return;
+    const remainingTarget = verificationTarget - verifiedEntries.length;
+    // Do not spend requests opening post pages until enough unseen candidates
+    // exist to possibly satisfy the real-media threshold. This removes most
+    // verification traffic for low-video artists without changing the rule.
+    if (pendingLinks.length < remainingTarget) return;
     pendingLinks.forEach(link => checkedPostLinks.add(link));
     const found = await random40ScrapeVideoLinksUntil(
       pendingLinks,
@@ -9971,7 +10075,8 @@ async function random40CollectVideoPostLinks(artist, {
       verificationTarget - verifiedEntries.length,
       ignoreStop,
       null,
-      scannedThroughPage > 5 ? 2 : 1
+      scannedThroughPage > 5 ? 2 : 1,
+      signal
     );
     const seenVideos = new Set(verifiedEntries.map(entry => entry?.videoUrl).filter(Boolean));
     found.forEach(entry => {
@@ -9988,10 +10093,14 @@ async function random40CollectVideoPostLinks(artist, {
     ? verifiedEntries.length < verificationTarget
     : postLinks.size < stopAt;
   while (!scanComplete && page <= maxPages && needsMore()) {
+    if (signal?.aborted) throw new DOMException('Artist precheck aborted', 'AbortError');
     if (random40State?.stop && !ignoreStop) break;
     const pages = Array.from({ length: Math.min(RANDOM40_PAGE_BATCH_SIZE, maxPages - page + 1) }, (_, i) => page + i);
     const docs = await Promise.all(pages.map(n =>
-      random40FetchDoc(`${base}?page=${n}`, { timeoutMs: 16000 }).catch(() => null)
+      random40FetchDoc(`${base}?page=${n}`, { timeoutMs: 16000, signal, priority: sourcePriority }).catch(error => {
+        if (signal?.aborted) throw error;
+        return null;
+      })
     ));
     let hasPosts = false;
     docs.forEach((doc, index) => {
@@ -10024,11 +10133,15 @@ async function random40CollectVideoPostLinks(artist, {
   };
 }
 
-async function random40VideoEntriesFromPost(postUrl, artistInfo) {
+async function random40VideoEntriesFromPost(postUrl, artistInfo, options = {}) {
   const cacheKey = random40NormalizeUrl(postUrl, location.href) || postUrl;
   if (random40PostEntriesCache.has(cacheKey)) return random40PostEntriesCache.get(cacheKey);
   const promise = (async () => {
-    const doc = await random40FetchDoc(postUrl, { timeoutMs: 22000 });
+    const doc = await random40FetchDoc(postUrl, {
+      timeoutMs: 22000,
+      signal: options.signal || null,
+      priority: Number(options.priority || 1)
+    });
     const body = doc.querySelector('div.post-body') || doc.body;
     const urls = [];
     body.querySelectorAll('video source[src], video[src], a[href]').forEach(node => {
@@ -10089,6 +10202,12 @@ function random40PumpPostFetchQueue() {
   const limit = random40PostFetchConcurrencyLimit();
   const activeArtist = random40ActiveArtistIdentity();
   while (random40PostFetchActive < limit && random40PostFetchQueue.length) {
+    random40PostFetchQueue = random40PostFetchQueue.filter(item => {
+      if (!item.signal?.aborted) return true;
+      item.reject?.(new DOMException('Post fetch aborted', 'AbortError'));
+      return false;
+    });
+    if (!random40PostFetchQueue.length) break;
     let selectedIndex = random40PostFetchQueue.findIndex(item => random40PostTaskMatchesActiveArtist(item, activeArtist));
     if (selectedIndex < 0) {
       selectedIndex = random40PostFetchQueue.findIndex(item => Number(item.priority || 1) < 2);
@@ -10114,22 +10233,40 @@ function random40PumpPostFetchQueue() {
   }
 }
 
-function random40WithPostFetchPriority(task, artistInfo = {}, priority = 1) {
+function random40WithPostFetchPriority(task, artistInfo = {}, priority = 1, signal = null) {
+  if (signal?.aborted) return Promise.reject(new DOMException('Post fetch aborted', 'AbortError'));
   return new Promise((resolve, reject) => {
-    random40PostFetchQueue.push({
+    const item = {
       task,
       resolve,
       reject,
+      signal,
       priority: Number(priority) >= 2 ? 2 : 1,
       artistUrl: artistInfo.artistUrl ? random40NormalizeArtistUrl(artistInfo.artistUrl) : '',
       artistKey: String(artistInfo.artistKey || '').toLowerCase(),
       sequence: random40PostFetchSequence++
-    });
+    };
+    const abortQueued = () => {
+      const index = random40PostFetchQueue.indexOf(item);
+      if (index < 0) return;
+      random40PostFetchQueue.splice(index, 1);
+      reject(new DOMException('Post fetch aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', abortQueued, { once: true });
+    item.resolve = value => {
+      signal?.removeEventListener('abort', abortQueued);
+      resolve(value);
+    };
+    item.reject = error => {
+      signal?.removeEventListener('abort', abortQueued);
+      reject(error);
+    };
+    random40PostFetchQueue.push(item);
     random40PumpPostFetchQueue();
   });
 }
 
-async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = Infinity, ignoreStop = false, onEntries = null, queuePriority = 1) {
+async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = Infinity, ignoreStop = false, onEntries = null, queuePriority = 1, signal = null) {
   const selectedLinks = shuffleInPlace([...new Set((links || []).filter(Boolean))]);
   if (!selectedLinks.length) return [];
 
@@ -10146,12 +10283,14 @@ async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = I
     const finish = () => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener('abort', finish);
       resolve(results.slice(0, stopAtVideos));
     };
+    signal?.addEventListener('abort', finish, { once: true });
 
     const launch = () => {
       if (settled) return;
-      if ((random40State?.stop && !ignoreStop) || results.length >= stopAtVideos || (index >= selectedLinks.length && active <= 0)) {
+      if (signal?.aborted || (random40State?.stop && !ignoreStop) || results.length >= stopAtVideos || (index >= selectedLinks.length && active <= 0)) {
         finish();
         return;
       }
@@ -10166,7 +10305,12 @@ async function random40ScrapeVideoLinksUntil(links, artistInfo, stopAtVideos = I
         if (active >= dynamicLimit) break;
         const link = selectedLinks[index++];
         active++;
-        random40WithPostFetchPriority(() => random40VideoEntriesFromPost(link, artistInfo), artistInfo, queuePriority)
+        random40WithPostFetchPriority(
+          () => random40VideoEntriesFromPost(link, artistInfo, { signal, priority: queuePriority }),
+          artistInfo,
+          queuePriority,
+          signal
+        )
           .catch(() => [])
           .then(entries => {
             if (!settled && entries?.length) {
@@ -10460,7 +10604,8 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
         stopAt: Infinity,
         maxPages: RANDOM40_MAX_ARTIST_PAGES,
         ignoreStop: true,
-        seed: precheck
+        seed: precheck,
+        sourcePriority: 2
       }).catch(() => null);
 
       await random40ScrapeVideoLinksUntil(
@@ -10767,7 +10912,7 @@ async function startRandom40(mode = 'nano') {
         const pageStageStarted = performance.now();
         const pageResults = await Promise.all(pages.map(page => {
           const pageUrl = random40PageUrl(page);
-          return random40FetchDoc(pageUrl, { timeoutMs: 22000 })
+          return random40FetchDoc(pageUrl, { timeoutMs: 22000, priority: 0 })
             .then(doc => ({ page, pageUrl, doc }))
             .catch(error => ({ page, pageUrl, error }));
         }));
@@ -10812,15 +10957,23 @@ async function startRandom40(mode = 'nano') {
 
         updateRandom40Progress({ detail: `Checking videos: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         let stageStarted = performance.now();
+        const precheckController = new AbortController();
+        const releasePrecheckController = trackPongWorkloadController(precheckController);
         const precheck = await random40WithTimeout(
           random40CollectVideoPostLinks(artist, {
             stopAt: Infinity,
             maxPages: RANDOM40_PRECHECK_MAX_ARTIST_PAGES,
-            verifyVideosAt: RANDOM40_MIN_VIDEOS_PER_ARTIST
+            verifyVideosAt: RANDOM40_MIN_VIDEOS_PER_ARTIST,
+            signal: precheckController.signal,
+            sourcePriority: 1
           }),
           45000,
           `${RANDOM40_MIN_VIDEOS_PER_ARTIST}-video verification timed out`
-        ).catch(() => ({ links: [], verifiedEntries: [] }));
+        ).catch(() => ({ links: [], verifiedEntries: [] }))
+          .finally(() => {
+            precheckController.abort();
+            releasePrecheckController();
+          });
         random40RecordStageTiming('video-precheck', performance.now() - stageStarted);
         if (precheck.hardReject) {
           random40CacheHardReject(artist.artistUrl, precheck.hardReject.reason || 'hard reject');

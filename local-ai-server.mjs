@@ -40,13 +40,13 @@ const MAX_LEARNED_RECORDS = 2000;
 const GATEWAY_TIMEOUT_MS = Math.max(5000, Number(process.env.PONG_GATEWAY_TIMEOUT_MS || 30000));
 const GATEWAY_MAX_REDIRECTS = 5;
 const GATEWAY_ALLOWED_HOSTS = ['coomerfans.com', 'onlyfaphouse.com'];
-const GATEWAY_WARM_CONNECTIONS = Math.max(1, Math.min(8, Number(process.env.PONG_GATEWAY_WARM_CONNECTIONS || 4)));
+const GATEWAY_WARM_CONNECTIONS = Math.max(1, Math.min(8, Number(process.env.PONG_GATEWAY_WARM_CONNECTIONS || 8)));
 const GATEWAY_KEEP_WARM_MS = Math.max(10000, Number(process.env.PONG_GATEWAY_KEEP_WARM_MS || 20000));
 const GATEWAY_AGENT = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 15000,
-  maxSockets: Math.max(12, Number(process.env.PONG_GATEWAY_MAX_SOCKETS || 24)),
-  maxFreeSockets: Math.max(8, Number(process.env.PONG_GATEWAY_MAX_FREE_SOCKETS || 24)),
+  maxSockets: Math.max(32, Number(process.env.PONG_GATEWAY_MAX_SOCKETS || 64)),
+  maxFreeSockets: Math.max(24, Number(process.env.PONG_GATEWAY_MAX_FREE_SOCKETS || 64)),
   scheduling: 'lifo'
 });
 
