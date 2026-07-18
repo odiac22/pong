@@ -28,12 +28,15 @@
   const PONG_ARTIST_PREFIX = '#PONG_ARTIST ';
   const PONG_VIDEO_PREFIX = '#PONG_VIDEO ';
   const REPAIR_LOG_UPLOAD_PATH = 'pong-data/repair-log-latest.txt';
+  const SHARED_SAVE_MAX_ATTEMPTS = 6;
 
   const GITHUB_SYNC = {
     owner: 'odiac22',
     repo: 'pong',
     branch: 'main',
-    path: 'pong-data/saved-links.json'
+    // V2 is isolated from stale tabs running the old full-file writer. Those
+    // tabs may still touch the legacy file, but cannot overwrite V2 records.
+    path: 'pong-data/saved-links-v2.json'
   };
 
   const SCRUB_START_PX = 34;
@@ -438,6 +441,7 @@
     if (!message) return 'unknown error';
     if (/No GitHub token/i.test(message)) return 'missing GitHub token';
     if (/GitHub load failed:\s*401/i.test(message)) return 'bad GitHub token';
+    if (/GitHub blob load failed:\s*401/i.test(message)) return 'bad GitHub token';
     if (/GitHub save failed:\s*401/i.test(message)) return 'bad GitHub token';
     if (/GitHub save failed:\s*403/i.test(message)) return 'GitHub permission denied';
     if (/GitHub save failed:\s*409/i.test(message)) return 'GitHub changed; try again';
@@ -446,7 +450,7 @@
   }
 
   function isGitHubAuthError(error) {
-    return /GitHub (?:load|save) failed:\s*(?:401|403)/i.test(String(error?.message || error || ''));
+    return /GitHub (?:load|save|blob load) failed:\s*(?:401|403)/i.test(String(error?.message || error || ''));
   }
 
   function normalizeGitHubToken(rawToken) {
@@ -643,9 +647,12 @@
     const bytes = new TextEncoder().encode(str);
     let binary = '';
 
-    bytes.forEach(byte => {
-      binary += String.fromCharCode(byte);
-    });
+    // Avoid one-character-at-a-time concatenation for multi-megabyte saved
+    // libraries. Chunking keeps 10,000+ URL snapshots practical on phones.
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    }
 
     return btoa(binary);
   }
@@ -666,6 +673,35 @@
 
   function githubTreeApiUrl() {
     return `https://api.github.com/repos/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/git/trees/${encodeURIComponent(GITHUB_SYNC.branch)}?recursive=1`;
+  }
+
+  function githubBlobApiUrl(sha) {
+    return `https://api.github.com/repos/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/git/blobs/${encodeURIComponent(sha)}`;
+  }
+
+  async function fetchSharedDataBlobFromGitHub(sha, gitUrl = '') {
+    if (!sha) throw new Error('GitHub saved links blob SHA missing');
+    const target = gitUrl || githubBlobApiUrl(sha);
+    const res = await fetch(`${target}${target.includes('?') ? '&' : '?'}t=${Date.now()}`, {
+      method: 'GET',
+      headers: githubHeaders(),
+      cache: 'no-store'
+    });
+
+    if (!res.ok) {
+      throw new Error(`GitHub blob load failed: ${res.status}`);
+    }
+
+    const blob = await res.json();
+    if (blob?.encoding !== 'base64' || typeof blob?.content !== 'string') {
+      throw new Error('GitHub saved links blob content missing');
+    }
+
+    try {
+      return JSON.parse(base64DecodeUnicode(blob.content));
+    } catch (error) {
+      throw new Error('GitHub saved links blob JSON parse failed');
+    }
   }
 
   function sameOriginSharedDataUrl() {
@@ -769,7 +805,10 @@
     let parsed = null;
     let apiError = null;
 
-    if (!requireWriteSha && options.rawFirst !== false) {
+    // Raw/GitHub Pages files can briefly lag behind the branch. They are only
+    // used when explicitly requested; counters, playback, and every mutation
+    // use the exact blob identified by the current Git SHA.
+    if (!requireWriteSha && options.rawFirst === true) {
       const pageUrl = options.pageFirst === false ? '' : sameOriginSharedDataUrl();
 
       if (pageUrl) {
@@ -827,12 +866,24 @@
           parsed = null;
         }
       }
+
+      if (!parsed && file?.sha) {
+        try {
+          parsed = await fetchSharedDataBlobFromGitHub(file.sha, file.git_url || '');
+        } catch (error) {
+          apiError = apiError || error;
+        }
+      }
     } catch (e) {
       apiError = apiError || e;
 
       if (requireWriteSha) {
         throw e;
       }
+    }
+
+    if (!parsed && requireWriteSha) {
+      throw apiError || new Error('GitHub exact saved links load failed');
     }
 
     if (!parsed) {
@@ -941,22 +992,71 @@
     return await res.json();
   }
 
-  async function updateSharedData(mutatorFn) {
+  let sharedDataWriteTail = Promise.resolve();
+
+  function enqueueSharedDataWrite(task) {
+    const run = sharedDataWriteTail.catch(() => {}).then(task);
+    sharedDataWriteTail = run.catch(() => {});
+    return run;
+  }
+
+  function assertNoUnexpectedSavedDataRemoval(before, after, result = {}) {
+    const allowedVideos = new Set(result.allowedRemovedVideoKeys || []);
+    const allowedArtists = new Set(result.allowedRemovedArtistKeys || []);
+
+    Object.keys(before?.savedVideos || {}).forEach(key => {
+      if (!after?.savedVideos?.[key] && !allowedVideos.has(key)) {
+        throw new Error(`Save safety stopped removal of video ${key}`);
+      }
+    });
+
+    Object.entries(before?.savedArtists || {}).forEach(([key, artist]) => {
+      if (!after?.savedArtists?.[key]) {
+        if (!allowedArtists.has(key)) {
+          throw new Error(`Save safety stopped removal of artist ${key}`);
+        }
+        return;
+      }
+
+      const nextVideoKeys = new Set((after.savedArtists[key].videos || []).map(getSavedVideoKey).filter(Boolean));
+      (artist?.videos || []).forEach(url => {
+        const mediaKey = getSavedVideoKey(url);
+        if (mediaKey && !nextVideoKeys.has(mediaKey)) {
+          throw new Error(`Save safety stopped removal of an existing video from artist ${key}`);
+        }
+      });
+    });
+  }
+
+  async function updateSharedDataNow(mutatorFn) {
     let lastError = null;
 
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < SHARED_SAVE_MAX_ATTEMPTS; attempt++) {
       try {
         const loaded = await fetchSharedDataFromGitHub({ requireWriteSha: true });
-        const data = loaded.data;
+        const before = cloneSharedData(loaded.data);
+        const data = cloneSharedData(loaded.data);
         const result = await mutatorFn(data) || {};
+        assertNoUnexpectedSavedDataRemoval(before, data, result);
 
-        await writeSharedDataToGitHub(data, loaded.sha);
-        mirrorSharedDataToLocal(data);
+        const expectedJson = JSON.stringify(normalizeSharedData(data));
+        const writeResult = await writeSharedDataToGitHub(data, loaded.sha);
+        const writtenSha = writeResult?.content?.sha || '';
+        if (!writtenSha) throw new Error('GitHub save verification SHA missing');
+
+        const verifiedData = normalizeSharedData(await fetchSharedDataBlobFromGitHub(writtenSha));
+        assertNoUnexpectedSavedDataRemoval(before, verifiedData, result);
+        if (JSON.stringify(verifiedData) !== expectedJson) {
+          throw new Error('GitHub saved links verification mismatch');
+        }
+
+        mirrorSharedDataToLocal(verifiedData);
 
         return {
           ok: true,
-          data,
-          result
+          data: verifiedData,
+          result,
+          sha: writtenSha
         };
       } catch (e) {
         lastError = e;
@@ -965,11 +1065,15 @@
           throw e;
         }
 
-        await new Promise(r => setTimeout(r, 400 + attempt * 400));
+        await new Promise(r => setTimeout(r, 450 + attempt * 550 + Math.floor(Math.random() * 250)));
       }
     }
 
     throw lastError;
+  }
+
+  async function updateSharedData(mutatorFn) {
+    return enqueueSharedDataWrite(() => updateSharedDataNow(mutatorFn));
   }
 
   async function updateSharedDataWithTokenRetry(mutatorFn) {
@@ -3091,13 +3195,16 @@
           data.savedVideos = data.savedVideos || {};
 
           let removed = false;
+          let removedKey = '';
 
           if (data.savedVideos[url]) {
+            removedKey = url;
             delete data.savedVideos[url];
             removed = true;
           } else {
             Object.keys(data.savedVideos).forEach(key => {
               if (data.savedVideos[key]?.url === url) {
+                removedKey = key;
                 delete data.savedVideos[key];
                 removed = true;
               }
@@ -3105,7 +3212,8 @@
           }
 
           return {
-            removed
+            removed,
+            allowedRemovedVideoKeys: removed ? [removedKey || getSavedVideoKey(url)].filter(Boolean) : []
           };
         });
 
@@ -3140,20 +3248,24 @@
 
           let removed = false;
 
+          let removedKey = '';
           if (data.savedArtists[artistKey]) {
             delete data.savedArtists[artistKey];
+            removedKey = artistKey;
             removed = true;
           } else {
             Object.keys(data.savedArtists).forEach(key => {
               if (data.savedArtists[key]?.artistKey === artistKey) {
                 delete data.savedArtists[key];
+                removedKey = key;
                 removed = true;
               }
             });
           }
 
           return {
-            removed
+            removed,
+            allowedRemovedArtistKeys: removedKey ? [removedKey] : []
           };
         });
 
@@ -4259,9 +4371,12 @@
         }
       });
 
-      const changed = JSON.stringify(oldVideos) !== JSON.stringify(freshVideos);
+      // Repair may refresh URLs, but it must never shrink an artist bundle
+      // merely because a scrape was partial or temporarily rate limited.
+      const mergedVideos = dedupeAndRefreshMediaUrls([...oldVideos, ...freshVideos]);
+      const changed = JSON.stringify(oldVideos) !== JSON.stringify(mergedVideos);
 
-      artist.videos = freshVideos;
+      artist.videos = mergedVideos;
       artist.videoMeta = {
         ...(artist.videoMeta || {}),
         ...freshMeta
@@ -4307,20 +4422,14 @@
   }
 
   async function writeRepairResultsToGitHubFromBaseData(state) {
-    const data = cloneSharedData(state?.baseData || emptySharedData());
-    const applied = applyRepairQueueResultsToData(data, state);
-
-    if (!applied.repaired && !(state?.results || []).length) {
+    if (!(state?.results || []).length) {
       return {
         repaired: 0
       };
     }
 
-    const sha = await fetchSharedDataShaFromGitHub();
-    await writeSharedDataToGitHub(data, sha);
-    mirrorSharedDataToLocal(data);
-
-    return applied;
+    const result = await updateSharedData(data => applyRepairQueueResultsToData(data, state));
+    return result.result;
   }
 
   async function finishIframeRepairQueue() {

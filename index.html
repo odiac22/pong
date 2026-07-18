@@ -291,7 +291,7 @@
     .update-app-button { left: 162px; font-size: 8px; font-weight: 850; letter-spacing: 0; }
     .reset-ai-stats-button { left: 192px; font-size: 9px; font-weight: 900; letter-spacing: 0; background: rgba(127,29,29,0.32) !important; }
     .next-batch-button {
-      position: fixed; left: 12px; top: 50%; transform: translateY(-50%);
+      position: fixed; left: 46px; top: 50%; transform: translateY(-50%);
       width: 30px; height: 30px; background: var(--ui-bg); opacity: 0.44;
       font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,0.28); border: 1px solid var(--ui-border);
       border-radius: 999px; z-index: 1000; display: flex; align-items: center;
@@ -318,6 +318,17 @@
       backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
     }
     .unwatched-videos-button:hover, .unwatched-videos-button:active { opacity: 0.85; transform: translateY(-50%) scale(1.06); }
+    .paste-prev-button {
+      position: fixed; left: 12px; top: 50%; transform: translateY(-50%);
+      width: 28px; height: 28px; background: var(--ui-bg); opacity: 0.2;
+      font-size: 15px; border-radius: 999px; display: flex; align-items: center;
+      justify-content: center; z-index: 1000; cursor: pointer; border: 1px solid var(--ui-border);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.28); transition: all 0.18s ease; color: var(--ui-text);
+      -webkit-tap-highlight-color: transparent;
+      user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    }
+    .paste-prev-button:hover, .paste-prev-button:active { opacity: 0.85; transform: translateY(-50%) scale(1.06); }
     .paste-nav-button {
       position: fixed; left: 12px; top: calc(50% + 42px); transform: translateY(-50%);
       width: 28px; height: 28px; background: var(--ui-bg); opacity: 0.44;
@@ -806,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">23.96</div>
+  <div class="version-number">23.97</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -934,6 +945,8 @@ let currentPasteIndex = -1;
 let paperclipRetiredBundleKeys = new Set();
 let paperclipVisitedArtistTokens = new Set();
 let paperclipStepCount = 1;
+let paperclipHistory = [];
+let paperclipHistoryPosition = -1;
 let pendingPastes = [];
 let _prevUrlCount = 0;
 let parsedVideoUrlsCache = [];
@@ -3492,7 +3505,7 @@ function getDeckSwipePoint(event) {
 
 function isDeckSwipeBlockedTarget(target) {
   return !!(target && target.closest && target.closest(
-    '.video-progress-container, .audio-toggle-button, .control-button, .next-batch-button, .unwatched-videos-button, .paste-nav-button, .save-video-button, .save-artist-button, .repair-button, .controls-overlay, #auth-helper, #erome-helper, button, input, textarea'
+    '.video-progress-container, .audio-toggle-button, .control-button, .next-batch-button, .unwatched-videos-button, .paste-prev-button, .paste-nav-button, .save-video-button, .save-artist-button, .repair-button, .controls-overlay, #auth-helper, #erome-helper, button, input, textarea'
   ));
 }
 
@@ -4273,7 +4286,19 @@ function reloadUnwatchedVideos(){
 }
 
 // ─── Paste navigation ─────────────────────────────────────────────────────────
-function setActivePlaybackRangeForPasteEvent(index) {
+function recordPaperclipHistoryIndex(index) {
+  const safeIndex = Number(index);
+  if (!Number.isInteger(safeIndex) || safeIndex < 0) return;
+  if (paperclipHistoryPosition < paperclipHistory.length - 1) {
+    paperclipHistory = paperclipHistory.slice(0, paperclipHistoryPosition + 1);
+  }
+  if (paperclipHistory[paperclipHistory.length - 1] !== safeIndex) {
+    paperclipHistory.push(safeIndex);
+  }
+  paperclipHistoryPosition = paperclipHistory.length - 1;
+}
+
+function setActivePlaybackRangeForPasteEvent(index, { recordHistory = true } = {}) {
   if (!pasteEvents.length || !allVideoUrls.length) return null;
 
   const safeIndex = ((Number(index) || 0) + pasteEvents.length) % pasteEvents.length;
@@ -4292,6 +4317,7 @@ function setActivePlaybackRangeForPasteEvent(index) {
   currentBatch = 0;
   currentVideoIndex = 0;
   markPasteEventVisitedForPaperclip(target, safeIndex);
+  if (recordHistory) recordPaperclipHistoryIndex(safeIndex);
 
   return target;
 }
@@ -4716,6 +4742,9 @@ function getPaperclipActiveBundleCount() {
 function getPaperclipProgressCount() {
   const total = getPaperclipTotalBundleCount();
   if (!total) return 0;
+  if (paperclipHistoryPosition >= 0 && paperclipHistory.length) {
+    return Math.min(total, paperclipHistoryPosition + 1);
+  }
   const active = getPaperclipActiveBundleCount();
   return Math.min(total, Math.max(1, total - active + 1));
 }
@@ -4724,6 +4753,8 @@ function resetPaperclipQueue() {
   paperclipRetiredBundleKeys = new Set();
   paperclipVisitedArtistTokens = new Set();
   paperclipStepCount = 1;
+  paperclipHistory = [];
+  paperclipHistoryPosition = -1;
 }
 
 window.PongResetPaperclipQueue = resetPaperclipQueue;
@@ -4818,6 +4849,37 @@ function shouldNextBatchAdvanceSavedArtist() {
     pasteEvents.length > 1;
 }
 
+function displayPasteEventAtIndex(index, { recordHistory = true } = {}) {
+  setActivePlaybackRangeForPasteEvent(index, { recordHistory });
+  random40PumpPostFetchQueue();
+  scheduleRandom40PreloadPool(50);
+  updatePasteNavigationButton();
+  scheduleSessionSave(700);
+
+  window.PongFastNextBatchOnce = true;
+  deckCurrentIndex = 0;
+  deckRestoreIndex = 0;
+  videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
+  setTimeout(()=>{
+    loadNextBatch(0);
+    updatePasteNavigationButton();
+  },0);
+}
+
+function navigateToPreviousPasteEvent() {
+  if (!pasteEvents.length || paperclipHistoryPosition <= 0) {
+    showSortingIndicator('No previous artist');
+    updatePasteNavigationButton();
+    return;
+  }
+
+  paperclipHistoryPosition--;
+  const previousIndex = paperclipHistory[paperclipHistoryPosition];
+  displayPasteEventAtIndex(previousIndex, { recordHistory: false });
+}
+
+window.PongNavigateToPreviousPasteEvent = navigateToPreviousPasteEvent;
+
 function navigateToNextPasteEvent(){
   if(!pasteEvents.length||!allVideoUrls.length){
     showSortingIndicator('No paste bundles yet');
@@ -4825,6 +4887,14 @@ function navigateToNextPasteEvent(){
   }
 
   syncCurrentPasteIndexFromVisibleVideo();
+
+  // After Previous, Paperclip moves forward through the exact viewed history.
+  // Once caught up, it resumes selecting artists that have never been visited.
+  if (paperclipHistoryPosition >= 0 && paperclipHistoryPosition < paperclipHistory.length - 1) {
+    paperclipHistoryPosition++;
+    displayPasteEventAtIndex(paperclipHistory[paperclipHistoryPosition], { recordHistory: false });
+    return;
+  }
 
   const excludedIdentity = getCurrentPaperclipArtistIdentity();
   const retired = retireCurrentPasteEventForPaperclip();
@@ -4846,20 +4916,7 @@ function navigateToNextPasteEvent(){
   }
 
   if (retired) paperclipStepCount++;
-  setActivePlaybackRangeForPasteEvent(nextActiveIndex);
-  random40PumpPostFetchQueue();
-  scheduleRandom40PreloadPool(50);
-  updatePasteNavigationButton();
-  scheduleSessionSave(700);
-
-  window.PongFastNextBatchOnce = true;
-  deckCurrentIndex = 0;
-  deckRestoreIndex = 0;
-  videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
-  setTimeout(()=>{
-    loadNextBatch(0);
-    updatePasteNavigationButton();
-  },0);
+  displayPasteEventAtIndex(nextActiveIndex);
 }
 
 window.PongNavigateToNextPasteEvent = navigateToNextPasteEvent;
@@ -4968,6 +5025,25 @@ function resetPasteEvents(){
 
 function updatePasteNavigationButton(){
   let btn=document.getElementById('paste-nav-button');
+  let previousBtn=document.getElementById('paste-prev-button');
+
+  if(!previousBtn){
+    previousBtn=document.createElement('div');
+    previousBtn.id='paste-prev-button';
+    previousBtn.className='paste-prev-button';
+    previousBtn.innerHTML='&#x21A9;';
+    previousBtn.setAttribute('aria-label','Previous artist');
+    previousBtn.addEventListener('click',e=>{
+      e.preventDefault();
+      e.stopPropagation();
+      navigateToPreviousPasteEvent();
+    });
+    document.body.appendChild(previousBtn);
+  }
+
+  const hasPrevious = paperclipHistoryPosition > 0;
+  previousBtn.style.opacity = hasPrevious ? '0.74' : '0.2';
+  previousBtn.title = hasPrevious ? 'Previous artist' : 'No previous artist';
 
   if(!btn){
     btn=document.createElement('div');
@@ -11549,6 +11625,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=106"></script>
+<script src="pong-sync.js?v=107"></script>
 </body>
 </html>
