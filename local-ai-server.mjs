@@ -49,6 +49,10 @@ const GATEWAY_AGENT = new https.Agent({
   maxFreeSockets: Math.max(16, Number(process.env.PONG_GATEWAY_MAX_FREE_SOCKETS || 32)),
   scheduling: 'lifo'
 });
+const VIDEO_VERIFY_FETCH_CONCURRENCY = Math.max(4, Math.min(32, Number(process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY || 18)));
+const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(8, Number(process.env.PONG_VIDEO_VERIFY_PER_ARTIST_CONCURRENCY || 6)));
+const VIDEO_VERIFY_CACHE_MAX = Math.max(200, Number(process.env.PONG_VIDEO_VERIFY_CACHE_MAX || 6000));
+const VIDEO_VERIFY_CACHE_TTL_MS = Math.max(30000, Number(process.env.PONG_VIDEO_VERIFY_CACHE_TTL_MS || 900000));
 
 env.allowLocalModels = false;
 env.useBrowserCache = false;
@@ -85,6 +89,10 @@ const gatewayWarmState = {
   failures: 0,
   error: ''
 };
+const videoVerifyCache = new Map();
+const videoVerifyFetchQueue = [];
+let videoVerifyFetchActive = 0;
+let videoVerifyBackoffUntil = 0;
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -101,7 +109,7 @@ function json(res, status, payload) {
 function gatewayCorsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,HEAD,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,HEAD,POST,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,Range,If-None-Match,If-Modified-Since',
     'Access-Control-Expose-Headers': 'Accept-Ranges,Content-Length,Content-Range,Content-Type,ETag,Last-Modified',
     'Cache-Control': 'no-store'
@@ -164,6 +172,176 @@ async function gatewayFetch(target, req, controller, method) {
     current = gatewayTargetUrl(new URL(location, current).toString());
   }
   throw new Error('gateway redirect failed');
+}
+
+function videoVerifyDelay(ms) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
+}
+
+function pumpVideoVerifyFetchQueue() {
+  while (videoVerifyFetchActive < VIDEO_VERIFY_FETCH_CONCURRENCY && videoVerifyFetchQueue.length) {
+    const item = videoVerifyFetchQueue.shift();
+    if (item.signal?.aborted) {
+      item.reject(new DOMException('video verification aborted', 'AbortError'));
+      continue;
+    }
+    videoVerifyFetchActive++;
+    Promise.resolve()
+      .then(async () => {
+        const waitMs = videoVerifyBackoffUntil - Date.now();
+        if (waitMs > 0) await videoVerifyDelay(waitMs);
+        return item.task();
+      })
+      .then(item.resolve, item.reject)
+      .finally(() => {
+        videoVerifyFetchActive = Math.max(0, videoVerifyFetchActive - 1);
+        pumpVideoVerifyFetchQueue();
+      });
+  }
+}
+
+function scheduleVideoVerifyFetch(task, signal) {
+  if (signal?.aborted) return Promise.reject(new DOMException('video verification aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    videoVerifyFetchQueue.push({ task, signal, resolve, reject });
+    pumpVideoVerifyFetchQueue();
+  });
+}
+
+function decodeHtmlUrl(value) {
+  return String(value || '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&#x2f;/gi, '/')
+    .replace(/&#47;/g, '/')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function extractVideoUrlsFromHtml(html, postUrl) {
+  const urls = [];
+  const seen = new Set();
+  const attributePattern = /(?:src|href)\s*=\s*["']([^"']+\.(?:mp4|m4v|mov|webm)(?:\?[^"']*)?)["']/gi;
+  for (const match of String(html || '').matchAll(attributePattern)) {
+    try {
+      const videoUrl = new URL(decodeHtmlUrl(match[1]), postUrl).toString();
+      if (!seen.has(videoUrl)) {
+        seen.add(videoUrl);
+        urls.push(videoUrl);
+      }
+    } catch (_) {}
+  }
+  return urls;
+}
+
+async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal) {
+  const normalizedPostUrl = gatewayTargetUrl(postUrl).toString();
+  const cached = videoVerifyCache.get(normalizedPostUrl);
+  if (cached && Date.now() - cached.at < VIDEO_VERIFY_CACHE_TTL_MS) {
+    videoVerifyCache.delete(normalizedPostUrl);
+    videoVerifyCache.set(normalizedPostUrl, cached);
+    return cached.entries;
+  }
+
+  const entries = await scheduleVideoVerifyFetch(async () => {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(), Math.min(GATEWAY_TIMEOUT_MS, 16000));
+    try {
+      let response = await fetch(normalizedPostUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 PongVideoVerifier/1.0',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Referer': `${new URL(normalizedPostUrl).origin}/`
+        },
+        redirect: 'follow',
+        cache: 'no-store',
+        signal: controller.signal
+      });
+      if (response.status === 429) {
+        const retryAfterSeconds = Number(response.headers.get('retry-after') || 0);
+        videoVerifyBackoffUntil = Math.max(videoVerifyBackoffUntil, Date.now() + Math.min(5000, Math.max(500, retryAfterSeconds * 1000)));
+        await videoVerifyDelay(Math.max(0, videoVerifyBackoffUntil - Date.now()));
+        response = await fetch(normalizedPostUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 PongVideoVerifier/1.0',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Referer': `${new URL(normalizedPostUrl).origin}/`
+          },
+          redirect: 'follow',
+          cache: 'no-store',
+          signal: controller.signal
+        });
+      }
+      if (!response.ok) throw new Error(`video post HTTP ${response.status}`);
+      gatewayTargetUrl(response.url || normalizedPostUrl);
+      const urls = extractVideoUrlsFromHtml(await response.text(), normalizedPostUrl);
+      return urls.map((videoUrl, postIndex) => ({
+        ...artistInfo,
+        type: 'video',
+        videoUrl,
+        mediaKey: videoUrl,
+        postUrl: normalizedPostUrl,
+        postIndex
+      }));
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    }
+  }, signal);
+
+  videoVerifyCache.set(normalizedPostUrl, { at: Date.now(), entries });
+  while (videoVerifyCache.size > VIDEO_VERIFY_CACHE_MAX) {
+    videoVerifyCache.delete(videoVerifyCache.keys().next().value);
+  }
+  return entries;
+}
+
+async function verifyVideoPostBatch(payload, requestSignal) {
+  const postUrls = [...new Set((Array.isArray(payload?.postUrls) ? payload.postUrls : [])
+    .map(value => gatewayTargetUrl(value).toString()))].slice(0, 500);
+  const stopAt = Math.max(1, Math.min(100, Number(payload?.stopAt || 15)));
+  const artistInfo = payload?.artistInfo && typeof payload.artistInfo === 'object' ? payload.artistInfo : {};
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  requestSignal?.addEventListener('abort', abort, { once: true });
+  const entries = [];
+  const seenVideos = new Set();
+  let nextIndex = 0;
+
+  async function worker() {
+    while (!controller.signal.aborted && entries.length < stopAt) {
+      const index = nextIndex++;
+      if (index >= postUrls.length) return;
+      const found = await fetchVideoEntriesForVerification(postUrls[index], artistInfo, controller.signal).catch(() => []);
+      for (const entry of found) {
+        if (!entry?.videoUrl || seenVideos.has(entry.videoUrl)) continue;
+        seenVideos.add(entry.videoUrl);
+        entries.push(entry);
+        if (entries.length >= stopAt) {
+          controller.abort();
+          break;
+        }
+      }
+    }
+  }
+
+  try {
+    await Promise.all(Array.from(
+      { length: Math.min(VIDEO_VERIFY_PER_ARTIST_CONCURRENCY, postUrls.length) },
+      () => worker()
+    ));
+  } finally {
+    requestSignal?.removeEventListener('abort', abort);
+  }
+  return {
+    ok: true,
+    entries: entries.slice(0, stopAt),
+    checked: Math.min(nextIndex, postUrls.length),
+    candidates: postUrls.length,
+    stopAt,
+    cacheSize: videoVerifyCache.size
+  };
 }
 
 async function warmGatewayConnections() {
@@ -2065,6 +2243,24 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'POST' && url.pathname === '/verify-videos') {
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      req.once('aborted', abort);
+      res.once('close', abort);
+      try {
+        const payload = JSON.parse(await readBody(req));
+        const result = await verifyVideoPostBatch(payload, controller.signal);
+        if (!res.writableEnded) json(res, 200, result);
+      } catch (error) {
+        if (!res.writableEnded) json(res, 400, { ok: false, error: error.message || String(error) });
+      } finally {
+        req.off('aborted', abort);
+        res.off('close', abort);
+      }
+      return;
+    }
+
     if (req.method === 'GET' && url.pathname === '/health') {
       const preferenceAi = await preferenceAiHealth(true);
       const learnedStore = preferenceAi ? { records: [] } : await loadLearnedStore();
@@ -2102,6 +2298,15 @@ const server = http.createServer(async (req, res) => {
           successes: gatewayWarmState.successes,
           failures: gatewayWarmState.failures,
           error: gatewayWarmState.error
+        },
+        video_verifier: {
+          storage: 'memory-only',
+          fetch_concurrency: VIDEO_VERIFY_FETCH_CONCURRENCY,
+          per_artist_concurrency: VIDEO_VERIFY_PER_ARTIST_CONCURRENCY,
+          active: videoVerifyFetchActive,
+          queued: videoVerifyFetchQueue.length,
+          cached_posts: videoVerifyCache.size,
+          backoff_until: videoVerifyBackoffUntil ? new Date(videoVerifyBackoffUntil).toISOString() : ''
         },
         cached_images: embeddingCache.size,
         learned_accept_records: preferenceAi?.accepts ?? learnedStore.records.filter(record => record.label === 'accept').length,

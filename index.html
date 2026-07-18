@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.04</div>
+  <div class="version-number">24.05</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7072,16 +7072,16 @@ const RANDOM40_REJECT_CACHE_MAX = 4000;
 const RANDOM40_REJECT_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const RANDOM40_CONFIDENCE_REVIEW = 0.95;
 const RANDOM40_ACCEPT_CONFIDENCE = 0.9;
-// personal_preference_v2 makes its own 0.52 probability decision; 0.58 is the
-// corresponding confidence floor from that model's margin calibration.
-const RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE = 0.58;
+// personal_preference_v2 makes its own 0.50 probability decision; 0.55 is the
+// corresponding confidence floor at that calibrated cutoff.
+const RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE = 0.55;
 const RANDOM40_LOCAL_BODY_QWEN_REVIEW_THRESHOLD = 0.43;
-const RANDOM40_MIN_SCREENED_IMAGES = 5;
+const RANDOM40_MIN_SCREENED_IMAGES = 3;
 const RANDOM40_MAX_REVIEW_IMAGES = 5;
 const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 5;
 const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 4;
-const RANDOM40_LOCAL_MAX_REVIEW_IMAGES = 5;
-const RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST = 5;
+const RANDOM40_LOCAL_MAX_REVIEW_IMAGES = 3;
+const RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST = 3;
 const RANDOM40_LOCAL_RANDOM_PROFILE_IMAGES_PER_ARTIST = 4;
 const RANDOM40_MAX_ACCEPT_RECORDS = 160;
 const RANDOM40_MAX_ACCEPT_EXAMPLES = 2;
@@ -7091,7 +7091,8 @@ const RANDOM40_MAX_REJECT_EXAMPLES = 4;
 const RANDOM40_REJECT_IMAGES_PER_EXAMPLE = 3;
 const RANDOM40_STORED_IMAGES_PER_ARTIST = 40;
 const RANDOM40_LOCAL_LEARN_IMAGES_PER_EXAMPLE = 6;
-const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
+const RANDOM40_DEFAULT_PROXY = 'https://pong-coomerfans-proxy.arianslade-pong.workers.dev';
+const RANDOM40_SOURCE_ROUTE_KEY = 'pong_random40_source_route_v1';
 const RANDOM40_PRELOAD_CURRENT_RESERVE = 30;
 let random40AcceptedArtistsMemory = [];
 let random40RejectedArtistsMemory = [];
@@ -7378,11 +7379,20 @@ async function random40TryKnownLocalEndpoint(timeoutMs = 2200) {
   return '';
 }
 
-function random40ProxyUrl(rawUrl) {
-  let proxy = RANDOM40_DEFAULT_PROXY;
+function random40ProxyBase() {
+  let proxy = '';
   try {
-    proxy = String(localStorage.getItem('pong_coomerfans_proxy_url_v1') || proxy || '').trim().replace(/\/+$/, '');
+    proxy = String(localStorage.getItem('pong_coomerfans_proxy_url_v1') || '').trim().replace(/\/+$/, '');
+    if (!proxy || /pong-coomerfans-proxy\.odiac22-pong-repair\.workers\.dev$/i.test(proxy)) {
+      proxy = RANDOM40_DEFAULT_PROXY;
+      localStorage.setItem('pong_coomerfans_proxy_url_v1', proxy);
+    }
   } catch (_) {}
+  return proxy || RANDOM40_DEFAULT_PROXY;
+}
+
+function random40ProxyUrl(rawUrl) {
+  const proxy = random40ProxyBase();
   if (!proxy) return rawUrl;
   return `${proxy}${proxy.includes('?') ? '&' : '?'}url=${encodeURIComponent(rawUrl)}&t=${Date.now()}`;
 }
@@ -7391,6 +7401,71 @@ function random40PcGatewayUrl(rawUrl) {
   const endpoint = random40GatewayEndpoint || random40State?.localEndpoint || '';
   if (!endpoint) return '';
   return `${endpoint}/proxy?url=${encodeURIComponent(rawUrl)}&t=${Date.now()}`;
+}
+
+function random40SourceRoute() {
+  try {
+    const configured = String(localStorage.getItem(RANDOM40_SOURCE_ROUTE_KEY) || '').trim().toLowerCase();
+    if (configured === 'cloudflare' || configured === 'pc') return configured;
+  } catch (_) {}
+  return 'pc';
+}
+
+function random40VideoVerifierEndpoints() {
+  const cloudflare = random40ProxyBase();
+  const pc = random40GatewayEndpoint || random40State?.localEndpoint || '';
+  if (random40SourceRoute() === 'cloudflare') {
+    return [...new Set([
+      cloudflare ? `${cloudflare}/verify-videos` : '',
+      pc ? `${pc}/verify-videos` : ''
+    ].filter(Boolean))];
+  }
+  return [...new Set([
+    pc ? `${pc}/verify-videos` : '',
+    cloudflare ? `${cloudflare}/verify-videos` : ''
+  ].filter(Boolean))];
+}
+
+async function random40VerifyPostLinksBatch(postLinks, artistInfo, stopAt, signal = null) {
+  const endpoints = random40VideoVerifierEndpoints();
+  if (!endpoints.length || !postLinks?.length) return null;
+  const orderedPostUrls = shuffleInPlace([...new Set(postLinks.filter(Boolean))]);
+  for (const endpoint of endpoints) {
+    const controller = new AbortController();
+    const releaseController = trackPongWorkloadController(controller);
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        signal: controller.signal,
+        body: JSON.stringify({
+          postUrls: orderedPostUrls,
+          artistInfo,
+          stopAt: Math.max(1, Number(stopAt || RANDOM40_MIN_VIDEOS_PER_ARTIST))
+        })
+      });
+      if (!response.ok) throw new Error(`video verifier HTTP ${response.status}`);
+      const payload = await response.json();
+      if (!payload?.ok || !Array.isArray(payload.entries)) throw new Error(payload?.error || 'bad video verifier response');
+      return payload.entries.map(entry => ({
+        ...artistInfo,
+        ...entry,
+        type: 'video',
+        mediaKey: entry.mediaKey || extractArtistKeyFromUrl(entry.videoUrl) || entry.videoUrl
+      })).filter(entry => entry.videoUrl);
+    } catch (_) {
+      if (signal?.aborted) return null;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      releaseController();
+    }
+  }
+  return null;
 }
 
 function random40PumpSourceFetchQueue() {
@@ -7475,12 +7550,15 @@ function random40ScheduleSourceFetch(task, options = {}) {
 async function random40FetchTextNow(rawUrl, options = {}) {
   const pcGatewayUrl = random40PcGatewayUrl(rawUrl);
   const cloudflareUrl = random40ProxyUrl(rawUrl);
+  const sourceRoute = random40SourceRoute();
   const localOnly = Boolean(pcGatewayUrl && (
     random40IsLocalMode(random40State?.mode) ||
     trainAiState?.open
   ));
-  const urls = localOnly
-    ? [pcGatewayUrl]
+  const urls = sourceRoute === 'cloudflare'
+    ? [cloudflareUrl]
+    : localOnly
+    ? [pcGatewayUrl, cloudflareUrl]
     : options.proxyOnly
       ? [pcGatewayUrl, cloudflareUrl]
       : [pcGatewayUrl, rawUrl, cloudflareUrl];
@@ -9167,7 +9245,7 @@ async function random40SelectRepresentativeCandidateImages({
 
 const TRAIN_AI_ACCURACY_KEY = 'pong_train_ai_accuracy_v1';
 const TRAIN_AI_AUDIT_KEY = 'pong_train_ai_verdict_audit_v1';
-const TRAIN_AI_TOTAL_IMAGES = 5;
+const TRAIN_AI_TOTAL_IMAGES = 3;
 const TRAIN_AI_POST_IMAGE_COUNT = TRAIN_AI_TOTAL_IMAGES - 1;
 const TRAIN_AI_SWIPE_COMMIT_MS = 80;
 const TRAIN_AI_CLASSIFY_TIMEOUT_MS = 35000;
@@ -10104,9 +10182,18 @@ async function random40CollectVideoPostLinks(artist, {
     // verification traffic for low-video artists without changing the rule.
     if (pendingLinks.length < remainingTarget) return;
     pendingLinks.forEach(link => checkedPostLinks.add(link));
-    const found = await random40ScrapeVideoLinksUntil(
+    const artistInfo = random40ArtistInfo(base, firstDoc);
+    const batchStarted = performance.now();
+    const batched = await random40VerifyPostLinksBatch(
       pendingLinks,
-      random40ArtistInfo(base, firstDoc),
+      artistInfo,
+      verificationTarget - verifiedEntries.length,
+      signal
+    );
+    if (batched) random40RecordStageTiming('video-batch-verify', performance.now() - batchStarted);
+    const found = batched || await random40ScrapeVideoLinksUntil(
+      pendingLinks,
+      artistInfo,
       verificationTarget - verifiedEntries.length,
       ignoreStop,
       null,

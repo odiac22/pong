@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "pong-coomerfans-proxy",
+  "main": "workers/coomerfans-proxy.js",
+  "compatibility_date": "2026-07-18",
+  "workers_dev": true,
+  "observability": {
+    "enabled": false
+  }
+}

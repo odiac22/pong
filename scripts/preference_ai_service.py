@@ -707,7 +707,7 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
     # Keep the personal cutoff separate from the immutable hard checks.  The
     # compact head is well separated around this point on the migrated labels;
     # higher fixed cutoffs made the speed mode reject known positive examples.
-    threshold = 0.52
+    threshold = 0.50
     if hard_reason:
         decision = "reject"
         confidence = max(0.94, preference)
