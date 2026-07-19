@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.07</div>
+  <div class="version-number">24.08</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7043,8 +7043,8 @@ const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
 const RANDOM40_AI_CONCURRENCY = 12;
-const RANDOM40_LOCAL_CONCURRENCY = 48;
-const RANDOM40_SOURCE_CONCURRENCY = 80;
+const RANDOM40_LOCAL_CONCURRENCY = 12;
+const RANDOM40_SOURCE_CONCURRENCY = 18;
 const RANDOM40_SOURCE_BACKGROUND_CONCURRENCY = 4;
 const RANDOM40_POST_CONCURRENCY = 18;
 const RANDOM40_POST_PLAYING_CONCURRENCY = 24;
@@ -7053,11 +7053,14 @@ const RANDOM40_POST_FOREGROUND_CONCURRENCY = 18;
 const RANDOM40_POST_SLOW_CONCURRENCY = 4;
 const RANDOM40_POST_ENTRIES_CACHE_MAX = 6000;
 const RANDOM40_PAGE_BATCH_SIZE = 2;
-const RANDOM40_LISTING_PAGE_BATCH_SIZE = 8;
+// A continuous one-page wave avoids putting hundreds of speculative profiles
+// ahead of artists that are already close to the real-video and visual gates.
+const RANDOM40_LISTING_PAGE_BATCH_SIZE = 1;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 15;
 const RANDOM40_PRECHECK_MAX_ARTIST_PAGES = 36;
-const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 192;
+const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 12;
+const RANDOM40_LOCAL_VIDEO_HEDGE_MS = 1200;
 const RANDOM40_SOURCE_BASES = ['https://coomerfans.com/', 'https://onlyfaphouse.com/'];
 const RANDOM40_FAST_PUBLISH_VIDEOS = RANDOM40_MIN_VIDEOS_PER_ARTIST;
 const RANDOM40_BACKGROUND_APPEND_BATCH = 4;
@@ -10103,6 +10106,27 @@ function random40RandomPage() {
   return RANDOM40_PAGE_MIN + Math.floor(Math.random() * (RANDOM40_PAGE_MAX - RANDOM40_PAGE_MIN + 1));
 }
 
+function random40BalancedArtistSample(candidates, limit) {
+  const groups = new Map(RANDOM40_SOURCE_BASES.map(base => [new URL(base).hostname, []]));
+  for (const artist of shuffleInPlace([...(candidates || [])])) {
+    try {
+      const host = new URL(artist.artistUrl).hostname;
+      if (!groups.has(host)) groups.set(host, []);
+      groups.get(host).push(artist);
+    } catch (_) {}
+  }
+  const queues = [...groups.values()].map(queue => shuffleInPlace(queue));
+  const selected = [];
+  while (selected.length < limit && queues.some(queue => queue.length)) {
+    for (const queue of queues) {
+      if (selected.length >= limit) break;
+      const artist = queue.shift();
+      if (artist) selected.push(artist);
+    }
+  }
+  return selected;
+}
+
 function random40ExtractVideoPostLinks(doc, baseUrl) {
   const links = [];
   doc.querySelectorAll('div.post').forEach(post => {
@@ -10112,6 +10136,86 @@ function random40ExtractVideoPostLinks(doc, baseUrl) {
     if (href) links.push(random40NormalizeUrl(href, baseUrl));
   });
   return [...new Set(links.filter(Boolean))];
+}
+
+async function random40PreflightArtist(artist) {
+  try {
+    const workingArtist = artist;
+    const firstDoc = await random40FetchDoc(artist.artistUrl, { timeoutMs: 15000, priority: 0 });
+    const pageText = String(firstDoc.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 60000);
+    const hardReject = random40HardFilter({
+      ...workingArtist,
+      pageText: `${workingArtist.pageText || ''} ${pageText}`.replace(/\s+/g, ' ').trim()
+    });
+    if (hardReject) return { artist: workingArtist, hardReject, score: -1 };
+    const links = random40ExtractVideoPostLinks(firstDoc, workingArtist.artistUrl);
+    const postImageEntries = random40ExtractScraperPostImages(firstDoc, workingArtist.artistUrl, workingArtist);
+    const hasNext = Boolean(firstDoc.querySelector('a[href*="?page="], a[href*="&page="]'));
+    const seed = {
+      firstDoc,
+      links,
+      pageText,
+      postImageEntries,
+      verifiedEntries: [],
+      checkedPostLinks: [],
+      scannedThroughPage: 1,
+      nextPage: 2,
+      scanComplete: !hasNext
+    };
+    return {
+      artist: { ...workingArtist, precheckSeed: seed },
+      score: links.length * 100 + Number(hasNext)
+    };
+  } catch (_) {
+    return { artist, score: 0 };
+  }
+}
+
+async function random40TakeWarmCandidates(localEndpoint, count = RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH) {
+  if (!localEndpoint) return [];
+  const controller = new AbortController();
+  const releaseController = trackPongWorkloadController(controller);
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch(`${localEndpoint}/random40/candidates?count=${Math.max(1, Number(count || 12))}`, {
+      cache: 'no-store',
+      signal: controller.signal
+    });
+    if (!response.ok) return [];
+    const payload = await response.json();
+    const candidates = [];
+    for (const item of payload?.candidates || []) {
+      const artistUrl = random40NormalizeArtistUrl(item?.artistUrl || '');
+      if (!artistUrl || !item?.html) continue;
+      const identity = random40ArtistIdentity(artistUrl);
+      if (!identity || random40State?.seenArtists?.has(identity) || random40State?.rejectedArtistUrls?.has(identity)) continue;
+      const firstDoc = new DOMParser().parseFromString(item.html, 'text/html');
+      const artist = random40ArtistInfo(artistUrl, firstDoc);
+      artist.pageText = String(firstDoc.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 60000);
+      artist.imageUrl = random40FindProfileImageFromDoc(firstDoc, artist, artistUrl);
+      const links = random40ExtractVideoPostLinks(firstDoc, artistUrl);
+      const postImageEntries = random40ExtractScraperPostImages(firstDoc, artistUrl, artist);
+      const hasNext = Boolean(firstDoc.querySelector('a[href*="?page="], a[href*="&page="]'));
+      artist.precheckSeed = {
+        firstDoc,
+        links,
+        pageText: artist.pageText,
+        postImageEntries,
+        verifiedEntries: Array.isArray(item.verifiedEntries) ? item.verifiedEntries.map(entry => ({ ...artist, ...entry })) : [],
+        checkedPostLinks: Array.isArray(item.verifiedEntries) ? item.verifiedEntries.map(entry => entry?.postUrl).filter(Boolean) : [],
+        scannedThroughPage: 1,
+        nextPage: 2,
+        scanComplete: !hasNext
+      };
+      candidates.push(artist);
+    }
+    return candidates;
+  } catch (_) {
+    return [];
+  } finally {
+    clearTimeout(timer);
+    releaseController();
+  }
 }
 
 async function random40CollectVideoPostLinks(artist, {
@@ -10775,6 +10879,10 @@ async function random40Pool(items, limit, worker) {
   return results;
 }
 
+function random40AdaptiveLocalConcurrency() {
+  return RANDOM40_LOCAL_CONCURRENCY;
+}
+
 async function random40AnalyzeArtist(artist, apiKey, options = {}) {
   let doc = options.firstDoc || null;
   const workingArtist = { ...artist };
@@ -10811,7 +10919,9 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
         postImageEntries: options.postImageEntries || options.collected?.postImageEntries || [],
         fallbackImageUrls: fallbackReviewImages,
         maxImages: localMode ? RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST : RANDOM40_INITIAL_IMAGES_PER_ARTIST,
-        resolvePostImages: mode === 'local'
+        // Profile cards already link to the original storage image. Opening the
+        // same post page again added source latency without improving evidence.
+        resolvePostImages: false
       })
     : [primaryImage].filter(Boolean);
 
@@ -10971,6 +11081,7 @@ async function startRandom40(mode = 'nano') {
     thumbnailSkips: 0,
     cachedSkips: 0,
     stageTimings: {},
+    verdictAudit: [],
     cardsStarted: false,
     stop: false,
     done: false,
@@ -11006,52 +11117,62 @@ async function startRandom40(mode = 'nano') {
   try {
     while (!random40State.stop && random40State.accepted < RANDOM40_TARGET_ACCEPTED) {
       const pages = [];
+      let artists = [];
+      if (runMode === 'local') {
+        const reservoirStarted = performance.now();
+        artists = await random40TakeWarmCandidates(localEndpoint);
+        random40RecordStageTiming('ram-reservoir', performance.now() - reservoirStarted);
+      }
       let attempts = 0;
 
-      while (pages.length < RANDOM40_LISTING_PAGE_BATCH_SIZE && attempts < RANDOM40_LISTING_PAGE_BATCH_SIZE * 8) {
-        const page = random40RandomPage();
-        attempts++;
-        if (random40State.seenPages.has(page)) continue;
-        random40State.seenPages.add(page);
-        pages.push(page);
-      }
+      if (!artists.length) {
+        while (pages.length < RANDOM40_LISTING_PAGE_BATCH_SIZE && attempts < RANDOM40_LISTING_PAGE_BATCH_SIZE * 8) {
+          const page = random40RandomPage();
+          attempts++;
+          if (random40State.seenPages.has(page)) continue;
+          random40State.seenPages.add(page);
+          pages.push(page);
+        }
 
-      if (!pages.length) continue;
+        if (!pages.length) continue;
 
-      updateRandom40Progress({ detail: `Loading pages ${pages.join(', ')}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+        updateRandom40Progress({ detail: `Loading pages ${pages.join(', ')}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
 
-      let artists = [];
-      try {
-        const pageStageStarted = performance.now();
-        const sourcePages = pages.flatMap(page => RANDOM40_SOURCE_BASES.map(sourceBase => ({
-          page,
-          pageUrl: random40PageUrl(page, sourceBase)
-        })));
-        const pageResults = await Promise.all(sourcePages.map(({ page, pageUrl }) => {
-          return random40FetchDoc(pageUrl, { timeoutMs: 22000, priority: 0 })
-            .then(doc => ({ page, pageUrl, doc }))
-            .catch(error => ({ page, pageUrl, error }));
-        }));
-        random40RecordStageTiming('listing-pages', performance.now() - pageStageStarted);
-        const byArtist = new Map();
+        try {
+          const pageStageStarted = performance.now();
+          const sourcePages = pages.flatMap(page => RANDOM40_SOURCE_BASES.map(sourceBase => ({
+            page,
+            pageUrl: random40PageUrl(page, sourceBase)
+          })));
+          const pageResults = await Promise.all(sourcePages.map(({ page, pageUrl }) => {
+            return random40FetchDoc(pageUrl, { timeoutMs: 22000, priority: 0 })
+              .then(doc => ({ page, pageUrl, doc }))
+              .catch(error => ({ page, pageUrl, error }));
+          }));
+          random40RecordStageTiming('listing-pages', performance.now() - pageStageStarted);
+          const byArtist = new Map();
 
-        pageResults.forEach(result => {
-          random40State.pages++;
-          if (result.error || !result.doc) return;
-          random40FindArtistsOnListing(result.doc, result.pageUrl).forEach(artist => {
-            if (!artist.imageUrl) return;
-            const identity = random40ArtistIdentity(artist.artistUrl);
-            if (!identity || random40State.seenArtists.has(identity)) return;
-            if (random40State.rejectedArtistUrls.has(identity)) return;
-            if (!byArtist.has(identity)) byArtist.set(identity, artist);
+          pageResults.forEach(result => {
+            random40State.pages++;
+            if (result.error || !result.doc) return;
+            random40FindArtistsOnListing(result.doc, result.pageUrl).forEach(artist => {
+              if (!artist.imageUrl) return;
+              const identity = random40ArtistIdentity(artist.artistUrl);
+              if (!identity || random40State.seenArtists.has(identity)) return;
+              if (random40State.rejectedArtistUrls.has(identity)) return;
+              if (!byArtist.has(identity)) byArtist.set(identity, artist);
+            });
           });
-        });
 
-        artists = shuffleInPlace([...byArtist.values()]).slice(0, RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH);
-      } catch (err) {
-        random40State.pages += pages.length * RANDOM40_SOURCE_BASES.length;
-        updateRandom40Progress({ detail: `Page batch failed: ${err.message}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
-        continue;
+          const candidates = [...byArtist.values()];
+          artists = runMode === 'local'
+            ? random40BalancedArtistSample(candidates, RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH)
+            : shuffleInPlace(candidates).slice(0, RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH);
+        } catch (err) {
+          random40State.pages += pages.length * RANDOM40_SOURCE_BASES.length;
+          updateRandom40Progress({ detail: `Page batch failed: ${err.message}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+          continue;
+        }
       }
 
       if (!artists.length) {
@@ -11060,38 +11181,112 @@ async function startRandom40(mode = 'nano') {
       }
 
       const classifierConcurrency = random40IsLocalMode(runMode) ? RANDOM40_LOCAL_CONCURRENCY : RANDOM40_AI_CONCURRENCY;
-      await random40Pool(artists, classifierConcurrency, async artist => {
+      const processArtist = async artist => {
         if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
-        random40State.seenArtists.add(random40ArtistIdentity(artist.artistUrl));
+        const artistIdentity = random40ArtistIdentity(artist.artistUrl);
         const artistLabel = artist.artistName || random40ArtistNameFromUrl(artist.artistUrl);
-        const classifierLabel = random40ModeLabel(runMode);
-
         if (random40CachedHardReject(artist.artistUrl)) {
           random40State.cachedSkips = (random40State.cachedSkips || 0) + 1;
           return;
         }
         if (random40HardFilter(artist)) return;
+        if (runMode === 'local' && !artist.precheckSeed) {
+          const profileStarted = performance.now();
+          const preflight = await random40PreflightArtist(artist);
+          random40RecordStageTiming('profile-preflight', performance.now() - profileStarted);
+          if (!preflight?.artist || preflight.hardReject) {
+            if (preflight?.hardReject) random40CacheHardReject(artist.artistUrl, preflight.hardReject.reason || 'hard reject');
+            return;
+          }
+          artist.artistUrl = preflight.artist.artistUrl;
+          artist.precheckSeed = preflight.artist.precheckSeed;
+        }
+        random40State.seenArtists.add(artistIdentity);
+        const classifierLabel = random40ModeLabel(runMode);
 
-        updateRandom40Progress({ detail: `Checking videos: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
+        updateRandom40Progress({ detail: `Checking videos + visuals: ${artistLabel}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api });
         let stageStarted = performance.now();
         const precheckController = new AbortController();
         const releasePrecheckController = trackPongWorkloadController(precheckController);
-        const precheck = await random40WithTimeout(
-          random40CollectVideoPostLinks(artist, {
-            stopAt: Infinity,
-            maxPages: RANDOM40_PRECHECK_MAX_ARTIST_PAGES,
-            verifyVideosAt: RANDOM40_MIN_VIDEOS_PER_ARTIST,
-            signal: precheckController.signal,
-            sourcePriority: 1
-          }),
-          20000,
-          `${RANDOM40_MIN_VIDEOS_PER_ARTIST}-video verification timed out`
-        ).catch(() => ({ links: [], verifiedEntries: [] }))
-          .finally(() => {
+        let precheckStarted = 0;
+        const startPrecheck = () => {
+          precheckStarted = performance.now();
+          return random40WithTimeout(
+            random40CollectVideoPostLinks(artist, {
+              stopAt: Infinity,
+              maxPages: RANDOM40_PRECHECK_MAX_ARTIST_PAGES,
+              verifyVideosAt: RANDOM40_MIN_VIDEOS_PER_ARTIST,
+              seed: artist.precheckSeed || null,
+              signal: precheckController.signal,
+              sourcePriority: 1
+            }),
+            45000,
+            `${RANDOM40_MIN_VIDEOS_PER_ARTIST}-video verification timed out`
+          ).catch(() => ({ links: [], verifiedEntries: [] }))
+            .finally(() => releasePrecheckController());
+        };
+        const delayedLocalPrecheck = runMode === 'local'
+          ? new Promise(resolve => setTimeout(() => {
+              if (precheckController.signal.aborted) {
+                resolve({ links: [], verifiedEntries: [] });
+                return;
+              }
+              resolve(startPrecheck());
+            }, RANDOM40_LOCAL_VIDEO_HEDGE_MS))
+          : null;
+        let precheckPromise = runMode === 'local' ? null : startPrecheck();
+        const seededArtist = {
+          ...artist,
+          pageText: `${artist.pageText || ''} ${artist.precheckSeed?.pageText || ''}`.replace(/\s+/g, ' ').trim()
+        };
+        const earlyLocalAnalysisStarted = performance.now();
+        const earlyLocalDecisionPromise = runMode === 'local'
+          ? random40WithTimeout(
+              random40AnalyzeArtist(seededArtist, apiKey, {
+                firstDoc: artist.precheckSeed?.firstDoc || null,
+                collected: artist.precheckSeed || null,
+                mode: runMode,
+                localEndpoint,
+                deferLocalHardVerification: true
+              }),
+              30000,
+              `${classifierLabel} timed out`
+            ).catch(error => ({ decision: 'reject', confidence: 0, reason: error.message }))
+          : null;
+
+        let earlyLocalDecision = null;
+        if (earlyLocalDecisionPromise) {
+          earlyLocalDecision = await earlyLocalDecisionPromise;
+          random40RecordStageTiming('full-ai', performance.now() - earlyLocalAnalysisStarted);
+          random40State.verdictAudit.push({
+            artistUrl: artist.artistUrl,
+            artistName: artist.artistName || artistLabel,
+            decision: earlyLocalDecision?.decision || 'reject',
+            confidence: Number(earlyLocalDecision?.confidence || 0),
+            preference: Number(earlyLocalDecision?.preference_probability ?? -1),
+            reason: String(earlyLocalDecision?.reason || ''),
+            actualVideos: null
+          });
+          if (random40State.verdictAudit.length > 240) random40State.verdictAudit.shift();
+          const earlyDeferredAccept = earlyLocalDecision?.decision === 'accept' &&
+            earlyLocalDecision.requires_local_hard_verification === true;
+          if (!earlyDeferredAccept && !random40IsAcceptedDecision(earlyLocalDecision)) {
             precheckController.abort();
             releasePrecheckController();
-          });
-        random40RecordStageTiming('video-precheck', performance.now() - stageStarted);
+            const checks = earlyLocalDecision?.checks || {};
+            if (checks.male_present === true || checks.male_only === true || checks.appears_over_50 === true || checks.feet_dominant === true) {
+              random40CacheHardReject(artist.artistUrl, earlyLocalDecision.reason || 'hard reject');
+            }
+            return;
+          }
+          precheckPromise = delayedLocalPrecheck;
+        }
+
+        const precheck = await precheckPromise;
+        precheckController.abort();
+        random40RecordStageTiming('video-precheck', performance.now() - precheckStarted);
+        const auditedVerdict = [...random40State.verdictAudit].reverse().find(item => item.artistUrl === artist.artistUrl && item.actualVideos == null);
+        if (auditedVerdict) auditedVerdict.actualVideos = Number(precheck?.verifiedEntries?.length || 0);
         if (precheck.hardReject) {
           random40CacheHardReject(artist.artistUrl, precheck.hardReject.reason || 'hard reject');
           random40State.cachedSkips = (random40State.cachedSkips || 0) + 1;
@@ -11148,13 +11343,16 @@ async function startRandom40(mode = 'nano') {
             shuffleInPlace([...(precheck.verifiedEntries || [])]).slice(0, RANDOM40_FAST_PUBLISH_VIDEOS)
           );
         }
-        stageStarted = performance.now();
-        const decision = await random40WithTimeout(
-          random40AnalyzeArtist(artistWithPrecheckText, apiKey, { firstDoc: precheck.firstDoc, collected: precheck, mode: runMode, localEndpoint, deferLocalHardVerification: true }),
-          random40IsLocalMode(runMode) ? 55000 : 35000,
-          `${classifierLabel} timed out`
-        ).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
-        random40RecordStageTiming('full-ai', performance.now() - stageStarted);
+        let decision = earlyLocalDecision;
+        if (!decision) {
+          stageStarted = performance.now();
+          decision = await random40WithTimeout(
+            random40AnalyzeArtist(artistWithPrecheckText, apiKey, { firstDoc: precheck.firstDoc, collected: precheck, mode: runMode, localEndpoint, deferLocalHardVerification: true }),
+            random40IsLocalMode(runMode) ? 55000 : 35000,
+            `${classifierLabel} timed out`
+          ).catch(err => ({ decision: 'reject', confidence: 0, reason: err.message }));
+          random40RecordStageTiming('full-ai', performance.now() - stageStarted);
+        }
         const deferredLocalAccept =
           runMode === 'local' &&
           decision?.decision === 'accept' &&
@@ -11225,7 +11423,30 @@ async function startRandom40(mode = 'nano') {
         random40RecordStageTiming('publish-first-videos', performance.now() - stageStarted);
         random40ContinueArtistScrapeInBackground(artistWithPrecheckText, precheck, entries);
         updateRandom40Progress({ detail: `${random40State.accepted}/${RANDOM40_TARGET_ACCEPTED} accepted - ${random40State.videos} videos`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
-      });
+      };
+
+      if (runMode === 'local') {
+        const activeTasks = random40State.localCandidateTasks || new Set();
+        random40State.localCandidateTasks = activeTasks;
+        for (const artist of artists) {
+          if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) break;
+          while (
+            activeTasks.size >= random40AdaptiveLocalConcurrency() &&
+            !random40State.stop &&
+            random40State.accepted < RANDOM40_TARGET_ACCEPTED
+          ) {
+            await Promise.race(activeTasks);
+          }
+          if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) break;
+          let task = null;
+          task = Promise.resolve(processArtist(artist))
+            .catch(() => {})
+            .finally(() => activeTasks.delete(task));
+          activeTasks.add(task);
+        }
+      } else {
+        await random40Pool(artists, classifierConcurrency, processArtist);
+      }
     }
 
     random40State.done = true;

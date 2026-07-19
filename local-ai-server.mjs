@@ -52,15 +52,18 @@ const GATEWAY_AGENT = new https.Agent({
 const VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST = Math.max(4, Math.min(32, Number(
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST ||
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY ||
-  24
+  30
 )));
 const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(8, Number(process.env.PONG_VIDEO_VERIFY_PER_ARTIST_CONCURRENCY || 6)));
 const VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST = Math.max(1, Math.min(
   VIDEO_VERIFY_PER_ARTIST_CONCURRENCY,
-  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 2)
+  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 6)
 ));
 const VIDEO_VERIFY_CACHE_MAX = Math.max(200, Number(process.env.PONG_VIDEO_VERIFY_CACHE_MAX || 6000));
 const VIDEO_VERIFY_CACHE_TTL_MS = Math.max(30000, Number(process.env.PONG_VIDEO_VERIFY_CACHE_TTL_MS || 900000));
+const RANDOM40_RESERVOIR_TARGET = Math.max(12, Math.min(96, Number(process.env.PONG_RANDOM40_RESERVOIR_TARGET || 64)));
+const RANDOM40_RESERVOIR_VERIFIED_TARGET = Math.max(3, Math.min(36, Number(process.env.PONG_RANDOM40_RESERVOIR_VERIFIED_TARGET || 24)));
+const RANDOM40_RESERVOIR_PROFILE_CONCURRENCY = Math.max(2, Math.min(12, Number(process.env.PONG_RANDOM40_RESERVOIR_CONCURRENCY || 8)));
 
 env.allowLocalModels = false;
 env.useBrowserCache = false;
@@ -104,9 +107,18 @@ const videoVerifyHostStates = new Map(GATEWAY_ALLOWED_HOSTS.map(host => [host, {
   active: 0,
   activeByGroup: new Map(),
   backoffUntil: 0,
-  rateLimits: 0
+  rateLimits: 0,
+  completed: 0,
+  queueWaitTotalMs: 0,
+  sourceTotalMs: 0
 }]));
 let videoVerifyGroupSequence = 0;
+const random40Reservoir = [];
+const random40ReservoirRecent = new Set();
+let random40ReservoirFillPromise = null;
+let random40ReservoirPages = 0;
+let random40ReservoirProfiles = 0;
+let random40ReservoirPauseUntil = 0;
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -195,7 +207,17 @@ function videoVerifyDelay(ms) {
 function videoVerifyStateForHost(hostname) {
   const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
   if (!videoVerifyHostStates.has(host)) {
-    videoVerifyHostStates.set(host, { host, queue: [], active: 0, activeByGroup: new Map(), backoffUntil: 0, rateLimits: 0 });
+    videoVerifyHostStates.set(host, {
+      host,
+      queue: [],
+      active: 0,
+      activeByGroup: new Map(),
+      backoffUntil: 0,
+      rateLimits: 0,
+      completed: 0,
+      queueWaitTotalMs: 0,
+      sourceTotalMs: 0
+    });
   }
   return videoVerifyHostStates.get(host);
 }
@@ -213,6 +235,7 @@ function pumpVideoVerifyFetchQueue(state) {
     }
     state.active++;
     state.activeByGroup.set(item.groupId, (state.activeByGroup.get(item.groupId) || 0) + 1);
+    state.queueWaitTotalMs += Math.max(0, Date.now() - item.enqueuedAt);
     Promise.resolve()
       .then(async () => {
         const waitMs = state.backoffUntil - Date.now();
@@ -234,9 +257,211 @@ function scheduleVideoVerifyFetch(hostname, groupId, task, signal) {
   if (signal?.aborted) return Promise.reject(new DOMException('video verification aborted', 'AbortError'));
   const state = videoVerifyStateForHost(hostname);
   return new Promise((resolve, reject) => {
-    state.queue.push({ groupId, task, signal, resolve, reject });
+    state.queue.push({ groupId, task, signal, resolve, reject, enqueuedAt: Date.now() });
     pumpVideoVerifyFetchQueue(state);
   });
+}
+
+async function readGatewayText(response, maxBytes = 8 * 1024 * 1024) {
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of response) {
+    const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += value.length;
+    if (bytes > maxBytes) {
+      response.destroy(new Error('video post response too large'));
+      throw new Error('video post response too large');
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+function random40ReservoirIdentity(rawUrl) {
+  try {
+    const url = gatewayTargetUrl(rawUrl);
+    const parts = url.pathname.split('/').filter(Boolean);
+    const marker = parts.findIndex(part => ['u', 'c'].includes(part.toLowerCase()));
+    const service = marker >= 0 ? parts[marker + 1] || '' : '';
+    const account = marker >= 0 ? parts[marker + 2] || '' : '';
+    return service && account ? `${service.toLowerCase()}:${account.toLowerCase()}` : url.pathname.toLowerCase();
+  } catch (_) {
+    return '';
+  }
+}
+
+async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const requestShape = {
+      method: 'GET',
+      headers: { accept: 'text/html,application/xhtml+xml', 'accept-encoding': 'identity' }
+    };
+    const response = await gatewayFetch(rawUrl, requestShape, controller, 'GET');
+    const status = Number(response.statusCode || 0);
+    if (status < 200 || status >= 300) {
+      response.resume();
+      throw new Error(`reservoir HTTP ${status}`);
+    }
+    return await readGatewayText(response);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function random40ReservoirArtistUrls(html, pageUrl) {
+  const urls = [];
+  const seen = new Set();
+  const pattern = /href\s*=\s*["']([^"']+)["']/gi;
+  for (const match of String(html || '').matchAll(pattern)) {
+    try {
+      const url = gatewayTargetUrl(new URL(match[1], pageUrl).toString());
+      if (!/^\/(?:u|c)\//i.test(url.pathname)) continue;
+      url.search = '';
+      url.hash = '';
+      const value = url.toString().replace(/\/$/, '');
+      const identity = random40ReservoirIdentity(value);
+      if (!identity || seen.has(identity) || random40ReservoirRecent.has(identity)) continue;
+      seen.add(identity);
+      urls.push(value);
+    } catch (_) {}
+  }
+  return urls;
+}
+
+function random40ReservoirProfileScore(html) {
+  const posts = String(html || '').split(/<div[^>]+class=["'][^"']*\bpost\b[^>]*>/i).slice(1);
+  let likelyVideos = 0;
+  let imagePosts = 0;
+  for (const post of posts) {
+    const card = post.slice(0, 5000);
+    if (/<img\b|<picture\b/i.test(card)) imagePosts++;
+    else if (/class=["']view-post["']/i.test(card)) likelyVideos++;
+  }
+  return { likelyVideos, imagePosts, posts: posts.length, score: likelyVideos * 100 + imagePosts };
+}
+
+function random40ReservoirVideoPostUrls(html, artistUrl) {
+  const urls = [];
+  const seen = new Set();
+  const posts = String(html || '').split(/<div[^>]+class=["'][^"']*\bpost\b[^>]*>/i).slice(1);
+  for (const post of posts) {
+    const card = post.slice(0, 5000);
+    if (/<img\b|<picture\b/i.test(card)) continue;
+    const match = card.match(/class=["']view-post["'][^>]+href=["']([^"']+)/i) ||
+      card.match(/href=["']([^"']+)["'][^>]+class=["']view-post["']/i);
+    if (!match?.[1]) continue;
+    try {
+      const postUrl = gatewayTargetUrl(new URL(match[1], artistUrl).toString()).toString();
+      if (!seen.has(postUrl)) {
+        seen.add(postUrl);
+        urls.push(postUrl);
+      }
+    } catch (_) {}
+  }
+  return urls;
+}
+
+function random40ReservoirArtistInfo(artistUrl) {
+  const url = new URL(artistUrl);
+  const parts = url.pathname.split('/').filter(Boolean);
+  const marker = parts.findIndex(part => ['u', 'c'].includes(part.toLowerCase()));
+  const service = marker >= 0 ? parts[marker + 1] || '' : '';
+  const account = marker >= 0 ? parts[marker + 2] || '' : '';
+  const name = marker >= 0 ? parts[marker + 3] || account : account;
+  return {
+    source: url.hostname.includes('onlyfaphouse') ? 'onlyfaphouse' : 'coomerfans',
+    artistUrl,
+    artistName: decodeURIComponent(name || account || 'unknown'),
+    artistKey: service && account ? `${service.toLowerCase()}:${account.toLowerCase()}` : url.pathname.toLowerCase(),
+    scrapedAt: new Date().toISOString()
+  };
+}
+
+async function random40ReservoirPool(items, limit, worker) {
+  let index = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length || 1) }, async () => {
+    while (index < items.length) {
+      const current = index++;
+      await worker(items[current], current);
+    }
+  }));
+}
+
+function fillRandom40Reservoir() {
+  if (random40ReservoirFillPromise) return random40ReservoirFillPromise;
+  random40ReservoirFillPromise = (async () => {
+    let rounds = 0;
+    while (
+      (random40Reservoir.length < RANDOM40_RESERVOIR_TARGET ||
+        random40Reservoir.filter(item => item.verified).length < RANDOM40_RESERVOIR_VERIFIED_TARGET) &&
+      rounds < 32
+    ) {
+      rounds++;
+      const page = crypto.randomInt(1, 3501);
+      const listingUrls = GATEWAY_ALLOWED_HOSTS.map(host => `https://${host}/?page=${page}`);
+      const listings = await Promise.allSettled(listingUrls.map(async pageUrl => ({
+        pageUrl,
+        html: await random40ReservoirFetchHtml(pageUrl, 15000)
+      })));
+      random40ReservoirPages += listings.filter(item => item.status === 'fulfilled').length;
+      const candidates = [];
+      for (const item of listings) {
+        if (item.status !== 'fulfilled') continue;
+        candidates.push(...random40ReservoirArtistUrls(item.value.html, item.value.pageUrl));
+      }
+      for (let i = candidates.length - 1; i > 0; i--) {
+        const j = crypto.randomInt(0, i + 1);
+        [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+      }
+      await random40ReservoirPool(candidates.slice(0, 32), RANDOM40_RESERVOIR_PROFILE_CONCURRENCY, async artistUrl => {
+        if (
+          random40Reservoir.length >= RANDOM40_RESERVOIR_TARGET &&
+          random40Reservoir.filter(item => item.verified).length >= RANDOM40_RESERVOIR_VERIFIED_TARGET
+        ) return;
+        const identity = random40ReservoirIdentity(artistUrl);
+        if (!identity || random40ReservoirRecent.has(identity)) return;
+        try {
+          const html = await random40ReservoirFetchHtml(artistUrl, 12000);
+          const profile = random40ReservoirProfileScore(html);
+          let verifiedEntries = [];
+          if (profile.likelyVideos >= 15) {
+            const postUrls = random40ReservoirVideoPostUrls(html, artistUrl);
+            if (postUrls.length >= 15) {
+              const verified = await verifyVideoPostBatch({
+                postUrls,
+                stopAt: 15,
+                artistInfo: random40ReservoirArtistInfo(artistUrl)
+              }, null).catch(() => ({ entries: [] }));
+              verifiedEntries = Array.isArray(verified?.entries) ? verified.entries : [];
+            }
+          }
+          const verified = verifiedEntries.length >= 15;
+          random40ReservoirRecent.add(identity);
+          random40ReservoirProfiles++;
+          while (random40ReservoirRecent.size > 1200) {
+            random40ReservoirRecent.delete(random40ReservoirRecent.values().next().value);
+          }
+          if (!verified && random40Reservoir.length >= RANDOM40_RESERVOIR_TARGET) return;
+          random40Reservoir.push({
+            artistUrl,
+            html,
+            ...profile,
+            verified,
+            verifiedEntries: verifiedEntries.slice(0, 15),
+            score: Number(profile.score || 0) + (verified ? 1000000 : 0),
+            warmedAt: new Date().toISOString()
+          });
+        } catch (_) {}
+      });
+      random40Reservoir.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+      if (random40Reservoir.length > RANDOM40_RESERVOIR_TARGET) random40Reservoir.length = RANDOM40_RESERVOIR_TARGET;
+    }
+  })().finally(() => {
+    random40ReservoirFillPromise = null;
+  });
+  return random40ReservoirFillPromise;
 }
 
 function decodeHtmlUrl(value) {
@@ -280,35 +505,31 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, gro
     signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), Math.min(GATEWAY_TIMEOUT_MS, 16000));
     try {
-      let response = await fetch(normalizedPostUrl, {
+      const requestShape = {
+        method: 'GET',
         headers: {
-          'User-Agent': 'Mozilla/5.0 PongVideoVerifier/1.0',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Referer': `${new URL(normalizedPostUrl).origin}/`
-        },
-        redirect: 'follow',
-        cache: 'no-store',
-        signal: controller.signal
-      });
-      if (response.status === 429) {
-        const retryAfterSeconds = Number(response.headers.get('retry-after') || 0);
+          accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'accept-encoding': 'identity'
+        }
+      };
+      const sourceStarted = Date.now();
+      let response = await gatewayFetch(normalizedPostUrl, requestShape, controller, 'GET');
+      if (Number(response.statusCode || 0) === 429) {
+        const retryAfterSeconds = Number(response.headers['retry-after'] || 0);
+        response.resume();
         hostState.rateLimits++;
         hostState.backoffUntil = Math.max(hostState.backoffUntil, Date.now() + Math.min(5000, Math.max(500, retryAfterSeconds * 1000)));
         await videoVerifyDelay(Math.max(0, hostState.backoffUntil - Date.now()));
-        response = await fetch(normalizedPostUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 PongVideoVerifier/1.0',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Referer': `${new URL(normalizedPostUrl).origin}/`
-          },
-          redirect: 'follow',
-          cache: 'no-store',
-          signal: controller.signal
-        });
+        response = await gatewayFetch(normalizedPostUrl, requestShape, controller, 'GET');
       }
-      if (!response.ok) throw new Error(`video post HTTP ${response.status}`);
-      gatewayTargetUrl(response.url || normalizedPostUrl);
-      const urls = extractVideoUrlsFromHtml(await response.text(), normalizedPostUrl);
+      const status = Number(response.statusCode || 0);
+      if (status < 200 || status >= 300) {
+        response.resume();
+        throw new Error(`video post HTTP ${status}`);
+      }
+      const urls = extractVideoUrlsFromHtml(await readGatewayText(response), normalizedPostUrl);
+      hostState.completed++;
+      hostState.sourceTotalMs += Math.max(0, Date.now() - sourceStarted);
       return urls.map((videoUrl, postIndex) => ({
         ...artistInfo,
         type: 'video',
@@ -2265,6 +2486,30 @@ const server = http.createServer(async (req, res) => {
 
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    if (req.method === 'GET' && url.pathname === '/random40/candidates') {
+      const count = Math.max(1, Math.min(36, Number(url.searchParams.get('count') || 24)));
+      const verifiedAvailable = random40Reservoir.filter(item => item.verified).length;
+      if (random40Reservoir.length < count || verifiedAvailable < Math.min(6, count)) {
+        await Promise.race([
+          fillRandom40Reservoir(),
+          videoVerifyDelay(7000)
+        ]);
+      }
+      random40Reservoir.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+      const candidates = random40Reservoir.splice(0, Math.min(count, random40Reservoir.length));
+      random40ReservoirPauseUntil = Date.now() + 30000;
+      json(res, 200, {
+        ok: true,
+        storage: 'memory-only',
+        candidates,
+        remaining: random40Reservoir.length,
+        target: RANDOM40_RESERVOIR_TARGET
+      });
+      const delayedRefill = setTimeout(() => fillRandom40Reservoir().catch(() => {}), 30000);
+      delayedRefill.unref();
+      return;
+    }
+
     if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/proxy') {
       const target = url.searchParams.get('url') || '';
       try {
@@ -2333,6 +2578,19 @@ const server = http.createServer(async (req, res) => {
           failures: gatewayWarmState.failures,
           error: gatewayWarmState.error
         },
+        random40_reservoir: {
+          storage: 'memory-only',
+          ready: random40Reservoir.length >= Math.min(12, RANDOM40_RESERVOIR_TARGET) &&
+            random40Reservoir.filter(item => item.verified).length >= 3,
+          filling: Boolean(random40ReservoirFillPromise),
+          candidates: random40Reservoir.length,
+          target: RANDOM40_RESERVOIR_TARGET,
+          listing_pages_fetched: random40ReservoirPages,
+          profiles_warmed: random40ReservoirProfiles,
+          video_verified_candidates: random40Reservoir.filter(item => item.verified).length,
+          verified_target: RANDOM40_RESERVOIR_VERIFIED_TARGET,
+          profile_concurrency: RANDOM40_RESERVOIR_PROFILE_CONCURRENCY
+        },
         video_verifier: {
           storage: 'memory-only',
           fetch_concurrency_per_host: VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST,
@@ -2346,6 +2604,9 @@ const server = http.createServer(async (req, res) => {
             active: state.active,
             queued: state.queue.length,
             rate_limits: state.rateLimits,
+            completed: state.completed,
+            average_queue_wait_ms: state.completed ? Math.round(state.queueWaitTotalMs / state.completed) : 0,
+            average_source_ms: state.completed ? Math.round(state.sourceTotalMs / state.completed) : 0,
             backoff_until: state.backoffUntil ? new Date(state.backoffUntil).toISOString() : ''
           }]))
         },
@@ -2523,12 +2784,26 @@ server.listen(PORT, HOST, () => {
   console.log(`Model: ${MODEL}`);
   console.log(`Vision model: ${OLLAMA_VISION_MODEL} via ${OLLAMA_URL}`);
   warmGatewayConnections()
-    .then(() => console.log(`RAM gateway warm: ${gatewayWarmState.successes} connections ready`))
+    .then(() => {
+      console.log(`RAM gateway warm: ${gatewayWarmState.successes} connections ready`);
+      return fillRandom40Reservoir();
+    })
+    .then(() => console.log(`Random40 RAM reservoir ready: ${random40Reservoir.length} profiles`))
     .catch(error => console.error(`RAM gateway warmup failed: ${error.message || error}`));
   const gatewayKeepWarmTimer = setInterval(() => {
     warmGatewayConnections().catch(() => {});
   }, GATEWAY_KEEP_WARM_MS);
   gatewayKeepWarmTimer.unref();
+  const reservoirKeepWarmTimer = setInterval(() => {
+    if (
+      Date.now() >= random40ReservoirPauseUntil &&
+      (
+        random40Reservoir.length < RANDOM40_RESERVOIR_TARGET ||
+        random40Reservoir.filter(item => item.verified).length < RANDOM40_RESERVOIR_VERIFIED_TARGET
+      )
+    ) fillRandom40Reservoir().catch(() => {});
+  }, 30000);
+  reservoirKeepWarmTimer.unref();
 
   const reportPreferenceReady = async () => {
     const health = await preferenceAiHealth(true);
