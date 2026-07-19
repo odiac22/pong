@@ -1,8 +1,10 @@
 import http from 'node:http';
 import https from 'node:https';
+import http2 from 'node:http2';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { pipeline, RawImage, env } from '@xenova/transformers';
 
@@ -45,25 +47,26 @@ const GATEWAY_KEEP_WARM_MS = Math.max(10000, Number(process.env.PONG_GATEWAY_KEE
 const GATEWAY_AGENT = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 15000,
-  maxSockets: Math.max(24, Number(process.env.PONG_GATEWAY_MAX_SOCKETS || 48)),
-  maxFreeSockets: Math.max(16, Number(process.env.PONG_GATEWAY_MAX_FREE_SOCKETS || 32)),
+  maxSockets: Math.max(24, Number(process.env.PONG_GATEWAY_MAX_SOCKETS || 72)),
+  maxFreeSockets: Math.max(16, Number(process.env.PONG_GATEWAY_MAX_FREE_SOCKETS || 48)),
   scheduling: 'lifo'
 });
-const VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST = Math.max(4, Math.min(32, Number(
+const VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST = Math.max(4, Math.min(96, Number(
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST ||
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY ||
-  30
+  60
 )));
-const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(8, Number(process.env.PONG_VIDEO_VERIFY_PER_ARTIST_CONCURRENCY || 6)));
+const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(32, Number(process.env.PONG_VIDEO_VERIFY_PER_ARTIST_CONCURRENCY || 24)));
 const VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST = Math.max(1, Math.min(
   VIDEO_VERIFY_PER_ARTIST_CONCURRENCY,
-  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 6)
+  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 24)
 ));
 const VIDEO_VERIFY_CACHE_MAX = Math.max(200, Number(process.env.PONG_VIDEO_VERIFY_CACHE_MAX || 6000));
 const VIDEO_VERIFY_CACHE_TTL_MS = Math.max(30000, Number(process.env.PONG_VIDEO_VERIFY_CACHE_TTL_MS || 900000));
 const RANDOM40_RESERVOIR_TARGET = Math.max(12, Math.min(96, Number(process.env.PONG_RANDOM40_RESERVOIR_TARGET || 64)));
 const RANDOM40_RESERVOIR_VERIFIED_TARGET = Math.max(3, Math.min(36, Number(process.env.PONG_RANDOM40_RESERVOIR_VERIFIED_TARGET || 24)));
 const RANDOM40_RESERVOIR_PROFILE_CONCURRENCY = Math.max(2, Math.min(12, Number(process.env.PONG_RANDOM40_RESERVOIR_CONCURRENCY || 8)));
+const RANDOM40_RESERVOIR_ENABLED = process.env.PONG_RANDOM40_RESERVOIR_ENABLED !== '0';
 
 env.allowLocalModels = false;
 env.useBrowserCache = false;
@@ -100,6 +103,7 @@ const gatewayWarmState = {
   failures: 0,
   error: ''
 };
+const gatewayH2Sessions = new Map();
 const videoVerifyCache = new Map();
 const videoVerifyHostStates = new Map(GATEWAY_ALLOWED_HOSTS.map(host => [host, {
   host,
@@ -116,6 +120,7 @@ let videoVerifyGroupSequence = 0;
 const random40Reservoir = [];
 const random40ReservoirRecent = new Set();
 let random40ReservoirFillPromise = null;
+let random40ReservoirAbortController = null;
 let random40ReservoirPages = 0;
 let random40ReservoirProfiles = 0;
 let random40ReservoirPauseUntil = 0;
@@ -155,6 +160,106 @@ function gatewayTargetUrl(raw) {
   ));
   if (!allowed || target.username || target.password) throw new Error('gateway host not allowed');
   return target;
+}
+
+function gatewayH2Session(target) {
+  const origin = `${target.protocol}//${target.host}`;
+  const existing = gatewayH2Sessions.get(origin);
+  if (existing && !existing.closed && !existing.destroyed) return existing;
+  const session = http2.connect(origin, {
+    settings: { enablePush: false, initialWindowSize: 2 * 1024 * 1024 }
+  });
+  session.setMaxListeners(1000);
+  session.on('error', () => {});
+  session.on('goaway', () => {
+    if (gatewayH2Sessions.get(origin) === session) gatewayH2Sessions.delete(origin);
+  });
+  session.on('close', () => {
+    if (gatewayH2Sessions.get(origin) === session) gatewayH2Sessions.delete(origin);
+  });
+  gatewayH2Sessions.set(origin, session);
+  return session;
+}
+
+function decodeGatewayH2Body(buffer, encoding) {
+  if (!buffer?.length) return buffer;
+  const value = String(encoding || '').toLowerCase();
+  if (value.includes('br')) return zlib.brotliDecompressSync(buffer);
+  if (value.includes('gzip')) return zlib.gunzipSync(buffer);
+  if (value.includes('deflate')) return zlib.inflateSync(buffer);
+  return buffer;
+}
+
+async function gatewayH2Fetch(rawUrl, { signal = null, timeoutMs = GATEWAY_TIMEOUT_MS, method = 'GET' } = {}) {
+  let target = gatewayTargetUrl(rawUrl);
+  for (let redirect = 0; redirect <= GATEWAY_MAX_REDIRECTS; redirect++) {
+    const response = await new Promise((resolve, reject) => {
+      const session = gatewayH2Session(target);
+      const request = session.request({
+        ':method': method,
+        ':path': `${target.pathname}${target.search}`,
+        ':authority': target.host,
+        'user-agent': 'Mozilla/5.0 PongLocalGateway/2.0',
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'accept-encoding': 'gzip, br'
+      });
+      const chunks = [];
+      let bytes = 0;
+      let headers = {};
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+      };
+      const fail = error => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const abort = () => {
+        try { request.close(http2.constants.NGHTTP2_CANCEL); } catch (_) {}
+        fail(new DOMException('gateway request aborted', 'AbortError'));
+      };
+      const timer = setTimeout(() => {
+        try { request.close(http2.constants.NGHTTP2_CANCEL); } catch (_) {}
+        fail(new Error('gateway HTTP/2 request timed out'));
+      }, Math.max(1000, timeoutMs));
+      signal?.addEventListener('abort', abort, { once: true });
+      request.on('response', value => { headers = value || {}; });
+      request.on('data', chunk => {
+        bytes += chunk.length;
+        if (bytes > 8 * 1024 * 1024) {
+          try { request.close(http2.constants.NGHTTP2_CANCEL); } catch (_) {}
+          fail(new Error('gateway HTTP/2 response too large'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      request.on('error', fail);
+      request.on('end', () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        try {
+          resolve({
+            status: Number(headers[':status'] || 0),
+            headers,
+            body: decodeGatewayH2Body(Buffer.concat(chunks), headers['content-encoding'])
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+      request.end();
+    });
+    if (response.status >= 300 && response.status < 400 && response.headers.location) {
+      target = gatewayTargetUrl(new URL(String(response.headers.location), target).toString());
+      continue;
+    }
+    return response;
+  }
+  throw new Error('too many gateway HTTP/2 redirects');
 }
 
 function gatewayRequest(current, req, controller, method = req.method === 'HEAD' ? 'HEAD' : 'GET') {
@@ -290,23 +395,21 @@ function random40ReservoirIdentity(rawUrl) {
   }
 }
 
-async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000) {
+async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = null) {
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const requestShape = {
-      method: 'GET',
-      headers: { accept: 'text/html,application/xhtml+xml', 'accept-encoding': 'identity' }
-    };
-    const response = await gatewayFetch(rawUrl, requestShape, controller, 'GET');
-    const status = Number(response.statusCode || 0);
+    const response = await gatewayH2Fetch(rawUrl, { signal: controller.signal, timeoutMs });
+    const status = Number(response.status || 0);
     if (status < 200 || status >= 300) {
-      response.resume();
       throw new Error(`reservoir HTTP ${status}`);
     }
-    return await readGatewayText(response);
+    return response.body.toString('utf8');
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
 }
 
@@ -356,11 +459,18 @@ function random40ReservoirVideoPostUrls(html, artistUrl) {
       const postUrl = gatewayTargetUrl(new URL(match[1], artistUrl).toString()).toString();
       if (!seen.has(postUrl)) {
         seen.add(postUrl);
-        urls.push(postUrl);
+        const text = card.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').toLowerCase();
+        let score = 0;
+        if (/\b(video|videos|vid|clip|watch|footage|sextape)\b/.test(text)) score += 12;
+        if (/\b\d+\s*(?:min|mins|minute|minutes)\b/.test(text)) score += 8;
+        if (/\b(full|ppv|masturbat|squir|orgasm|blowjob|fuck|anal)\w*/.test(text)) score += 4;
+        if (/(?:\b\d{2,3}%\s*off\b|click (?:the )?link|new followers)/.test(text)) score -= 10;
+        urls.push({ postUrl, score });
       }
     } catch (_) {}
   }
-  return urls;
+  urls.sort((a, b) => b.score - a.score);
+  return urls.map(item => item.postUrl);
 }
 
 function random40ReservoirArtistInfo(artistUrl) {
@@ -390,10 +500,15 @@ async function random40ReservoirPool(items, limit, worker) {
 }
 
 function fillRandom40Reservoir() {
+  if (!RANDOM40_RESERVOIR_ENABLED) return Promise.resolve();
+  if (Date.now() < random40ReservoirPauseUntil) return Promise.resolve();
   if (random40ReservoirFillPromise) return random40ReservoirFillPromise;
+  const fillController = new AbortController();
+  random40ReservoirAbortController = fillController;
   random40ReservoirFillPromise = (async () => {
     let rounds = 0;
     while (
+      !fillController.signal.aborted &&
       (random40Reservoir.length < RANDOM40_RESERVOIR_TARGET ||
         random40Reservoir.filter(item => item.verified).length < RANDOM40_RESERVOIR_VERIFIED_TARGET) &&
       rounds < 32
@@ -403,19 +518,20 @@ function fillRandom40Reservoir() {
       const listingUrls = GATEWAY_ALLOWED_HOSTS.map(host => `https://${host}/?page=${page}`);
       const listings = await Promise.allSettled(listingUrls.map(async pageUrl => ({
         pageUrl,
-        html: await random40ReservoirFetchHtml(pageUrl, 15000)
+        html: await random40ReservoirFetchHtml(pageUrl, 15000, fillController.signal)
       })));
       random40ReservoirPages += listings.filter(item => item.status === 'fulfilled').length;
       const candidates = [];
       for (const item of listings) {
         if (item.status !== 'fulfilled') continue;
-        candidates.push(...random40ReservoirArtistUrls(item.value.html, item.value.pageUrl));
+        candidates.push(...random40ReservoirArtistUrls(item.value.html, item.value.pageUrl).map(artistUrl => ({ artistUrl, sourcePage: page })));
       }
       for (let i = candidates.length - 1; i > 0; i--) {
         const j = crypto.randomInt(0, i + 1);
         [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
       }
-      await random40ReservoirPool(candidates.slice(0, 32), RANDOM40_RESERVOIR_PROFILE_CONCURRENCY, async artistUrl => {
+      await random40ReservoirPool(candidates.slice(0, 32), RANDOM40_RESERVOIR_PROFILE_CONCURRENCY, async candidate => {
+        const artistUrl = candidate.artistUrl;
         if (
           random40Reservoir.length >= RANDOM40_RESERVOIR_TARGET &&
           random40Reservoir.filter(item => item.verified).length >= RANDOM40_RESERVOIR_VERIFIED_TARGET
@@ -423,7 +539,8 @@ function fillRandom40Reservoir() {
         const identity = random40ReservoirIdentity(artistUrl);
         if (!identity || random40ReservoirRecent.has(identity)) return;
         try {
-          const html = await random40ReservoirFetchHtml(artistUrl, 12000);
+          if (fillController.signal.aborted) return;
+          const html = await random40ReservoirFetchHtml(artistUrl, 12000, fillController.signal);
           const profile = random40ReservoirProfileScore(html);
           let verifiedEntries = [];
           if (profile.likelyVideos >= 15) {
@@ -433,7 +550,7 @@ function fillRandom40Reservoir() {
                 postUrls,
                 stopAt: 15,
                 artistInfo: random40ReservoirArtistInfo(artistUrl)
-              }, null).catch(() => ({ entries: [] }));
+              }, fillController.signal).catch(() => ({ entries: [] }));
               verifiedEntries = Array.isArray(verified?.entries) ? verified.entries : [];
             }
           }
@@ -446,6 +563,7 @@ function fillRandom40Reservoir() {
           if (!verified && random40Reservoir.length >= RANDOM40_RESERVOIR_TARGET) return;
           random40Reservoir.push({
             artistUrl,
+            sourcePage: candidate.sourcePage,
             html,
             ...profile,
             verified,
@@ -460,6 +578,7 @@ function fillRandom40Reservoir() {
     }
   })().finally(() => {
     random40ReservoirFillPromise = null;
+    if (random40ReservoirAbortController === fillController) random40ReservoirAbortController = null;
   });
   return random40ReservoirFillPromise;
 }
@@ -505,29 +624,26 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, gro
     signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), Math.min(GATEWAY_TIMEOUT_MS, 16000));
     try {
-      const requestShape = {
-        method: 'GET',
-        headers: {
-          accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'accept-encoding': 'identity'
-        }
-      };
       const sourceStarted = Date.now();
-      let response = await gatewayFetch(normalizedPostUrl, requestShape, controller, 'GET');
-      if (Number(response.statusCode || 0) === 429) {
+      let response = await gatewayH2Fetch(normalizedPostUrl, {
+        signal: controller.signal,
+        timeoutMs: Math.min(GATEWAY_TIMEOUT_MS, 16000)
+      });
+      if (Number(response.status || 0) === 429) {
         const retryAfterSeconds = Number(response.headers['retry-after'] || 0);
-        response.resume();
         hostState.rateLimits++;
         hostState.backoffUntil = Math.max(hostState.backoffUntil, Date.now() + Math.min(5000, Math.max(500, retryAfterSeconds * 1000)));
         await videoVerifyDelay(Math.max(0, hostState.backoffUntil - Date.now()));
-        response = await gatewayFetch(normalizedPostUrl, requestShape, controller, 'GET');
+        response = await gatewayH2Fetch(normalizedPostUrl, {
+          signal: controller.signal,
+          timeoutMs: Math.min(GATEWAY_TIMEOUT_MS, 16000)
+        });
       }
-      const status = Number(response.statusCode || 0);
+      const status = Number(response.status || 0);
       if (status < 200 || status >= 300) {
-        response.resume();
         throw new Error(`video post HTTP ${status}`);
       }
-      const urls = extractVideoUrlsFromHtml(await readGatewayText(response), normalizedPostUrl);
+      const urls = extractVideoUrlsFromHtml(response.body.toString('utf8'), normalizedPostUrl);
       hostState.completed++;
       hostState.sourceTotalMs += Math.max(0, Date.now() - sourceStarted);
       return urls.map((videoUrl, postIndex) => ({
@@ -551,11 +667,49 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, gro
   return entries;
 }
 
+function mirrorVideoPostUrl(rawUrl, artistInfo = {}) {
+  try {
+    const original = gatewayTargetUrl(rawUrl);
+    const parts = original.pathname.split('/').filter(Boolean);
+    const artistUrl = String(artistInfo.artistUrl || '');
+    const artistSlug = (() => {
+      try {
+        return new URL(artistUrl).pathname.split('/').filter(Boolean).at(-1) || '';
+      } catch (_) {
+        return '';
+      }
+    })();
+    if (original.hostname.endsWith('coomerfans.com') && parts[0] === 'p' && parts.length >= 4 && artistSlug) {
+      return `https://onlyfaphouse.com/post/${parts.slice(1, 4).map(encodeURIComponent).join('/')}/${encodeURIComponent(artistSlug)}`;
+    }
+    if (original.hostname.endsWith('onlyfaphouse.com') && parts[0] === 'post' && parts.length >= 4) {
+      return `https://coomerfans.com/p/${parts.slice(1, 4).map(encodeURIComponent).join('/')}`;
+    }
+  } catch (_) {}
+  return '';
+}
+
+function balanceVideoPostsAcrossHosts(postUrls, artistInfo) {
+  const primary = [];
+  const fallbacks = [];
+  postUrls.forEach((postUrl, index) => {
+    const mirror = index % 2 ? mirrorVideoPostUrl(postUrl, artistInfo) : '';
+    if (mirror && mirror !== postUrl) {
+      primary.push(mirror);
+      fallbacks.push(postUrl);
+    } else {
+      primary.push(postUrl);
+    }
+  });
+  return [...new Set(primary.concat(fallbacks))];
+}
+
 async function verifyVideoPostBatch(payload, requestSignal) {
-  const postUrls = [...new Set((Array.isArray(payload?.postUrls) ? payload.postUrls : [])
+  const originalPostUrls = [...new Set((Array.isArray(payload?.postUrls) ? payload.postUrls : [])
     .map(value => gatewayTargetUrl(value).toString()))].slice(0, 500);
   const stopAt = Math.max(1, Math.min(100, Number(payload?.stopAt || 15)));
   const artistInfo = payload?.artistInfo && typeof payload.artistInfo === 'object' ? payload.artistInfo : {};
+  const postUrls = balanceVideoPostsAcrossHosts(originalPostUrls, artistInfo).slice(0, 750);
   const controller = new AbortController();
   const abort = () => controller.abort();
   requestSignal?.addEventListener('abort', abort, { once: true });
@@ -642,24 +796,23 @@ async function streamGatewayResponse(req, res, target) {
   req.once('aborted', abort);
   res.once('close', abort);
   try {
-    const upstream = await gatewayFetch(target, req, controller);
+    const upstream = await gatewayH2Fetch(target, {
+      signal: controller.signal,
+      timeoutMs: GATEWAY_TIMEOUT_MS,
+      method: req.method === 'HEAD' ? 'HEAD' : 'GET'
+    });
     const headers = gatewayCorsHeaders();
-    for (const name of ['accept-ranges', 'content-encoding', 'content-length', 'content-range', 'content-type', 'etag', 'last-modified', 'vary']) {
+    for (const name of ['content-type', 'etag', 'last-modified', 'vary']) {
       const value = upstream.headers[name];
       if (value) headers[name] = value;
     }
-    res.writeHead(Number(upstream.statusCode || 502), headers);
+    if (req.method !== 'HEAD') headers['Content-Length'] = String(upstream.body.length);
+    res.writeHead(Number(upstream.status || 502), headers);
     if (req.method === 'HEAD') {
-      upstream.resume();
       res.end();
       return;
     }
-    await new Promise((resolve, reject) => {
-      upstream.once('error', reject);
-      res.once('error', reject);
-      res.once('finish', resolve);
-      upstream.pipe(res);
-    });
+    res.end(upstream.body);
   } finally {
     clearTimeout(timer);
     activeWorkloadControllers.delete(controller);
@@ -2487,14 +2640,20 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     if (req.method === 'GET' && url.pathname === '/random40/candidates') {
+      if (!RANDOM40_RESERVOIR_ENABLED) {
+        json(res, 200, { ok: true, storage: 'memory-only', enabled: false, candidates: [], remaining: 0, target: 0 });
+        return;
+      }
       const count = Math.max(1, Math.min(36, Number(url.searchParams.get('count') || 24)));
       const verifiedAvailable = random40Reservoir.filter(item => item.verified).length;
-      if (random40Reservoir.length < count || verifiedAvailable < Math.min(6, count)) {
+      const foregroundPauseActive = Date.now() < random40ReservoirPauseUntil;
+      if (!foregroundPauseActive && (random40Reservoir.length < count || verifiedAvailable < Math.min(6, count))) {
         await Promise.race([
           fillRandom40Reservoir(),
           videoVerifyDelay(7000)
         ]);
       }
+      random40ReservoirAbortController?.abort();
       random40Reservoir.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
       const candidates = random40Reservoir.splice(0, Math.min(count, random40Reservoir.length));
       random40ReservoirPauseUntil = Date.now() + 30000;
@@ -2505,8 +2664,6 @@ const server = http.createServer(async (req, res) => {
         remaining: random40Reservoir.length,
         target: RANDOM40_RESERVOIR_TARGET
       });
-      const delayedRefill = setTimeout(() => fillRandom40Reservoir().catch(() => {}), 30000);
-      delayedRefill.unref();
       return;
     }
 
@@ -2579,6 +2736,7 @@ const server = http.createServer(async (req, res) => {
           error: gatewayWarmState.error
         },
         random40_reservoir: {
+          enabled: RANDOM40_RESERVOIR_ENABLED,
           storage: 'memory-only',
           ready: random40Reservoir.length >= Math.min(12, RANDOM40_RESERVOIR_TARGET) &&
             random40Reservoir.filter(item => item.verified).length >= 3,
@@ -2786,7 +2944,7 @@ server.listen(PORT, HOST, () => {
   warmGatewayConnections()
     .then(() => {
       console.log(`RAM gateway warm: ${gatewayWarmState.successes} connections ready`);
-      return fillRandom40Reservoir();
+      return RANDOM40_RESERVOIR_ENABLED ? fillRandom40Reservoir() : null;
     })
     .then(() => console.log(`Random40 RAM reservoir ready: ${random40Reservoir.length} profiles`))
     .catch(error => console.error(`RAM gateway warmup failed: ${error.message || error}`));
@@ -2796,6 +2954,7 @@ server.listen(PORT, HOST, () => {
   gatewayKeepWarmTimer.unref();
   const reservoirKeepWarmTimer = setInterval(() => {
     if (
+      RANDOM40_RESERVOIR_ENABLED &&
       Date.now() >= random40ReservoirPauseUntil &&
       (
         random40Reservoir.length < RANDOM40_RESERVOIR_TARGET ||

@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.08</div>
+  <div class="version-number">24.09</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7043,7 +7043,7 @@ const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
 const RANDOM40_AI_CONCURRENCY = 12;
-const RANDOM40_LOCAL_CONCURRENCY = 12;
+const RANDOM40_LOCAL_CONCURRENCY = 14;
 const RANDOM40_SOURCE_CONCURRENCY = 18;
 const RANDOM40_SOURCE_BACKGROUND_CONCURRENCY = 4;
 const RANDOM40_POST_CONCURRENCY = 18;
@@ -7059,8 +7059,8 @@ const RANDOM40_LISTING_PAGE_BATCH_SIZE = 1;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 15;
 const RANDOM40_PRECHECK_MAX_ARTIST_PAGES = 36;
-const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 12;
-const RANDOM40_LOCAL_VIDEO_HEDGE_MS = 1200;
+const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 18;
+const RANDOM40_LOCAL_VIDEO_HEDGE_MS = 2500;
 const RANDOM40_SOURCE_BASES = ['https://coomerfans.com/', 'https://onlyfaphouse.com/'];
 const RANDOM40_FAST_PUBLISH_VIDEOS = RANDOM40_MIN_VIDEOS_PER_ARTIST;
 const RANDOM40_BACKGROUND_APPEND_BATCH = 4;
@@ -7395,13 +7395,15 @@ function random40VideoVerifierEndpoints() {
 async function random40VerifyPostLinksBatch(postLinks, artistInfo, stopAt, signal = null) {
   const endpoints = random40VideoVerifierEndpoints();
   if (!endpoints.length || !postLinks?.length) return null;
-  const orderedPostUrls = shuffleInPlace([...new Set(postLinks.filter(Boolean))]);
+  // Extraction already ranks cards by video-language evidence. Preserve that
+  // order so the exact-media verifier reaches 15 real videos in fewer requests.
+  const orderedPostUrls = [...new Set(postLinks.filter(Boolean))];
   for (const endpoint of endpoints) {
     const controller = new AbortController();
     const releaseController = trackPongWorkloadController(controller);
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(() => controller.abort(), 20000);
+    const timer = setTimeout(() => controller.abort(), 32000);
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -7431,7 +7433,9 @@ async function random40VerifyPostLinksBatch(postLinks, artistInfo, stopAt, signa
       releaseController();
     }
   }
-  return null;
+  // The PC verifier is authoritative for Local1. Reopening the same posts in
+  // the browser after a timeout doubled traffic and delayed every other artist.
+  return [];
 }
 
 function random40PumpSourceFetchQueue() {
@@ -10133,9 +10137,17 @@ function random40ExtractVideoPostLinks(doc, baseUrl) {
     if (post.querySelector('img, picture')) return;
     const link = post.querySelector('a.view-post, a[href*="/p/"], a[href*="/post/"]');
     const href = link?.getAttribute('href') || '';
-    if (href) links.push(random40NormalizeUrl(href, baseUrl));
+    if (!href) return;
+    const text = String(post.textContent || '').toLowerCase();
+    let score = 0;
+    if (/\b(video|videos|vid|clip|watch|footage|sextape)\b/.test(text)) score += 12;
+    if (/\b\d+\s*(?:min|mins|minute|minutes)\b/.test(text)) score += 8;
+    if (/\b(full|ppv|masturbat|squir|orgasm|blowjob|fuck|anal)\w*/.test(text)) score += 4;
+    if (/(?:\b\d{2,3}%\s*off\b|click (?:the )?link|new followers|onlyfans\.com\/.+\/c\d+)/.test(text)) score -= 10;
+    links.push({ url: random40NormalizeUrl(href, baseUrl), score });
   });
-  return [...new Set(links.filter(Boolean))];
+  links.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+  return [...new Set(links.map(item => item.url).filter(Boolean))];
 }
 
 async function random40PreflightArtist(artist) {
@@ -10191,6 +10203,7 @@ async function random40TakeWarmCandidates(localEndpoint, count = RANDOM40_MAX_AR
       if (!identity || random40State?.seenArtists?.has(identity) || random40State?.rejectedArtistUrls?.has(identity)) continue;
       const firstDoc = new DOMParser().parseFromString(item.html, 'text/html');
       const artist = random40ArtistInfo(artistUrl, firstDoc);
+      artist.sourcePage = Number(item.sourcePage || 0);
       artist.pageText = String(firstDoc.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 60000);
       artist.imageUrl = random40FindProfileImageFromDoc(firstDoc, artist, artistUrl);
       const links = random40ExtractVideoPostLinks(firstDoc, artistUrl);
@@ -10629,6 +10642,7 @@ function random40BuildImportPayload(entries, globalStartIndex = 0, mode = random
       bundleKey: `random40:${first.artistKey || first.artistUrl}`,
       source: 'random40',
       random40Mode: modelMode,
+      sourcePage: Number(first.sourcePage || 0),
       artistUrl: first.artistUrl,
       postUrl: first.artistUrl,
       artistDisplayName: first.artistDisplayName || first.artistName || '',
@@ -11220,7 +11234,7 @@ async function startRandom40(mode = 'nano') {
               signal: precheckController.signal,
               sourcePriority: 1
             }),
-            45000,
+            36000,
             `${RANDOM40_MIN_VIDEOS_PER_ARTIST}-video verification timed out`
           ).catch(() => ({ links: [], verifiedEntries: [] }))
             .finally(() => releasePrecheckController());
