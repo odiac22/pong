@@ -156,6 +156,7 @@ async function startChrome() {
   const profile = await mkdtemp(path.join(os.tmpdir(), 'pong-local1-bench-'));
   const child = spawn(CHROME, [
     '--headless=new',
+    '--mute-audio',
     '--remote-debugging-port=0',
     `--user-data-dir=${profile}`,
     '--no-first-run',
