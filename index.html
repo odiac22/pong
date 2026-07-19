@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.11</div>
+  <div class="version-number">24.12</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5624,31 +5624,62 @@ function isPasteEventViewableForPaperclip(event) {
   return false;
 }
 
-function getPaperclipTotalBundleCount() {
+function countUniquePaperclipEventIdentities(includeEvent = () => true) {
   if (!Array.isArray(pasteEvents) || !pasteEvents.length) return 0;
-  return pasteEvents.reduce((count, event) => (
-    isPasteEventViewableForPaperclip(event) ? count + 1 : count
-  ), 0);
+
+  const parents = [];
+  const tokenOwners = new Map();
+  const findRoot = node => {
+    let root = node;
+    while (parents[root] !== root) root = parents[root];
+    while (parents[node] !== node) {
+      const parent = parents[node];
+      parents[node] = root;
+      node = parent;
+    }
+    return root;
+  };
+  const merge = (left, right) => {
+    const leftRoot = findRoot(left);
+    const rightRoot = findRoot(right);
+    if (leftRoot !== rightRoot) parents[rightRoot] = leftRoot;
+  };
+
+  pasteEvents.forEach((event, index) => {
+    if (!isPasteEventViewableForPaperclip(event) || !includeEvent(event, index)) return;
+    const node = parents.length;
+    parents.push(node);
+    const tokens = [...getPasteEventArtistIdentityTokens(event, index)];
+    if (!tokens.length) tokens.push(`event:${index}`);
+    tokens.forEach(token => {
+      if (tokenOwners.has(token)) merge(node, tokenOwners.get(token));
+      else tokenOwners.set(token, node);
+    });
+  });
+
+  return new Set(parents.map((_, node) => findRoot(node))).size;
+}
+
+function getPaperclipTotalBundleCount() {
+  return countUniquePaperclipEventIdentities();
 }
 
 function getPaperclipActiveBundleCount() {
   if (!Array.isArray(pasteEvents) || !pasteEvents.length) return 0;
   const visibleIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
   const currentIndex = visibleIndex >= 0 ? visibleIndex : currentPasteIndex;
-  return pasteEvents.reduce((count, event, index) => (
-    !isPasteEventViewableForPaperclip(event) ||
-    isPasteEventRetiredForPaperclip(event, index) ||
-    (index !== currentIndex && isPasteEventPreviouslyVisitedForPaperclip(event, index))
-      ? count
-      : count + 1
-  ), 0);
+  return countUniquePaperclipEventIdentities((event, index) => (
+    !isPasteEventRetiredForPaperclip(event, index) &&
+    (index === currentIndex || !isPasteEventPreviouslyVisitedForPaperclip(event, index))
+  ));
 }
 
 function getPaperclipProgressCount() {
   const total = getPaperclipTotalBundleCount();
   if (!total) return 0;
   if (paperclipHistoryPosition >= 0 && paperclipHistory.length) {
-    return Math.min(total, paperclipHistoryPosition + 1);
+    const visibleHistoryIndexes = new Set(paperclipHistory.slice(0, paperclipHistoryPosition + 1));
+    return Math.min(total, countUniquePaperclipEventIdentities((event, index) => visibleHistoryIndexes.has(index)));
   }
   const active = getPaperclipActiveBundleCount();
   return Math.min(total, Math.max(1, total - active + 1));
