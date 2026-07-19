@@ -49,8 +49,16 @@ const GATEWAY_AGENT = new https.Agent({
   maxFreeSockets: Math.max(16, Number(process.env.PONG_GATEWAY_MAX_FREE_SOCKETS || 32)),
   scheduling: 'lifo'
 });
-const VIDEO_VERIFY_FETCH_CONCURRENCY = Math.max(4, Math.min(32, Number(process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY || 18)));
+const VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST = Math.max(4, Math.min(32, Number(
+  process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST ||
+  process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY ||
+  24
+)));
 const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(8, Number(process.env.PONG_VIDEO_VERIFY_PER_ARTIST_CONCURRENCY || 6)));
+const VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST = Math.max(1, Math.min(
+  VIDEO_VERIFY_PER_ARTIST_CONCURRENCY,
+  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 2)
+));
 const VIDEO_VERIFY_CACHE_MAX = Math.max(200, Number(process.env.PONG_VIDEO_VERIFY_CACHE_MAX || 6000));
 const VIDEO_VERIFY_CACHE_TTL_MS = Math.max(30000, Number(process.env.PONG_VIDEO_VERIFY_CACHE_TTL_MS || 900000));
 
@@ -90,9 +98,15 @@ const gatewayWarmState = {
   error: ''
 };
 const videoVerifyCache = new Map();
-const videoVerifyFetchQueue = [];
-let videoVerifyFetchActive = 0;
-let videoVerifyBackoffUntil = 0;
+const videoVerifyHostStates = new Map(GATEWAY_ALLOWED_HOSTS.map(host => [host, {
+  host,
+  queue: [],
+  active: 0,
+  activeByGroup: new Map(),
+  backoffUntil: 0,
+  rateLimits: 0
+}]));
+let videoVerifyGroupSequence = 0;
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -178,33 +192,50 @@ function videoVerifyDelay(ms) {
   return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
 }
 
-function pumpVideoVerifyFetchQueue() {
-  while (videoVerifyFetchActive < VIDEO_VERIFY_FETCH_CONCURRENCY && videoVerifyFetchQueue.length) {
-    const item = videoVerifyFetchQueue.shift();
+function videoVerifyStateForHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+  if (!videoVerifyHostStates.has(host)) {
+    videoVerifyHostStates.set(host, { host, queue: [], active: 0, activeByGroup: new Map(), backoffUntil: 0, rateLimits: 0 });
+  }
+  return videoVerifyHostStates.get(host);
+}
+
+function pumpVideoVerifyFetchQueue(state) {
+  while (state.active < VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST && state.queue.length) {
+    const eligibleIndex = state.queue.findIndex(item =>
+      (state.activeByGroup.get(item.groupId) || 0) < VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST
+    );
+    if (eligibleIndex < 0) break;
+    const item = state.queue.splice(eligibleIndex, 1)[0];
     if (item.signal?.aborted) {
       item.reject(new DOMException('video verification aborted', 'AbortError'));
       continue;
     }
-    videoVerifyFetchActive++;
+    state.active++;
+    state.activeByGroup.set(item.groupId, (state.activeByGroup.get(item.groupId) || 0) + 1);
     Promise.resolve()
       .then(async () => {
-        const waitMs = videoVerifyBackoffUntil - Date.now();
+        const waitMs = state.backoffUntil - Date.now();
         if (waitMs > 0) await videoVerifyDelay(waitMs);
-        return item.task();
+        return item.task(state);
       })
       .then(item.resolve, item.reject)
       .finally(() => {
-        videoVerifyFetchActive = Math.max(0, videoVerifyFetchActive - 1);
-        pumpVideoVerifyFetchQueue();
+        state.active = Math.max(0, state.active - 1);
+        const groupActive = Math.max(0, (state.activeByGroup.get(item.groupId) || 0) - 1);
+        if (groupActive) state.activeByGroup.set(item.groupId, groupActive);
+        else state.activeByGroup.delete(item.groupId);
+        pumpVideoVerifyFetchQueue(state);
       });
   }
 }
 
-function scheduleVideoVerifyFetch(task, signal) {
+function scheduleVideoVerifyFetch(hostname, groupId, task, signal) {
   if (signal?.aborted) return Promise.reject(new DOMException('video verification aborted', 'AbortError'));
+  const state = videoVerifyStateForHost(hostname);
   return new Promise((resolve, reject) => {
-    videoVerifyFetchQueue.push({ task, signal, resolve, reject });
-    pumpVideoVerifyFetchQueue();
+    state.queue.push({ groupId, task, signal, resolve, reject });
+    pumpVideoVerifyFetchQueue(state);
   });
 }
 
@@ -233,7 +264,7 @@ function extractVideoUrlsFromHtml(html, postUrl) {
   return urls;
 }
 
-async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal) {
+async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, groupId) {
   const normalizedPostUrl = gatewayTargetUrl(postUrl).toString();
   const cached = videoVerifyCache.get(normalizedPostUrl);
   if (cached && Date.now() - cached.at < VIDEO_VERIFY_CACHE_TTL_MS) {
@@ -242,7 +273,8 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal) {
     return cached.entries;
   }
 
-  const entries = await scheduleVideoVerifyFetch(async () => {
+  const verificationHost = new URL(normalizedPostUrl).hostname;
+  const entries = await scheduleVideoVerifyFetch(verificationHost, groupId, async hostState => {
     const controller = new AbortController();
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
@@ -260,8 +292,9 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal) {
       });
       if (response.status === 429) {
         const retryAfterSeconds = Number(response.headers.get('retry-after') || 0);
-        videoVerifyBackoffUntil = Math.max(videoVerifyBackoffUntil, Date.now() + Math.min(5000, Math.max(500, retryAfterSeconds * 1000)));
-        await videoVerifyDelay(Math.max(0, videoVerifyBackoffUntil - Date.now()));
+        hostState.rateLimits++;
+        hostState.backoffUntil = Math.max(hostState.backoffUntil, Date.now() + Math.min(5000, Math.max(500, retryAfterSeconds * 1000)));
+        await videoVerifyDelay(Math.max(0, hostState.backoffUntil - Date.now()));
         response = await fetch(normalizedPostUrl, {
           headers: {
             'User-Agent': 'Mozilla/5.0 PongVideoVerifier/1.0',
@@ -308,12 +341,13 @@ async function verifyVideoPostBatch(payload, requestSignal) {
   const entries = [];
   const seenVideos = new Set();
   let nextIndex = 0;
+  const groupId = `verify-${++videoVerifyGroupSequence}`;
 
   async function worker() {
     while (!controller.signal.aborted && entries.length < stopAt) {
       const index = nextIndex++;
       if (index >= postUrls.length) return;
-      const found = await fetchVideoEntriesForVerification(postUrls[index], artistInfo, controller.signal).catch(() => []);
+      const found = await fetchVideoEntriesForVerification(postUrls[index], artistInfo, controller.signal, groupId).catch(() => []);
       for (const entry of found) {
         if (!entry?.videoUrl || seenVideos.has(entry.videoUrl)) continue;
         seenVideos.add(entry.videoUrl);
@@ -2301,12 +2335,19 @@ const server = http.createServer(async (req, res) => {
         },
         video_verifier: {
           storage: 'memory-only',
-          fetch_concurrency: VIDEO_VERIFY_FETCH_CONCURRENCY,
+          fetch_concurrency_per_host: VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST,
+          maximum_total_concurrency: VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST * videoVerifyHostStates.size,
           per_artist_concurrency: VIDEO_VERIFY_PER_ARTIST_CONCURRENCY,
-          active: videoVerifyFetchActive,
-          queued: videoVerifyFetchQueue.length,
+          active_per_artist_host: VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST,
+          active: [...videoVerifyHostStates.values()].reduce((sum, state) => sum + state.active, 0),
+          queued: [...videoVerifyHostStates.values()].reduce((sum, state) => sum + state.queue.length, 0),
           cached_posts: videoVerifyCache.size,
-          backoff_until: videoVerifyBackoffUntil ? new Date(videoVerifyBackoffUntil).toISOString() : ''
+          hosts: Object.fromEntries([...videoVerifyHostStates.entries()].map(([host, state]) => [host, {
+            active: state.active,
+            queued: state.queue.length,
+            rate_limits: state.rateLimits,
+            backoff_until: state.backoffUntil ? new Date(state.backoffUntil).toISOString() : ''
+          }]))
         },
         cached_images: embeddingCache.size,
         learned_accept_records: preferenceAi?.accepts ?? learnedStore.records.filter(record => record.label === 'accept').length,

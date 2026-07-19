@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.06</div>
+  <div class="version-number">24.07</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7043,8 +7043,8 @@ const RANDOM40_TARGET_ACCEPTED = 40;
 const RANDOM40_PAGE_MIN = 1;
 const RANDOM40_PAGE_MAX = 3500;
 const RANDOM40_AI_CONCURRENCY = 12;
-const RANDOM40_LOCAL_CONCURRENCY = 18;
-const RANDOM40_SOURCE_CONCURRENCY = 32;
+const RANDOM40_LOCAL_CONCURRENCY = 48;
+const RANDOM40_SOURCE_CONCURRENCY = 80;
 const RANDOM40_SOURCE_BACKGROUND_CONCURRENCY = 4;
 const RANDOM40_POST_CONCURRENCY = 18;
 const RANDOM40_POST_PLAYING_CONCURRENCY = 24;
@@ -7057,7 +7057,8 @@ const RANDOM40_LISTING_PAGE_BATCH_SIZE = 8;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 15;
 const RANDOM40_PRECHECK_MAX_ARTIST_PAGES = 36;
-const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 96;
+const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 192;
+const RANDOM40_SOURCE_BASES = ['https://coomerfans.com/', 'https://onlyfaphouse.com/'];
 const RANDOM40_FAST_PUBLISH_VIDEOS = RANDOM40_MIN_VIDEOS_PER_ARTIST;
 const RANDOM40_BACKGROUND_APPEND_BATCH = 4;
 const RANDOM40_BACKGROUND_APPEND_DELAY_MS = 180;
@@ -7578,12 +7579,31 @@ function random40WithTimeout(promise, timeoutMs, label = 'Random 40 step timed o
 function random40NormalizeArtistUrl(raw) {
   try {
     const url = new URL(raw, 'https://coomerfans.com/');
-    if (!/\/u\//i.test(url.pathname)) return '';
+    const host = url.hostname.toLowerCase().replace(/^www\./, '');
+    const validPath = host === 'coomerfans.com'
+      ? /\/u\//i.test(url.pathname)
+      : /\/c\//i.test(url.pathname);
+    if (!RANDOM40_SOURCE_BASES.some(base => new URL(base).hostname === host) || !validPath) return '';
     url.protocol = 'https:';
-    url.hostname = 'coomerfans.com';
+    url.hostname = host;
     url.search = '';
     url.hash = '';
     return url.toString().replace(/\/$/, '');
+  } catch (_) {
+    return '';
+  }
+}
+
+function random40ArtistIdentity(raw) {
+  try {
+    const url = new URL(random40NormalizeArtistUrl(raw));
+    const parts = url.pathname.split('/').filter(Boolean);
+    const userIndex = parts.findIndex(part => ['u', 'c'].includes(part.toLowerCase()));
+    const service = userIndex >= 0 ? parts[userIndex + 1] || '' : '';
+    const accountId = userIndex >= 0 ? parts[userIndex + 2] || '' : '';
+    return service && accountId
+      ? `${service.toLowerCase()}:${decodeURIComponent(accountId).toLowerCase()}`
+      : url.pathname.toLowerCase();
   } catch (_) {
     return '';
   }
@@ -7610,14 +7630,14 @@ function random40ArtistNameFromUrl(raw) {
 function random40ArtistInfo(artistUrl, doc) {
   const url = new URL(artistUrl, 'https://coomerfans.com/');
   const parts = url.pathname.split('/').filter(Boolean);
-  const userIndex = parts.findIndex(part => part.toLowerCase() === 'u');
+  const userIndex = parts.findIndex(part => ['u', 'c'].includes(part.toLowerCase()));
   const service = userIndex >= 0 ? parts[userIndex + 1] || '' : '';
   const accountId = userIndex >= 0 ? parts[userIndex + 2] || '' : '';
   const username = userIndex >= 0 ? parts[userIndex + 3] || accountId || '' : '';
   const artistName = decodeURIComponent(username || random40ArtistNameFromUrl(artistUrl) || 'unknown');
   return {
     type: 'artist',
-    source: 'coomerfans',
+    source: url.hostname.toLowerCase().includes('onlyfaphouse') ? 'onlyfaphouse' : 'coomerfans',
     artistName,
     artistDisplayName: artistName,
     artistKey: service && (accountId || username)
@@ -7639,8 +7659,9 @@ function random40SaveAcceptedArtists(records) {
   const seen = new Set();
   (records || []).forEach(item => {
     const artistUrl = random40NormalizeArtistUrl(item?.artistUrl || '');
-    if (!artistUrl || seen.has(artistUrl)) return;
-    seen.add(artistUrl);
+    const identity = random40ArtistIdentity(artistUrl);
+    if (!artistUrl || !identity || seen.has(identity)) return;
+    seen.add(identity);
     clean.push({
       artistUrl,
       artistName: String(item.artistName || random40ArtistNameFromUrl(artistUrl) || 'unknown').slice(0, 100),
@@ -7662,8 +7683,9 @@ function random40SaveRejectedArtists(records) {
   const seen = new Set();
   (records || []).forEach(item => {
     const artistUrl = random40NormalizeArtistUrl(item?.artistUrl || '');
-    if (!artistUrl || seen.has(artistUrl)) return;
-    seen.add(artistUrl);
+    const identity = random40ArtistIdentity(artistUrl);
+    if (!artistUrl || !identity || seen.has(identity)) return;
+    seen.add(identity);
     clean.push({
       artistUrl,
       artistName: String(item.artistName || random40ArtistNameFromUrl(artistUrl) || 'unknown').slice(0, 100),
@@ -7737,9 +7759,9 @@ function random40CurrentVideoMeta() {
 }
 
 function random40SelectReferenceRecords(records, maxExamples, excludeArtistUrl = '', options = {}) {
-  const excluded = random40NormalizeArtistUrl(excludeArtistUrl);
+  const excluded = random40ArtistIdentity(excludeArtistUrl);
   const filtered = (records || [])
-    .filter(item => random40NormalizeArtistUrl(item.artistUrl) !== excluded)
+    .filter(item => random40ArtistIdentity(item.artistUrl) !== excluded)
     .filter(item => Array.isArray(item.imageUrls) && item.imageUrls.length);
   if (!filtered.length) return [];
 
@@ -8159,8 +8181,9 @@ async function random40AcceptCurrentArtistForFutureFinds(bundleInfo = {}) {
     showSortingIndicator(`Adding ${artistName} as a Random 40 accepted example...`);
     const doc = await random40FetchDoc(artistUrl, { timeoutMs: 22000 });
     const images = random40ExtractReviewImages(doc, artistUrl, meta.imageUrl || '').slice(0, RANDOM40_STORED_IMAGES_PER_ARTIST);
-    const accepted = random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
-    const rejected = random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
+    const artistIdentity = random40ArtistIdentity(artistUrl);
+    const accepted = random40LoadAcceptedArtists().filter(item => random40ArtistIdentity(item.artistUrl) !== artistIdentity);
+    const rejected = random40LoadRejectedArtists().filter(item => random40ArtistIdentity(item.artistUrl) !== artistIdentity);
     const record = {
       artistUrl,
       artistName,
@@ -8173,15 +8196,15 @@ async function random40AcceptCurrentArtistForFutureFinds(bundleInfo = {}) {
     ]);
     random40SaveRejectedArtists(rejected);
     const learned = await random40SendLocalLearningExample('accept', record);
-    random40State?.seenArtists?.add?.(artistUrl);
-    random40State?.rejectedArtistUrls?.delete?.(artistUrl);
+    random40State?.seenArtists?.add?.(random40ArtistIdentity(artistUrl));
+    random40State?.rejectedArtistUrls?.delete?.(random40ArtistIdentity(artistUrl));
     showSortingIndicator(learned
       ? `PC memory learned accepted artist: ${artistName}`
       : `Session-only accepted artist; PC memory unavailable: ${artistName}`);
     return true;
   } catch (err) {
-    random40State?.seenArtists?.add?.(artistUrl);
-    random40State?.rejectedArtistUrls?.delete?.(artistUrl);
+    random40State?.seenArtists?.add?.(random40ArtistIdentity(artistUrl));
+    random40State?.rejectedArtistUrls?.delete?.(random40ArtistIdentity(artistUrl));
     showSortingIndicator(`Could not learn accepted artist; images did not load: ${artistName}`);
     return false;
   }
@@ -8211,8 +8234,9 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
     showSortingIndicator(`Adding ${artistName} as ${rejectReasonLabel} avoid example...`);
     const doc = await random40FetchDoc(artistUrl, { timeoutMs: 22000 });
     const images = random40ExtractReviewImages(doc, artistUrl, meta.imageUrl || '');
-    const accepted = random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
-    const existing = random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl);
+    const artistIdentity = random40ArtistIdentity(artistUrl);
+    const accepted = random40LoadAcceptedArtists().filter(item => random40ArtistIdentity(item.artistUrl) !== artistIdentity);
+    const existing = random40LoadRejectedArtists().filter(item => random40ArtistIdentity(item.artistUrl) !== artistIdentity);
     random40SaveAcceptedArtists(accepted);
     const record = {
       artistUrl,
@@ -8234,8 +8258,8 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
       rejectReasonLabel
     });
     const learned = await random40SendLocalLearningExample('reject', record);
-    random40State?.seenArtists?.add?.(artistUrl);
-    random40State?.rejectedArtistUrls?.add?.(artistUrl);
+    random40State?.seenArtists?.add?.(random40ArtistIdentity(artistUrl));
+    random40State?.rejectedArtistUrls?.add?.(random40ArtistIdentity(artistUrl));
     showSortingIndicator(learned
       ? `PC memory learned ${rejectReasonLabel}: ${artistName}`
       : `Session-only ${rejectReasonLabel}; PC memory unavailable: ${artistName}`);
@@ -8248,8 +8272,8 @@ async function random40RejectCurrentArtistForFutureFinds(bundleInfo = {}) {
       rejectReason,
       rejectReasonLabel
     });
-    random40State?.seenArtists?.add?.(artistUrl);
-    random40State?.rejectedArtistUrls?.add?.(artistUrl);
+    random40State?.seenArtists?.add?.(random40ArtistIdentity(artistUrl));
+    random40State?.rejectedArtistUrls?.add?.(random40ArtistIdentity(artistUrl));
     showSortingIndicator(`Could not learn ${rejectReasonLabel}; images did not load: ${artistName}`);
     return false;
   }
@@ -8260,9 +8284,10 @@ window.PongRandom40RejectCurrentArtist = random40RejectCurrentArtistForFutureFin
 
 function random40FindArtistsOnListing(doc, pageUrl) {
   const found = new Map();
-  for (const link of doc.querySelectorAll('a[href*="/u/"]')) {
-    const artistUrl = random40NormalizeArtistUrl(link.getAttribute('href'));
-    if (!artistUrl || found.has(artistUrl)) continue;
+  for (const link of doc.querySelectorAll('a[href*="/u/"], a[href*="/c/"]')) {
+    const artistUrl = random40NormalizeArtistUrl(random40NormalizeUrl(link.getAttribute('href'), pageUrl));
+    const identity = random40ArtistIdentity(artistUrl);
+    if (!artistUrl || !identity || found.has(identity)) continue;
     const card = link.closest('.thumb, article, li, .card, .creator, .model, div') || link.parentElement || link;
     const image = link.querySelector('img') || card?.querySelector('img');
     const imageUrl = random40NormalizeUrl(
@@ -8275,7 +8300,7 @@ function random40FindArtistsOnListing(doc, pageUrl) {
       image?.getAttribute('alt') ||
       random40ArtistNameFromUrl(artistUrl)
     ).replace(/\s+/g, ' ').trim();
-    found.set(artistUrl, {
+    found.set(identity, {
       artistUrl,
       artistName,
       imageUrl,
@@ -8422,19 +8447,19 @@ function random40SaveRejectCacheSoon() {
 }
 
 function random40CachedHardReject(artistUrl) {
-  const url = random40NormalizeArtistUrl(artistUrl);
-  if (!url) return null;
-  const entry = random40GetRejectCache().artists[url];
+  const identity = random40ArtistIdentity(artistUrl);
+  if (!identity) return null;
+  const entry = random40GetRejectCache().artists[identity];
   if (!entry) return null;
   if (Date.now() - Number(entry.at || 0) > RANDOM40_REJECT_CACHE_TTL_MS) return null;
   return entry;
 }
 
 function random40CacheHardReject(artistUrl, reason) {
-  const url = random40NormalizeArtistUrl(artistUrl);
-  if (!url) return;
+  const identity = random40ArtistIdentity(artistUrl);
+  if (!identity) return;
   const cache = random40GetRejectCache();
-  cache.artists[url] = { reason: String(reason || '').slice(0, 80), at: Date.now() };
+  cache.artists[identity] = { reason: String(reason || '').slice(0, 80), at: Date.now() };
   const entries = Object.entries(cache.artists);
   if (entries.length > RANDOM40_REJECT_CACHE_MAX) {
     entries.sort((a, b) => Number(a[1]?.at || 0) - Number(b[1]?.at || 0));
@@ -8933,7 +8958,10 @@ function random40IsAllowedImageHost(url) {
     const hostname = parsed.hostname.toLowerCase();
     return hostname === 'coomerfans.com' ||
       hostname === 'www.coomerfans.com' ||
-      hostname.endsWith('.coomerfans.com');
+      hostname.endsWith('.coomerfans.com') ||
+      hostname === 'onlyfaphouse.com' ||
+      hostname === 'www.onlyfaphouse.com' ||
+      hostname.endsWith('.onlyfaphouse.com');
   } catch (_) {
     return false;
   }
@@ -8994,7 +9022,7 @@ function random40FindProfileImageFromDoc(doc, artist, baseUrl) {
   const candidates = [];
   try {
     const parts = new URL(artist.artistUrl || baseUrl, 'https://coomerfans.com/').pathname.split('/').filter(Boolean);
-    const userIndex = parts.findIndex(part => part.toLowerCase() === 'u');
+    const userIndex = parts.findIndex(part => ['u', 'c'].includes(part.toLowerCase()));
     const numericId = userIndex >= 0 ? parts[userIndex + 2] || '' : '';
     if (numericId) candidates.push(random40NormalizeUrl(`/istorage/${numericId}.jpg`, baseUrl));
   } catch (_) {}
@@ -9016,12 +9044,14 @@ function random40FindProfileImageFromDoc(doc, artist, baseUrl) {
 }
 
 function random40PostUrlFromPost(post, baseUrl) {
-  for (const selector of ['a.view-post[href]', 'a[href*="/p/"]', 'h2 a[href]', 'h3 a[href]']) {
+  for (const selector of ['a.view-post[href]', 'a[href*="/p/"]', 'a[href*="/post/"]', 'h2 a[href]', 'h3 a[href]']) {
     const link = post.querySelector(selector);
     const postUrl = random40NormalizeUrl(link?.getAttribute('href'), baseUrl);
     try {
       const parsed = new URL(postUrl);
-      if (parsed.hostname.endsWith('coomerfans.com') && parsed.pathname.includes('/p/')) return postUrl;
+      const host = parsed.hostname.toLowerCase();
+      if ((host.endsWith('coomerfans.com') && parsed.pathname.includes('/p/')) ||
+          (host.endsWith('onlyfaphouse.com') && parsed.pathname.includes('/post/'))) return postUrl;
     } catch (_) {}
   }
   return '';
@@ -9643,7 +9673,8 @@ async function trainAiLoadRandomPage({ quiet = false, generation = trainAiState.
     const page = random40RandomPage();
     if (!quiet) trainAiSetStatus(`Loading page ${page}…`);
     try {
-      const pageUrl = random40PageUrl(page);
+      const sourceBase = RANDOM40_SOURCE_BASES[(page + attempt) % RANDOM40_SOURCE_BASES.length];
+      const pageUrl = random40PageUrl(page, sourceBase);
       const doc = await random40FetchDoc(pageUrl, { timeoutMs: 22000 });
       if (generation !== trainAiState.queueGeneration) return false;
       const artists = shuffleInPlace(random40FindArtistsOnListing(doc, pageUrl).filter(artist => artist.imageUrl)).slice(0, 36);
@@ -9796,6 +9827,7 @@ function trainAiShowModelAgreement(elementId, modelName, prediction, label) {
 
 function trainAiStoreBrowserFeedback(label, candidate, reasonLabel) {
   const artistUrl = random40NormalizeArtistUrl(candidate.artistUrl);
+  const artistIdentity = random40ArtistIdentity(artistUrl);
   const record = {
     artistUrl,
     artistName: candidate.artistName,
@@ -9804,13 +9836,13 @@ function trainAiStoreBrowserFeedback(label, candidate, reasonLabel) {
     learnedAt: new Date().toISOString()
   };
   if (label === 'accept') {
-    random40SaveAcceptedArtists([record, ...random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl)]);
-    random40SaveRejectedArtists(random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl));
+    random40SaveAcceptedArtists([record, ...random40LoadAcceptedArtists().filter(item => random40ArtistIdentity(item.artistUrl) !== artistIdentity)]);
+    random40SaveRejectedArtists(random40LoadRejectedArtists().filter(item => random40ArtistIdentity(item.artistUrl) !== artistIdentity));
   } else {
     record.rejectReason = String(reasonLabel || 'Not my taste').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'reject';
     record.rejectReasonLabel = reasonLabel || 'Not my taste';
-    random40SaveRejectedArtists([record, ...random40LoadRejectedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl)]);
-    random40SaveAcceptedArtists(random40LoadAcceptedArtists().filter(item => random40NormalizeArtistUrl(item.artistUrl) !== artistUrl));
+    random40SaveRejectedArtists([record, ...random40LoadRejectedArtists().filter(item => random40ArtistIdentity(item.artistUrl) !== artistIdentity)]);
+    random40SaveAcceptedArtists(random40LoadAcceptedArtists().filter(item => random40ArtistIdentity(item.artistUrl) !== artistIdentity));
   }
   return record;
 }
@@ -10062,8 +10094,9 @@ function installTrainAiSwipe() {
   });
 }
 
-function random40PageUrl(page) {
-  return `https://coomerfans.com/${page > 1 ? `?page=${page}` : ''}`;
+function random40PageUrl(page, sourceBase = RANDOM40_SOURCE_BASES[0]) {
+  const base = String(sourceBase || RANDOM40_SOURCE_BASES[0]).replace(/\/+$/, '');
+  return `${base}/${page > 1 ? `?page=${page}` : ''}`;
 }
 
 function random40RandomPage() {
@@ -10943,7 +10976,7 @@ async function startRandom40(mode = 'nano') {
     done: false,
     seenPages: new Set(),
     seenArtists: new Set(),
-    rejectedArtistUrls: new Set(random40LoadRejectedArtists().map(item => random40NormalizeArtistUrl(item.artistUrl)).filter(Boolean))
+    rejectedArtistUrls: new Set(random40LoadRejectedArtists().map(item => random40ArtistIdentity(item.artistUrl)).filter(Boolean))
   };
 
   updateRandom40Progress({ detail: `Starting ${random40ModeLabel(runMode)} random scan...`, force: true });
@@ -10990,8 +11023,11 @@ async function startRandom40(mode = 'nano') {
       let artists = [];
       try {
         const pageStageStarted = performance.now();
-        const pageResults = await Promise.all(pages.map(page => {
-          const pageUrl = random40PageUrl(page);
+        const sourcePages = pages.flatMap(page => RANDOM40_SOURCE_BASES.map(sourceBase => ({
+          page,
+          pageUrl: random40PageUrl(page, sourceBase)
+        })));
+        const pageResults = await Promise.all(sourcePages.map(({ page, pageUrl }) => {
           return random40FetchDoc(pageUrl, { timeoutMs: 22000, priority: 0 })
             .then(doc => ({ page, pageUrl, doc }))
             .catch(error => ({ page, pageUrl, error }));
@@ -11004,15 +11040,16 @@ async function startRandom40(mode = 'nano') {
           if (result.error || !result.doc) return;
           random40FindArtistsOnListing(result.doc, result.pageUrl).forEach(artist => {
             if (!artist.imageUrl) return;
-            if (random40State.seenArtists.has(artist.artistUrl)) return;
-            if (random40State.rejectedArtistUrls.has(artist.artistUrl)) return;
-            byArtist.set(artist.artistUrl, artist);
+            const identity = random40ArtistIdentity(artist.artistUrl);
+            if (!identity || random40State.seenArtists.has(identity)) return;
+            if (random40State.rejectedArtistUrls.has(identity)) return;
+            if (!byArtist.has(identity)) byArtist.set(identity, artist);
           });
         });
 
         artists = shuffleInPlace([...byArtist.values()]).slice(0, RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH);
       } catch (err) {
-        random40State.pages += pages.length;
+        random40State.pages += pages.length * RANDOM40_SOURCE_BASES.length;
         updateRandom40Progress({ detail: `Page batch failed: ${err.message}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
         continue;
       }
@@ -11025,7 +11062,7 @@ async function startRandom40(mode = 'nano') {
       const classifierConcurrency = random40IsLocalMode(runMode) ? RANDOM40_LOCAL_CONCURRENCY : RANDOM40_AI_CONCURRENCY;
       await random40Pool(artists, classifierConcurrency, async artist => {
         if (random40State.stop || random40State.accepted >= RANDOM40_TARGET_ACCEPTED) return;
-        random40State.seenArtists.add(artist.artistUrl);
+        random40State.seenArtists.add(random40ArtistIdentity(artist.artistUrl));
         const artistLabel = artist.artistName || random40ArtistNameFromUrl(artist.artistUrl);
         const classifierLabel = random40ModeLabel(runMode);
 
