@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.19</div>
+  <div class="version-number">24.20</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5678,7 +5678,12 @@ function getPaperclipTotalBundleCount() {
 function getPaperclipActiveBundleCount() {
   if (!Array.isArray(pasteEvents) || !pasteEvents.length) return 0;
   const visibleIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
-  const currentIndex = visibleIndex >= 0 ? visibleIndex : currentPasteIndex;
+  // Navigation updates currentPasteIndex synchronously, while the prior
+  // artist's video can remain visible until the next render tick. Trust the
+  // navigation state first so one Paperclip press advances exactly one count.
+  const currentIndex = Number.isInteger(currentPasteIndex) && currentPasteIndex >= 0
+    ? currentPasteIndex
+    : visibleIndex;
   return countUniquePaperclipEventIdentities((event, index) => (
     !isPasteEventRetiredForPaperclip(event, index) &&
     (index === currentIndex || !isPasteEventPreviouslyVisitedForPaperclip(event, index))
@@ -5849,6 +5854,21 @@ function navigateToPreviousPasteEvent() {
 
 window.PongNavigateToPreviousPasteEvent = navigateToPreviousPasteEvent;
 
+function canNavigateToNextPasteEvent() {
+  if (!Array.isArray(pasteEvents) || !pasteEvents.length || !Array.isArray(allVideoUrls) || !allVideoUrls.length) {
+    return false;
+  }
+  if (paperclipHistoryPosition >= 0 && paperclipHistoryPosition < paperclipHistory.length - 1) {
+    return true;
+  }
+
+  const excludedIdentity = getCurrentPaperclipArtistIdentity();
+  const eromeBundleMode = isEromePasteEvent(pasteEvents[currentPasteIndex]) || window.PongLoadedSavedMode === 'erome';
+  return eromeBundleMode
+    ? getRandomActiveEromePasteEventIndex(excludedIdentity) >= 0
+    : getFirstActivePasteEventIndex(excludedIdentity) >= 0;
+}
+
 function navigateToNextPasteEvent(){
   if(!pasteEvents.length||!allVideoUrls.length){
     showSortingIndicator('No paste bundles yet');
@@ -5869,7 +5889,6 @@ function navigateToNextPasteEvent(){
   }
 
   const excludedIdentity = getCurrentPaperclipArtistIdentity();
-  const retired = retireCurrentPasteEventForPaperclip();
   const eromeBundleMode = isEromePasteEvent(pasteEvents[currentPasteIndex]) || window.PongLoadedSavedMode === 'erome';
   const nextActiveIndex = eromeBundleMode
     ? getRandomActiveEromePasteEventIndex(excludedIdentity)
@@ -5897,6 +5916,9 @@ function navigateToNextPasteEvent(){
     return;
   }
 
+  // Do not retire the last artist merely because Paperclip was pressed at
+  // N/N. Keeping it current lets a later appended artist correctly show N/N+1.
+  const retired = retireCurrentPasteEventForPaperclip();
   if (retired) paperclipStepCount++;
   displayPasteEventAtIndex(nextActiveIndex);
 }
@@ -6041,6 +6063,7 @@ function updatePasteNavigationButton(){
     btn.addEventListener('click',e=>{
       e.preventDefault();
       e.stopPropagation();
+      if (btn.getAttribute('aria-disabled') === 'true') return;
       navigateToNextPasteEvent();
     });
     document.body.appendChild(btn);
@@ -6050,26 +6073,38 @@ function updatePasteNavigationButton(){
 
   if(pendingCount){
     btn.setAttribute('data-count', pendingCount + 'p');
-    btn.style.opacity='0.74';
-    btn.style.background='rgba(103,232,249,0.22)';
+    const canAdvance = canNavigateToNextPasteEvent();
+    btn.setAttribute('aria-disabled', canAdvance ? 'false' : 'true');
+    btn.style.pointerEvents = canAdvance ? 'auto' : 'none';
+    btn.style.opacity = canAdvance ? '0.74' : '0.2';
+    btn.style.background = canAdvance ? 'rgba(103,232,249,0.22)' : '';
+    btn.title = canAdvance ? 'Next artist bundle' : 'Waiting for another artist';
     updateViewedRemainingCounter();
     return;
   }
 
   if(!pasteEvents.length){
     btn.setAttribute('data-count','0/0');
+    btn.setAttribute('aria-disabled','true');
+    btn.style.pointerEvents='none';
     btn.style.opacity='0.2';
     btn.style.background='';
+    btn.title='No artist bundles';
   } else {
     const total = getPaperclipTotalBundleCount();
     const current = getPaperclipProgressCount();
+    const canAdvance = canNavigateToNextPasteEvent();
     btn.setAttribute('data-count',`${current}/${total}`);
-    btn.style.opacity=total ? '0.74' : '0.2';
-    btn.style.background=total ? 'rgba(103,232,249,0.22)' : '';
-    const preferredIndex = getBestLoadedPasteEventIndex();
+    btn.setAttribute('aria-disabled', canAdvance ? 'false' : 'true');
+    btn.style.pointerEvents = canAdvance ? 'auto' : 'none';
+    btn.style.opacity = canAdvance ? '0.74' : '0.2';
+    btn.style.background = canAdvance ? 'rgba(103,232,249,0.22)' : '';
+    const preferredIndex = canAdvance ? getBestLoadedPasteEventIndex() : -1;
     const preferredEvent = preferredIndex >= 0 ? pasteEvents[preferredIndex] : null;
     const stats = preferredEvent ? getRandom40PreloadBundleStats(preferredEvent, preferredIndex) : null;
-    btn.title = stats?.total
+    btn.title = !canAdvance
+      ? `All ${total} paperclip artists viewed`
+      : stats?.total
       ? `Next artist: ${stats.ready}/${stats.total} videos preloaded`
       : 'Next artist bundle';
   }
