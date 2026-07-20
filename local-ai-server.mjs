@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { pipeline, RawImage, env } from '@xenova/transformers';
+import { createLocal2NodeAdapter } from './local2-node-adapter.mjs';
 
 const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
 const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
@@ -19,6 +20,7 @@ const TOP_K = 10;
 const QWEN_ACCEPT_EXAMPLES = Number(process.env.PONG_QWEN_ACCEPT_EXAMPLE_IMAGES || 0);
 const QWEN_REJECT_EXAMPLES = Number(process.env.PONG_QWEN_REJECT_EXAMPLE_IMAGES || 0);
 const QWEN_CANDIDATE_IMAGES = Number(process.env.PONG_QWEN_CANDIDATE_IMAGES || 2);
+const LOCAL2_CLEAN_MAX_IMAGES = Math.max(4, Math.min(12, Number(process.env.PONG_LOCAL2_CLEAN_MAX_IMAGES || 8)));
 const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD || 40);
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const LEARNED_STORE_PATH = path.join(LOCAL_AI_DIR, 'learned-examples.json');
@@ -2268,14 +2270,35 @@ async function probePlayableMediaUrl(rawUrl, signal = null, timeoutMs = 8000) {
 
 async function verifyPlayableMediaEntries(entries, signal = null) {
   const accepted = [];
+  const acceptedKeys = new Set();
   let nextIndex = 0;
   await Promise.all(Array.from({ length: Math.min(8, entries.length || 1) }, async () => {
     while (!signal?.aborted && accepted.length < 15) {
       const index = nextIndex++;
       if (index >= entries.length) return;
       const entry = entries[index];
-      if (await probePlayableMediaUrl(entry.videoUrl, signal)) {
-        accepted.push({ ...entry, playbackProbeVerified: true });
+      const candidates = [...new Set([
+        entry?.videoUrl,
+        ...(Array.isArray(entry?.alternateVideoUrls) ? entry.alternateVideoUrls : [])
+      ].map(value => String(value || '').trim()).filter(Boolean))];
+      let selectedUrl = '';
+      for (const candidateUrl of candidates) {
+        if (!await probePlayableMediaUrl(candidateUrl, signal)) continue;
+        selectedUrl = candidateUrl;
+        break;
+      }
+      if (selectedUrl) {
+        const selected = {
+          ...entry,
+          videoUrl: selectedUrl,
+          alternateVideoUrls: candidates.filter(value => value !== selectedUrl),
+          playbackProbeVerified: true,
+          playbackFastStart: videoPlaybackProbeCache.get(selectedUrl)?.fastStart === true
+        };
+        const mediaKeys = canonicalVideoEntryKeys(selected);
+        if (!mediaKeys.length || mediaKeys.some(key => acceptedKeys.has(key))) continue;
+        mediaKeys.forEach(key => acceptedKeys.add(key));
+        accepted.push(selected);
       }
     }
   }));
@@ -2719,20 +2742,11 @@ function textHardFilter(artist = {}) {
   if (/\b(?:i am|i'm)\s+(?:a\s+)?(?:man|male|guy|dude|boy)\b/i.test(combined)) {
     return 'blocked explicit male self-description';
   }
-  // "Trap" is ambiguous English. Only treat it as a blocked identity/content
-  // clue when nearby words make that meaning explicit; phrases such as
-  // "trap door", "thirst trap", and music/genre references are incidental.
-  const nameAndUrl = `${artist.artistName || ''} ${artist.artistUrl || ''}`
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, ' ');
-  const nameAndUrlTokens = nameAndUrl.split(/[^a-z0-9]+/g).filter(Boolean);
-  const explicitlyQualifiedName = /(?:^|[^a-z0-9])trap(?:girl|boy|babe|model|creator|porn)(?:[^a-z0-9]|$)/i.test(nameAndUrl) ||
-    (nameAndUrlTokens.includes('trap') && nameAndUrlTokens.some(token => /^(?:trans|transgender|shemale|femboy|sissy|crossdress)/.test(token)));
-  if (explicitlyQualifiedName) return 'blocked contextual text: explicit trap identity/content phrase in artist name or URL';
-  const explicitTrapContext = /\b(?:trans|transgender|shemale|femboy|sissy|crossdress(?:er|ing)?)\s+(?:\w+\s+){0,2}trap\b|\btrap\s+(?:girl|boy|babe|model|creator|content|porn|onlyfans)\b|#trap\b/i;
-  if (explicitTrapContext.test(combined)) {
-    return 'blocked contextual text: explicit trap identity/content phrase';
+  // Only explicit trans or transgender profile text belongs to this
+  // deterministic rule; unrelated ambiguous slang is not identity evidence.
+  if (tokens.has('trans') || tokens.has('transgender') ||
+      [...tokens].some(token => /^trans(?:gender|girl|woman|female|model|creator)/.test(token))) {
+    return 'blocked explicit trans or transgender profile text';
   }
   // Feet-related words are deliberately not text hard filters. A profile is
   // rejected for feet only when the visual classifier finds feet-dominant
@@ -3512,7 +3526,7 @@ function local2HardVeto(result) {
   ) {
     return 'no clearly female-presenting adult visible';
   }
-  if (confidentReason && /\b(over 50|older than 50|age limit)\b/i.test(reason) && checks.appears_over_50 !== false) {
+  if (confidentReason && /\b(over 60|older than 60|age limit)\b/i.test(reason) && checks.appears_over_50 !== false) {
     return 'appears over age limit';
   }
   if (confidentReason && /\b(underage|minor|adult age (?:is )?not (?:clear|established))\b/i.test(reason) && checks.underage_looking !== false) {
@@ -3674,7 +3688,11 @@ function reviewReasonsIncludeAnatomy(reasons = []) {
 }
 
 function reviewReasonsIncludeAge(reasons = []) {
-  return reasons.some(reason => /\b(age|underage|over 50|older adult)\b/i.test(String(reason || '')));
+  return reasons.some(reason => /\b(age|underage|over 60|older adult)\b/i.test(String(reason || '')));
+}
+
+function reviewReasonsIncludeFeet(reasons = []) {
+  return reasons.some(reason => /\b(feet|foot|toe|toes)\b/i.test(String(reason || '')));
 }
 
 function reviewReasonsIncludeGender(reasons = []) {
@@ -3720,6 +3738,9 @@ function enforceHardCheckReviewCompleteness(result = {}, reviewReasons = []) {
     checks.male_present === false &&
     checks.male_only === false
   )) unresolved.push('gender presentation');
+  if (reviewReasonsIncludeFeet(reviewReasons) && checks.feet_dominant !== false) {
+    unresolved.push('feet dominance');
+  }
   if (!unresolved.length) {
     return {
       ...normalizedResult,
@@ -3773,6 +3794,7 @@ function mergePersonalQwenReview(personal, qwen, reviewReasons = []) {
     checks.male_present === false &&
     checks.male_only === false
   );
+  const feetUnresolved = reviewReasonsIncludeFeet(reviewReasons) && checks.feet_dominant !== false;
   // A narrow review must be decided by the fields it was asked to resolve.
   // Qwen often fills unrelated age/anatomy fields with "ambiguous"; treating
   // those incidental nulls as artist-wide vetoes caused systematic false rejects.
@@ -3780,7 +3802,7 @@ function mergePersonalQwenReview(personal, qwen, reviewReasons = []) {
     (reviewReasonsIncludeAnatomy(reviewReasons) && (checks.anatomy_ambiguous === true || anatomy.ambiguous === true)) ||
     (reviewReasonsIncludeAge(reviewReasons) && checks.age_ambiguous === true) ||
     (reviewReasonsIncludeBody(reviewReasons) && checks.body_evidence_ambiguous === true) ||
-    anatomyUnresolved || bodyUnresolved || ageUnresolved || genderUnresolved;
+    anatomyUnresolved || bodyUnresolved || ageUnresolved || genderUnresolved || feetUnresolved;
   const concrete = hasConcreteVisionChecks(qwen);
 
   if (!qwen || hardVeto || bodyVeto || ambiguity || !concrete) {
@@ -4116,7 +4138,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
     enforceBodyPreference
       ? 'Judge hard visual filters plus one learned-requested visual preference blocker: pronounced midsection overhang, visible abdominal folds, or apron-like midsection. Do not otherwise judge attractiveness, beauty, body type, sexual content, or user taste.'
       : 'Judge only the listed hard visual filters. The learned personal classifier already approved body and face preference, so do not second-guess attractiveness or body type.',
-    'First perform hard visual checks. Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, age appears over the configured limit, or the person appears underage. Set underage_looking or appears_over_50 accordingly. If a visible face exists but adult age genuinely cannot be resolved, set age_ambiguous true and return unsure. A body-only profile with no visible face is allowed when the body evidence clearly depicts an adult.',
+    'First perform hard visual checks. Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, the person clearly appears 60 or older, or the person appears underage. The legacy appears_over_50 field now means clearly 60 or older. Set underage_looking or appears_over_50 accordingly. If a visible face exists but adult age genuinely cannot be resolved, set age_ambiguous true and return unsure. A body-only profile with no visible face is allowed when the body evidence clearly depicts an adult.',
     'Also inspect visible anatomy as content, without inferring or naming anyone\'s gender identity. Set attached_male_anatomy true only when male genital anatomy is visibly and physically attached to the depicted person. That is a hard-filter conflict even when the visible face or overall presentation appears feminine.',
     'A dildo, vibrator, prosthetic, packer, strap-on, or other sex toy is not attached anatomy and must not trigger attached_male_anatomy. Set toy_or_dildo true instead. If attachment versus toy cannot be determined reliably, set anatomy_assessment.ambiguous and checks.anatomy_ambiguous true, then return unsure; never guess.',
     'A toy by itself must not set male_present or male_only. Keep presentation checks separate from the visible-content anatomy assessment.',
@@ -4298,18 +4320,22 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
     };
   }
 
+  const personalImageLimit = localVariant === 'local2'
+    ? LOCAL2_CLEAN_MAX_IMAGES
+    : RANDOM40_LOCAL_DECISION_IMAGES;
   const personalCandidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))]
-    .slice(0, RANDOM40_LOCAL_DECISION_IMAGES);
-  // Local1, Local2, and Train AI receive one identity/profile image plus three
-  // independently body-prioritized images. Qwen remains a narrow verifier over
-  // the three most relevant hard-check images.
+    .slice(0, personalImageLimit);
+  // Local1 retains its exact four-image contract. Clean Local2 may inspect a
+  // wider in-memory evidence set, while Qwen remains a narrow three-image
+  // ambiguity verifier in both modes.
   const candidateUrls = personalCandidateUrls.slice(0, payload.hardCheckOnly ? 3 : QWEN_CANDIDATE_IMAGES);
   if (!personalCandidateUrls.length) throw new Error('No candidate image URLs supplied.');
 
   if (payload.fastHardCheckOnly) {
-    return await preferenceAiRequest('/classify', {
+    return await preferenceAiRequest('/local2-clean/classify', {
       ...payload,
       localVariant: 'local2',
+      stage: 'triage',
       hardCheckOnly: true,
       fastHardCheckOnly: false,
       candidateImageUrls: personalCandidateUrls
@@ -4343,7 +4369,98 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
     };
   }
 
-  if (localVariant === 'local' || localVariant === 'local2') {
+  if (localVariant === 'local2') {
+    const trainAiRequest = /^pong-train-ai/i.test(String(payload.app || ''));
+    try {
+      const personalRaw = await preferenceAiRequest('/local2-clean/classify', {
+        ...payload,
+        localVariant: 'local2',
+        candidateImageUrls: personalCandidateUrls
+      }, trainAiRequest ? 45000 : 120000, { workload: true, signal });
+      const personal = enforcePersonalAnatomyVeto(personalRaw);
+      const personalDecision = String(personal?.decision || '').toLowerCase();
+      if (personalDecision === 'reject' || (personalDecision === 'accept' && personal.requires_qwen_review !== true)) {
+        return personal;
+      }
+      if (payload.deferQwenReview === true) return personal;
+
+      const reviewReasons = personalQwenReviewReasons(personal);
+      if (!reviewReasons.length || reviewReasons.some(reason => /personalized Local2 preference evidence is unavailable/i.test(reason))) {
+        return {
+          ...personal,
+          decision: 'reject',
+          confidence: Math.max(Number(personal.confidence || 0), 0.9),
+          reason: 'Local2 clean evidence was not sufficient for an accept',
+          hard_verified: false,
+          requires_qwen_review: false
+        };
+      }
+      const requestedReviewUrls = Array.isArray(personal.hard_check_image_urls)
+        ? personal.hard_check_image_urls
+        : [];
+      const reviewUrls = [...new Set(requestedReviewUrls
+        .map(url => normalizeUrl(url))
+        .filter(Boolean))]
+        .slice(0, 3);
+      let qwen;
+      try {
+        qwen = await classifyWithOllamaVision({
+          artist,
+          candidateUrls: reviewUrls.length ? reviewUrls : candidateUrls,
+          siglipDecision: personal,
+          imageGrades: Array.isArray(personal.image_grades) ? personal.image_grades : [],
+          acceptedExampleUrls: [],
+          rejectedExampleUrls: [],
+          rejectionSummary: '',
+          visionModel,
+          enforceBodyPreference: reviewReasonsIncludeBody(reviewReasons),
+          reviewReasons,
+          signal
+        });
+      } catch (error) {
+        qwen = {
+          decision: 'unsure',
+          confidence: 0.5,
+          source: 'ollama_local2_clean_review_unavailable',
+          reason: `Local2 ambiguity review unavailable: ${error.message || String(error)}`.slice(0, 140),
+          checks: {},
+          anatomy_assessment: normalizeAnatomyAssessment()
+        };
+      }
+      const verifiedQwen = enforceHardCheckReviewCompleteness(qwen || {}, reviewReasons);
+      const merged = mergePersonalQwenReview(personal, verifiedQwen, reviewReasons);
+      if (merged.hard_verified === true && String(merged.decision || '').toLowerCase() === 'review') {
+        const preferenceProbability = Number(personal.preference_probability);
+        const preferenceThreshold = Number(personal.preference_threshold);
+        const preferencePassed = Number.isFinite(preferenceProbability) &&
+          Number.isFinite(preferenceThreshold) && preferenceProbability >= preferenceThreshold;
+        if (!preferencePassed) {
+          return {
+            ...merged,
+            decision: 'reject',
+            confidence: Number.isFinite(preferenceProbability)
+              ? Math.max(0.5, 1 - preferenceProbability)
+              : 0.9,
+            reason: 'Local2 personalized preference score is below its calibrated threshold',
+            hard_verified: false,
+            requires_qwen_review: false
+          };
+        }
+        return {
+          ...merged,
+          decision: 'accept',
+          confidence: Math.max(preferenceProbability, 0.9),
+          reason: `Local2 clean hard review passed: ${personal.reason || 'personalized match'}`.slice(0, 140)
+        };
+      }
+      return merged;
+    } catch (error) {
+      if (generation !== workloadGeneration) throw new Error('workload reset');
+      throw new Error(`Local2 clean preference service unavailable: ${error.message || String(error)}`);
+    }
+  }
+
+  if (localVariant === 'local') {
     const trainAiRequest = /^pong-train-ai/i.test(String(payload.app || ''));
     try {
       const personalRaw = await preferenceAiRequest('/classify', {
@@ -4752,6 +4869,328 @@ async function classify(payload, signal = null, control = {}) {
   }
 }
 
+// Clean Local2 is lazy and fully isolated from the Local1 reservoirs, revisions,
+// leases, and playback-protection window. Merely starting this server or using
+// Local1 never creates or schedules Local2 work.
+const local2ProducerRecentArtists = new Set();
+const local2ProducerRecentPages = new Set();
+
+function local2AbortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason || new Error('Local2 stopped'));
+      return;
+    }
+    const finish = () => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    };
+    const timer = setTimeout(finish, Math.max(0, Number(ms || 0)));
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      reject(signal.reason || new Error('Local2 stopped'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function local2VideoPostUrls(html, artistUrl) {
+  const urls = [...random40ReservoirVideoPostUrls(html, artistUrl)];
+  const seen = new Set(urls.map(canonicalVideoPostKey).filter(Boolean));
+  const posts = String(html || '').split(/<div[^>]+class=["'][^"']*\bpost\b[^>]*>/i).slice(1);
+  for (const post of posts) {
+    const card = post.slice(0, 50000);
+    // Local2 accepts poster-bearing video cards; the legacy parser discarded
+    // every card containing an <img>, even when it also contained a video.
+    const videoEvidence = /<video\b|<source\b[^>]+(?:video\/|\.(?:mp4|m4v|webm))|\b(?:video|videos|clip|watch|footage|\d+\s*(?:min|mins|minutes))\b/i.test(card);
+    if (!videoEvidence) continue;
+    const match = card.match(/class=["']view-post["'][^>]+href=["']([^"']+)/i) ||
+      card.match(/href=["']([^"']+)["'][^>]+class=["']view-post["']/i);
+    if (!match?.[1]) continue;
+    try {
+      const postUrl = gatewayTargetUrl(new URL(decodeHtmlUrl(match[1]), artistUrl).toString()).toString();
+      const key = canonicalVideoPostKey(postUrl);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      urls.push(postUrl);
+    } catch (_) {}
+  }
+  return urls;
+}
+
+function local2PipelineDecision(result = {}, fallbackImageUrls = []) {
+  const checks = result?.checks || {};
+  const anatomy = result?.anatomy_assessment || {};
+  const decision = String(result?.decision || '').toLowerCase();
+  const ambiguous = decision === 'review' || decision === 'unsure' ||
+    result?.requires_qwen_review === true || result?.hard_verified !== true;
+  const imageUrls = [...new Set((result?.candidateImageUrls || fallbackImageUrls)
+    .map(url => normalizeUrl(url))
+    .filter(Boolean))].slice(0, LOCAL2_CLEAN_MAX_IMAGES);
+  return {
+    verdict: decision === 'accept' ? 'accept' : decision === 'reject' ? 'reject' : 'uncertain',
+    confidence: Math.max(0, Math.min(1, Number(result?.confidence || 0))),
+    reason: String(result?.reason || 'Local2 clean decision').slice(0, 240),
+    reasonCode: String(result?.reason_code || '').slice(0, 80),
+    model: String(result?.model || 'Local2 clean').slice(0, 256),
+    hardFilters: {
+      photograph: checks.photograph === true,
+      femalePresentingAdult: checks.female_presenting_adult === true,
+      malePresent: checks.male_present === true || checks.male_only === true,
+      attachedAnatomy: random40ReservoirDecisionHasAnatomyConflict(result) ||
+        (anatomy.attached_male_anatomy === true && anatomy.toy_or_dildo !== true),
+      feetDominant: checks.feet_dominant === true,
+      bodyMismatch: checks.body_preference_conflict === true,
+      over60: checks.appears_over_60 === true || checks.appears_over_50 === true,
+      adultSafetyRisk: checks.underage_looking === true,
+      ambiguous
+    },
+    evidence: {
+      examinedImages: Number(result?.evidence?.images || imageUrls.length),
+      clearBodyViews: Number(result?.evidence?.clear_body_images || 0),
+      decisionImageUrls: imageUrls
+    },
+    rawDecision: result
+  };
+}
+
+async function local2ProfileWorker(candidate, context) {
+  const artistUrl = gatewayTargetUrl(candidate.artistUrl).toString();
+  const firstHtml = await random40ReservoirFetchHtml(artistUrl, 12000, context.signal);
+  const artistInfo = random40ReservoirArtistInfo(artistUrl);
+  const pages = [{ page: 1, html: firstHtml }];
+  try {
+    const secondUrl = random40ReservoirProfilePageUrl(artistUrl, 2);
+    const secondHtml = await random40ReservoirFetchHtml(secondUrl, 9000, context.signal);
+    if (random40ReservoirProfileScore(secondHtml).posts > 0) pages.push({ page: 2, html: secondHtml });
+  } catch (_) {}
+  const pageText = pages
+    .map(item => item.html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<[^>]+>/gi, ' ').replace(/\s+/g, ' '))
+    .join(' ')
+    .slice(0, 60000);
+  artistInfo.pageText = pageText;
+  const hardTextReason = textHardFilter(artistInfo);
+  if (hardTextReason) throw new Error(hardTextReason);
+  const profileImageUrl = random40ReservoirProfileImageUrl(firstHtml, artistUrl);
+  const postImageEntries = random40ReservoirBestImageEntries(pages.flatMap(item =>
+    random40ReservoirPostImageEntries(
+      item.html,
+      random40ReservoirProfilePageUrl(artistUrl, item.page),
+      artistInfo
+    )
+  ), 32);
+  const candidateImageUrls = [...new Set([
+    profileImageUrl,
+    ...postImageEntries.map(entry => entry.imageUrl)
+  ].map(url => normalizeUrl(url)).filter(Boolean))].slice(0, LOCAL2_CLEAN_MAX_IMAGES);
+  if (candidateImageUrls.length < 2) throw new Error('Local2 found fewer than two usable review images');
+  const videoPostUrls = [];
+  const seenPosts = new Set();
+  for (const item of pages) {
+    for (const postUrl of local2VideoPostUrls(item.html, artistUrl)) {
+      const key = canonicalVideoPostKey(postUrl);
+      if (!key || seenPosts.has(key)) continue;
+      seenPosts.add(key);
+      videoPostUrls.push(postUrl);
+    }
+  }
+  return {
+    ...artistInfo,
+    sourcePage: Number(candidate.sourcePage || 0),
+    profileImageUrl,
+    candidateImageUrls,
+    postImageEntries,
+    videoPostUrls,
+    scannedThroughPage: pages.at(-1)?.page || 1
+  };
+}
+
+async function local2TriageWorker(profile, context) {
+  const urls = profile.candidateImageUrls.slice(0, Math.min(6, LOCAL2_CLEAN_MAX_IMAGES));
+  const result = await classifyInner({
+    app: 'pong-random40-local2-clean-triage',
+    localVariant: 'local2',
+    stage: 'triage',
+    deferQwenReview: true,
+    artist: profile,
+    candidateImageUrls: urls
+  }, workloadGeneration, context.signal);
+  const mapped = local2PipelineDecision(result, urls);
+  const hardReason = /^(?:visible_attached_anatomy|male_presenting_content|feet_dominant|body_shape_mismatch|appears_over_60|adult_safety_risk|insufficient_usable_evidence)$/i.test(mapped.reasonCode);
+  return {
+    verdict: mapped.verdict,
+    confidence: mapped.confidence,
+    reason: mapped.reason,
+    hardReject: mapped.verdict === 'reject' && hardReason,
+    priorityBoost: Math.max(-1, Math.min(1, Number(result?.preference_probability || 0.5) - 0.5))
+  };
+}
+
+async function local2VerifyWorker(profile, context) {
+  const postUrls = [...profile.videoPostUrls];
+  const seen = new Set(postUrls.map(canonicalVideoPostKey).filter(Boolean));
+  const maximumPages = Math.max(6, Math.min(100, Number(process.env.PONG_LOCAL2_MAX_PROFILE_PAGES || 20)));
+  let nextPage = Math.max(2, Number(profile.scannedThroughPage || 1) + 1);
+  while (!context.signal.aborted && nextPage <= maximumPages) {
+    if (postUrls.length >= 15) {
+      const verified = await verifyVideoPostBatch({ postUrls, stopAt: 24, artistInfo: profile }, context.signal)
+        .catch(() => ({ entries: [] }));
+      const entries = Array.isArray(verified?.entries) ? verified.entries : [];
+      if (entries.length >= 15) {
+        return entries.slice(0, 24).map(entry => ({
+          videoUrl: entry.videoUrl,
+          postUrl: entry.postUrl,
+          postIndex: Number(entry.postIndex || 0),
+          alternateVideoUrls: Array.isArray(entry.alternateVideoUrls) ? entry.alternateVideoUrls : [],
+          verified: entry.playbackProbeVerified === true,
+          fastStart: entry.playbackFastStart === true
+        }));
+      }
+    }
+    const batchPages = [nextPage, nextPage + 1].filter(page => page <= maximumPages);
+    const results = await Promise.allSettled(batchPages.map(page => random40ReservoirFetchHtml(
+      random40ReservoirProfilePageUrl(profile.artistUrl, page),
+      10000,
+      context.signal
+    )));
+    let foundPosts = false;
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index];
+      if (result.status !== 'fulfilled') continue;
+      if (random40ReservoirProfileScore(result.value).posts > 0) foundPosts = true;
+      for (const postUrl of local2VideoPostUrls(result.value, profile.artistUrl)) {
+        const key = canonicalVideoPostKey(postUrl);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        postUrls.push(postUrl);
+      }
+    }
+    nextPage = batchPages.at(-1) + 1;
+    if (!foundPosts) break;
+  }
+  if (postUrls.length >= 15 && !context.signal.aborted) {
+    const verified = await verifyVideoPostBatch({ postUrls, stopAt: 24, artistInfo: profile }, context.signal)
+      .catch(() => ({ entries: [] }));
+    return (Array.isArray(verified?.entries) ? verified.entries : []).slice(0, 24).map(entry => ({
+      videoUrl: entry.videoUrl,
+      postUrl: entry.postUrl,
+      postIndex: Number(entry.postIndex || 0),
+      alternateVideoUrls: Array.isArray(entry.alternateVideoUrls) ? entry.alternateVideoUrls : [],
+      verified: entry.playbackProbeVerified === true,
+      fastStart: entry.playbackFastStart === true
+    }));
+  }
+  return [];
+}
+
+async function local2ClassifyWorker(profile, _triage, context) {
+  const result = await classifyInner({
+    app: 'pong-random40-local2-clean',
+    localVariant: 'local2',
+    stage: 'full',
+    deferQwenReview: false,
+    artist: profile,
+    candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL2_CLEAN_MAX_IMAGES)
+  }, workloadGeneration, context.signal);
+  return local2PipelineDecision(result, profile.candidateImageUrls);
+}
+
+async function createPongLocal2Workers() {
+  return {
+    profile: local2ProfileWorker,
+    triage: local2TriageWorker,
+    verify: local2VerifyWorker,
+    classify: local2ClassifyWorker,
+    // Source extraction supplies candidates; this bounded range probe proves
+    // that at least 15 are real supported media containers without playback.
+    finalize: async (_profile, media, _decision, context) => {
+      const playable = await verifyPlayableMediaEntries(media, context.signal);
+      return playable.map(entry => ({
+        ...entry,
+        verified: true,
+        fastStart: videoPlaybackProbeCache.get(entry.videoUrl)?.fastStart === true
+      }));
+    }
+  };
+}
+
+async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates }) {
+  while (!signal.aborted && needsCandidates()) {
+    const state = snapshot();
+    if (Number(state.states || 0) >= Math.max(48, Number(state.target || 48) * 3)) {
+      await local2AbortableDelay(300, signal);
+      continue;
+    }
+    let page = 0;
+    for (let attempts = 0; attempts < 30; attempts++) {
+      const candidatePage = crypto.randomInt(1, 3501);
+      if (local2ProducerRecentPages.has(candidatePage)) continue;
+      page = candidatePage;
+      break;
+    }
+    if (!page) {
+      local2ProducerRecentPages.clear();
+      continue;
+    }
+    local2ProducerRecentPages.add(page);
+    while (local2ProducerRecentPages.size > 500) {
+      local2ProducerRecentPages.delete(local2ProducerRecentPages.values().next().value);
+    }
+    const hosts = availableGatewayHosts().length ? availableGatewayHosts() : GATEWAY_ALLOWED_HOSTS;
+    const listings = await Promise.allSettled(hosts.map(host =>
+      random40ReservoirFetchHtml(`https://${host}/?page=${page}`, 14000, signal)
+        .then(html => ({ host, html }))
+    ));
+    let submitted = 0;
+    for (const listing of listings) {
+      if (listing.status !== 'fulfilled') continue;
+      const pageUrl = `https://${listing.value.host}/?page=${page}`;
+      for (const artistUrl of random40ReservoirArtistUrls(listing.value.html, pageUrl)) {
+        const identity = random40ReservoirIdentity(artistUrl);
+        if (!identity || local2ProducerRecentArtists.has(identity)) continue;
+        local2ProducerRecentArtists.add(identity);
+        if (submit({ artistUrl, sourcePage: page }, { priority: 0 })) submitted++;
+      }
+    }
+    while (local2ProducerRecentArtists.size > 5000) {
+      local2ProducerRecentArtists.delete(local2ProducerRecentArtists.values().next().value);
+    }
+    await local2AbortableDelay(submitted ? 25 : 250, signal);
+  }
+}
+
+async function local2CleanHealth() {
+  return fetchJsonWithTimeout(`${PREFERENCE_AI_URL}/local2-clean/health`, {}, 5000);
+}
+
+let local2LastKnownRevision = 'pong-local2-clean-v2:uninitialized';
+const local2Adapter = createLocal2NodeAdapter({
+  createWorkers: createPongLocal2Workers,
+  producer: pongLocal2Producer,
+  learn: payload => preferenceAiRequest('/local2-clean/learn', payload, 240000),
+  getRevision: async () => {
+    const health = await local2CleanHealth().catch(() => null);
+    const revision = String(health?.local2_revision || '').trim();
+    if (revision && revision !== local2LastKnownRevision) {
+      local2ProducerRecentArtists.clear();
+      local2ProducerRecentPages.clear();
+      local2LastKnownRevision = revision;
+    }
+    return local2LastKnownRevision;
+  },
+  initialRevision: 'pong-local2-clean-v2:uninitialized',
+  modelRevision: 'siglip2-grouped-dinov2-small-ridge-local2-clean-v2',
+  pipelineOptions: {
+    targetAccepted: 48,
+    readyMinimum: 4,
+    deliveryBatch: 12,
+    minimumVerifiedMedia: 15,
+    triageHardRejectConfidence: 0.96,
+    concurrency: { profile: 12, triage: 2, verify: 12, classify: 2, finalize: 4 }
+  }
+});
+
 const server = http.createServer(async (req, res) => {
   if (!isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
     json(res, 403, { ok: false, error: 'browser origin is not allowed' });
@@ -4765,6 +5204,19 @@ const server = http.createServer(async (req, res) => {
 
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    if (url.pathname.startsWith('/local2/')) {
+      const body = ['POST', 'PUT', 'PATCH'].includes(String(req.method || '').toUpperCase())
+        ? JSON.parse(await readBody(req))
+        : {};
+      const result = await local2Adapter.dispatch({
+        method: req.method,
+        pathname: url.pathname,
+        query: Object.fromEntries(url.searchParams),
+        body
+      });
+      json(res, result.status || 200, result.body || {});
+      return;
+    }
     if (req.method === 'POST' && url.pathname === '/train-ai/candidates') {
       const payload = JSON.parse(await readBody(req));
       const count = Math.max(1, Math.min(20, Number(payload?.count || 10)));
@@ -5143,6 +5595,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/workload/reset') {
       workloadGeneration++;
+      await local2Adapter.stop().catch(() => {});
       random40ReservoirAbortController?.abort();
       random40AcceptedAbortController?.abort();
       random40AcceptedPending.clear();

@@ -30,11 +30,15 @@ import torch
 from PIL import Image
 from transformers import AutoImageProcessor, AutoModel, AutoProcessor
 
+from local2_clean import ENGINE_SCHEMA as LOCAL2_CLEAN_SCHEMA, Local2NumericStore
+from local2_vision_adapter import Local2VisionAdapter, MAX_LOCAL2_IMAGES
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / ".pong-local-ai"
 STORE_PATH = DATA_DIR / "preference-examples-v2.json"
 STORE_DB_PATH = DATA_DIR / "preference-examples-v3.sqlite3"
+LOCAL2_STORE_DB_PATH = DATA_DIR / "local2-clean-v2.sqlite3"
 LEGACY_STORE_PATH = DATA_DIR / "learned-examples.json"
 IMAGE_DIR = DATA_DIR / "preference-images-v2"
 STATUS_PATH = DATA_DIR / "preference-service-status.json"
@@ -79,8 +83,8 @@ ANATOMY_PROMPTS = [
 ]
 AGE_PROMPTS = [
     "the visible face clearly appears to be an adult approximately 18 to 35 years old",
-    "the visible face clearly appears to be an adult approximately 36 to 49 years old",
-    "the visible face clearly appears to be age 50 or older",
+    "the visible face clearly appears to be an adult approximately 36 to 59 years old",
+    "the visible face clearly appears to be age 60 or older",
     "the visible face appears under 18 or could be a minor",
     "age cannot be judged because the face is absent, hidden, cropped, or unclear",
 ]
@@ -88,7 +92,7 @@ BODY_REASON_PATTERN = r"fat|body|weight|midsection|obese|overweight|chubby|belly
 FACE_REASON_PATTERN = r"ugly|face|unattractive"
 CATEGORICAL_HARD_REASON_PATTERN = re.compile(
     r"\b(?:male|man|men|trans|transgender|feet|foot|logo|placeholder|blank|anime|"
-    r"illustration|advertisement|underage|minor|too\s+young|over\s*50|too\s+old|"
+    r"illustration|advertisement|underage|minor|too\s+young|over\s*(?:50|60)|too\s+old|"
     r"penis|testicles|attached\s+anatomy|anatomy\s+conflict|spam|non[- ]?photo)\b",
     re.I,
 )
@@ -110,7 +114,10 @@ FACE_HEAD_MIN_LOCAL2 = float(os.environ.get("PONG_FACE_REJECT_LOCAL2_MIN", "0.55
 ANATOMY_ATTACHED_MIN = float(os.environ.get("PONG_ANATOMY_ATTACHED_MIN", "0.78"))
 ANATOMY_ATTACHED_MARGIN = float(os.environ.get("PONG_ANATOMY_ATTACHED_MARGIN", "0.28"))
 ANATOMY_AMBIGUOUS_MIN = float(os.environ.get("PONG_ANATOMY_AMBIGUOUS_MIN", "0.50"))
-AGE_OVER_50_MIN = float(os.environ.get("PONG_AGE_OVER_50_MIN", "0.66"))
+# Keep the legacy output key for wire compatibility, but its meaning is now the
+# requested 60+ upper-age preference. The new environment name wins while the
+# old one remains a transition fallback for existing launch configurations.
+AGE_OVER_50_MIN = float(os.environ.get("PONG_AGE_OVER_60_MIN", os.environ.get("PONG_AGE_OVER_50_MIN", "0.66")))
 AGE_UNDERAGE_MIN = float(os.environ.get("PONG_AGE_UNDERAGE_MIN", "0.72"))
 IMAGE_CACHE_MAX_ITEMS = max(8, int(os.environ.get("PONG_IMAGE_CACHE_MAX_ITEMS", "160")))
 IMAGE_CACHE_MAX_BYTES = max(16 * 1024 * 1024, int(os.environ.get("PONG_IMAGE_CACHE_MAX_BYTES", str(256 * 1024 * 1024))))
@@ -917,6 +924,42 @@ class VisionRuntime:
 
 
 VISION = VisionRuntime()
+LOCAL2_CLEAN_LOCK = threading.RLock()
+LOCAL2_CLEAN_STORE: Local2NumericStore | None = None
+LOCAL2_CLEAN_ADAPTER: Local2VisionAdapter | None = None
+
+
+def local2_clean_store() -> Local2NumericStore:
+    """Open only the numeric Local2 store; this never loads a vision model."""
+    global LOCAL2_CLEAN_STORE
+    with LOCAL2_CLEAN_LOCK:
+        if LOCAL2_CLEAN_STORE is None:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            LOCAL2_CLEAN_STORE = Local2NumericStore(LOCAL2_STORE_DB_PATH)
+        return LOCAL2_CLEAN_STORE
+
+
+def local2_clean_adapter() -> Local2VisionAdapter:
+    """Lazily create Local2 state without changing Local1 startup or schemas."""
+    global LOCAL2_CLEAN_STORE, LOCAL2_CLEAN_ADAPTER
+    with LOCAL2_CLEAN_LOCK:
+        if LOCAL2_CLEAN_ADAPTER is None:
+            LOCAL2_CLEAN_STORE = local2_clean_store()
+            LOCAL2_CLEAN_ADAPTER = Local2VisionAdapter(
+                VISION,
+                numeric_store=LOCAL2_CLEAN_STORE,
+                legacy_record_provider=STORE.records,
+                legacy_revision_provider=lambda: STORE.revision,
+                max_images=MAX_LOCAL2_IMAGES,
+            )
+        return LOCAL2_CLEAN_ADAPTER
+
+
+def local2_clean_revision() -> str:
+    return (
+        f"{local2_clean_store().revision_token}:"
+        f"legacy-{SERVICE_INSTANCE_ID}-{STORE.revision}"
+    )
 INFERENCE_LIMIT = max(1, min(6, int(os.environ.get("PONG_PREFERENCE_AI_CONCURRENCY", "4"))))
 INFERENCE_SEMAPHORE = threading.BoundedSemaphore(INFERENCE_LIMIT)
 CLASSIFY_ADMISSION_SEMAPHORE = threading.BoundedSemaphore(CLASSIFY_ADMISSION_LIMIT)
@@ -1412,18 +1455,24 @@ def age_assessment(analysis: dict[str, Any]) -> dict[str, Any]:
             "image_index": image_number,
             "face_evidence_clear": face_clear,
             "adult_18_35_score": young_adult,
+            "adult_36_59_score": middle_adult,
+            "over_60_score": over_50,
+            # Legacy aliases retained for the Local1/browser wire contract.
             "adult_36_49_score": middle_adult,
             "over_50_score": over_50,
             "underage_score": underage,
             "unclear_score": unclear,
+            "appears_over_60": clear_over,
             "appears_over_50": clear_over,
             "appears_underage": clear_underage,
             "ambiguous": ambiguous,
         })
     return {
+        "appears_over_60": True if over_evidence else (None if ambiguous_evidence else False),
         "appears_over_50": True if over_evidence else (None if ambiguous_evidence else False),
         "appears_underage": True if underage_evidence else (None if ambiguous_evidence else False),
         "ambiguous": bool(ambiguous_evidence),
+        "over_60_score": over_score,
         "over_50_score": over_score,
         "underage_score": underage_score,
         "evidence_images": sorted(set(over_evidence + underage_evidence + ambiguous_evidence)),
@@ -1891,7 +1940,7 @@ def classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
             fast_analysis["feature"], variant, r"logo|placeholder|blank|anime|illustration|non[- ]?photo"
         ),
         "age_reject": reason_probability(
-            fast_analysis["feature"], variant, r"underage|minor|too\s+young|over\s*50|too\s+old"
+            fast_analysis["feature"], variant, r"underage|minor|too\s+young|over\s*(?:50|60)|too\s+old"
         ),
         "anatomy_reject": reason_probability(
             fast_analysis["feature"], variant, r"penis|testicles|attached\s+anatomy|anatomy\s+conflict"
@@ -2197,6 +2246,156 @@ def classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
         },
         "candidateImageUrls": used_urls,
         "hard_check_image_urls": hard_check_image_urls,
+    }
+
+
+def local2_clean_review_metadata(review_codes: Sequence[str]) -> tuple[list[str], list[str]]:
+    normalized_codes: list[str] = []
+    reasons: list[str] = []
+    for code in review_codes:
+        if code == "anatomy":
+            normalized_codes.append("anatomy")
+            reasons.append("ambiguous visible attached anatomy versus toy or obscured content")
+        elif code == "presentation":
+            normalized_codes.append("gender-presentation")
+            reasons.append("male versus female presentation is not explicitly resolved")
+        elif code == "feet":
+            normalized_codes.append("feet")
+            reasons.append("feet dominance is not explicitly resolved")
+        elif code in {"body-shape", "body-evidence"}:
+            normalized_codes.append("body")
+            reasons.append("body-shape evidence is not explicitly resolved")
+        elif code == "age-60":
+            normalized_codes.append("age")
+            reasons.append("visible age near the 60+ preference boundary is unresolved")
+        elif code == "adult-safety":
+            normalized_codes.append("adult-safety")
+            reasons.append("adult age safety is not explicitly established")
+        elif code == "preference":
+            normalized_codes.append("preference")
+            reasons.append("personalized Local2 preference evidence is unavailable")
+    return list(dict.fromkeys(normalized_codes)), list(dict.fromkeys(reasons))
+
+
+def local2_clean_classify(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run only the clean Local2 path; images remain in memory and are never saved."""
+    # Share the same admission guard as Local1 so starting the clean pipeline
+    # cannot create an unbounded image-download queue beside an active Local1 run.
+    with CLASSIFY_ADMISSION_SEMAPHORE:
+        return local2_clean_classify_admitted(payload)
+
+
+def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
+    stage = str(payload.get("stage", "full")).strip().lower()
+    maximum = 6 if stage == "triage" else MAX_LOCAL2_IMAGES
+    urls = list(dict.fromkeys(
+        normalize_url(value)
+        for value in payload.get("candidateImageUrls", [])
+        if normalize_url(value)
+    ))[:maximum]
+    images, used_urls = load_candidate_images(urls, max_images=maximum)
+    if not images:
+        raise ValueError("No usable Local2 candidate images")
+    adapter = local2_clean_adapter()
+    with INFERENCE_SEMAPHORE:
+        analysis = adapter.analyze(
+            images,
+            image_urls=used_urls,
+            include_taste=stage != "triage",
+        )
+        result = adapter.classify_analysis(analysis, hard_only=stage == "triage")
+
+    review_codes, review_reasons = local2_clean_review_metadata(result.get("review_codes") or [])
+    checks = dict(result.get("checks") or {})
+    # Compatibility aliases are confined to the Local2 response boundary. The
+    # clean engine itself exposes a truthful 60+ field and separate adult safety.
+    checks["appears_over_50"] = checks.get("appears_over_60")
+    checks["age_ambiguous"] = any(code in {"age", "adult-safety"} for code in review_codes)
+    checks["anatomy_ambiguous"] = "anatomy" in review_codes
+    checks["body_evidence_ambiguous"] = any(code == "body" for code in review_codes)
+    checks.setdefault("toy_or_dildo", False)
+    checks.setdefault("logo_or_placeholder", checks.get("photograph") is not True)
+
+    grades = list(result.get("image_grades") or [])
+    ranked_indices = sorted(
+        range(len(grades)),
+        key=lambda index: max(
+            float((grades[index].get("scores") or {}).get(name, 0.0))
+            for name in (
+                "male_presentation", "attached_anatomy", "feet_dominant",
+                "body_mismatch", "over_60", "adult_safety_risk",
+            )
+        ),
+        reverse=True,
+    )
+    hard_urls = [used_urls[index] for index in ranked_indices[:3] if index < len(used_urls)]
+    if not hard_urls:
+        hard_urls = used_urls[:3]
+    evidence = dict(result.get("evidence") or {})
+    evidence.update({
+        "images": len(used_urls),
+        "clear_body_images": int(evidence.get("clear_body_images") or 0),
+        "preferred_body_images": int(evidence.get("body_preferred_votes") or 0),
+    })
+    anatomy = {
+        "attached_male_anatomy": checks.get("attached_male_anatomy"),
+        "toy_or_dildo": checks.get("toy_or_dildo"),
+        "ambiguous": checks.get("anatomy_ambiguous"),
+        "classification_scope": "visible content only; no gender-identity inference",
+    }
+    return {
+        **result,
+        "stage": stage,
+        "checks": checks,
+        "evidence": evidence,
+        "anatomy_assessment": anatomy,
+        "candidateImageUrls": used_urls,
+        "hard_check_image_urls": hard_urls,
+        "qwen_review_codes": review_codes,
+        "qwen_review_reasons": review_reasons,
+        "hard_review_required": bool(review_reasons),
+        "requires_qwen_review": bool(review_reasons),
+        "local2_revision": local2_clean_revision(),
+    }
+
+
+def local2_clean_learn(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist Local2 descriptors/vectors only; never retain URLs or image bytes."""
+    label = str(payload.get("label", "")).strip().lower()
+    if label not in {"accept", "reject"}:
+        raise ValueError("Local2 learning label must be accept or reject")
+    artist = payload.get("artist") or {}
+    artist_url = normalize_url(artist.get("artistUrl", ""))
+    identity = artist_identity(artist_url)
+    if not identity:
+        raise ValueError("Local2 artist identity is required")
+    urls = list(dict.fromkeys(
+        normalize_url(value)
+        for value in payload.get("imageUrls", [])
+        if normalize_url(value)
+    ))[:MAX_LOCAL2_IMAGES]
+    images, used_urls = load_candidate_images(urls, max_images=MAX_LOCAL2_IMAGES)
+    if not images:
+        raise ValueError("No usable Local2 learning images")
+    adapter = local2_clean_adapter()
+    with INFERENCE_SEMAPHORE:
+        analysis = adapter.analyze(images, image_urls=used_urls)
+    reason_code = str(
+        payload.get("rejectReason") or payload.get("rejectReasonLabel") or
+        ("saved" if label == "accept" else "reject")
+    ).strip().lower()[:80]
+    learned = adapter.learn_numeric(
+        artist_identity=identity,
+        label=label,
+        reason_code=reason_code,
+        analysis=analysis,
+    )
+    revision = local2_clean_revision()
+    return {
+        **learned,
+        "model_revision": revision,
+        "local2_revision": revision,
+        "storage": "numeric-descriptors-and-vectors-only",
     }
 
 
@@ -2524,7 +2723,7 @@ def warm_personal_heads() -> None:
         cached_head(variant, "all", r"male|\bman\b|trans")
         cached_head(variant, "all", r"feet|foot")
         cached_head(variant, "all", r"logo|placeholder|blank|anime|illustration|non[- ]?photo")
-        cached_head(variant, "all", r"underage|minor|too\s+young|over\s*50|too\s+old")
+        cached_head(variant, "all", r"underage|minor|too\s+young|over\s*(?:50|60)|too\s+old")
         cached_head(variant, "all", r"penis|testicles|attached\s+anatomy|anatomy\s+conflict")
 
 
@@ -2701,6 +2900,20 @@ class Handler(BaseHTTPRequestHandler):
                     "feature_cache": feature_cache,
                 })
                 return
+            if self.path.split("?", 1)[0] == "/local2-clean/health":
+                local2_store = local2_clean_store()
+                local2_records = local2_store.record_count()
+                self.send_json(200, {
+                    "ok": True,
+                    "ready": bool(SERVICE_STATE["ready"]),
+                    "mode": "local2",
+                    "schema": LOCAL2_CLEAN_SCHEMA,
+                    "local2_revision": local2_clean_revision(),
+                    "storage": "numeric-descriptors-and-vectors-only",
+                    "records": local2_records,
+                    "max_in_memory_images": MAX_LOCAL2_IMAGES,
+                })
+                return
             if self.path.split("?", 1)[0] == "/examples":
                 self.send_json(200, examples())
                 return
@@ -2735,11 +2948,30 @@ class Handler(BaseHTTPRequestHandler):
                         ACTIVE_CLASSIFY = max(0, ACTIVE_CLASSIFY - 1)
                 self.send_json(200, result)
                 return
+            if path == "/local2-clean/classify":
+                if not SERVICE_STATE["ready"]:
+                    self.send_json(503, {"ok": False, "error": "personal preference models are still warming"})
+                    return
+                with ACTIVE_CLASSIFY_LOCK:
+                    ACTIVE_CLASSIFY += 1
+                try:
+                    result = local2_clean_classify(payload)
+                finally:
+                    with ACTIVE_CLASSIFY_LOCK:
+                        ACTIVE_CLASSIFY = max(0, ACTIVE_CLASSIFY - 1)
+                self.send_json(200, result)
+                return
             if path == "/learn":
                 if not SERVICE_STATE["ready"]:
                     self.send_json(503, {"ok": False, "error": "personal preference models are still warming"})
                     return
                 self.send_json(200, learn(payload))
+                return
+            if path == "/local2-clean/learn":
+                if not SERVICE_STATE["ready"]:
+                    self.send_json(503, {"ok": False, "error": "personal preference models are still warming"})
+                    return
+                self.send_json(200, local2_clean_learn(payload))
                 return
             self.send_json(404, {"ok": False, "error": "not found"})
         except Exception as exc:
