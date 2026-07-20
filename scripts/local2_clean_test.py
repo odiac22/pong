@@ -60,6 +60,14 @@ class Local2PolicyTests(unittest.TestCase):
         result = self.policy.decide(rows, taste_probability=0.84)
         self.assertEqual("accept", result.decision)
 
+    def test_moderate_body_uncertainty_does_not_override_trained_taste(self) -> None:
+        rows = [
+            evidence(1, body_mismatch=0.52, body_preferred=0.10),
+            evidence(2, body_mismatch=0.50, body_preferred=0.12),
+        ]
+        result = self.policy.decide(rows, taste_probability=0.84)
+        self.assertEqual("accept", result.decision)
+
     def test_two_body_mismatch_views_reject(self) -> None:
         result = self.policy.decide(
             [evidence(1, body_mismatch=0.91, body_preferred=0.04), evidence(2, body_mismatch=0.87, body_preferred=0.05)],

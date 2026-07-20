@@ -464,7 +464,7 @@ class Local2Policy:
             review_codes.append("presentation")
         if len(feet_votes) == 1 or feet_uncertain:
             review_codes.append("feet")
-        if len(body_mismatch) == 1 or body_uncertain:
+        if len(body_mismatch) == 1 or (taste_probability is None and body_uncertain):
             review_codes.append("body-shape")
         if strong_over_60 or len(over_60) == 1 or age_uncertain:
             review_codes.append("age-60")
