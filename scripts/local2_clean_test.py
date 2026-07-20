@@ -67,9 +67,20 @@ class Local2PolicyTests(unittest.TestCase):
         self.assertEqual("review", result.decision)
         self.assertIn("body-shape", result.review_codes)
 
-    def test_unambiguous_attached_anatomy_rejects(self) -> None:
+    def test_single_attached_anatomy_vote_requires_review(self) -> None:
         result = self.policy.decide(
             [evidence(1, attached_anatomy=0.94, toy_or_prosthetic=0.03), evidence(2)],
+            taste_probability=0.99,
+        )
+        self.assertEqual("review", result.decision)
+        self.assertIn("anatomy", result.review_codes)
+
+    def test_two_attached_anatomy_votes_reject(self) -> None:
+        result = self.policy.decide(
+            [
+                evidence(1, attached_anatomy=0.94, toy_or_prosthetic=0.03),
+                evidence(2, attached_anatomy=0.90, toy_or_prosthetic=0.04),
+            ],
             taste_probability=0.99,
         )
         self.assertEqual("visible_attached_anatomy", result.reason_code)

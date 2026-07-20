@@ -87,9 +87,18 @@ class Local2VisionAdapterTests(unittest.TestCase):
         self.assertEqual("accept", result["decision"])
         self.assertTrue(result["training"]["head_available"])
 
-    def test_lower_torso_attached_anatomy_rejects(self) -> None:
+    def test_one_lower_torso_anatomy_vote_is_ambiguous_not_a_veto(self) -> None:
         result = self.make_adapter().classify(
             [np.asarray([99.0, 0.0]), np.asarray([2.0, 0.0])]
+        )
+        self.assertEqual("review", result["decision"])
+        self.assertIn("anatomy", result["review_codes"])
+        self.assertIsNone(result["image_grades"][0]["checks"]["attached_male_anatomy"])
+        self.assertTrue(result["image_grades"][0]["checks"]["anatomy_ambiguous"])
+
+    def test_two_lower_torso_anatomy_votes_reject(self) -> None:
+        result = self.make_adapter().classify(
+            [np.asarray([99.0, 0.0]), np.asarray([99.0, 0.0])]
         )
         self.assertEqual("visible_attached_anatomy", result["reason_code"])
 

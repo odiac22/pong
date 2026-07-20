@@ -73,6 +73,43 @@ export function local2DecisionIsHardSafe(decision = {}) {
     hard.ambiguous === false;
 }
 
+export function local2CleanResultIsExplicitlyHardSafe(result = {}) {
+  const checks = result?.checks || {};
+  const decision = normalizedVerdict(result?.decision || result?.verdict);
+  return decision === 'accept' &&
+    result?.requires_qwen_review !== true &&
+    checks.photograph === true &&
+    checks.female_presenting_adult === true &&
+    checks.male_present === false &&
+    checks.male_only === false &&
+    checks.attached_male_anatomy === false &&
+    checks.feet_dominant === false &&
+    checks.logo_or_placeholder === false &&
+    checks.body_preference_conflict === false &&
+    checks.appears_over_60 === false &&
+    checks.appears_over_50 === false &&
+    checks.underage_looking === false &&
+    checks.age_ambiguous === false &&
+    checks.anatomy_ambiguous === false &&
+    checks.body_evidence_ambiguous === false;
+}
+
+export function local2ImageGradeSummary(imageGrades = [], fallbackConfidence = 0.5) {
+  const fallback = Number.isFinite(Number(fallbackConfidence))
+    ? Math.max(0, Math.min(1, Number(fallbackConfidence)))
+    : 0.5;
+  return (Array.isArray(imageGrades) ? imageGrades : []).map((item, index) => {
+    const rawConfidence = Number(item?.confidence);
+    const confidence = Number.isFinite(rawConfidence)
+      ? Math.max(0, Math.min(1, rawConfidence))
+      : fallback;
+    const imageIndex = Math.max(1, Number(item?.image_index || index + 1) || index + 1);
+    const decision = normalizedVerdict(item?.decision || item?.verdict) || 'uncertain';
+    const reason = normalizedString(item?.reason || item?.reason_code, 160) || 'numeric local evidence';
+    return `image ${imageIndex}: ${decision}, confidence ${confidence.toFixed(2)}, ${reason}`;
+  }).join('\n');
+}
+
 export function local2VerifiedMedia(media = []) {
   const byUrl = new Map();
   for (const raw of Array.isArray(media) ? media : []) {
@@ -593,6 +630,18 @@ export class Local2ContinuousPipeline {
 
   stats() {
     this.releaseExpiredLeases();
+    const rejectionStages = {};
+    const rejectionReasons = {};
+    for (const rejection of this.rejected.values()) {
+      const stage = normalizedString(rejection.stage, 40) || 'unknown';
+      const reason = normalizedString(rejection.reason, 160) || 'unknown';
+      rejectionStages[stage] = (rejectionStages[stage] || 0) + 1;
+      rejectionReasons[reason] = (rejectionReasons[reason] || 0) + 1;
+    }
+    const topRejectionReasons = Object.entries(rejectionReasons)
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 12)
+      .map(([reason, count]) => ({ reason, count }));
     return {
       schema: LOCAL2_PIPELINE_SCHEMA,
       storage: 'memory-only',
@@ -604,6 +653,8 @@ export class Local2ContinuousPipeline {
       leased: this.leases.size,
       states: this.states.size,
       rejected: this.rejected.size,
+      rejectionStages,
+      topRejectionReasons,
       counters: { ...this.statsCounters },
       stages: Object.fromEntries(Object.entries(this.stages).map(([name, stage]) => [name, stage.stats()]))
     };

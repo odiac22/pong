@@ -517,6 +517,16 @@ class Local2VisionAdapter:
             taste_probability=taste_probability,
         )
         result = decision.as_dict()
+        aggregate_anatomy_conflict = decision.checks.get("attached_male_anatomy") is True
+
+        def anatomy_vote(item: Local2ImageEvidence) -> bool:
+            return bool(
+                item.anatomy_clear
+                and item.attached_anatomy >= self.policy.thresholds.anatomy_reject
+                and item.attached_anatomy >=
+                    item.toy_or_prosthetic + self.policy.thresholds.anatomy_margin
+            )
+
         result.update({
             "model": "shared SigLIP grouped hard triage" if hard_only else
                 "shared SigLIP grouped semantics + facebook/dinov2-small weighted-ridge taste head",
@@ -531,7 +541,16 @@ class Local2VisionAdapter:
                     "checks": {
                         "body_evidence_clear": item.body_clear,
                         "body_preference_match": item.body_preferred >= self.policy.thresholds.body_preferred_vote,
-                        "attached_male_anatomy": item.attached_anatomy >= self.policy.thresholds.anatomy_reject,
+                        # A single SigLIP vote is ambiguity evidence, not a veto.
+                        # Otherwise Node's legacy per-image anatomy scan would
+                        # undo the clean policy's independent-view consensus.
+                        "attached_male_anatomy": (
+                            True if aggregate_anatomy_conflict and anatomy_vote(item)
+                            else None if anatomy_vote(item)
+                            else False
+                        ),
+                        "toy_or_dildo": item.toy_or_prosthetic >= self.policy.thresholds.anatomy_reject,
+                        "anatomy_ambiguous": anatomy_vote(item) and not aggregate_anatomy_conflict,
                         "feet_dominant": item.feet_dominant >= self.policy.thresholds.feet_vote,
                     },
                     "scores": {

@@ -8,6 +8,10 @@ import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { pipeline, RawImage, env } from '@xenova/transformers';
 import { createLocal2NodeAdapter } from './local2-node-adapter.mjs';
+import {
+  local2CleanResultIsExplicitlyHardSafe,
+  local2ImageGradeSummary
+} from './local2-pipeline.mjs';
 
 const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
 const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
@@ -2713,6 +2717,9 @@ function textHardFilter(artist = {}) {
     .split(/[^a-z0-9]+/g)
     .filter(Boolean);
   if (nameTokens.includes('ts')) return 'blocked exact name token: ts';
+  if (nameTokens.some(token => /^ts[a-z]{3,}$/.test(token))) {
+    return 'blocked explicit ts creator prefix';
+  }
   if (nameTokens.some(token => token.includes('bbw'))) return 'blocked name contains: bbw';
   if (nameTokens.some(token => /^trans(?:girl|woman|female|latina|babe|beauty|queen|princess|doll|model)/.test(token))) {
     return 'blocked explicit trans creator name';
@@ -4095,9 +4102,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
   const images = [...candidateImages, ...acceptedImages, ...rejectedImages];
   if (!images.length) return null;
 
-  const localSummary = imageGrades.map(item =>
-    `image ${item.image_index}: ${item.decision}, confidence ${item.confidence.toFixed(2)}, ${item.reason}`
-  ).join('\n');
+  const localSummary = local2ImageGradeSummary(imageGrades, siglipDecision?.confidence);
 
   const narrowGenderReview = reviewReasonsIncludeGender(reviewReasons);
   const narrowAgeReview = reviewReasonsIncludeAge(reviewReasons);
@@ -4923,8 +4928,10 @@ function local2PipelineDecision(result = {}, fallbackImageUrls = []) {
   const checks = result?.checks || {};
   const anatomy = result?.anatomy_assessment || {};
   const decision = String(result?.decision || '').toLowerCase();
+  const hardVerified = result?.hard_verified === true ||
+    local2CleanResultIsExplicitlyHardSafe(result);
   const ambiguous = decision === 'review' || decision === 'unsure' ||
-    result?.requires_qwen_review === true || result?.hard_verified !== true;
+    result?.requires_qwen_review === true || !hardVerified;
   const imageUrls = [...new Set((result?.candidateImageUrls || fallbackImageUrls)
     .map(url => normalizeUrl(url))
     .filter(Boolean))].slice(0, LOCAL2_CLEAN_MAX_IMAGES);

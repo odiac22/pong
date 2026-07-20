@@ -286,10 +286,15 @@ class Local2Policy:
             if row.attached_anatomy >= t.anatomy_reject
             and row.attached_anatomy >= row.toy_or_prosthetic + t.anatomy_margin
         ]
+        # SigLIP can produce one confident false positive from a tight lower-body
+        # crop. Two independent views are enough for an immediate hard reject;
+        # one view, even a strong one, is sent to the narrow Qwen anatomy review.
+        # Review is fail-closed when Qwen is unavailable, so unresolved anatomy
+        # still cannot pass.
+        anatomy_reject = len(attached) >= t.hard_consensus
         anatomy_uncertain = [
             row for row in clear_anatomy
             if row.attached_anatomy >= t.anatomy_review
-            and row not in attached
         ]
         male_votes = [
             row for row in usable
@@ -380,7 +385,7 @@ class Local2Policy:
             "female_presenting_adult": bool(female_votes),
             "male_present": bool(strong_male or len(male_votes) >= t.hard_consensus),
             "male_only": bool(strong_male or len(male_votes) >= t.hard_consensus),
-            "attached_male_anatomy": bool(attached),
+            "attached_male_anatomy": anatomy_reject,
             "toy_or_dildo": any(row.toy_or_prosthetic >= t.anatomy_reject for row in clear_anatomy),
             "feet_dominant": len(feet_votes) >= t.hard_consensus,
             "logo_or_placeholder": not bool(usable),
@@ -410,10 +415,9 @@ class Local2Policy:
                 review_codes=tuple(dict.fromkeys(review_codes)),
             )
 
-        # A single unambiguous attached-anatomy view is direct evidence.  A toy
-        # never satisfies this gate because the attached score must beat it by a
-        # substantial margin.
-        if attached:
+        # Require independent semantic agreement for an immediate veto. A single
+        # candidate view is reviewed rather than accepted.
+        if anatomy_reject:
             return result(
                 "reject", max(row.attached_anatomy for row in attached),
                 "visible_attached_anatomy", "visible attached anatomy conflicts with the hard filter",

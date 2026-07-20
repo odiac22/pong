@@ -5,7 +5,9 @@ import {
   Local2CacheBundle,
   Local2ContinuousPipeline,
   createLocal2AcceptedDto,
-  local2DecisionIsHardSafe
+  local2CleanResultIsExplicitlyHardSafe,
+  local2DecisionIsHardSafe,
+  local2ImageGradeSummary
 } from './local2-pipeline.mjs';
 
 function hardSafeDecision(overrides = {}) {
@@ -67,6 +69,41 @@ test('hard-safe decision is fail-closed for every Local2 hard filter', () => {
   ]) {
     assert.equal(local2DecisionIsHardSafe(hardSafeDecision({ hardFilters: { [field]: unsafeValue } })), false, field);
   }
+});
+
+test('clean model accept is hard-safe without requiring a Qwen-only flag', () => {
+  const result = {
+    decision: 'accept',
+    requires_qwen_review: false,
+    checks: {
+      photograph: true,
+      female_presenting_adult: true,
+      male_present: false,
+      male_only: false,
+      attached_male_anatomy: false,
+      feet_dominant: false,
+      logo_or_placeholder: false,
+      body_preference_conflict: false,
+      appears_over_60: false,
+      appears_over_50: false,
+      underage_looking: false,
+      age_ambiguous: false,
+      anatomy_ambiguous: false,
+      body_evidence_ambiguous: false
+    }
+  };
+  assert.equal(local2CleanResultIsExplicitlyHardSafe(result), true);
+  assert.equal(local2CleanResultIsExplicitlyHardSafe({
+    ...result,
+    checks: { ...result.checks, attached_male_anatomy: true }
+  }), false);
+});
+
+test('clean image grades without legacy confidence or reason format safely for Qwen', () => {
+  const summary = local2ImageGradeSummary([
+    { image_index: 3, decision: 'unsure', checks: {}, scores: { attached_anatomy: 0.91 } }
+  ], 0.64);
+  assert.equal(summary, 'image 3: uncertain, confidence 0.64, numeric local evidence');
 });
 
 test('accepted DTO contains URLs only and requires 15 verified media entries', () => {
