@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.21</div>
+  <div class="version-number">24.22</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -902,6 +902,7 @@ let slidingPlaybackRespectsRange = false;
 let eromeSlidingRenderPending = false;
 const VIDEO_LOAD_RETRY_DELAYS_MS = [3000, 5000, 7000, 10000, 15000, 20000];
 const VIDEO_LOAD_RETRY_POLL_MS = 1000;
+const VIDEO_NETWORK_PROGRESS_TIMEOUT_MS = 20000;
 let visibleBatchRetryTimer = null;
 let visibleBatchRetryToken = 0;
 let sessionSaveTimer = null;
@@ -911,9 +912,11 @@ let deckOrder = [];
 let deckHistory = [];
 let deckForwardHistory = [];
 const DECK_HISTORY_LIMIT = 80;
-const DECK_PRELOAD_RADIUS = 2;
-const DECK_INITIAL_WARM_COUNT = 5;
+const DECK_PRELOAD_RADIUS = 1;
+const DECK_INITIAL_WARM_COUNT = 1;
 const FOREGROUND_VIDEO_BUFFER_TARGET_SECONDS = 10;
+const FOREGROUND_VIDEO_BUFFER_CRITICAL_SECONDS = 6;
+const VIDEO_START_BUFFER_SECONDS = 8;
 const EROME_SESSION_SAVE_MIN_DELAY_MS = 6000;
 const EROME_LARGE_SESSION_SAVE_MIN_DELAY_MS = 22000;
 const EROME_LARGE_SESSION_URL_THRESHOLD = 600;
@@ -2120,6 +2123,8 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
     currentBatch = Math.max(1, Math.ceil(nextLoadedEnd / batchSize));
   }
 
+  wrapper.dataset.networkSuspended = 'true';
+  delete wrapper.dataset.deckNextWarm;
   try {
     video.pause();
     video.removeAttribute('src');
@@ -2128,6 +2133,12 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
 
   delete wrapper.dataset.viewed;
   delete wrapper.dataset.playIntent;
+  delete wrapper.dataset.userPaused;
+  delete wrapper.dataset.userAudioIntent;
+  delete wrapper.dataset.gatewayFallbackTried;
+  delete wrapper.dataset.directFallbackRestored;
+  wrapper.dataset.originalVideoUrl = nextUrl;
+  wrapper.dataset.suspendedVideoSrc = random40PlaybackUrl(nextUrl);
   wrapper.dataset.readyPlayable = 'false';
   wrapper.dataset.autoRetryStartedAt = String(Date.now());
   wrapper.dataset.autoRetryNextAt = String(Date.now() + getVideoRetryDelay(0));
@@ -2166,14 +2177,10 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
     artistLabel.style.display = videoUrls.length ? '' : 'none';
   }
 
-  video.src = nextUrl;
-  video.preload = 'metadata';
+  video.preload = 'none';
   video.muted = true;
   video.volume = 0;
   video.dataset.lastLoadKick = '0';
-  try {
-    video.load();
-  } catch (_) {}
 
   const audioBtn = wrapper.querySelector('.audio-toggle-button');
   if (audioBtn) {
@@ -3052,7 +3059,6 @@ function getVideoBufferedAheadSeconds(video) {
 function videoNeedsForegroundPriority(video) {
   if (!video || video.error || video.ended) return false;
   if (video.readyState < 3) return true;
-  if (video.readyState >= 4) return false;
 
   const duration = Number(video.duration || 0);
   const remaining = Number.isFinite(duration) && duration > 0
@@ -3061,6 +3067,19 @@ function videoNeedsForegroundPriority(video) {
   const target = Math.min(FOREGROUND_VIDEO_BUFFER_TARGET_SECONDS, Math.max(2, remaining));
 
   return getVideoBufferedAheadSeconds(video) < target;
+}
+
+function videoHasCriticalForegroundBuffer(video) {
+  if (!video || video.error || video.ended) return false;
+  const duration = Number(video.duration || 0);
+  const remaining = Number.isFinite(duration) && duration > 0
+    ? Math.max(0, duration - Number(video.currentTime || 0))
+    : FOREGROUND_VIDEO_BUFFER_CRITICAL_SECONDS;
+  const target = Math.min(
+    FOREGROUND_VIDEO_BUFFER_CRITICAL_SECONDS,
+    Math.max(0.5, remaining)
+  );
+  return getVideoBufferedAheadSeconds(video) + 0.08 < target;
 }
 
 function getForegroundPriorityVideo() {
@@ -3081,7 +3100,10 @@ function refreshForegroundVideoPriority(video, force = false) {
 
   const needsPriority = videoNeedsForegroundPriority(video);
   const nextState = needsPriority ? 'boosted' : 'buffered';
-  if (!force && video.dataset.foregroundPriorityState === nextState) return;
+  const mustSuspendSpeculativeLoad = needsPriority &&
+    wrapper.dataset.deckNextWarm === 'true' &&
+    videoHasCriticalForegroundBuffer(video);
+  if (!force && video.dataset.foregroundPriorityState === nextState && !mustSuspendSpeculativeLoad) return;
 
   video.dataset.foregroundPriorityState = nextState;
   tuneVideoPreloadAround(wrapper);
@@ -3106,6 +3128,8 @@ function transferForegroundVideoPriority(video) {
   }
 
   nextVideo.dataset.foregroundPriority = 'true';
+  const nextWrapper = nextVideo.closest('.video-wrapper');
+  if (nextWrapper) restoreDeckVideoNetwork(nextWrapper, nextVideo);
   nextVideo.preload = 'auto';
 
   const now = Date.now();
@@ -3118,28 +3142,97 @@ function transferForegroundVideoPriority(video) {
   refreshForegroundVideoPriority(nextVideo, true);
 }
 
+function suspendDeckVideoNetwork(wrapper, video) {
+  if (!DECK_MODE_ENABLED || !wrapper || !video || wrapper.dataset.networkSuspended === 'true') return false;
+
+  const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
+  const activeUrl = String(video.currentSrc || video.src || random40PlaybackUrl(originalUrl) || '');
+  if (activeUrl) wrapper.dataset.suspendedVideoSrc = activeUrl;
+  wrapper.dataset.networkSuspended = 'true';
+  wrapper.dataset.readyPlayable = 'false';
+  wrapper.dataset.autoRetryDone = 'false';
+  video.preload = 'none';
+
+  try {
+    video.removeAttribute('src');
+    video.load();
+  } catch (_) {}
+
+  updateVideoReadyLoader(video);
+  return true;
+}
+
+function restoreDeckVideoNetwork(wrapper, video) {
+  if (!wrapper || !video || wrapper.dataset.networkSuspended !== 'true') return false;
+
+  const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
+  const playbackUrl = String(wrapper.dataset.suspendedVideoSrc || random40PlaybackUrl(originalUrl) || originalUrl);
+  delete wrapper.dataset.networkSuspended;
+  delete wrapper.dataset.suspendedVideoSrc;
+  if (!playbackUrl) return false;
+
+  video.preload = 'auto';
+  video.src = playbackUrl;
+  if (originalUrl && playbackUrl !== originalUrl) wrapper.dataset.gatewayFallbackTried = 'true';
+  video.dataset.lastLoadKick = String(Date.now());
+  delete video.dataset.lastNetworkProgressAt;
+  video.dataset.lastNetworkAttemptAt = String(Date.now());
+  try { video.load(); } catch (_) {}
+  if (DECK_MODE_ENABLED && !visibleBatchRetryTimer) {
+    queueMicrotask(() => {
+      if (!visibleBatchRetryTimer && document.body.contains(video)) startVisibleBatchAutoRetry();
+    });
+  }
+  return true;
+}
+
+function getDeckNetworkWarmIndexes(activeWrapper) {
+  const warmIndexes = new Set();
+  const activeIndex = getDeckIndex(activeWrapper);
+  if (activeIndex < 0) {
+    getDeckWrappers().slice(0, DECK_INITIAL_WARM_COUNT).forEach(wrapper => {
+      const index = getDeckIndex(wrapper);
+      if (index >= 0) warmIndexes.add(index);
+    });
+    return warmIndexes;
+  }
+
+  warmIndexes.add(activeIndex);
+  const activeVideo = activeWrapper?.querySelector('video');
+  if (!activeVideo || DECK_PRELOAD_RADIUS < 1) return warmIndexes;
+
+  const criticallyLow = videoHasCriticalForegroundBuffer(activeVideo);
+  const nextWasWarming = activeWrapper.dataset.deckNextWarm === 'true';
+  if ((nextWasWarming && criticallyLow) || (!nextWasWarming && videoNeedsForegroundPriority(activeVideo))) {
+    if (criticallyLow) delete activeWrapper.dataset.deckNextWarm;
+    return warmIndexes;
+  }
+  activeWrapper.dataset.deckNextWarm = 'true';
+
+  const forwardIndex = [...deckForwardHistory].reverse().find(index => getDeckWrapper(index));
+  const nextIndex = forwardIndex != null ? forwardIndex : getNextDeckIndex();
+  if (nextIndex != null) warmIndexes.add(nextIndex);
+  return warmIndexes;
+}
+
 function tuneVideoPreloadAround(activeWrapper) {
   const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
-  const activeIndex = wrappers.indexOf(activeWrapper);
-  const priorityVideo = getForegroundPriorityVideo();
-  const foregroundIsStarving = Boolean(
-    priorityVideo && priorityVideo.closest('.video-wrapper') === activeWrapper && videoNeedsForegroundPriority(priorityVideo)
-  );
-  const effectiveRadius = foregroundIsStarving
-    ? Math.max(1, DECK_PRELOAD_RADIUS - 1)
-    : DECK_PRELOAD_RADIUS;
+  const warmIndexes = getDeckNetworkWarmIndexes(activeWrapper);
   const now = Date.now();
 
-  wrappers.forEach((w, index) => {
+  wrappers.forEach(w => {
     const v = w.querySelector('video');
     if (!v) return;
 
-    const distance = activeIndex < 0 ? Infinity : Math.abs(index - activeIndex);
     const shouldWarm = DECK_MODE_ENABLED
-      ? activeIndex < 0
-        ? index < DECK_INITIAL_WARM_COUNT
-        : distance <= effectiveRadius
-      : distance <= 1;
+      ? warmIndexes.has(getDeckIndex(w))
+      : w === activeWrapper;
+    if (DECK_MODE_ENABLED && !shouldWarm) {
+      suspendDeckVideoNetwork(w, v);
+      return;
+    }
+
+    restoreDeckVideoNetwork(w, v);
     const desiredPreload = shouldWarm ? 'auto' : 'metadata';
     const lastLoadKick = Number(v.dataset.lastLoadKick || 0);
 
@@ -3200,8 +3293,15 @@ function stopVisibleBatchAutoRetry() {
 
 function isVideoReadyForInitialPlayback(video) {
   if (!video) return true;
+  if (video.error || video.readyState < 3) return false;
 
-  return video.readyState >= 2;
+  const duration = Number(video.duration || 0);
+  const currentTime = Math.max(0, Number(video.currentTime || 0));
+  const remaining = Number.isFinite(duration) && duration > 0
+    ? Math.max(0, duration - currentTime)
+    : VIDEO_START_BUFFER_SECONDS;
+  const target = Math.min(VIDEO_START_BUFFER_SECONDS, Math.max(0.5, remaining));
+  return getVideoBufferedAheadSeconds(video) + 0.08 >= target;
 }
 
 function getVideoReadyPercent(video) {
@@ -3299,8 +3399,45 @@ function markVideoAutoRetryDone(video, state) {
   updateVideoReadyLoader(video, true);
 }
 
+function maybeAutoplayReadyDeckVideo(video, wrapper, state = 'buffered') {
+  if (!video || !wrapper || !isVideoReadyForInitialPlayback(video)) return false;
+  if (wrapper.dataset.autoRetryDone !== 'true') markVideoAutoRetryDone(video, state);
+  if (
+    DECK_MODE_ENABLED &&
+    (window.autoplayEnabled || wrapper.dataset.playIntent === 'true') &&
+    wrapper.dataset.userPaused !== 'true' &&
+    wrapper.classList.contains('deck-active') &&
+    video.paused
+  ) {
+    if (window.pongUserWantsAudio === true && video.muted) {
+      unmuteSafely(video);
+      const audioBtn = wrapper.querySelector('.audio-toggle-button');
+      if (audioBtn) {
+        audioBtn.textContent = '🔊';
+        audioBtn.setAttribute('data-muted', 'false');
+      }
+    }
+    playVideoCleanly(video);
+  }
+  return true;
+}
+
 function getVideoRetryDelay(attempts) {
   return VIDEO_LOAD_RETRY_DELAYS_MS[Math.min(attempts, VIDEO_LOAD_RETRY_DELAYS_MS.length - 1)];
+}
+
+function videoNetworkRequestIsMakingProgress(video, wrapper, now = Date.now()) {
+  if (!video || video.networkState !== 2) return false;
+  const progressAt = Number(video.dataset.lastNetworkProgressAt || 0);
+  const attemptAt = Number(video.dataset.lastNetworkAttemptAt || 0);
+  const attemptCount = Number(wrapper?.dataset.autoRetryCount || 0);
+  const recentRealProgress = progressAt > 0 &&
+    progressAt >= attemptAt &&
+    now - progressAt < VIDEO_NETWORK_PROGRESS_TIMEOUT_MS;
+  const initialAttemptGrace = attemptCount === 0 &&
+    attemptAt > 0 &&
+    now - attemptAt < VIDEO_NETWORK_PROGRESS_TIMEOUT_MS;
+  return recentRealProgress || initialAttemptGrace;
 }
 
 function showVideoRefreshPercentPulse(wrapper) {
@@ -3318,24 +3455,22 @@ function retryVisibleBatchVideoLoads(token) {
   if (token !== visibleBatchRetryToken) return;
 
   const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
-  const activeIndex = wrappers.findIndex(wrapper => wrapper.classList.contains('deck-active'));
+  const activeWrapper = wrappers.find(wrapper => wrapper.classList.contains('deck-active')) || null;
+  const warmIndexes = getDeckNetworkWarmIndexes(activeWrapper);
   let stillPending = 0;
   let nextDelay = VIDEO_LOAD_RETRY_POLL_MS;
   const now = Date.now();
 
   wrappers.forEach((wrapper, wrapperIndex) => {
-    const distance = activeIndex < 0 ? Infinity : Math.abs(wrapperIndex - activeIndex);
     const shouldRetry = !DECK_MODE_ENABLED
       ? true
-      : activeIndex < 0
-        ? wrapperIndex < DECK_INITIAL_WARM_COUNT
-        : distance <= DECK_PRELOAD_RADIUS;
+      : warmIndexes.has(getDeckIndex(wrapper));
 
     if (!shouldRetry) return;
 
     const video = wrapper.querySelector('video');
 
-    if (!video || wrapper.dataset.autoRetryDone === 'true') return;
+    if (!video || wrapper.dataset.networkSuspended === 'true' || wrapper.dataset.autoRetryDone === 'true') return;
 
     if (isVideoReadyForInitialPlayback(video)) {
       markVideoAutoRetryDone(video, 'loaded');
@@ -3346,6 +3481,14 @@ function retryVisibleBatchVideoLoads(token) {
     const nextRetryAt = Number(wrapper.dataset.autoRetryNextAt || (now + getVideoRetryDelay(0)));
 
     stillPending++;
+
+    // Never restart an in-flight request or a playing card. Calling load() in
+    // either state throws away useful buffered data and creates a stall loop.
+    const requestIsProgressing = videoNetworkRequestIsMakingProgress(video, wrapper, now);
+    if (requestIsProgressing || !video.paused) {
+      nextDelay = Math.min(nextDelay, VIDEO_LOAD_RETRY_POLL_MS);
+      return;
+    }
 
     if (now < nextRetryAt) {
       nextDelay = Math.min(nextDelay, Math.max(250, nextRetryAt - now));
@@ -3359,6 +3502,7 @@ function retryVisibleBatchVideoLoads(token) {
 
     try {
       if (video.preload !== 'auto') video.preload = 'auto';
+      video.dataset.lastNetworkAttemptAt = String(now);
       video.load();
     } catch (error) {
       console.warn('[Video retry] Could not reload video', error);
@@ -3394,21 +3538,20 @@ function startVisibleBatchAutoRetry() {
 
 function warmCurrentBatchVideos() {
   const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
-  const activeIndex = wrappers.findIndex(wrapper => wrapper.classList.contains('deck-active'));
-  const videos = wrappers.map(wrapper => wrapper.querySelector('video'));
+  const activeWrapper = wrappers.find(wrapper => wrapper.classList.contains('deck-active')) || null;
+  const warmIndexes = getDeckNetworkWarmIndexes(activeWrapper);
 
-  videos.forEach((video, index) => {
-    if (DECK_MODE_ENABLED) {
-      const distance = activeIndex < 0 ? Infinity : Math.abs(index - activeIndex);
-      const shouldWarm = activeIndex < 0
-        ? index < DECK_INITIAL_WARM_COUNT
-        : distance <= DECK_PRELOAD_RADIUS;
-
-      if (!shouldWarm) return;
-    }
+  wrappers.forEach((wrapper, index) => {
+    const video = wrapper.querySelector('video');
+    if (DECK_MODE_ENABLED && !warmIndexes.has(getDeckIndex(wrapper))) return;
 
     setTimeout(() => {
-      if (!video || !document.body.contains(video) || isVideoReadyForInitialPlayback(video)) return;
+      if (
+        !video ||
+        !document.body.contains(video) ||
+        wrapper.dataset.networkSuspended === 'true' ||
+        isVideoReadyForInitialPlayback(video)
+      ) return;
 
       const lastLoadKick = Number(video.dataset.lastLoadKick || 0);
       const now = Date.now();
@@ -3874,6 +4017,10 @@ function createVideoElements() {
   deckCurrentIndex = -1;
   window.currentlyPlayingVideo = null;
   if (videoMetadata.length !== videoUrls.length) videoMetadata = Array(videoUrls.length).fill(null).map(() => ({}));
+  const requestedDeckIndex = Number(deckRestoreIndex);
+  const initialDeckIndex = Number.isInteger(requestedDeckIndex) && requestedDeckIndex >= 0 && requestedDeckIndex < videoUrls.length
+    ? requestedDeckIndex
+    : 0;
 
   videoUrls.forEach((url, index) => {
     const wrapper = document.createElement('div');
@@ -3883,19 +4030,28 @@ function createVideoElements() {
     wrapper.dataset.autoRetryStartedAt = String(Date.now());
 
     const globalIndex = Number(currentLoadedRangeStart || 0) + index;
-    const claimedPreload = random40ClaimReadyPreloadVideo(globalIndex, url);
+    const shouldAttachInitially = !DECK_MODE_ENABLED || index === initialDeckIndex;
+    const claimedPreload = shouldAttachInitially ? random40ClaimReadyPreloadVideo(globalIndex, url) : null;
     const video = claimedPreload?.video || document.createElement('video');
     video.style.cssText = '';
     video.className = 'video-player';
-    if (!claimedPreload || video.error || !video.currentSrc) {
+    video.preload = shouldAttachInitially
+      ? (claimedPreload || DECK_MODE_ENABLED ? 'auto' : 'metadata')
+      : 'none';
+    if (shouldAttachInitially && !video.dataset.lastNetworkAttemptAt) {
+      video.dataset.lastNetworkAttemptAt = String(Date.now());
+    }
+    if (shouldAttachInitially && (!claimedPreload || video.error || !video.currentSrc)) {
       const playbackUrl = random40PlaybackUrl(url);
       video.src = playbackUrl;
       // The global override may already select the PC gateway for a newly
       // rendered card. Mark that attempt so its first error restores the
       // direct source instead of repeatedly retrying the same failed gateway.
       if (playbackUrl && playbackUrl !== url) wrapper.dataset.gatewayFallbackTried = 'true';
+    } else if (!shouldAttachInitially) {
+      wrapper.dataset.networkSuspended = 'true';
+      wrapper.dataset.suspendedVideoSrc = random40PlaybackUrl(url);
     }
-    video.preload = claimedPreload ? 'auto' : 'metadata';
     video.playsInline = true; video.controls = false; video.autoplay = false;
     video.muted = true; video.volume = 0;
     video.setAttribute('playsinline',''); video.setAttribute('webkit-playsinline',''); video.setAttribute('poster','data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
@@ -3943,8 +4099,8 @@ function createVideoElements() {
     audioBtn.className = 'audio-toggle-button'; audioBtn.innerHTML = '🔇'; audioBtn.setAttribute('data-muted','true');
     audioBtn.addEventListener('click', e => {
       e.preventDefault(); e.stopPropagation();
-      if (video.muted) { unmuteSafely(video); audioBtn.innerHTML='🔊'; audioBtn.setAttribute('data-muted','false'); }
-      else { video.muted=true; video.volume=0; audioBtn.innerHTML='🔇'; audioBtn.setAttribute('data-muted','true'); }
+      if (video.muted) { window.pongUserWantsAudio=true; unmuteSafely(video); audioBtn.innerHTML='🔊'; audioBtn.setAttribute('data-muted','false'); }
+      else { window.pongUserWantsAudio=false; video.muted=true; video.volume=0; audioBtn.innerHTML='🔇'; audioBtn.setAttribute('data-muted','true'); }
       const n = document.createElement('div'); n.className='audio-notification';
       n.textContent = video.muted ? '🔈 Audio disabled' : '🔊 Audio enabled';
       wrapper.appendChild(n);
@@ -4086,15 +4242,12 @@ function createVideoElements() {
 
       lastTapTime = now; lastTapX = tapX;
 
-      markVideoPlayIntent(wrapper, video);
-      if (video.paused) playVideoCleanly(video);
-      else video.pause();
+      toggleVideoPlaybackFromIntent(wrapper, video);
     },{passive:false});
 
     tapArea.addEventListener('click', e => {
       if (e.target.closest('.video-progress-container') || e.target.tagName==='BUTTON') { e.stopPropagation(); return; }
-      markVideoPlayIntent(wrapper, video);
-      if (video.paused) playVideoCleanly(video); else video.pause();
+      toggleVideoPlaybackFromIntent(wrapper, video);
     });
 
     video.addEventListener('play', () => {
@@ -4105,15 +4258,20 @@ function createVideoElements() {
       random40PauseHiddenPreloadsForPlayback();
       random40PumpPostFetchQueue();
       random40PumpPreloadQueue(350);
-      setTimeout(()=>{ if(video.muted){video.muted=false;video.volume=1.0;} },100);
     });
     video.addEventListener('pause', () => {
       const wasCurrent = window.currentlyPlayingVideo === video;
+      const ownedForeground = foregroundPriorityVideo === video;
+      const isActive = wrapper.classList.contains('deck-active');
       wrapper.classList.remove('video-playing');
       if (wasCurrent) window.currentlyPlayingVideo = null;
       loadingIndicator.style.display='none';
-      if (wasCurrent) {
+      // A prior card can emit pause asynchronously after navigation. It must
+      // not clear or retune the newly active card's foreground connection.
+      if (ownedForeground || (wasCurrent && isActive && !foregroundPriorityVideo)) {
         transferForegroundVideoPriority(null);
+        const activeWrapper = document.querySelector('.video-wrapper.deck-active');
+        if (activeWrapper) tuneVideoPreloadAround(activeWrapper);
         random40PumpPostFetchQueue();
         random40PumpPreloadQueue(100);
       }
@@ -4126,26 +4284,35 @@ function createVideoElements() {
       updateVideoReadyLoader(video);
     });
     video.addEventListener('progress', () => {
+      video.dataset.lastNetworkProgressAt = String(Date.now());
       updateVideoReadyLoader(video);
       refreshForegroundVideoPriority(video);
+      maybeAutoplayReadyDeckVideo(video, wrapper, 'buffered');
     });
     video.addEventListener('canplay', () => {
-      markVideoAutoRetryDone(video, 'canplay');
       refreshForegroundVideoPriority(video);
       loadingIndicator.style.display='none';
-      if (DECK_MODE_ENABLED && window.autoplayEnabled && wrapper.classList.contains('deck-active') && video.paused) {
-        playVideoCleanly(video);
-      }
+      maybeAutoplayReadyDeckVideo(video, wrapper, 'canplay');
+    });
+    video.addEventListener('canplaythrough', () => {
+      refreshForegroundVideoPriority(video);
+      maybeAutoplayReadyDeckVideo(video, wrapper, 'canplaythrough');
     });
     video.addEventListener('playing', () => {
-      markVideoAutoRetryDone(video, 'playing');
+      if (isVideoReadyForInitialPlayback(video)) markVideoAutoRetryDone(video, 'playing');
+      else updateVideoReadyLoader(video);
       markVideoViewed(wrapper);
       refreshForegroundVideoPriority(video, true);
       random40PumpPostFetchQueue();
       random40PumpPreloadQueue(500);
     });
     video.addEventListener('loadedmetadata', () => { updateVideoReadyLoader(video); });
-    video.addEventListener('playing', () => { loadingIndicator.style.display='none'; if(video.muted){video.muted=false;video.volume=1.0;audioBtn.innerHTML='🔊';audioBtn.setAttribute('data-muted','false');} });
+    video.addEventListener('playing', () => {
+      // Local classification can outlive the initiating click. Keep delayed
+      // autoplay muted; unmuting here makes Chrome revoke playback. A direct
+      // card tap or the speaker button still enables audio under that gesture.
+      loadingIndicator.style.display='none';
+    });
     video.addEventListener('timeupdate', () => {
       if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`;
       const viewThreshold = video.duration ? 0.01 : 0.75;
@@ -4160,6 +4327,7 @@ function createVideoElements() {
     });
     video.addEventListener('ended', () => { refreshForegroundVideoPriority(video, true); });
     video.addEventListener('error', () => {
+      if (wrapper.dataset.networkSuspended === 'true') return;
       loadingIndicator.style.display='none';
       updateVideoReadyLoader(video);
       refreshForegroundVideoPriority(video, true);
@@ -4173,6 +4341,8 @@ function createVideoElements() {
       ) {
         wrapper.dataset.gatewayFallbackTried = 'true';
         random40RememberPlaybackOverride(originalUrl, gatewayUrl);
+        delete video.dataset.lastNetworkProgressAt;
+        video.dataset.lastNetworkAttemptAt = String(Date.now());
         video.src = gatewayUrl;
         try { video.load(); } catch (_) {}
       } else if (
@@ -4182,6 +4352,8 @@ function createVideoElements() {
       ) {
         wrapper.dataset.directFallbackRestored = 'true';
         random40PlaybackUrlOverrides.delete(originalUrl);
+        delete video.dataset.lastNetworkProgressAt;
+        video.dataset.lastNetworkAttemptAt = String(Date.now());
         video.src = originalUrl;
         try { video.load(); } catch (_) {}
       }
@@ -4197,6 +4369,7 @@ function createVideoElements() {
     wrapper.appendChild(rightFlash);
     wrapper.appendChild(tapArea);
     videoContainer.appendChild(wrapper);
+    updateVideoReadyLoader(video);
 
     if (index < videoUrls.length-1) {
       const spacer = document.createElement('div'); spacer.className='blank-space'; videoContainer.appendChild(spacer);
@@ -4379,6 +4552,60 @@ function markVideoPlayIntent(wrapper, video) {
   if (!wrapper) return;
 
   wrapper.dataset.playIntent = 'true';
+  wrapper.dataset.userAudioIntent = 'true';
+  if (video?.muted && isVideoReadyForInitialPlayback(video)) {
+    window.pongUserWantsAudio = true;
+    unmuteSafely(video);
+    delete wrapper.dataset.userAudioIntent;
+    const audioBtn = wrapper.querySelector('.audio-toggle-button');
+    if (audioBtn) {
+      audioBtn.textContent = '🔊';
+      audioBtn.setAttribute('data-muted', 'false');
+    }
+  }
+}
+
+function toggleVideoPlaybackFromIntent(wrapper, video) {
+  if (!wrapper || !video) return;
+  if (!video.paused) {
+    if (video.muted && wrapper.dataset.userAudioIntent === 'true') {
+      window.pongUserWantsAudio = true;
+      unmuteSafely(video);
+      delete wrapper.dataset.userAudioIntent;
+      const audioBtn = wrapper.querySelector('.audio-toggle-button');
+      if (audioBtn) {
+        audioBtn.textContent = '🔊';
+        audioBtn.setAttribute('data-muted', 'false');
+      }
+      return;
+    }
+    wrapper.dataset.playIntent = 'false';
+    wrapper.dataset.userPaused = 'true';
+    delete wrapper.dataset.userAudioIntent;
+    video.pause();
+    return;
+  }
+
+  if (wrapper.dataset.playIntent === 'true' && !isVideoReadyForInitialPlayback(video)) {
+    wrapper.dataset.playIntent = 'false';
+    wrapper.dataset.userPaused = 'true';
+    delete wrapper.dataset.userAudioIntent;
+    wrapper.classList.remove('video-playing');
+    if (window.currentlyPlayingVideo === video) window.currentlyPlayingVideo = null;
+    if (foregroundPriorityVideo === video) transferForegroundVideoPriority(null);
+    return;
+  }
+
+  if (video.ended) {
+    try { video.currentTime = 0; } catch (_) {}
+  }
+  delete wrapper.dataset.userPaused;
+  markVideoPlayIntent(wrapper, video);
+  if (isVideoReadyForInitialPlayback(video)) playVideoCleanly(video);
+  else {
+    prepareVideoForPlayback(video);
+    updateVideoReadyLoader(video);
+  }
 }
 
 function isWrapperViewed(wrapper) {
@@ -4762,7 +4989,15 @@ function random40PreloadConcurrencyLimit() {
   const video = getForegroundPriorityVideo();
   if (random40VisibleVideoIsBuffering()) return RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY;
   if (video && videoNeedsForegroundPriority(video)) return RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY;
-  if (video && !video.paused) return RANDOM40_PRELOAD_PLAYING_CONCURRENCY;
+  if (video && !video.paused) {
+    const speculativeDeckLoad = [...document.querySelectorAll('.video-wrapper:not(.deck-active) video')]
+      .some(candidate => {
+        const wrapper = candidate.closest('.video-wrapper');
+        return wrapper?.dataset.networkSuspended !== 'true' &&
+          videoNetworkRequestIsMakingProgress(candidate, wrapper);
+      });
+    return speculativeDeckLoad ? 0 : RANDOM40_PRELOAD_PLAYING_CONCURRENCY;
+  }
   return RANDOM40_PRELOAD_IDLE_CONCURRENCY;
 }
 
@@ -4987,7 +5222,14 @@ function random40InstallPlaybackFallback(record) {
   document.querySelectorAll('.video-wrapper').forEach(wrapper => {
     if (wrapper.dataset.originalVideoUrl !== record.url) return;
     const visibleVideo = wrapper.querySelector('video');
-    if (!visibleVideo || (visibleVideo.readyState >= 2 && !visibleVideo.error)) return;
+    if (
+      !visibleVideo ||
+      wrapper.dataset.networkSuspended === 'true' ||
+      wrapper.classList.contains('deck-active') ||
+      !visibleVideo.paused ||
+      wrapper.dataset.playIntent === 'true' ||
+      (visibleVideo.readyState >= 2 && !visibleVideo.error)
+    ) return;
     wrapper.dataset.gatewayFallbackTried = 'true';
     delete wrapper.dataset.directFallbackRestored;
     visibleVideo.src = record.fallbackUrl;
@@ -7892,7 +8134,7 @@ let random40MemoryLoadPromise = null;
 let random40MemoryEndpoint = '';
 const RANDOM40_PRELOAD_MAX_ELEMENTS = 180;
 const RANDOM40_PRELOAD_IDLE_CONCURRENCY = 12;
-const RANDOM40_PRELOAD_PLAYING_CONCURRENCY = 2;
+const RANDOM40_PRELOAD_PLAYING_CONCURRENCY = 1;
 const RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY = 0;
 const RANDOM40_PRELOAD_LOAD_TIMEOUT_MS = 12000;
 const RANDOM40_PRELOAD_RETRY_DELAY_MS = 2000;
