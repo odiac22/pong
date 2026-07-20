@@ -4108,11 +4108,16 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
   const narrowGenderReview = reviewReasonsIncludeGender(reviewReasons);
   const narrowAgeReview = reviewReasonsIncludeAge(reviewReasons);
   const narrowAnatomyReview = reviewReasonsIncludeAnatomy(reviewReasons);
-  const narrowReviewPrompt = Array.isArray(reviewReasons) && reviewReasons.length && !enforceBodyPreference
+  const narrowBodyReview = reviewReasonsIncludeBody(reviewReasons);
+  const narrowReviewPrompt = Array.isArray(reviewReasons) && reviewReasons.length
     ? [
         'You are resolving one narrow visual hard-filter ambiguity for private local sorting.',
-        'Return only compact JSON: {"decision":"accept|reject|unsure","confidence":0.0,"reason":"short factual reason","checks":{},"anatomy_assessment":{}}.',
-        'Do not judge attractiveness, body shape, curves, nudity, sexual content, or personal taste.',
+        'Return one compact JSON object only. decision must be exactly "accept", "reject", or "unsure".',
+        'Use booleans for every requested check; never return null for a requested check.',
+        'Required shape: {"decision":"accept","confidence":0.0,"reason":"short factual reason","checks":{},"anatomy_assessment":{}}.',
+        narrowBodyReview
+          ? 'Judge only the requested midsection conflict, not broad attractiveness or body type.'
+          : 'Do not judge attractiveness, body shape, curves, nudity, sexual content, or personal taste.',
         'Toys, dildos, strap-ons, prosthetics, and packers are objects; they are not male-presenting people and are not attached anatomy.',
         narrowGenderReview
           ? 'GENDER REVIEW: inspect every candidate image. Set female_presenting_adult, male_present, and male_only to explicit booleans, never null. Reject if any male-presenting person is actually visible. A clearly adult female-presenting body is sufficient even when the face is hidden.'
@@ -4123,8 +4128,13 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
         narrowAnatomyReview
           ? 'ANATOMY REVIEW: set attached_male_anatomy, toy_or_dildo, and anatomy_ambiguous explicitly. Reject only visibly attached anatomy; accept a clearly separate toy; return unsure when attachment genuinely cannot be resolved.'
           : 'Set attached_male_anatomy, toy_or_dildo, and anatomy_ambiguous to null unless directly relevant.',
-        'checks must also include photograph, woman_prominent, feet_dominant, logo_or_placeholder, body_preference_conflict, and body_evidence_ambiguous; use null for unrelated fields. logo_or_placeholder is true only when every candidate image is non-photo/placeholder; if any clear person photograph exists, it must be false.',
-        'anatomy_assessment must contain attached_male_anatomy, toy_or_dildo, ambiguous, attached_score, toy_score, and evidence_images.',
+        narrowBodyReview
+          ? 'BODY REVIEW: set body_preference_conflict and body_evidence_ambiguous explicitly. Conflict is true only when two separate clear body images agree on pronounced midsection overhang, visible abdominal folds, or an apron-like midsection. Ordinary softness is not a conflict.'
+          : 'Set body_preference_conflict and body_evidence_ambiguous to null unless directly relevant.',
+        'Also set photograph and logo_or_placeholder explicitly. logo_or_placeholder is true only if every candidate image is unusable.',
+        narrowAnatomyReview
+          ? 'anatomy_assessment must repeat attached_male_anatomy, toy_or_dildo, and ambiguous as booleans, plus attached_score, toy_score, and evidence_images.'
+          : 'anatomy_assessment may use null for unrelated anatomy fields.',
         'Return accept only when every requested ambiguity is explicitly resolved safe, reject only for an explicit requested hard-filter violation, and unsure only when a requested field cannot be resolved.',
         `Requested ambiguity: ${reviewReasons.map(reason => String(reason).slice(0, 100)).join('; ')}`,
         `Artist: ${artist.artistName || 'unknown'}`,
