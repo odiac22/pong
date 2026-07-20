@@ -18,6 +18,7 @@ const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
 const MODEL = process.env.PONG_LOCAL_IMAGE_MODEL || 'Xenova/siglip-base-patch16-224';
 const OLLAMA_URL = (process.env.PONG_OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
 const OLLAMA_VISION_MODEL = process.env.PONG_OLLAMA_VISION_MODEL || 'qwen3-vl:4b';
+const LOCAL2_QWEN_MODEL = process.env.PONG_LOCAL2_QWEN_MODEL || 'qwen3-vl:2b';
 const OLLAMA_KEEP_ALIVE = process.env.PONG_OLLAMA_KEEP_ALIVE || -1;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
@@ -5097,6 +5098,7 @@ async function local2ClassifyWorker(profile, _triage, context) {
     localVariant: 'local2',
     stage: 'full',
     deferQwenReview: false,
+    visionModel: LOCAL2_QWEN_MODEL,
     artist: profile,
     candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL2_CLEAN_MAX_IMAGES)
   }, workloadGeneration, context.signal);
@@ -5187,7 +5189,7 @@ const local2Adapter = createLocal2NodeAdapter({
     return local2LastKnownRevision;
   },
   initialRevision: 'pong-local2-clean-v3:uninitialized',
-  modelRevision: 'siglip2-grouped-dinov2-small-ridge-local2-clean-v3',
+  modelRevision: `siglip2-grouped-dinov2-small-ridge-${LOCAL2_QWEN_MODEL}-local2-clean-v3`,
   pipelineOptions: {
     targetAccepted: 48,
     readyMinimum: 4,
