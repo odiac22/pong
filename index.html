@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.13</div>
+  <div class="version-number">24.14</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5669,7 +5669,14 @@ function getPaperclipActiveBundleCount() {
 function getPaperclipProgressCount() {
   const total = getPaperclipTotalBundleCount();
   if (!total) return 0;
-  if (paperclipHistoryPosition >= 0 && paperclipHistory.length) {
+  // Previous deliberately moves backward through visible history. At the
+  // forward tip, derive progress from the same visited/retired queue used by
+  // Paperclip and Red-X so skipped artists cannot disappear from the numerator.
+  if (
+    paperclipHistoryPosition >= 0 &&
+    paperclipHistory.length &&
+    paperclipHistoryPosition < paperclipHistory.length - 1
+  ) {
     const visibleHistoryIndexes = new Set(paperclipHistory.slice(0, paperclipHistoryPosition + 1));
     return Math.min(total, countUniquePaperclipEventIdentities((event, index) => visibleHistoryIndexes.has(index)));
   }
@@ -5860,11 +5867,14 @@ function navigateToNextPasteEvent(){
 
   if (nextActiveIndex < 0) {
     const total = getPaperclipTotalBundleCount();
+    const current = getPaperclipProgressCount();
     if (total) paperclipStepCount = total;
     updatePasteNavigationButton();
-    showSortingIndicator(total
+    showSortingIndicator(total && current >= total
       ? `All ${total} ${eromeBundleMode ? 'Erome bundles' : 'paperclip artists'} viewed`
-      : 'No new paperclip artists loaded yet');
+      : total
+        ? `No unviewed artist is available (${current}/${total})`
+        : 'No new paperclip artists loaded yet');
     return;
   }
 
@@ -7742,7 +7752,7 @@ const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 15;
 const RANDOM40_PRECHECK_MAX_ARTIST_PAGES = 36;
 const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 48;
-const RANDOM40_MIN_POST_IMAGES_FOR_REVIEW = 2;
+const RANDOM40_MIN_POST_IMAGES_FOR_REVIEW = 3;
 const RANDOM40_BODY_IMAGE_SEARCH_MAX_PAGES = 6;
 const RANDOM40_SOURCE_BASES = ['https://coomerfans.com/', 'https://onlyfaphouse.com/'];
 const RANDOM40_FAST_PUBLISH_VIDEOS = 20;
@@ -7751,7 +7761,7 @@ const RANDOM40_BACKGROUND_APPEND_DELAY_MS = 180;
 const RANDOM40_MODEL = 'gpt-5.4-nano';
 const RANDOM40_LOCAL_MODEL_NAME = 'local-image-embeddings';
 const RANDOM40_LOCAL2_VISION_MODEL = 'qwen3-vl:4b';
-const RANDOM40_PROMPT_VERSION = 'cf-vision-v12';
+const RANDOM40_PROMPT_VERSION = 'cf-vision-v13';
 const RANDOM40_THUMBNAIL_REJECT_CONFIDENCE = 0.95;
 const RANDOM40_NANO_THUMBNAIL_TRIAGE = false;
 const RANDOM40_REJECT_CACHE_KEY = 'pong_random40_model_reject_cache_v1';
@@ -7767,9 +7777,11 @@ const RANDOM40_MIN_SCREENED_IMAGES = 3;
 const RANDOM40_MAX_REVIEW_IMAGES = 3;
 const RANDOM40_INITIAL_IMAGES_PER_ARTIST = 3;
 const RANDOM40_RANDOM_PROFILE_IMAGES_PER_ARTIST = 2;
-const RANDOM40_LOCAL_MAX_REVIEW_IMAGES = 3;
-const RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST = 3;
-const RANDOM40_LOCAL_RANDOM_PROFILE_IMAGES_PER_ARTIST = 2;
+const RANDOM40_LOCAL_REQUIRED_GRADED_IMAGES = 4;
+const RANDOM40_LOCAL_REQUIRED_CLEAR_BODY_IMAGES = 3;
+const RANDOM40_LOCAL_MAX_REVIEW_IMAGES = 4;
+const RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST = 4;
+const RANDOM40_LOCAL_RANDOM_PROFILE_IMAGES_PER_ARTIST = 3;
 const RANDOM40_MAX_ACCEPT_RECORDS = 160;
 const RANDOM40_MAX_ACCEPT_EXAMPLES = 2;
 const RANDOM40_ACCEPT_IMAGES_PER_EXAMPLE = 3;
@@ -9401,9 +9413,18 @@ function random40IsAcceptedDecision(decision) {
   const preferredBodyGrades = imageGrades.filter(grade =>
     grade?.checks?.body_evidence_clear === true && grade?.checks?.body_preference_match === true
   ).length;
+  const clearBodyGrades = random40ClearBodyEvidenceCount(decision);
   const requiredImageMajority = Math.ceil(screenedImages / 2);
 
   if (visionSource === 'local_trained_embedding_classifier' || /^personal_preference_v[23]$/.test(visionSource)) {
+    const localVariant = String(decision.variant || '').toLowerCase();
+    if (
+      (localVariant === 'local' || localVariant === 'local2') &&
+      (
+        screenedImages < RANDOM40_LOCAL_REQUIRED_GRADED_IMAGES ||
+        clearBodyGrades < RANDOM40_LOCAL_REQUIRED_CLEAR_BODY_IMAGES
+      )
+    ) return false;
     if (decision.hard_verified !== true) return false;
     if (Number(decision.confidence || 0) < RANDOM40_LOCAL_TRAINED_ACCEPT_CONFIDENCE) return false;
     const hardChecks = decision.checks || {};
@@ -9470,10 +9491,10 @@ function random40DecisionNeedsMoreBodyEvidence(decision) {
   ) return false;
   const clearBodies = random40ClearBodyEvidenceCount(decision);
   if (clearBodies <= 0) return true;
-  // A second clear body image is evidence, not a second vote requirement. The
-  // bounded progressive search tries to find it when available; after the
-  // search is exhausted, one clearly preferred body can still be authoritative.
-  return clearBodies < 2 || decision?.body_consensus?.positive_preference?.needs_more_body_evidence === true;
+  // Local decisions now require three independently clear body views. The
+  // existing two-image mismatch consensus still blocks the artist early.
+  return clearBodies < RANDOM40_LOCAL_REQUIRED_CLEAR_BODY_IMAGES ||
+    decision?.body_consensus?.positive_preference?.needs_more_body_evidence === true;
 }
 
 function random40MergeReviewedChecks(decision, fallbackDecision = null) {
@@ -10345,12 +10366,12 @@ async function random40SelectRepresentativeCandidateImages({
 
 const TRAIN_AI_ACCURACY_KEY = 'pong_train_ai_accuracy_v1';
 const TRAIN_AI_AUDIT_KEY = 'pong_train_ai_verdict_audit_v1';
-// Match Random 40's one-pass evidence batch: require the profile plus two post
-// images, and include up to two more body-ranked post images when available.
+// Match Random 40's production evidence batch: one profile/identity image plus
+// three independently graded, body-prioritized post images.
 // The exact same image set is displayed and classified.
-const TRAIN_AI_MIN_IMAGES = 3;
+const TRAIN_AI_MIN_IMAGES = 4;
 const TRAIN_AI_MIN_POST_IMAGE_COUNT = TRAIN_AI_MIN_IMAGES - 1;
-const TRAIN_AI_MAX_IMAGES = 3;
+const TRAIN_AI_MAX_IMAGES = 4;
 const TRAIN_AI_MAX_POST_IMAGE_COUNT = TRAIN_AI_MAX_IMAGES - 1;
 const TRAIN_AI_SWIPE_COMMIT_MS = 80;
 const TRAIN_AI_CLASSIFY_TIMEOUT_MS = 35000;
@@ -11840,7 +11861,7 @@ async function random40TakeWarmCandidates(localEndpoint, count = RANDOM40_MAX_AR
         decisionRevision && item?.local1DecisionRevision === decisionRevision &&
         verifiedEntries.length >= RANDOM40_MIN_VIDEOS_PER_ARTIST &&
         verifiedEntries.slice(0, RANDOM40_MIN_VIDEOS_PER_ARTIST).every(entry => entry?.playbackProbeVerified === true) &&
-        exactDecisionImages.length >= RANDOM40_MIN_SCREENED_IMAGES &&
+        exactDecisionImages.length >= RANDOM40_LOCAL_REQUIRED_GRADED_IMAGES &&
         random40IsAcceptedDecision(warmDecision);
       if (!warmDecisionValid) {
         const validVerified = verifiedEntries.filter(entry => entry?.playbackProbeVerified === true).length;
@@ -11848,8 +11869,8 @@ async function random40TakeWarmCandidates(localEndpoint, count = RANDOM40_MAX_AR
           ? 'stale preference revision'
           : validVerified < RANDOM40_MIN_VIDEOS_PER_ARTIST
             ? `only ${validVerified}/${RANDOM40_MIN_VIDEOS_PER_ARTIST} browser-distinct verified videos`
-            : exactDecisionImages.length < RANDOM40_MIN_SCREENED_IMAGES
-              ? `only ${exactDecisionImages.length}/${RANDOM40_MIN_SCREENED_IMAGES} exact decision images`
+            : exactDecisionImages.length < RANDOM40_LOCAL_REQUIRED_GRADED_IMAGES
+              ? `only ${exactDecisionImages.length}/${RANDOM40_LOCAL_REQUIRED_GRADED_IMAGES} exact decision images`
               : 'browser production decision gate rejected server accept';
         rememberWarmDrop(item, reason);
         continue;
@@ -12741,12 +12762,15 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
       localMode ? RANDOM40_LOCAL_INITIAL_IMAGES_PER_ARTIST : RANDOM40_INITIAL_IMAGES_PER_ARTIST
   );
 
-  if (reviewedImages.length < RANDOM40_MIN_SCREENED_IMAGES) {
+  const requiredScreenedImages = localMode
+    ? RANDOM40_LOCAL_REQUIRED_GRADED_IMAGES
+    : RANDOM40_MIN_SCREENED_IMAGES;
+  if (reviewedImages.length < requiredScreenedImages) {
     return {
       decision: 'reject',
       confidence: 1,
       source: 'screening_gate',
-      reason: `not enough profile/post images screened (${reviewedImages.length}/${RANDOM40_MIN_SCREENED_IMAGES})`,
+      reason: `not enough profile/post images screened (${reviewedImages.length}/${requiredScreenedImages})`,
       checks: {
         photograph: null,
         woman_prominent: null,
@@ -13172,7 +13196,7 @@ async function startRandom40(mode = 'nano') {
         const usePrecomputedLocal1Decision = Boolean(
           precomputedLocal1Decision &&
           (precheck.verifiedEntries || []).filter(entry => entry?.playbackProbeVerified === true).length >= RANDOM40_MIN_VIDEOS_PER_ARTIST &&
-          (artist.precomputedLocal1ImageUrls || []).length >= RANDOM40_MIN_SCREENED_IMAGES &&
+          (artist.precomputedLocal1ImageUrls || []).length >= RANDOM40_LOCAL_REQUIRED_GRADED_IMAGES &&
           random40IsAcceptedDecision(precomputedLocal1Decision)
         );
         stageStarted = performance.now();
@@ -13189,7 +13213,8 @@ async function startRandom40(mode = 'nano') {
           !usePrecomputedLocal1Decision &&
           (
             random40DecisionNeedsMoreBodyEvidence(decision) ||
-            (Array.isArray(decision?.image_grades) ? decision.image_grades.length : 0) < RANDOM40_MIN_SCREENED_IMAGES
+            (Array.isArray(decision?.image_grades) ? decision.image_grades.length : 0) <
+              (random40IsLocalMode(runMode) ? RANDOM40_LOCAL_REQUIRED_GRADED_IMAGES : RANDOM40_MIN_SCREENED_IMAGES)
           ) &&
           random40State === runState &&
           !runState.stop
@@ -13245,8 +13270,11 @@ async function startRandom40(mode = 'nano') {
               .filter(url => url !== profileImage);
             const retryImages = [];
             const retrySeen = new Set();
+            const retryImageLimit = random40IsLocalMode(runMode)
+              ? RANDOM40_LOCAL_MAX_REVIEW_IMAGES
+              : RANDOM40_MAX_REVIEW_IMAGES;
             const addRetryImage = url => {
-              if (!url || retrySeen.has(url) || retryImages.length >= RANDOM40_MAX_REVIEW_IMAGES) return;
+              if (!url || retrySeen.has(url) || retryImages.length >= retryImageLimit) return;
               retrySeen.add(url);
               retryImages.push(url);
             };
@@ -13269,7 +13297,10 @@ async function startRandom40(mode = 'nano') {
             rankedBodyUrls.forEach(addRetryImage);
             priorCandidateUrls.forEach(addRetryImage);
             const containsFreshEvidence = retryImages.some(url => !priorImageUrls.has(url));
-            if (containsFreshEvidence && retryImages.length >= RANDOM40_MIN_SCREENED_IMAGES) {
+            const requiredRetryImages = random40IsLocalMode(runMode)
+              ? RANDOM40_LOCAL_REQUIRED_GRADED_IMAGES
+              : RANDOM40_MIN_SCREENED_IMAGES;
+            if (containsFreshEvidence && retryImages.length >= requiredRetryImages) {
             artistWithPrecheckText = {
               ...artist,
               pageText: `${artist.pageText || ''} ${precheck.pageText || ''}`.replace(/\s+/g, ' ').trim()
@@ -13338,7 +13369,10 @@ async function startRandom40(mode = 'nano') {
           preferenceWeights: decision?.preference_weights || decision?.evidence?.preference_weights || null,
           precomputedLocal1: usePrecomputedLocal1Decision,
           decisionRevision: usePrecomputedLocal1Decision ? String(artist.precomputedLocal1DecisionRevision || '') : '',
-          candidateImageUrls: [...new Set((decision?.candidateImageUrls || []).filter(Boolean))].slice(0, RANDOM40_MAX_REVIEW_IMAGES)
+          candidateImageUrls: [...new Set((decision?.candidateImageUrls || []).filter(Boolean))].slice(
+            0,
+            random40IsLocalMode(runMode) ? RANDOM40_LOCAL_MAX_REVIEW_IMAGES : RANDOM40_MAX_REVIEW_IMAGES
+          )
         };
         random40State.verdictAudit.push(verdictAuditRecord);
         if (random40State.verdictAudit.length > 240) random40State.verdictAudit.shift();

@@ -47,6 +47,8 @@ SIGLIP_MODEL = os.environ.get("PONG_SIGLIP2_MODEL", "google/siglip2-base-patch16
 POSE_MODEL = os.environ.get("PONG_POSE_MODEL", "yolo11n-pose.pt")
 MAX_RECORDS = int(os.environ.get("PONG_PREFERENCE_MAX_RECORDS", "2000"))
 MAX_LEARN_IMAGES = int(os.environ.get("PONG_PREFERENCE_LEARN_IMAGES", "6"))
+LOCAL_DECISION_IMAGES = 4
+LOCAL_REQUIRED_CLEAR_BODY_IMAGES = 3
 FEATURE_SCHEMA_VERSION = 3
 STORE_VERSION = 3
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1004,7 +1006,7 @@ def deduplicate_candidate_images(
     return unique_images, unique_urls
 
 
-def load_candidate_images(urls: list[str], max_images: int = 3) -> tuple[list[Image.Image], list[str]]:
+def load_candidate_images(urls: list[str], max_images: int = LOCAL_DECISION_IMAGES) -> tuple[list[Image.Image], list[str]]:
     normalized_urls = list(dict.fromkeys(
         normalize_url(url) for url in urls[:max(1, max_images)] if normalize_url(url)
     ))
@@ -1723,8 +1725,10 @@ def classify(payload: dict[str, Any]) -> dict[str, Any]:
 
 def classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
     variant = "local" if str(payload.get("localVariant", "local")).lower() == "local" else "local2"
-    urls = list(dict.fromkeys(normalize_url(x) for x in payload.get("candidateImageUrls", []) if normalize_url(x)))[:3]
-    images, used_urls = load_candidate_images(urls)
+    urls = list(dict.fromkeys(
+        normalize_url(x) for x in payload.get("candidateImageUrls", []) if normalize_url(x)
+    ))[:LOCAL_DECISION_IMAGES]
+    images, used_urls = load_candidate_images(urls, max_images=LOCAL_DECISION_IMAGES)
     if not images:
         raise ValueError("No usable candidate images")
 
@@ -1969,6 +1973,12 @@ def classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
         personalized_decision = "reject"
         personalized_confidence = 0.92
         personalized_reason = "face visual preference mismatch"
+    elif clear_body_count < LOCAL_REQUIRED_CLEAR_BODY_IMAGES:
+        personalized_decision = "reject"
+        personalized_confidence = 0.90
+        personalized_reason = (
+            f"only {clear_body_count}/{LOCAL_REQUIRED_CLEAR_BODY_IMAGES} independently clear body images"
+        )
     elif preference >= threshold:
         personalized_decision = "accept"
         personalized_confidence = min(0.99, 0.58 + abs(preference - threshold) * 1.7)
@@ -2057,7 +2067,10 @@ def classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
         # dropping an otherwise excellent personalized match.
         qwen_review_codes.append("gender-presentation")
         qwen_review_reasons.append("female presentation is not yet explicit on a preferred-body match")
-    if decision == "accept" and age.get("ambiguous"):
+    # A hidden/covered face is allowed when three clear preferred body views
+    # establish the candidate. Ask Qwen about age only when a visible face
+    # exists but the age boundary itself remains ambiguous.
+    if decision == "accept" and age.get("ambiguous") and clear_face_available:
         qwen_review_codes.append("age")
         qwen_review_reasons.append("ambiguous visible age near a hard-filter boundary")
     requires_qwen_review = bool(qwen_review_reasons)
@@ -2065,8 +2078,8 @@ def classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
     # precise standardized field.
     hard_review_required = requires_qwen_review
 
-    # Qwen is a verifier, not the personal taste model. Give it the same three
-    # body-prioritized images used by DINO/SigLIP/YOLO.
+    # DINO/SigLIP/YOLO grade all four production images. Qwen remains a narrow
+    # verifier and receives the three strongest hard-filter evidence images.
     semantic_rows = semantic_analysis.get("semanticScores")
     gender_evidence_images = set(
         int(value) for value in checks.get("gender_presentation_ambiguous_images", [])
@@ -2092,7 +2105,20 @@ def classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
         evidence_score += person_score * 10.0 - clarity_penalty * 4.0 - index * 0.001
         ranked_hard_images.append((evidence_score, index, url))
     ranked_hard_images.sort(reverse=True)
-    hard_check_image_urls = [item[2] for item in ranked_hard_images[:3]]
+    hard_check_image_urls: list[str] = []
+    if {"age", "gender-presentation"}.intersection(qwen_review_codes):
+        face_visible_rows = fast_analysis.get("faceVisibleByImage") or []
+        best_face = next(
+            (item for item in ranked_hard_images if item[1] < len(face_visible_rows) and face_visible_rows[item[1]]),
+            None,
+        )
+        if best_face is not None:
+            hard_check_image_urls.append(best_face[2])
+    for _, _, url in ranked_hard_images:
+        if url not in hard_check_image_urls:
+            hard_check_image_urls.append(url)
+        if len(hard_check_image_urls) >= 3:
+            break
 
     return {
         "decision": decision,

@@ -549,6 +549,29 @@ async function runTrial(chromePort, appUrl, trialNumber) {
       const oneBodyMismatch = [{ checks: { body_preference_mismatch: true } }];
       if (random40BodyMismatchGrade(oneBodyMismatch)) failures.push('one body crop caused an artist veto');
       if (!random40BodyMismatchGrade([...oneBodyMismatch, ...oneBodyMismatch])) failures.push('two body mismatches did not form consensus');
+      const clearBodyGrade = {
+        decision: 'accept', confidence: 0.9,
+        checks: { visual_preference_match: true, body_evidence_clear: true, body_preference_match: true }
+      };
+      const profileGrade = {
+        decision: 'accept', confidence: 0.9,
+        checks: { visual_preference_match: true, body_evidence_clear: false, body_preference_match: null }
+      };
+      const localFourImageDecision = {
+        decision: 'accept', confidence: 0.9, hard_verified: true,
+        source: 'personal_preference_v3', vision_source: 'personal_preference_v3', variant: 'local',
+        checks: { photograph: true, female_presenting_adult: true, male_present: false, male_only: false, appears_over_50: false, underage_looking: false, age_ambiguous: false, feet_dominant: false, logo_or_placeholder: false },
+        anatomy_assessment: { attached_male_anatomy: false, toy_or_dildo: false, ambiguous: false },
+        evidence: { clear_body_images: 3, preferred_body_images: 3 },
+        image_grades: [profileGrade, clearBodyGrade, clearBodyGrade, clearBodyGrade]
+      };
+      if (!random40IsAcceptedDecision(localFourImageDecision)) failures.push('four-image/three-body Local1 contract did not accept');
+      const onlyTwoBodies = {
+        ...localFourImageDecision,
+        evidence: { clear_body_images: 2, preferred_body_images: 2 },
+        image_grades: [profileGrade, profileGrade, clearBodyGrade, clearBodyGrade]
+      };
+      if (random40IsAcceptedDecision(onlyTwoBodies)) failures.push('Local1 accepted without three independently clear body images');
       const toy = { anatomy_assessment: { attached_male_anatomy: true, toy_or_dildo: true, ambiguous: false } };
       if (random40HasAttachedAnatomyConflict(toy)) failures.push('toy was treated as attached anatomy');
       if (!random40AnatomyNeedsReview(toy)) failures.push('contradictory attached-plus-toy evidence did not request review');
@@ -595,20 +618,15 @@ async function runTrial(chromePort, appUrl, trialNumber) {
         const evidence = group.evidence || {};
         const checks = evidence.checks || {};
         const anatomy = evidence.anatomyAssessment || {};
-        const faceOnlyExceptionalPass =
-          Number(evidence.clearBodyImages || 0) === 0 &&
-          Number(evidence.preferenceThreshold || 0) >= 0.70 &&
-          Number(evidence.preference || 0) >= Number(evidence.preferenceThreshold || 1) &&
-          Number(evidence.facePreference || 0) >= Number(evidence.preferenceThreshold || 1);
         return evidence.decision === 'accept' &&
           Number(evidence.actualVideos || 0) >= 15 &&
           group.distinctMedia >= 15 &&
           group.byteVerifiedMedia >= 15 &&
           evidence.hardVerified === true &&
           evidence.requiresQwenReview !== true &&
-          Number(evidence.screenedImages || 0) === 3 &&
-          Array.isArray(evidence.candidateImageUrls) && evidence.candidateImageUrls.length === 3 &&
-          (Number(evidence.clearBodyImages || 0) >= 1 || faceOnlyExceptionalPass) &&
+          Number(evidence.screenedImages || 0) === 4 &&
+          Array.isArray(evidence.candidateImageUrls) && evidence.candidateImageUrls.length === 4 &&
+          Number(evidence.clearBodyImages || 0) >= 3 &&
           checks.photograph !== false && checks.female_presenting_adult === true &&
           checks.male_present !== true && checks.male_only !== true &&
           checks.feet_dominant !== true && checks.logo_or_placeholder !== true &&

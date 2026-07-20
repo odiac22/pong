@@ -93,6 +93,8 @@ const RANDOM40_ACCEPTED_CLASSIFY_CONCURRENCY = Math.max(1, Math.min(4, Number(pr
 const RANDOM40_ACCEPTED_LEASE_TTL_MS = Math.max(60000, Number(process.env.PONG_RANDOM40_ACCEPTED_LEASE_TTL_MS || 180000));
 const RANDOM40_PLAYBACK_PROTECTION_MS = Math.max(45000, Number(process.env.PONG_RANDOM40_PLAYBACK_PROTECTION_MS || 110000));
 const RANDOM40_ACCEPTED_BODY_SEARCH_MAX_PAGES = Math.max(3, Math.min(8, Number(process.env.PONG_RANDOM40_BODY_SEARCH_MAX_PAGES || 6)));
+const RANDOM40_LOCAL_DECISION_IMAGES = 4;
+const RANDOM40_LOCAL_REQUIRED_CLEAR_BODY_IMAGES = 3;
 const RANDOM40_ACCEPTED_DELIVERY_VIDEO_TARGET = Math.max(15, Math.min(30, Number(process.env.PONG_RANDOM40_DELIVERY_VIDEO_TARGET || 20)));
 // The RAM prewarm lane favors creators whose 15 real videos can be established
 // promptly. Sparse long-tail profiles are revisited by later reservoir fills,
@@ -1168,7 +1170,7 @@ function random40ReservoirDecisionNeedsBodySearch(decision = {}) {
   // Missing female/preferred-body evidence is precisely what the progressive
   // search is intended to repair; only concrete terminal evidence stops it.
   if (terminalHardEvidence) return false;
-  return random40DecisionClearBodyCount(decision) < 2 ||
+  return random40DecisionClearBodyCount(decision) < RANDOM40_LOCAL_REQUIRED_CLEAR_BODY_IMAGES ||
     decision?.body_consensus?.positive_preference?.needs_more_body_evidence === true;
 }
 
@@ -1206,7 +1208,7 @@ async function random40ReservoirTriageBodyImages(item, signal) {
 }
 
 function random40ReservoirSelectDecisionImages(item, priorDecision = null, excludedUrls = null) {
-  const target = 3;
+  const target = RANDOM40_LOCAL_DECISION_IMAGES;
   const selected = [];
   const seen = new Set();
   const excluded = excludedUrls instanceof Set ? excludedUrls : new Set(excludedUrls || []);
@@ -1250,10 +1252,11 @@ function random40ReservoirSelectDecisionImages(item, priorDecision = null, exclu
     Number(b.qualityScore || 0) - Number(a.qualityScore || 0) ||
     random40StableImageTie(identity, a.imageUrl) - random40StableImageTie(identity, b.imageUrl)
   );
-  const openSlots = Math.max(0, target - selected.length);
-  const hintedCount = Math.min(openSlots, Math.max(1, Math.ceil(openSlots / 2)));
-  ranked.slice(0, hintedCount).forEach(entry => add(entry.imageUrl));
-  ranked.slice(hintedCount)
+  // Fill every available post slot with pose-confirmed body evidence first.
+  // Lower-confidence/random thumbnails are fallback only when three distinct
+  // body views cannot be located inside the bounded profile scan.
+  ranked.filter(entry => entry.poseBodyVisible === true).forEach(entry => add(entry.imageUrl));
+  ranked.filter(entry => entry.poseBodyVisible !== true)
     .sort((a, b) => random40StableImageTie(identity, a.imageUrl) - random40StableImageTie(identity, b.imageUrl))
     .forEach(entry => add(entry.imageUrl));
   ranked.forEach(entry => add(entry.imageUrl));
@@ -1317,7 +1320,7 @@ async function random40ResolveDecisionImages(item, selectedUrls, signal) {
   // otherwise make one physical body photo look like two independent votes.
   resolved.forEach(raw => {
     const value = normalizeUrl(raw, item?.artistUrl || undefined);
-    if (!value || seen.has(value) || exact.length >= 3) return;
+    if (!value || seen.has(value) || exact.length >= RANDOM40_LOCAL_DECISION_IMAGES) return;
     seen.add(value);
     exact.push(value);
   });
@@ -1379,7 +1382,9 @@ function random40ReservoirDecisionRejectionReason(decision = {}) {
   if (finalChecks.male_present !== false || finalChecks.male_only !== false) return 'male-presenting hard check was not explicitly safe';
   if (finalChecks.age_ambiguous === true) return 'adult age remains ambiguous';
   const grades = Array.isArray(decision?.image_grades) ? decision.image_grades : [];
-  if (grades.length < 3) return `only ${grades.length}/3 perceptually distinct decision images`;
+  if (grades.length < RANDOM40_LOCAL_DECISION_IMAGES) {
+    return `only ${grades.length}/${RANDOM40_LOCAL_DECISION_IMAGES} perceptually distinct decision images`;
+  }
   const immediateHardReject = grades.some(grade => {
     const checks = grade?.checks || {};
     return checks.male_present === true || checks.male_only === true ||
@@ -1389,6 +1394,10 @@ function random40ReservoirDecisionRejectionReason(decision = {}) {
   if (immediateHardReject) return 'one decision image contains a visual hard-filter conflict';
   const bodyMismatchCount = grades.filter(grade => grade?.checks?.body_preference_mismatch === true).length;
   if (bodyMismatchCount >= 2) return 'body-shape mismatch confirmed by multiple clear images';
+  const clearBodyCount = grades.filter(grade => grade?.checks?.body_evidence_clear === true).length;
+  if (clearBodyCount < RANDOM40_LOCAL_REQUIRED_CLEAR_BODY_IMAGES) {
+    return `only ${clearBodyCount}/${RANDOM40_LOCAL_REQUIRED_CLEAR_BODY_IMAGES} independently clear body images`;
+  }
   const preferredBody = grades.filter(grade =>
     grade?.checks?.body_evidence_clear === true && grade?.checks?.body_preference_match === true
   ).length;
@@ -1396,7 +1405,7 @@ function random40ReservoirDecisionRejectionReason(decision = {}) {
   const majority = Math.ceil(grades.length / 2);
   const accepts = grades.filter(grade => String(grade?.decision || '').toLowerCase() === 'accept').length;
   const visualMatches = grades.filter(grade => grade?.checks?.visual_preference_match === true).length;
-  if (accepts < majority || visualMatches < majority) return 'three-image preference consensus did not pass';
+  if (accepts < majority || visualMatches < majority) return 'four-image preference consensus did not pass';
   return '';
 }
 
@@ -1440,7 +1449,7 @@ async function random40ClassifyReservoirItem(item, revision, signal) {
     candidateImageUrls,
     visionModel: OLLAMA_VISION_MODEL,
     deferQwenReview,
-    promptVersion: 'cf-vision-v12-accepted-reservoir'
+    promptVersion: 'cf-vision-v13-accepted-reservoir'
   }, signal, { background: true });
 
   await random40ReservoirTriageBodyImages(item, signal).catch(() => {
@@ -1449,8 +1458,8 @@ async function random40ClassifyReservoirItem(item, revision, signal) {
   let selectedImageUrls = random40ReservoirSelectDecisionImages(item);
   let images = await random40ResolveDecisionImages(item, selectedImageUrls, signal);
   const examinedImageUrls = new Set([...selectedImageUrls, ...images]);
-  if (images.length < 3) {
-    while (images.length < 3 && !item.bodyImageScanComplete && !signal?.aborted) {
+  if (images.length < RANDOM40_LOCAL_DECISION_IMAGES) {
+    while (images.length < RANDOM40_LOCAL_DECISION_IMAGES && !item.bodyImageScanComplete && !signal?.aborted) {
       await random40ReservoirExpandBodyImages(item, signal);
       selectedImageUrls = random40ReservoirSelectDecisionImages(item);
       images = await random40ResolveDecisionImages(item, selectedImageUrls, signal);
@@ -1458,7 +1467,7 @@ async function random40ClassifyReservoirItem(item, revision, signal) {
       images.forEach(url => examinedImageUrls.add(url));
     }
   }
-  if (images.length < 3) return { accepted: false, decision: null, reason: 'not enough visual evidence' };
+  if (images.length < RANDOM40_LOCAL_DECISION_IMAGES) return { accepted: false, decision: null, reason: 'not enough visual evidence' };
   const hardText = textHardFilter({ ...artist, pageText: item.pageText || artist.pageText });
   if (hardText) return { accepted: false, decision: { decision: 'reject', source: 'hard_filter', reason: hardText }, reason: hardText };
 
@@ -1467,10 +1476,10 @@ async function random40ClassifyReservoirItem(item, revision, signal) {
     revision === random40PreferenceRevision && !signal?.aborted &&
     (
       random40ReservoirDecisionNeedsBodySearch(decision) ||
-      (Array.isArray(decision?.image_grades) ? decision.image_grades.length : 0) < 3
+      (Array.isArray(decision?.image_grades) ? decision.image_grades.length : 0) < RANDOM40_LOCAL_DECISION_IMAGES
     )
   ) {
-    const needsDistinctImage = (Array.isArray(decision?.image_grades) ? decision.image_grades.length : 0) < 3;
+    const needsDistinctImage = (Array.isArray(decision?.image_grades) ? decision.image_grades.length : 0) < RANDOM40_LOCAL_DECISION_IMAGES;
     if (item.bodyTriageAvailable) {
       let hasFreshPoseBody = (item.postImageEntries || []).some(entry =>
         entry?.poseBodyVisible === true &&
@@ -1517,7 +1526,7 @@ async function random40ClassifyReservoirItem(item, revision, signal) {
       selectedImageUrls = random40ReservoirSelectDecisionImages(item, decision, examinedImageUrls);
       hasFreshEvidence = selectedImageUrls.some(url => !examinedImageUrls.has(url));
     }
-    if (!hasFreshEvidence || selectedImageUrls.length < 3) break;
+    if (!hasFreshEvidence || selectedImageUrls.length < RANDOM40_LOCAL_DECISION_IMAGES) break;
     const expandedHardText = textHardFilter({ ...artist, pageText: item.pageText || artist.pageText });
     if (expandedHardText) {
       decision = { decision: 'reject', source: 'hard_filter', reason: expandedHardText };
@@ -1526,12 +1535,12 @@ async function random40ClassifyReservoirItem(item, revision, signal) {
     images = await random40ResolveDecisionImages(item, selectedImageUrls, signal);
     selectedImageUrls.forEach(url => examinedImageUrls.add(url));
     images.forEach(url => examinedImageUrls.add(url));
-    if (images.length < 3) break;
+    if (images.length < RANDOM40_LOCAL_DECISION_IMAGES) break;
     decision = await classifyImages(images, true);
   }
   item.bodyImageScanComplete = item.bodyImageScanComplete ||
     Number(item.scannedThroughPage || 1) >= RANDOM40_ACCEPTED_BODY_SEARCH_MAX_PAGES ||
-    random40DecisionClearBodyCount(decision) >= 2;
+    random40DecisionClearBodyCount(decision) >= RANDOM40_LOCAL_REQUIRED_CLEAR_BODY_IMAGES;
 
   let qwenReviewed = false;
   if (String(decision?.decision || '').toLowerCase() === 'accept' && personalDecisionNeedsQwenReview(decision)) {
@@ -1545,7 +1554,7 @@ async function random40ClassifyReservoirItem(item, revision, signal) {
   return {
     accepted,
     decision,
-    imageUrls: exactImages.slice(0, 3),
+    imageUrls: exactImages.slice(0, RANDOM40_LOCAL_DECISION_IMAGES),
     qwenReviewed,
     reason: accepted
       ? String(decision?.reason || '')
@@ -1582,7 +1591,8 @@ function random40TrainAiHardSafe(decision = {}) {
   return ['accept', 'reject'].includes(decisionKind) &&
     (decisionKind !== 'accept' || decision?.hard_verified === true) &&
     !pendingReview && !gradeHardReject &&
-    grades.length >= 3 &&
+    grades.length >= RANDOM40_LOCAL_DECISION_IMAGES &&
+    random40DecisionClearBodyCount(decision) >= RANDOM40_LOCAL_REQUIRED_CLEAR_BODY_IMAGES &&
     checks.photograph !== false &&
     checks.female_presenting_adult === true &&
     checks.male_present === false && checks.male_only === false &&
@@ -1598,10 +1608,10 @@ function random40TrainAiCard(item = {}) {
   const decision = item?.local1Decision;
   const imageUrls = [...new Set((item?.local1DecisionImageUrls || decision?.candidateImageUrls || [])
     .map(url => normalizeUrl(url))
-    .filter(Boolean))].slice(0, 3);
+    .filter(Boolean))].slice(0, RANDOM40_LOCAL_DECISION_IMAGES);
   if (
     item?.local1DecisionRevision !== random40PreferenceRevision ||
-    imageUrls.length < 3 ||
+    imageUrls.length < RANDOM40_LOCAL_DECISION_IMAGES ||
     !random40TrainAiHardSafe(decision)
   ) return null;
   const artist = random40ReservoirArtistInfo(item.artistUrl);
@@ -3571,10 +3581,13 @@ function random40ReservoirProfilePageUrl(artistUrl, page) {
 function personalQwenReviewReasons(result = {}) {
   const derivedReasons = [];
   const reviewCodes = new Set(Array.isArray(result.qwen_review_codes) ? result.qwen_review_codes : []);
+  const ambiguousVisibleAge = result?.evidence?.face_available === true && (
+    result.checks?.age_ambiguous === true || result.age_assessment?.ambiguous === true
+  );
   if (reviewCodes.has('anatomy') || result.anatomy_assessment?.ambiguous === true) {
     derivedReasons.push('ambiguous visible attached anatomy versus toy or obscured content');
   }
-  if (reviewCodes.has('age') || result.checks?.age_ambiguous === true || result.age_assessment?.ambiguous === true) {
+  if (reviewCodes.has('age') || ambiguousVisibleAge) {
     derivedReasons.push('ambiguous visible age near a hard-filter boundary');
   }
   if (
@@ -3600,6 +3613,7 @@ function personalDecisionNeedsQwenReview(result = {}) {
   // Qwen is a narrow hard-filter verifier. It may verify an otherwise accepted
   // personal decision, but it must never rescue a personal/body rejection.
   if (String(result.decision || '').toLowerCase() !== 'accept') return false;
+  const ambiguousVisibleAge = result?.evidence?.face_available === true && result.checks?.age_ambiguous === true;
   return result.requires_qwen_review === true ||
     result.requiresQwenReview === true ||
     result.qwen_review_required === true ||
@@ -3607,7 +3621,7 @@ function personalDecisionNeedsQwenReview(result = {}) {
     result.requires_qwen_hard_check === true ||
     result.hard_review_required === true ||
     result.anatomy_assessment?.ambiguous === true ||
-    result.checks?.age_ambiguous === true ||
+    ambiguousVisibleAge ||
     result.ambiguity?.requires_qwen_review === true;
 }
 
@@ -4284,9 +4298,11 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
     };
   }
 
-  const personalCandidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))].slice(0, 3);
-  // Local1, Local2, Train AI, and Qwen receive the same three-image contract:
-  // profile/identity evidence plus up to two body-prioritized post images.
+  const personalCandidateUrls = [...new Set((payload.candidateImageUrls || []).map(url => normalizeUrl(url)).filter(Boolean))]
+    .slice(0, RANDOM40_LOCAL_DECISION_IMAGES);
+  // Local1, Local2, and Train AI receive one identity/profile image plus three
+  // independently body-prioritized images. Qwen remains a narrow verifier over
+  // the three most relevant hard-check images.
   const candidateUrls = personalCandidateUrls.slice(0, payload.hardCheckOnly ? 3 : QWEN_CANDIDATE_IMAGES);
   if (!personalCandidateUrls.length) throw new Error('No candidate image URLs supplied.');
 
