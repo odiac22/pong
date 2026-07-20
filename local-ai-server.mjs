@@ -4913,6 +4913,7 @@ function local2AbortableDelay(ms, signal) {
 
 function local2VideoPostUrls(html, artistUrl) {
   const urls = [...random40ReservoirVideoPostUrls(html, artistUrl)];
+  const fallbackUrls = [];
   const seen = new Set(urls.map(canonicalVideoPostKey).filter(Boolean));
   const posts = String(html || '').split(/<div[^>]+class=["'][^"']*\bpost\b[^>]*>/i).slice(1);
   for (const post of posts) {
@@ -4920,7 +4921,6 @@ function local2VideoPostUrls(html, artistUrl) {
     // Local2 accepts poster-bearing video cards; the legacy parser discarded
     // every card containing an <img>, even when it also contained a video.
     const videoEvidence = /<video\b|<source\b[^>]+(?:video\/|\.(?:mp4|m4v|webm))|\b(?:video|videos|clip|watch|footage|\d+\s*(?:min|mins|minutes))\b/i.test(card);
-    if (!videoEvidence) continue;
     const match = card.match(/class=["']view-post["'][^>]+href=["']([^"']+)/i) ||
       card.match(/href=["']([^"']+)["'][^>]+class=["']view-post["']/i);
     if (!match?.[1]) continue;
@@ -4929,10 +4929,13 @@ function local2VideoPostUrls(html, artistUrl) {
       const key = canonicalVideoPostKey(postUrl);
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      urls.push(postUrl);
+      // Listing cards do not reliably expose media type. Keep textual/video
+      // hints first, but resolve every post and let byte-level verification be
+      // the authority instead of silently discarding poster-bearing videos.
+      (videoEvidence ? urls : fallbackUrls).push(postUrl);
     } catch (_) {}
   }
-  return urls;
+  return [...urls, ...fallbackUrls];
 }
 
 function local2PipelineDecision(result = {}, fallbackImageUrls = []) {
