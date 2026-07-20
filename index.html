@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.12</div>
+  <div class="version-number">24.13</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2986,32 +2986,27 @@ function reorderAndRedisplayVideos(newOrder) {
   if (!DECK_MODE_ENABLED) videoContainer.scrollTo(0,0);
 }
 
-function isEromeScrubContext(options = {}) {
-  const meta = options.metadata || {};
-  const source = String(meta.source || options.source || '').toLowerCase();
-  const candidateUrl = String(
-    options.videoUrl ||
-    options.url ||
-    options.video?.currentSrc ||
-    options.video?.src ||
-    ''
-  );
+function getAdaptiveScrubSecondsPerScreen(duration) {
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
+  if (!safeDuration) return 0;
 
-  return source === 'erome' ||
-    /(?:erome\.mp4\?u=|erome\.com|v\d+\.erome\.com)/i.test(candidateUrl);
+  // A screen-width drag spans the complete duration of a short clip. Longer
+  // videos accelerate progressively, preserving fine control without forcing
+  // many repeated swipes to cross a long recording.
+  if (safeDuration <= 30) return safeDuration;
+  return Math.min(safeDuration, 30 * Math.pow(safeDuration / 30, 0.75));
 }
 
-function getAdaptiveScrubTime(startTime, dx, duration, width, options = {}) {
+function getAdaptiveScrubTime(startTime, dx, duration, width) {
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
   const safeWidth = Math.max(240, width || window.innerWidth || 360);
 
   if (!safeDuration) return Math.max(0, startTime + dx / 22);
 
   const dragRatio = dx / safeWidth;
-  const secondsPerScreen = isEromeScrubContext(options)
-    ? Math.min(Math.max(safeDuration, 90), 900)
-    : Math.min(Math.max(safeDuration * 0.18, 24), 210);
-  return Math.max(0, Math.min(safeDuration, startTime + dragRatio * secondsPerScreen));
+  const smoothRatio = Math.sign(dragRatio) * Math.pow(Math.abs(dragRatio), 1.08);
+  const secondsPerScreen = getAdaptiveScrubSecondsPerScreen(safeDuration);
+  return Math.max(0, Math.min(safeDuration, startTime + smoothRatio * secondsPerScreen));
 }
 
 function pauseOtherVideos(activeVideo) {
@@ -3178,6 +3173,7 @@ function playVideoCleanly(video) {
 }
 
 window.getAdaptiveScrubTime = getAdaptiveScrubTime;
+window.getAdaptiveScrubSecondsPerScreen = getAdaptiveScrubSecondsPerScreen;
 window.pauseOtherVideos = pauseOtherVideos;
 window.tuneVideoPreloadAround = tuneVideoPreloadAround;
 window.playVideoCleanly = playVideoCleanly;
@@ -4017,11 +4013,7 @@ function createVideoElements() {
       if (!isDeckSwipe && absX > 8 && absX > absY * 1.05) {
         isDragging = true;
         progressContainer.style.opacity = '1';
-        const newTime = getAdaptiveScrubTime(startTime, dx, video.duration || 0, wrapper.offsetWidth, {
-          metadata: videoMetadata[index],
-          videoUrl: url,
-          video
-        });
+        const newTime = getAdaptiveScrubTime(startTime, dx, video.duration || 0, wrapper.offsetWidth);
         wrapper.dataset.pendingTime = newTime;
         if (video.duration && !isNaN(newTime)) {
           let pf = wrapper.querySelector('.preview-fill');
