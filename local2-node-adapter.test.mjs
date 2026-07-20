@@ -110,9 +110,11 @@ test('candidate endpoint leases minimal DTO and ack accepts artist URL', async (
 
 test('learning sanitizes URL-only input and rotates only the Local2 revision', async () => {
   let learnedPayload = null;
+  let producerStarted = 0;
   const adapter = createLocal2NodeAdapter({
     workers: syntheticWorkers(),
     initialRevision: 'local2-r1',
+    producer: async () => { producerStarted++; },
     learn: async payload => {
       learnedPayload = payload;
       return { ok: true, learned: true, local2_revision: 'local2-r2' };
@@ -133,6 +135,8 @@ test('learning sanitizes URL-only input and rotates only the Local2 revision', a
         'data:image/jpeg;base64,not-allowed',
         'https://image.invalid/one.jpg'
       ],
+      app: 'pong-random40-local2-clean',
+      workflow: 'train-ai',
       rejectReasonLabel: 'Body'
     }
   });
@@ -140,7 +144,11 @@ test('learning sanitizes URL-only input and rotates only the Local2 revision', a
   assert.equal(learned.body.revision, 'local2-r2');
   assert.deepEqual(learnedPayload.imageUrls, ['https://image.invalid/one.jpg']);
   assert.equal(learnedPayload.mode, 'local2');
-  assert.equal(adapter.snapshot().cache.learningRevision, 'local2-r2');
+  assert.equal(learnedPayload.workflow, 'train-ai');
+  assert.equal(learnedPayload.app, 'pong-random40-local2-clean');
+  assert.equal(producerStarted, 0);
+  assert.equal(adapter.snapshot().active, false);
+  assert.equal(learned.body.revision, 'local2-r2');
   await adapter.stop();
 });
 

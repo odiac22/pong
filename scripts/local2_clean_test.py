@@ -91,6 +91,17 @@ class Local2PolicyTests(unittest.TestCase):
         self.assertEqual("review", result.decision)
         self.assertIn("anatomy", result.review_codes)
 
+    def test_low_taste_keeps_pending_hard_reviews_for_save_override(self) -> None:
+        result = self.policy.decide(
+            [
+                evidence(1, attached_anatomy=0.78, toy_or_prosthetic=0.03),
+                evidence(2),
+            ],
+            taste_probability=0.20,
+        )
+        self.assertEqual("personal_preference_mismatch", result.reason_code)
+        self.assertIn("anatomy", result.review_codes)
+
     def test_two_attached_anatomy_votes_reject(self) -> None:
         result = self.policy.decide(
             [
@@ -133,20 +144,29 @@ class Local2PolicyTests(unittest.TestCase):
         self.assertEqual("appears_over_60", result.reason_code)
         self.assertFalse(result.checks["underage_looking"])
 
-    def test_adult_safety_is_separate_from_over_60_preference(self) -> None:
+    def test_one_over_60_vote_requires_narrow_review(self) -> None:
+        result = self.policy.decide(
+            [evidence(1, over_60=0.86), evidence(2, face_clear=False)],
+            taste_probability=0.99,
+        )
+        self.assertEqual("review", result.decision)
+        self.assertIn("age-60", result.review_codes)
+
+    def test_underage_looking_signal_is_not_a_preference_filter(self) -> None:
         result = self.policy.decide(
             [evidence(1, adult_probability=0.0, adult_safety_risk=0.99), evidence(2)], taste_probability=0.99
         )
-        self.assertEqual("adult_safety_risk", result.reason_code)
+        self.assertEqual("accept", result.decision)
+        self.assertFalse(result.checks["underage_looking"])
 
-    def test_unclear_adult_evidence_fails_closed_to_review(self) -> None:
+    def test_unclear_young_age_evidence_does_not_request_review(self) -> None:
         rows = [
             evidence(index, adult_probability=0.10, adult_safety_risk=0.10, adult_safety_unclear=0.80)
             for index in (1, 2)
         ]
         result = self.policy.decide(rows, taste_probability=0.99)
-        self.assertEqual("review", result.decision)
-        self.assertIn("adult-safety", result.review_codes)
+        self.assertEqual("accept", result.decision)
+        self.assertNotIn("adult-safety", result.review_codes)
 
     def test_clear_adult_body_evidence_does_not_require_a_visible_face(self) -> None:
         result = self.policy.decide(
@@ -182,6 +202,7 @@ class NumericLearningTests(unittest.TestCase):
                 artist_identity="source/service/account",
                 label="accept",
                 reason_code="saved",
+                workflow="save",
                 feature_schema="test-encoder-v1",
                 descriptors=[evidence(1)],
                 views=[Local2NumericView(1, "body", np.asarray([0.2, 0.4, 0.6], dtype=np.float32))],
@@ -190,6 +211,10 @@ class NumericLearningTests(unittest.TestCase):
             self.assertEqual(64, len(artist_key))
             self.assertEqual(1, len(loaded))
             self.assertEqual((3,), loaded[0].views[0].vector.shape)
+            self.assertEqual(
+                ("accept", "saved", "save"),
+                store.feedback_for_identity("source/service/account")[:3],
+            )
             raw = store.connection.execute(
                 "SELECT artist_key, descriptor_json FROM local2_examples"
             ).fetchone()

@@ -451,8 +451,11 @@ export class Local2ContinuousPipeline {
   triaged(state, triage = {}) {
     if (!this.current(state)) return;
     state.triage = triage;
-    const hardReject = normalizedVerdict(triage.verdict || triage.decision) === 'reject' &&
-      triage.hardReject === true && Number(triage.confidence || 0) >= this.triageHardRejectConfidence;
+    const rejected = normalizedVerdict(triage.verdict || triage.decision) === 'reject';
+    const hardReject = rejected && (
+      triage.terminalReject === true ||
+      (triage.hardReject === true && Number(triage.confidence || 0) >= this.triageHardRejectConfidence)
+    );
     if (hardReject) {
       this.statsCounters.triageHardRejects++;
       this.reject(state, 'triage', triage.reason || 'high-confidence hard reject');

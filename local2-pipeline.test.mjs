@@ -226,6 +226,34 @@ test('only high-confidence hard triage rejects; uncertainty reaches full classif
   pipeline.stop();
 });
 
+test('terminal taste prefilter reject skips classification regardless of confidence scale', async () => {
+  let classifyCalls = 0;
+  const pipeline = new Local2ContinuousPipeline({
+    revision: 'local2-r1',
+    targetAccepted: 15,
+    readyMinimum: 1,
+    workers: {
+      profile: async candidate => ({ ...candidate }),
+      triage: async () => ({
+        verdict: 'reject',
+        terminalReject: true,
+        confidence: 0.51,
+        reason: 'personal_preference_mismatch'
+      }),
+      verify: async () => media(15),
+      classify: async () => {
+        classifyCalls++;
+        return hardSafeDecision();
+      }
+    }
+  });
+  pipeline.submit({ artistUrl: 'https://coomerfans.com/u/onlyfans/7/taste-reject' });
+  await waitFor(() => pipeline.stats().rejected === 1);
+  assert.equal(classifyCalls, 0);
+  assert.equal(pipeline.stats().counters.triageHardRejects, 1);
+  pipeline.stop();
+});
+
 test('definitive visual reject aborts concurrent media verification', async () => {
   let verificationAborted = false;
   const pipeline = new Local2ContinuousPipeline({

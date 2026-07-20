@@ -2,6 +2,9 @@
   "scripts": {
     "local-ai": "node local-ai-server.mjs",
     "benchmark:local1": "node scripts/benchmark-local1-exact.mjs",
+    "benchmark:local-buttons": "node scripts/benchmark-local-buttons.mjs",
+    "benchmark:feedback-memory": "python scripts\\benchmark-exact-feedback-memory.py",
+    "benchmark:local2:live-regressions": "node scripts/benchmark-local2-live-regressions.mjs",
     "benchmark:local2:offline": ".\\.pong-local-ai\\lora-venv\\Scripts\\python.exe scripts\\benchmark-local2-offline.py",
     "test:local2": "node --test local2-pipeline.test.mjs local2-node-adapter.test.mjs && .\\.pong-local-ai\\lora-venv\\Scripts\\python.exe scripts\\local2_clean_test.py && .\\.pong-local-ai\\lora-venv\\Scripts\\python.exe scripts\\local2_vision_adapter_test.py"
   },

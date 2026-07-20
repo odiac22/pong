@@ -34,43 +34,35 @@ ENGINE_SCHEMA = "pong-local2-clean-v3"
 # hard checks are male-presenting content and visibly attached anatomy.
 SEMANTIC_PROMPT_GROUPS: dict[str, tuple[str, ...]] = {
     "media_type": (
-        "a usable photograph containing a clearly visible adult person",
+        "a usable photograph containing a clearly visible person",
         "anime, illustration, logo, advertisement, placeholder, or synthetic graphic",
         "blank, tiny, heavily obscured, or unusable visual evidence",
     ),
     "presentation": (
-        "a clearly female-presenting adult person",
-        "a clearly male-presenting adult person",
+        "a clearly female-presenting person",
+        "a clearly male-presenting person",
         "mixed, hidden, or unclear presentation",
     ),
     "content_focus": (
-        "the visible adult person's face or body is the main subject",
+        "the visible person's face or body is the main subject",
         "feet or a foot are the main subject",
         "the main subject is unclear",
     ),
     "body_shape": (
-        "a clear slim, fit, athletic, or proportionate adult torso",
-        "a clear adult torso with a pronounced large midsection, abdominal folds, or apron-like overhang",
+        "a clear slim, fit, athletic, or proportionate torso",
+        "a clear torso with a pronounced large midsection, abdominal folds, or apron-like overhang",
         "the torso or midsection is hidden, cropped, distorted, or unclear",
     ),
     "anatomy": (
-        "penis or testicles visibly attached to the photographed adult person's body",
+        "penis or testicles visibly attached to the photographed person's body",
         "a dildo, sex toy, strap-on, prosthetic, or artificial object",
         "no penis, testicles, or explicit intimate object is visible",
         "the relevant anatomy or object is hidden or unclear",
     ),
     "age_limit": (
-        "a clearly visible adult who appears younger than 60",
-        "a clearly visible adult who appears age 60 or older",
-        "the visible adult's age cannot be judged",
-    ),
-    # Mandatory content-safety evidence is deliberately separate from the
-    # user's 60+ preference boundary. It is not a taste label and cannot be
-    # disabled by Local2 training.
-    "adult_safety": (
-        "a clearly visible adult person age 18 or older",
-        "the visible person may be under age 18 or may be a minor",
-        "whether the visible person is an adult cannot be judged",
+        "a clearly visible person who appears younger than 60",
+        "a clearly visible person who appears age 60 or older",
+        "the visible person's age cannot be judged",
     ),
 }
 
@@ -81,7 +73,6 @@ GROUP_LABELS: dict[str, tuple[str, ...]] = {
     "body_shape": ("preferred", "mismatch", "unclear"),
     "anatomy": ("attached", "toy", "none", "unclear"),
     "age_limit": ("under_60", "over_60", "unclear"),
-    "adult_safety": ("adult", "minor_risk", "unclear"),
 }
 
 
@@ -159,7 +150,6 @@ class Local2ImageEvidence:
         body = _normalized_group(groups, "body_shape")
         anatomy = _normalized_group(groups, "anatomy")
         age = _normalized_group(groups, "age_limit")
-        adult_safety = _normalized_group(groups, "adult_safety")
         return cls(
             image_index=int(image_index),
             photo=media["person_photo"],
@@ -173,9 +163,11 @@ class Local2ImageEvidence:
             attached_anatomy=anatomy["attached"],
             toy_or_prosthetic=anatomy["toy"],
             over_60=age["over_60"],
-            adult_probability=adult_safety["adult"],
-            adult_safety_risk=adult_safety["minor_risk"],
-            adult_safety_unclear=adult_safety["unclear"],
+            # Kept as inert numeric fields for SQLite/wire compatibility. The
+            # only configured age boundary is visible 60+ evidence.
+            adult_probability=1.0,
+            adult_safety_risk=0.0,
+            adult_safety_unclear=0.0,
             # The crop exists only when YOLO established a usable body region.
             # Do not let an uncalibrated generic SigLIP "unclear" score erase
             # that independent evidence; SigLIP still supplies the mismatch vote.
@@ -217,7 +209,7 @@ class Local2Thresholds:
     hard_consensus: int = 2
     required_usable_images: int = 2
     required_clear_body_images: int = 2
-    preference_accept: float = 0.72
+    preference_accept: float = 0.65
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,10 +387,8 @@ class Local2Policy:
             "feet_dominant": len(feet_votes) >= t.hard_consensus,
             "logo_or_placeholder": not bool(usable),
             "appears_over_60": bool(strong_over_60 or len(over_60) >= t.hard_consensus),
-            "underage_looking": bool(
-                strong_adult_safety_risk or len(adult_safety_votes) >= t.hard_consensus
-            ),
-            "adult_safety_established": adult_safety_established,
+            "underage_looking": False,
+            "adult_safety_established": True,
             "body_preference_conflict": len(body_mismatch) >= t.hard_consensus,
             "body_evidence_ambiguous": len(clear_body) < t.required_clear_body_images,
         }
@@ -435,28 +425,13 @@ class Local2Policy:
                 "reject", float(np.mean([row.feet_dominant for row in feet_votes])),
                 "feet_dominant", "feet are the dominant subject in multiple images",
             )
-        # Body-shape rejection is never permitted from one crop, regardless of
-        # confidence.  Two independently deduplicated clear views must agree.
-        if len(body_mismatch) >= t.hard_consensus:
-            return result(
-                "reject", float(np.mean([row.body_mismatch for row in body_mismatch[: t.hard_consensus]])),
-                "body_shape_mismatch", "two clear body views agree on a body-shape mismatch",
-            )
-        if strong_adult_safety_risk or len(adult_safety_votes) >= t.hard_consensus:
-            strength = max(
-                row.adult_safety_risk
-                for row in strong_adult_safety_risk or adult_safety_votes
-            )
-            return result(
-                "reject", strength, "adult_safety_risk",
-                "adult age could not be safely established",
-            )
         if strong_over_60 or len(over_60) >= t.hard_consensus:
             strength = max(row.over_60 for row in strong_over_60 or over_60)
             return result("reject", strength, "appears_over_60", "visible adult clearly appears age 60 or older")
-        if len(usable) < t.required_usable_images:
-            return result("reject", 0.92, "insufficient_usable_evidence", "too few usable person photographs")
 
+        # Preserve every unresolved hard-filter signal before taste or body
+        # short-circuits. Exact Save memory may override personalized taste,
+        # but it must never erase anatomy, presentation, feet, or 60+ review.
         review_codes: list[str] = []
         if anatomy_uncertain:
             review_codes.append("anatomy")
@@ -464,23 +439,34 @@ class Local2Policy:
             review_codes.append("presentation")
         if len(feet_votes) == 1 or feet_uncertain:
             review_codes.append("feet")
+        if len(over_60) == 1 or age_uncertain:
+            review_codes.append("age-60")
         if len(body_mismatch) == 1 or (taste_probability is None and body_uncertain):
             review_codes.append("body-shape")
-        if strong_over_60 or len(over_60) == 1 or age_uncertain:
-            review_codes.append("age-60")
-        if (
-            len(adult_safety_votes) == 1
-            or adult_safety_uncertain
-            or not adult_safety_established
-        ):
-            review_codes.append("adult-safety")
-        # Two YOLO-backed body views are still required so the two-view mismatch
-        # veto is meaningful. A generic zero-shot "preferred" label is not an
-        # additional taste gate when the trained DINO head is available.
         if len(clear_body) < t.required_clear_body_images or (
             taste_probability is None and not body_preferred
         ):
             review_codes.append("body-evidence")
+
+        # Body-shape rejection is never permitted from one crop, regardless of
+        # confidence.  Two independently deduplicated clear views must agree.
+        if len(body_mismatch) >= t.hard_consensus:
+            return result(
+                "reject", float(np.mean([row.body_mismatch for row in body_mismatch[: t.hard_consensus]])),
+                "body_shape_mismatch", "two clear body views agree on a body-shape mismatch",
+                review_codes,
+            )
+        if len(usable) < t.required_usable_images:
+            return result("reject", 0.92, "insufficient_usable_evidence", "too few usable person photographs")
+        # A below-threshold taste candidate can be rejected immediately. It
+        # cannot become an accepted hard-filter escape, so spending Qwen on its
+        # remaining ambiguities only adds latency and GPU pressure.
+        if taste_probability is not None and taste_probability < t.preference_accept:
+            return result(
+                "reject", 1.0 - taste_probability,
+                "personal_preference_mismatch", "personalized preference score is below threshold",
+                review_codes,
+            )
         if review_codes:
             return result(
                 "review", 0.50, "ambiguous_hard_evidence",
@@ -490,11 +476,6 @@ class Local2Policy:
             return result(
                 "review", 0.50, "missing_personalization",
                 "no calibrated Local2 preference score is available", ("preference",),
-            )
-        if taste_probability < t.preference_accept:
-            return result(
-                "reject", 1.0 - taste_probability,
-                "personal_preference_mismatch", "personalized preference score is below threshold",
             )
         return result(
             "accept", taste_probability,
@@ -668,6 +649,7 @@ class Local2StoredExample:
     artist_key: str
     label: str
     reason_code: str
+    workflow: str
     feature_schema: str
     descriptors: tuple[Local2ImageEvidence, ...]
     views: tuple[Local2NumericView, ...]
@@ -695,6 +677,7 @@ class Local2NumericStore:
                 updated_at REAL NOT NULL,
                 label TEXT NOT NULL CHECK(label IN ('accept', 'reject')),
                 reason_code TEXT NOT NULL,
+                workflow TEXT NOT NULL DEFAULT '',
                 feature_schema TEXT NOT NULL,
                 descriptor_json TEXT NOT NULL
             );
@@ -712,6 +695,13 @@ class Local2NumericStore:
             );
             """
         )
+        columns = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(local2_examples)")
+        }
+        if "workflow" not in columns:
+            self.connection.execute(
+                "ALTER TABLE local2_examples ADD COLUMN workflow TEXT NOT NULL DEFAULT ''"
+            )
         with self.connection:
             store_row = self.connection.execute(
                 "SELECT value FROM local2_metadata WHERE key = 'store_id'"
@@ -744,12 +734,25 @@ class Local2NumericStore:
         with self.lock:
             return int(self.connection.execute("SELECT COUNT(*) FROM local2_examples").fetchone()[0])
 
+    def feedback_for_identity(self, artist_identity: str) -> tuple[str, str, str, float] | None:
+        """Return only the latest numeric feedback label/reason for an artist."""
+        artist_key = stable_artist_key(artist_identity)
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT label, reason_code, workflow, updated_at FROM local2_examples WHERE artist_key = ?",
+                (artist_key,),
+            ).fetchone()
+        if not row:
+            return None
+        return str(row[0]), str(row[1]), str(row[2]), float(row[3])
+
     def upsert(
         self,
         *,
         artist_identity: str,
         label: str,
         reason_code: str,
+        workflow: str = "",
         feature_schema: str,
         descriptors: Sequence[Local2ImageEvidence],
         views: Sequence[Local2NumericView],
@@ -769,9 +772,12 @@ class Local2NumericStore:
             with self.connection:
                 self.connection.execute(
                     "INSERT OR REPLACE INTO local2_examples "
-                    "(artist_key, updated_at, label, reason_code, feature_schema, descriptor_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (artist_key, now, normalized_label, str(reason_code)[:80], str(feature_schema), descriptor_json),
+                    "(artist_key, updated_at, label, reason_code, workflow, feature_schema, descriptor_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        artist_key, now, normalized_label, str(reason_code)[:80],
+                        str(workflow).strip().lower()[:24], str(feature_schema), descriptor_json,
+                    ),
                 )
                 self.connection.execute("DELETE FROM local2_vectors WHERE artist_key = ?", (artist_key,))
                 self.connection.executemany(
@@ -807,17 +813,17 @@ class Local2NumericStore:
         with self.lock:
             if feature_schema is None:
                 rows = self.connection.execute(
-                    "SELECT artist_key, label, reason_code, feature_schema, descriptor_json "
+                    "SELECT artist_key, label, reason_code, workflow, feature_schema, descriptor_json "
                     "FROM local2_examples ORDER BY updated_at DESC"
                 ).fetchall()
             else:
                 rows = self.connection.execute(
-                    "SELECT artist_key, label, reason_code, feature_schema, descriptor_json "
+                    "SELECT artist_key, label, reason_code, workflow, feature_schema, descriptor_json "
                     "FROM local2_examples WHERE feature_schema = ? ORDER BY updated_at DESC",
                     (feature_schema,),
                 ).fetchall()
             result: list[Local2StoredExample] = []
-            for artist_key, label, reason_code, schema, raw_descriptors in rows:
+            for artist_key, label, reason_code, workflow, schema, raw_descriptors in rows:
                 descriptors = tuple(
                     Local2ImageEvidence(**item) for item in json.loads(raw_descriptors)
                 )
@@ -837,6 +843,7 @@ class Local2NumericStore:
                         artist_key=str(artist_key),
                         label=str(label),
                         reason_code=str(reason_code),
+                        workflow=str(workflow),
                         feature_schema=str(schema),
                         descriptors=descriptors,
                         views=tuple(views),

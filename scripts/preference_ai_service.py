@@ -19,6 +19,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ LEGACY_STORE_PATH = DATA_DIR / "learned-examples.json"
 IMAGE_DIR = DATA_DIR / "preference-images-v2"
 STATUS_PATH = DATA_DIR / "preference-service-status.json"
 MIGRATION_BACKUP_PATH = DATA_DIR / "preference-examples-v2.pre-feature-v3.json"
+TRAIN_AI_AUDIT_PATH = DATA_DIR / "train-ai-verdict-audit.jsonl"
 HOST = os.environ.get("PONG_PREFERENCE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("PONG_PREFERENCE_PORT", "8791"))
 LOCAL1_DINO = os.environ.get("PONG_LOCAL1_DINO_MODEL", "facebook/dinov2-base")
@@ -82,11 +84,11 @@ ANATOMY_PROMPTS = [
     "no penis, testicles, dildo, strap-on, or explicit intimate object is visible",
 ]
 AGE_PROMPTS = [
-    "the visible face clearly appears to be an adult approximately 18 to 35 years old",
-    "the visible face clearly appears to be an adult approximately 36 to 59 years old",
+    "the visible face clearly appears approximately 18 to 35 years old",
+    "the visible face clearly appears approximately 36 to 59 years old",
     "the visible face clearly appears to be age 60 or older",
-    "the visible face appears under 18 or could be a minor",
-    "age cannot be judged because the face is absent, hidden, cropped, or unclear",
+    "the visible face does not clearly appear age 60 or older",
+    "whether the visible face appears age 60 or older cannot be judged because it is absent, hidden, cropped, or unclear",
 ]
 BODY_REASON_PATTERN = r"fat|body|weight|midsection|obese|overweight|chubby|belly|stomach"
 FACE_REASON_PATTERN = r"ugly|face|unattractive"
@@ -118,7 +120,6 @@ ANATOMY_AMBIGUOUS_MIN = float(os.environ.get("PONG_ANATOMY_AMBIGUOUS_MIN", "0.50
 # requested 60+ upper-age preference. The new environment name wins while the
 # old one remains a transition fallback for existing launch configurations.
 AGE_OVER_50_MIN = float(os.environ.get("PONG_AGE_OVER_60_MIN", os.environ.get("PONG_AGE_OVER_50_MIN", "0.66")))
-AGE_UNDERAGE_MIN = float(os.environ.get("PONG_AGE_UNDERAGE_MIN", "0.72"))
 IMAGE_CACHE_MAX_ITEMS = max(8, int(os.environ.get("PONG_IMAGE_CACHE_MAX_ITEMS", "160")))
 IMAGE_CACHE_MAX_BYTES = max(16 * 1024 * 1024, int(os.environ.get("PONG_IMAGE_CACHE_MAX_BYTES", str(256 * 1024 * 1024))))
 IMAGE_DOWNLOAD_WORKERS = max(4, min(16, int(os.environ.get("PONG_IMAGE_DOWNLOAD_WORKERS", "12"))))
@@ -252,6 +253,58 @@ def artist_identity(raw: str) -> str:
         return ""
 
 
+TRAIN_AI_AUDIT_LOCK = threading.RLock()
+TRAIN_AI_AUDIT_CACHE: tuple[int, set[str]] = (-1, set())
+
+
+def train_ai_audited_identities() -> set[str]:
+    """Return timestamped Train AI identities without rereading an unchanged audit."""
+    global TRAIN_AI_AUDIT_CACHE
+    try:
+        modified = TRAIN_AI_AUDIT_PATH.stat().st_mtime_ns
+    except OSError:
+        return set()
+    with TRAIN_AI_AUDIT_LOCK:
+        if TRAIN_AI_AUDIT_CACHE[0] == modified:
+            return set(TRAIN_AI_AUDIT_CACHE[1])
+        identities: set[str] = set()
+        try:
+            with TRAIN_AI_AUDIT_PATH.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(record, dict) or not record.get("auditedAt"):
+                        continue
+                    identity = artist_identity(record.get("artistUrl", ""))
+                    if identity:
+                        identities.add(identity)
+        except OSError:
+            identities = set()
+        TRAIN_AI_AUDIT_CACHE = (modified, identities)
+        return set(identities)
+
+
+def is_direct_feedback_record(record: dict[str, Any], audited: set[str] | None = None) -> bool:
+    """Separate exact Random40 Save/Red-X memory from Train AI supervision."""
+    workflow = str(record.get("workflow", "")).strip().lower()
+    if workflow == "train-ai":
+        return False
+    if workflow in {"save", "red-x"}:
+        return True
+    identity = artist_identity(record.get("artistUrl", ""))
+    return bool(identity and identity not in (audited if audited is not None else train_ai_audited_identities()))
+
+
+def feedback_timestamp(record: dict[str, Any]) -> float:
+    try:
+        value = str(record.get("learnedAt") or record.get("acceptedAt") or record.get("rejectedAt") or "")
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def thawed_cache_value(value: Any) -> Any:
     """Return an isolated mutable copy of a cached inference result."""
     if isinstance(value, np.ndarray):
@@ -304,9 +357,75 @@ class Store:
             "CREATE TABLE IF NOT EXISTS preference_records ("
             "artist_url TEXT PRIMARY KEY, updated_at REAL NOT NULL, record_json TEXT NOT NULL)"
         )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS exact_direct_feedback ("
+            "artist_identity TEXT PRIMARY KEY, updated_at REAL NOT NULL, "
+            "label TEXT NOT NULL CHECK(label IN ('accept', 'reject')), "
+            "reason TEXT NOT NULL, source TEXT NOT NULL)"
+        )
         self.db.commit()
         self.value = self._load()
+        self._backfill_exact_feedback()
         self.revision = 0
+
+    def _backfill_exact_feedback(self) -> None:
+        """Seed the dedicated exact store from direct legacy rows once."""
+        audited = train_ai_audited_identities()
+        rows = []
+        for record in self.value.get("records", []):
+            if not isinstance(record, dict) or not is_direct_feedback_record(record, audited):
+                continue
+            identity = artist_identity(record.get("artistUrl", ""))
+            label = str(record.get("label", "")).strip().lower()
+            if not identity or label not in {"accept", "reject"}:
+                continue
+            rows.append((
+                identity,
+                feedback_timestamp(record) or time.time(),
+                label,
+                str(record.get("rejectReason") or record.get("rejectReasonLabel") or "")[:80],
+                "shared-random40-backfill",
+            ))
+        if rows:
+            with self.db:
+                self.db.executemany(
+                    "INSERT OR IGNORE INTO exact_direct_feedback "
+                    "(artist_identity, updated_at, label, reason, source) VALUES (?, ?, ?, ?, ?)",
+                    rows,
+                )
+
+    def exact_feedback_for_identity(self, identity: str) -> dict[str, Any] | None:
+        normalized = str(identity or "").strip().lower()
+        if not normalized:
+            return None
+        with self.lock:
+            row = self.db.execute(
+                "SELECT label, reason, source, updated_at FROM exact_direct_feedback WHERE artist_identity = ?",
+                (normalized,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "label": str(row[0]), "reason": str(row[1]), "source": str(row[2]),
+            "updated_at": float(row[3]),
+        }
+
+    def upsert_exact_feedback(
+        self, *, identity: str, label: str, reason: str = "", source: str = "direct"
+    ) -> None:
+        normalized_identity = str(identity or "").strip().lower()
+        normalized_label = str(label or "").strip().lower()
+        if not normalized_identity or normalized_label not in {"accept", "reject"}:
+            raise ValueError("exact direct feedback requires identity and accept/reject label")
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO exact_direct_feedback "
+                "(artist_identity, updated_at, label, reason, source) VALUES (?, ?, ?, ?, ?)",
+                (
+                    normalized_identity, time.time(), normalized_label,
+                    str(reason or "")[:80], str(source or "direct")[:40],
+                ),
+            )
 
     def _load(self) -> dict[str, Any]:
         rows = self.db.execute(
@@ -410,6 +529,18 @@ class Store:
                 "SELECT artist_url FROM preference_records ORDER BY updated_at DESC LIMIT ?)",
                 (MAX_RECORDS,),
             )
+            workflow = str(record.get("workflow", "")).strip().lower()
+            label = str(record.get("label", "")).strip().lower()
+            if identity and workflow in {"save", "red-x"} and label in {"accept", "reject"}:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO exact_direct_feedback "
+                    "(artist_identity, updated_at, label, reason, source) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        identity, time.time(), label,
+                        str(record.get("rejectReason") or record.get("rejectReasonLabel") or "")[:80],
+                        "shared-random40",
+                    ),
+                )
             self.db.commit()
             self.revision += 1
         invalidate_model_cache()
@@ -960,6 +1091,57 @@ def local2_clean_revision() -> str:
         f"{local2_clean_store().revision_token}:"
         f"legacy-{SERVICE_INSTANCE_ID}-{STORE.revision}"
     )
+
+
+def local2_known_feedback(artist_url: str) -> dict[str, str] | None:
+    """Resolve exact Save/Red-X memory before doing any candidate image I/O."""
+    identity = artist_identity(artist_url)
+    if not identity:
+        return None
+    audited = train_ai_audited_identities()
+    candidates: list[tuple[float, dict[str, str]]] = []
+    exact = STORE.exact_feedback_for_identity(identity)
+    if exact:
+        candidates.append((
+            float(exact.get("updated_at") or 0.0),
+            {
+                "label": str(exact["label"]),
+                "reason": str(exact["reason"]),
+                "source": str(exact["source"]),
+            },
+        ))
+    # Shared browser timestamps are consulted only for pre-migration fallback.
+    # Once the server-timestamped exact row exists, a skewed phone clock must
+    # never outrank a later direct action.
+    if not exact:
+        for record in STORE.records():
+            if artist_identity(record.get("artistUrl", "")) != identity:
+                continue
+            if is_direct_feedback_record(record, audited):
+                label = str(record.get("label", "")).strip().lower()
+                if label in {"accept", "reject"}:
+                    reason = str(record.get("rejectReason") or record.get("rejectReasonLabel") or "")[:80]
+                    candidates.append((
+                        feedback_timestamp(record),
+                        {"label": label, "reason": reason, "source": "shared-random40"},
+                    ))
+            break
+    numeric = local2_clean_store().feedback_for_identity(identity)
+    if numeric:
+        label, reason, workflow, updated_at = numeric
+        workflow = workflow.strip().lower()
+        if workflow != "train-ai" and (workflow or identity not in audited):
+            candidates.append((
+                updated_at,
+                {"label": label, "reason": reason, "source": "local2-numeric"},
+            ))
+    if not candidates:
+        return None
+    # Whichever button supplied the newest direct action wins across the legacy
+    # shared store and clean Local2's URL-free numeric store.
+    return max(candidates, key=lambda item: item[0])[1]
+
+
 INFERENCE_LIMIT = max(1, min(6, int(os.environ.get("PONG_PREFERENCE_AI_CONCURRENCY", "4"))))
 INFERENCE_SEMAPHORE = threading.BoundedSemaphore(INFERENCE_LIMIT)
 CLASSIFY_ADMISSION_SEMAPHORE = threading.BoundedSemaphore(CLASSIFY_ADMISSION_LIMIT)
@@ -1405,50 +1587,36 @@ def anatomy_assessment(analysis: dict[str, Any]) -> dict[str, Any]:
 
 
 def age_assessment(analysis: dict[str, Any]) -> dict[str, Any]:
-    """Conservative visible-age gate; absent faces produce no veto or review."""
+    """Conservative visible-60+ gate; absent faces produce no veto or review."""
     scores = analysis.get("ageScores")
     clear_faces = analysis.get("clearFaceByImage") or []
     if scores is None:
         scores = np.zeros((0, len(AGE_PROMPTS)), dtype=np.float32)
     per_image: list[dict[str, Any]] = []
     over_evidence: list[int] = []
-    underage_evidence: list[int] = []
     ambiguous_evidence: list[int] = []
     over_score = 0.0
-    underage_score = 0.0
     for index in range(len(scores)):
-        young_adult, middle_adult, over_50, underage, unclear = [float(value) for value in scores[index]]
+        young_adult, middle_adult, over_50, not_over_60, unclear = [float(value) for value in scores[index]]
         face_clear = bool(index < len(clear_faces) and clear_faces[index])
         over_score = max(over_score, over_50 if face_clear else 0.0)
-        underage_score = max(underage_score, underage if face_clear else 0.0)
-        adult_peak = max(young_adult, middle_adult)
+        younger_peak = max(young_adult, middle_adult, not_over_60)
         clear_over = bool(
             face_clear
             and over_50 >= AGE_OVER_50_MIN
-            and over_50 >= adult_peak + 0.18
+            and over_50 >= younger_peak + 0.18
             and over_50 >= unclear + 0.15
-        )
-        clear_underage = bool(
-            face_clear
-            and underage >= AGE_UNDERAGE_MIN
-            and underage >= adult_peak + 0.24
-            and underage >= unclear + 0.18
         )
         ambiguous = bool(
             face_clear
             and not clear_over
-            and not clear_underage
             and unclear < 0.55
-            and (
-                (over_50 >= 0.40 and over_50 >= adult_peak - 0.06)
-                or (underage >= 0.44 and underage >= adult_peak - 0.06)
-            )
+            and over_50 >= 0.40
+            and over_50 >= younger_peak - 0.06
         )
         image_number = index + 1
         if clear_over:
             over_evidence.append(image_number)
-        if clear_underage:
-            underage_evidence.append(image_number)
         if ambiguous:
             ambiguous_evidence.append(image_number)
         per_image.append({
@@ -1460,22 +1628,22 @@ def age_assessment(analysis: dict[str, Any]) -> dict[str, Any]:
             # Legacy aliases retained for the Local1/browser wire contract.
             "adult_36_49_score": middle_adult,
             "over_50_score": over_50,
-            "underage_score": underage,
+            "underage_score": 0.0,
             "unclear_score": unclear,
             "appears_over_60": clear_over,
             "appears_over_50": clear_over,
-            "appears_underage": clear_underage,
+            "appears_underage": False,
             "ambiguous": ambiguous,
         })
     return {
         "appears_over_60": True if over_evidence else (None if ambiguous_evidence else False),
         "appears_over_50": True if over_evidence else (None if ambiguous_evidence else False),
-        "appears_underage": True if underage_evidence else (None if ambiguous_evidence else False),
+        "appears_underage": False,
         "ambiguous": bool(ambiguous_evidence),
         "over_60_score": over_score,
         "over_50_score": over_score,
-        "underage_score": underage_score,
-        "evidence_images": sorted(set(over_evidence + underage_evidence + ambiguous_evidence)),
+        "underage_score": 0.0,
+        "evidence_images": sorted(set(over_evidence + ambiguous_evidence)),
         "per_image": per_image,
         "no_face_allowed": not any(clear_faces),
     }
@@ -1488,6 +1656,22 @@ def hard_checks(
     body_scores = analysis.get("bodyScores")
     anatomy = anatomy_assessment(analysis)
     age = age_assessment(analysis)
+    # User preference has only one age boundary: visibly 60+. Do not reject or
+    # review a candidate merely for looking young or for an unresolved age.
+    age = {
+        **age,
+        "appears_underage": False,
+        "ambiguous": False,
+        "evidence_images": [
+            int(item.get("image_index", 0))
+            for item in age.get("per_image", [])
+            if item.get("appears_over_60") is True and int(item.get("image_index", 0)) > 0
+        ],
+        "per_image": [
+            {**item, "appears_underage": False, "ambiguous": False}
+            for item in age.get("per_image", [])
+        ],
+    }
     anatomy_by_image = {
         int(item.get("image_index", 0)): item for item in anatomy.get("per_image", [])
     }
@@ -1536,9 +1720,9 @@ def hard_checks(
             "gender_presentation_material_male": material_male_ambiguity,
             "female_presenting_adult": female_presentation_clear,
             "appears_over_50": visible_age.get("appears_over_50", False),
-            "appears_underage": visible_age.get("appears_underage", False),
-            "underage_looking": visible_age.get("appears_underage", False),
-            "age_ambiguous": visible_age.get("ambiguous", False),
+            "appears_underage": False,
+            "underage_looking": False,
+            "age_ambiguous": False,
             "feet_dominant": bool(feet > 0.38 and feet > person),
             "logo_or_placeholder": bool(logo > 0.38 and logo > person),
             "attached_male_anatomy": visible_anatomy.get("attached_male_anatomy", False),
@@ -1553,8 +1737,6 @@ def hard_checks(
             grade_reasons.append("feet are the main subject")
         if checks["attached_male_anatomy"]:
             grade_reasons.append("visible attached anatomy conflicts with the requested visual filter")
-        if checks["appears_underage"]:
-            grade_reasons.append("visible person appears underage")
         if checks["appears_over_50"]:
             grade_reasons.append("visible person clearly appears over the age limit")
         grade_reason = "; ".join(grade_reasons)
@@ -1562,7 +1744,7 @@ def hard_checks(
             hard_reason = grade_reason
         grades.append({
             "image_index": index + 1,
-            "decision": "reject" if checks["male_present"] or checks["feet_dominant"] or checks["logo_or_placeholder"] or checks["attached_male_anatomy"] or checks["appears_underage"] or checks["appears_over_50"] else "unsure",
+            "decision": "reject" if checks["male_present"] or checks["feet_dominant"] or checks["logo_or_placeholder"] or checks["attached_male_anatomy"] or checks["appears_over_50"] else "unsure",
             "confidence": float(min(0.99, max(row))),
             "reason": grade_reason or "visual evidence checked",
             "checks": checks,
@@ -1603,9 +1785,9 @@ def hard_checks(
         ],
         "female_presenting_adult": any(g["checks"]["female_presenting_adult"] for g in grades),
         "appears_over_50": age["appears_over_50"],
-        "appears_underage": age["appears_underage"],
-        "underage_looking": age["appears_underage"],
-        "age_ambiguous": age["ambiguous"],
+        "appears_underage": False,
+        "underage_looking": False,
+        "age_ambiguous": False,
         "feet_dominant": any(g["checks"]["feet_dominant"] for g in grades),
         "logo_or_placeholder": all_logo,
         "attached_male_anatomy": anatomy["attached_male_anatomy"],
@@ -1940,7 +2122,7 @@ def classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
             fast_analysis["feature"], variant, r"logo|placeholder|blank|anime|illustration|non[- ]?photo"
         ),
         "age_reject": reason_probability(
-            fast_analysis["feature"], variant, r"underage|minor|too\s+young|over\s*(?:50|60)|too\s+old"
+            fast_analysis["feature"], variant, r"over\s*(?:50|60)|too\s+old"
         ),
         "anatomy_reject": reason_probability(
             fast_analysis["feature"], variant, r"penis|testicles|attached\s+anatomy|anatomy\s+conflict"
@@ -2268,9 +2450,6 @@ def local2_clean_review_metadata(review_codes: Sequence[str]) -> tuple[list[str]
         elif code == "age-60":
             normalized_codes.append("age")
             reasons.append("visible age near the 60+ preference boundary is unresolved")
-        elif code == "adult-safety":
-            normalized_codes.append("adult-safety")
-            reasons.append("adult age safety is not explicitly established")
         elif code == "preference":
             normalized_codes.append("preference")
             reasons.append("personalized Local2 preference evidence is unavailable")
@@ -2287,6 +2466,32 @@ def local2_clean_classify(payload: dict[str, Any]) -> dict[str, Any]:
 
 def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
     stage = str(payload.get("stage", "full")).strip().lower()
+    artist = payload.get("artist") or {}
+    known_feedback = local2_known_feedback(normalize_url(artist.get("artistUrl", "")))
+    if known_feedback and known_feedback["label"] == "reject":
+        return {
+            "decision": "reject",
+            "confidence": 0.999,
+            "reason_code": "exact_red_x_memory",
+            "reason": f"exact Red-X memory: {known_feedback['reason'] or 'reject'}"[:140],
+            "source": LOCAL2_CLEAN_SCHEMA,
+            "vision_source": LOCAL2_CLEAN_SCHEMA,
+            "variant": "local2",
+            "hard_verified": False,
+            "requires_second_stage": False,
+            "requires_qwen_review": False,
+            "terminal_personal_reject": True,
+            "review_codes": [],
+            "qwen_review_codes": [],
+            "qwen_review_reasons": [],
+            "checks": {},
+            "evidence": {"images": 0, "clear_body_images": 0, "preferred_body_images": 0},
+            "image_grades": [],
+            "candidateImageUrls": [],
+            "hard_check_image_urls": [],
+            "known_feedback": known_feedback,
+            "local2_revision": local2_clean_revision(),
+        }
     maximum = 6 if stage == "triage" else MAX_LOCAL2_IMAGES
     urls = list(dict.fromkeys(
         normalize_url(value)
@@ -2298,19 +2503,65 @@ def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("No usable Local2 candidate images")
     adapter = local2_clean_adapter()
     with INFERENCE_SEMAPHORE:
-        analysis = adapter.analyze(
-            images,
-            image_urls=used_urls,
-            include_taste=stage != "triage",
-        )
-        result = adapter.classify_analysis(analysis, hard_only=stage == "triage")
+        if stage == "triage":
+            analysis = adapter.analyze(
+                images,
+                image_urls=used_urls,
+                include_taste=False,
+            )
+            result = adapter.classify_analysis(analysis, hard_only=True)
+        else:
+            # Clean Local2 runs YOLO + DINO-small first. Clear non-saved taste
+            # misses stop before SigLIP; candidates near the boundary and exact
+            # Saves reuse those same prepared views/vectors for all hard checks.
+            result = adapter.classify_staged(
+                images,
+                image_urls=used_urls,
+                known_accept=bool(
+                    known_feedback and known_feedback["label"] == "accept"
+                ),
+            )
+
+    if known_feedback and known_feedback["label"] == "accept" and stage != "triage":
+        review_codes = [
+            code for code in (result.get("review_codes") or [])
+            if code not in {"body-shape", "body-evidence", "preference"}
+        ]
+        reason_code = str(result.get("reason_code", ""))
+        if reason_code in {"body_shape_mismatch", "personal_preference_mismatch"}:
+            result.update({
+                "decision": "accept" if not review_codes else "review",
+                "confidence": 0.999 if not review_codes else 0.5,
+                "reason_code": "exact_save_memory",
+                "reason": "exact Save memory overrides learned taste/body mismatch",
+                "hard_verified": not bool(review_codes),
+                "requires_second_stage": bool(review_codes),
+                "requires_qwen_review": bool(review_codes),
+            })
+        elif str(result.get("decision", "")) == "review":
+            result.update({
+                "decision": "accept" if not review_codes else "review",
+                "confidence": 0.999 if not review_codes else 0.5,
+                "reason_code": "exact_save_memory" if not review_codes else result.get("reason_code"),
+                "reason": "exact Save memory passed all remaining hard checks" if not review_codes else result.get("reason"),
+                "hard_verified": not bool(review_codes),
+                "requires_second_stage": bool(review_codes),
+                "requires_qwen_review": bool(review_codes),
+            })
+        result["review_codes"] = review_codes
+        checks = dict(result.get("checks") or {})
+        checks["body_preference_conflict"] = False
+        checks["body_evidence_ambiguous"] = False
+        result["checks"] = checks
+        result["preference_probability"] = 1.0
+        result["known_feedback"] = known_feedback
 
     review_codes, review_reasons = local2_clean_review_metadata(result.get("review_codes") or [])
     checks = dict(result.get("checks") or {})
     # Compatibility aliases are confined to the Local2 response boundary. The
-    # clean engine itself exposes a truthful 60+ field and separate adult safety.
+    # clean engine's only configured visible-age boundary is 60+.
     checks["appears_over_50"] = checks.get("appears_over_60")
-    checks["age_ambiguous"] = any(code in {"age", "adult-safety"} for code in review_codes)
+    checks["age_ambiguous"] = any(code == "age" for code in review_codes)
     checks["anatomy_ambiguous"] = "anatomy" in review_codes
     checks["body_evidence_ambiguous"] = any(code == "body" for code in review_codes)
     checks.setdefault("toy_or_dildo", False)
@@ -2323,7 +2574,7 @@ def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
             float((grades[index].get("scores") or {}).get(name, 0.0))
             for name in (
                 "male_presentation", "attached_anatomy", "feet_dominant",
-                "body_mismatch", "over_60", "adult_safety_risk",
+                "body_mismatch", "over_60",
             )
         ),
         reverse=True,
@@ -2384,12 +2635,21 @@ def local2_clean_learn(payload: dict[str, Any]) -> dict[str, Any]:
         payload.get("rejectReason") or payload.get("rejectReasonLabel") or
         ("saved" if label == "accept" else "reject")
     ).strip().lower()[:80]
+    workflow = str(payload.get("workflow", "")).strip().lower()[:24]
     learned = adapter.learn_numeric(
         artist_identity=identity,
         label=label,
         reason_code=reason_code,
+        workflow=workflow,
         analysis=analysis,
     )
+    if workflow in {"save", "red-x"}:
+        STORE.upsert_exact_feedback(
+            identity=identity,
+            label=label,
+            reason=reason_code,
+            source="local2-numeric",
+        )
     revision = local2_clean_revision()
     return {
         **learned,
@@ -2543,6 +2803,9 @@ def learn(payload: dict[str, Any]) -> dict[str, Any]:
         "artistUrl": artist_url,
         "artistName": str(artist.get("artistName", ""))[:120],
         "label": label,
+        "app": str(payload.get("app", ""))[:80],
+        "mode": str(payload.get("mode") or payload.get("localVariant") or "")[:20],
+        "workflow": str(payload.get("workflow", ""))[:24],
         "rejectReason": str(payload.get("rejectReason", ""))[:40],
         "rejectReasonLabel": str(payload.get("rejectReasonLabel", ""))[:80],
         "learnedAt": now_iso(),
@@ -2579,11 +2842,16 @@ def learn(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def examples() -> dict[str, Any]:
+    audited = train_ai_audited_identities()
     records = [
         {
             "artistUrl": r.get("artistUrl", ""),
             "artistName": r.get("artistName", ""),
             "label": r.get("label", ""),
+            "app": r.get("app", ""),
+            "mode": r.get("mode", ""),
+            "workflow": r.get("workflow", ""),
+            "exactFeedback": is_direct_feedback_record(r, audited),
             "rejectReason": r.get("rejectReason", ""),
             "rejectReasonLabel": r.get("rejectReasonLabel", ""),
             "learnedAt": r.get("learnedAt", ""),

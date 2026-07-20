@@ -6,7 +6,11 @@
       "name": "kaylapeach90",
       "artistUrl": "https://coomerfans.com/u/onlyfans/288990/kaylapeach90",
       "expectedDecision": "reject",
-      "expectedReason": "body_shape_mismatch"
+      "expectedReason": "body_shape_mismatch",
+      "acceptableReasons": [
+        "body_shape_mismatch",
+        "personal_preference_mismatch"
+      ]
     },
     {
       "name": "fitbryceadams",

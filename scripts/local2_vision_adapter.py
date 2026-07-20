@@ -33,6 +33,7 @@ from local2_clean import (
 
 DEFAULT_FEATURE_SCHEMA = "facebook-dinov2-small/local2-clean-full-body-face-v2"
 MAX_LOCAL2_IMAGES = 12
+TASTE_PREFILTER_REJECT = 0.55
 HARD_ONLY_REASON = re.compile(
     r"\b(?:male|man|men|trans|transgender|feet|foot|logo|placeholder|anime|"
     r"illustration|advertisement|age|over\s*60|too\s*old|penis|testicles|"
@@ -109,6 +110,24 @@ class Local2AnalysisBundle:
     descriptors: tuple[Local2ImageEvidence, ...]
     numeric_views: tuple[Local2NumericView, ...]
     artist_feature: np.ndarray
+    feature_schema: str
+
+
+@dataclass(frozen=True, slots=True)
+class Local2PreparedViews:
+    """YOLO crops and DINO-small vectors prepared before expensive semantics."""
+
+    selected_images: tuple[Any, ...]
+    selected_urls: tuple[str, ...]
+    full_images: tuple[Any, ...]
+    body_images: tuple[Any, ...]
+    lower_images: tuple[Any, ...]
+    face_images: tuple[Any, ...]
+    body_visible: tuple[bool, ...]
+    lower_visible: tuple[bool, ...]
+    face_visible: tuple[bool, ...]
+    numeric_views: tuple[Local2NumericView, ...]
+    prefilter_feature: np.ndarray
     feature_schema: str
 
 
@@ -277,23 +296,25 @@ class Local2VisionAdapter:
         }
 
     @staticmethod
-    def _artist_feature(
-        descriptors: Sequence[Local2ImageEvidence], views: Sequence[Local2NumericView]
+    def _artist_feature_for_indices(
+        views: Sequence[Local2NumericView],
+        *,
+        body_indices: set[int],
+        face_indices: set[int],
     ) -> np.ndarray:
         if not views:
             raise ValueError("Local2 DINO encoder returned no numeric views")
         dimension = len(views[0].vector)
         if any(len(view.vector) != dimension for view in views):
             raise ValueError("Local2 DINO view dimensions do not match")
-        descriptor_by_index = {item.image_index: item for item in descriptors}
         full = [view.vector for view in views if view.view_kind == "full"]
         body = [
             view.vector for view in views
-            if view.view_kind == "body" and descriptor_by_index[view.image_index].body_clear
+            if view.view_kind == "body" and view.image_index in body_indices
         ]
         face = [
             view.vector for view in views
-            if view.view_kind == "face" and descriptor_by_index[view.image_index].face_clear
+            if view.view_kind == "face" and view.image_index in face_indices
         ]
         return np.concatenate(
             [
@@ -304,13 +325,25 @@ class Local2VisionAdapter:
             ]
         ).astype(np.float32)
 
-    def analyze(
+    @classmethod
+    def _artist_feature(
+        cls, descriptors: Sequence[Local2ImageEvidence], views: Sequence[Local2NumericView]
+    ) -> np.ndarray:
+        return cls._artist_feature_for_indices(
+            views,
+            body_indices={item.image_index for item in descriptors if item.body_clear},
+            face_indices={item.image_index for item in descriptors if item.face_clear},
+        )
+
+    def prepare_taste(
         self,
         images: Sequence[Any],
         *,
         image_urls: Sequence[str] | None = None,
         include_taste: bool = True,
-    ) -> Local2AnalysisBundle:
+    ) -> Local2PreparedViews:
+        """Run YOLO once and optionally DINO-small once, without invoking SigLIP."""
+
         selected = list(images[: self.max_images])
         if len(selected) < 1:
             raise ValueError("Local2 requires at least one in-memory image")
@@ -347,14 +380,68 @@ class Local2VisionAdapter:
             lower_visible.append(lower is not None)
             face_visible.append(face is not None)
 
-        count = len(selected)
-        semantic_views = full_images + body_images + lower_images + face_images
+        numeric_views: list[Local2NumericView] = []
+        if include_taste:
+            # Lower-torso views are semantic hard-filter evidence only. Encoding
+            # full/body/face here makes the cheap taste decision available before
+            # SigLIP while preserving the production artist-feature dimensions.
+            count = len(selected)
+            taste_views = full_images + body_images + face_images
+            encoded = [
+                np.asarray(value, dtype=np.float32).reshape(-1)
+                for value in self.feature_encoder(taste_views)
+            ]
+            if len(encoded) != len(taste_views):
+                raise ValueError("Local2 DINO encoder returned a mismatched result count")
+            for index in range(count):
+                image_index = index + 1
+                numeric_views.append(Local2NumericView(image_index, "full", encoded[index]))
+                if body_visible[index]:
+                    numeric_views.append(Local2NumericView(image_index, "body", encoded[count + index]))
+                if face_visible[index]:
+                    numeric_views.append(Local2NumericView(image_index, "face", encoded[count * 2 + index]))
+            prefilter_feature = self._artist_feature_for_indices(
+                numeric_views,
+                body_indices={index + 1 for index, visible in enumerate(body_visible) if visible},
+                face_indices={index + 1 for index, visible in enumerate(face_visible) if visible},
+            )
+        else:
+            prefilter_feature = np.zeros(0, dtype=np.float32)
+
+        return Local2PreparedViews(
+            selected_images=tuple(selected),
+            selected_urls=tuple(selected_urls),
+            full_images=tuple(full_images),
+            body_images=tuple(body_images),
+            lower_images=tuple(lower_images),
+            face_images=tuple(face_images),
+            body_visible=tuple(body_visible),
+            lower_visible=tuple(lower_visible),
+            face_visible=tuple(face_visible),
+            numeric_views=tuple(numeric_views),
+            prefilter_feature=prefilter_feature,
+            feature_schema=self.feature_schema,
+        )
+
+    def analyze_prepared(
+        self,
+        prepared: Local2PreparedViews,
+        *,
+        include_taste: bool = True,
+    ) -> Local2AnalysisBundle:
+        """Add grouped SigLIP evidence without repeating YOLO or DINO-small."""
+
+        count = len(prepared.selected_images)
+        semantic_views = (
+            list(prepared.full_images) + list(prepared.body_images) +
+            list(prepared.lower_images) + list(prepared.face_images)
+        )
         semantic_cache_keys = (
-            [f"{ENGINE_SCHEMA}:{url}:full" for url in selected_urls] +
-            [f"{ENGINE_SCHEMA}:{url}:body" for url in selected_urls] +
-            [f"{ENGINE_SCHEMA}:{url}:lower" for url in selected_urls] +
-            [f"{ENGINE_SCHEMA}:{url}:face" for url in selected_urls]
-        ) if selected_urls else None
+            [f"{ENGINE_SCHEMA}:{url}:full" for url in prepared.selected_urls] +
+            [f"{ENGINE_SCHEMA}:{url}:body" for url in prepared.selected_urls] +
+            [f"{ENGINE_SCHEMA}:{url}:lower" for url in prepared.selected_urls] +
+            [f"{ENGINE_SCHEMA}:{url}:face" for url in prepared.selected_urls]
+        ) if prepared.selected_urls else None
         grouped_raw = (
             self.group_scorer(semantic_views, cache_keys=semantic_cache_keys)
             if isinstance(self.group_scorer, RuntimeSiglipGroupedScorer)
@@ -370,45 +457,41 @@ class Local2VisionAdapter:
                 "body_shape": self._group_row(grouped, "body_shape", count + index),
                 "anatomy": self._group_row(grouped, "anatomy", count * 2 + index),
                 "age_limit": self._group_row(grouped, "age_limit", count * 3 + index),
-                "adult_safety": self._group_row(grouped, "adult_safety", count * 3 + index),
             }
             descriptors.append(
                 Local2ImageEvidence.from_grouped_scores(
                     index + 1,
                     groups,
-                    body_visible=body_visible[index],
-                    face_visible=face_visible[index],
-                    lower_torso_visible=lower_visible[index],
+                    body_visible=prepared.body_visible[index],
+                    face_visible=prepared.face_visible[index],
+                    lower_torso_visible=prepared.lower_visible[index],
                 )
             )
 
-        numeric_views: list[Local2NumericView] = []
-        if include_taste:
-            # Lower-torso views are needed by grouped anatomy semantics but not
-            # by the DINO taste head. Avoiding that fourth DINO view saves 25%.
-            taste_views = full_images + body_images + face_images
-            encoded = [
-                np.asarray(value, dtype=np.float32).reshape(-1)
-                for value in self.feature_encoder(taste_views)
-            ]
-            if len(encoded) != len(taste_views):
-                raise ValueError("Local2 DINO encoder returned a mismatched result count")
-            for index in range(count):
-                image_index = index + 1
-                numeric_views.append(Local2NumericView(image_index, "full", encoded[index]))
-                if body_visible[index]:
-                    numeric_views.append(Local2NumericView(image_index, "body", encoded[count + index]))
-                if face_visible[index]:
-                    numeric_views.append(Local2NumericView(image_index, "face", encoded[count * 2 + index]))
-            feature = self._artist_feature(descriptors, numeric_views)
-        else:
-            feature = np.zeros(0, dtype=np.float32)
+        feature = (
+            self._artist_feature(descriptors, prepared.numeric_views)
+            if include_taste else np.zeros(0, dtype=np.float32)
+        )
         return Local2AnalysisBundle(
             descriptors=tuple(descriptors),
-            numeric_views=tuple(numeric_views),
+            numeric_views=prepared.numeric_views if include_taste else (),
             artist_feature=feature,
-            feature_schema=self.feature_schema,
+            feature_schema=prepared.feature_schema,
         )
+
+    def analyze(
+        self,
+        images: Sequence[Any],
+        *,
+        image_urls: Sequence[str] | None = None,
+        include_taste: bool = True,
+    ) -> Local2AnalysisBundle:
+        prepared = self.prepare_taste(
+            images,
+            image_urls=image_urls,
+            include_taste=include_taste,
+        )
+        return self.analyze_prepared(prepared, include_taste=include_taste)
 
     @staticmethod
     def _record_reason(record: Mapping[str, Any]) -> str:
@@ -577,8 +660,134 @@ class Local2VisionAdapter:
         })
         return result
 
+    def classify_staged(
+        self,
+        images: Sequence[Any],
+        *,
+        image_urls: Sequence[str] | None = None,
+        known_accept: bool = False,
+    ) -> dict[str, Any]:
+        """Reject clear taste misses before SigLIP, then run the full hard path.
+
+        YOLO and DINO-small execute exactly once. Exact Saves deliberately bypass
+        only this early taste rejection; their prepared views still continue
+        through every grouped semantic hard filter.
+        """
+
+        prepared = self.prepare_taste(images, image_urls=image_urls, include_taste=True)
+        head = self._taste_head(len(prepared.prefilter_feature))
+        # SigLIP determines which YOLO body/face crops are clear enough for the
+        # final trained feature. Before SigLIP, enumerate every plausible clear
+        # subset (the production button supplies at most four images) and use
+        # the highest score. A candidate is cheap-rejected only if *every*
+        # feature the full classifier could form is below the cutoff.
+        plausible_probabilities: list[float] = []
+        prefilter_is_safe = head is not None and len(prepared.selected_images) <= 4
+        if prefilter_is_safe:
+            body_indices = [
+                index + 1 for index, visible in enumerate(prepared.body_visible) if visible
+            ]
+            face_indices = [
+                index + 1 for index, visible in enumerate(prepared.face_visible) if visible
+            ]
+            for body_mask in range(1 << len(body_indices)):
+                selected_bodies = {
+                    value for offset, value in enumerate(body_indices)
+                    if body_mask & (1 << offset)
+                }
+                for face_mask in range(1 << len(face_indices)):
+                    selected_faces = {
+                        value for offset, value in enumerate(face_indices)
+                        if face_mask & (1 << offset)
+                    }
+                    feature = self._artist_feature_for_indices(
+                        prepared.numeric_views,
+                        body_indices=selected_bodies,
+                        face_indices=selected_faces,
+                    )
+                    plausible_probabilities.append(head.predict_probability(feature))
+        prefilter_probability = max(plausible_probabilities) if plausible_probabilities else (
+            head.predict_probability(prepared.prefilter_feature) if head is not None else None
+        )
+        if (
+            prefilter_is_safe and not known_accept and prefilter_probability is not None and
+            prefilter_probability < TASTE_PREFILTER_REJECT
+        ):
+            return {
+                "decision": "reject",
+                "confidence": float(max(0.5, min(0.999, 1.0 - prefilter_probability))),
+                "reason_code": "personal_preference_mismatch",
+                "reason": "Local2 taste prefilter is clearly below 55%",
+                "source": ENGINE_SCHEMA,
+                "vision_source": ENGINE_SCHEMA,
+                "variant": "local2",
+                "hard_verified": False,
+                "requires_second_stage": False,
+                "requires_qwen_review": False,
+                # Browser orchestration must not expand the image window and
+                # invoke the classifier again after this intentional cheap
+                # taste-only rejection.
+                "terminal_personal_reject": True,
+                "review_codes": [],
+                # Hard semantics intentionally did not run. Keep these unknown
+                # instead of manufacturing either a safe result or a hard veto.
+                "checks": {
+                    "photograph": None,
+                    "female_presenting_adult": None,
+                    "male_present": None,
+                    "male_only": None,
+                    "attached_male_anatomy": None,
+                    "feet_dominant": None,
+                    "logo_or_placeholder": None,
+                    "appears_over_60": None,
+                    "body_preference_conflict": None,
+                    "body_evidence_ambiguous": None,
+                },
+                "evidence": {
+                    "images": len(prepared.selected_images),
+                    "usable_images": 0,
+                    "clear_body_images": sum(prepared.body_visible),
+                    "clear_face_images": sum(prepared.face_visible),
+                    "hard_semantics_evaluated": 0,
+                },
+                "image_grades": [],
+                "model": "facebook/dinov2-small weighted-ridge taste prefilter",
+                "local2_schema": ENGINE_SCHEMA,
+                "feature_schema": prepared.feature_schema,
+                "preference_probability": float(prefilter_probability),
+                "preference_threshold": self.policy.thresholds.preference_accept,
+                "taste_prefilter": {
+                    "threshold": TASTE_PREFILTER_REJECT,
+                    "probability": float(prefilter_probability),
+                    "plausible_feature_count": len(plausible_probabilities),
+                    "passed": False,
+                    "bypassed_for_exact_save": False,
+                    "siglip_ran": False,
+                },
+                "training": {
+                    "head_available": True,
+                    "hard_only": False,
+                },
+            }
+
+        analysis = self.analyze_prepared(prepared, include_taste=True)
+        result = self.classify_analysis(analysis)
+        result["taste_prefilter"] = {
+            "threshold": TASTE_PREFILTER_REJECT,
+            "probability": None if prefilter_probability is None else float(prefilter_probability),
+            "plausible_feature_count": len(plausible_probabilities),
+            "passed": prefilter_probability is None or prefilter_probability >= TASTE_PREFILTER_REJECT,
+            "bypassed_for_exact_save": bool(known_accept),
+            "siglip_ran": True,
+        }
+        result["training"] = {
+            **dict(result.get("training") or {}),
+            "prefilter_head_available": head is not None,
+        }
+        return result
+
     def classify(self, images: Sequence[Any]) -> dict[str, Any]:
-        return self.classify_analysis(self.analyze(images))
+        return self.classify_staged(images)
 
     def learn_numeric(
         self,
@@ -586,6 +795,7 @@ class Local2VisionAdapter:
         artist_identity: str,
         label: str,
         reason_code: str,
+        workflow: str = "",
         analysis: Local2AnalysisBundle,
     ) -> dict[str, Any]:
         if self.numeric_store is None:
@@ -594,6 +804,7 @@ class Local2VisionAdapter:
             artist_identity=artist_identity,
             label=label,
             reason_code=reason_code,
+            workflow=workflow,
             feature_schema=analysis.feature_schema,
             descriptors=analysis.descriptors,
             views=analysis.numeric_views,
@@ -617,7 +828,9 @@ class Local2VisionAdapter:
 __all__ = [
     "DEFAULT_FEATURE_SCHEMA",
     "Local2AnalysisBundle",
+    "Local2PreparedViews",
     "Local2VisionAdapter",
     "MAX_LOCAL2_IMAGES",
     "RuntimeSiglipGroupedScorer",
+    "TASTE_PREFILTER_REJECT",
 ]

@@ -68,6 +68,8 @@ function sanitizeLearningPayload(payload = {}) {
       artistName: text(artist.artistName || payload.artistName, 256)
     },
     imageUrls,
+    app: text(payload.app, 80),
+    workflow: text(payload.workflow, 24).toLowerCase(),
     rejectReason: text(payload.rejectReason, 240),
     rejectReasonLabel: text(payload.rejectReasonLabel, 80)
   };
@@ -366,16 +368,17 @@ export function createLocal2NodeAdapter({
       if (typeof learn !== 'function') {
         return { handled: true, status: 501, body: { ok: false, error: 'Local2 learning is not configured' } };
       }
-      await ensureStarted();
       const sanitized = sanitizeLearningPayload(body);
       const result = await learn(sanitized, {
         schema: ADAPTER_SCHEMA,
         mode: 'local2',
         storage: 'embeddings-and-labels-only',
-        signal: producerController.signal,
+        signal: producerController?.signal,
         cache
       });
-      const nextRevision = revisionFrom(result) || await syncRevision(true);
+      const nextRevision = revisionFrom(result) || (
+        pipeline ? await syncRevision(true) : await resolveRevision(true)
+      );
       rotateRevision(nextRevision);
       return {
         handled: true,
@@ -384,7 +387,7 @@ export function createLocal2NodeAdapter({
           ok: result?.ok !== false,
           schema: ADAPTER_SCHEMA,
           storage: 'embeddings-and-labels-only',
-          revision: pipeline.revision,
+          revision: pipeline?.revision || nextRevision || configuredInitialRevision,
           learned: result?.learned !== false
         }
       };

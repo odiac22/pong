@@ -11,7 +11,12 @@ from local2_vision_adapter import Local2VisionAdapter
 
 
 class FakeRuntime:
+    def __init__(self) -> None:
+        self.view_calls = 0
+        self.dino_calls = 0
+
     def detect_views_batch(self, images: list[np.ndarray]) -> list[dict[str, np.ndarray]]:
+        self.view_calls += 1
         return [
             {
                 "full": image,
@@ -23,6 +28,7 @@ class FakeRuntime:
         ]
 
     def dino_encode(self, images: list[np.ndarray], variant: str) -> list[np.ndarray]:
+        self.dino_calls += 1
         assert variant == "local2"
         result = []
         for image in images:
@@ -35,7 +41,11 @@ class FakeRuntime:
 
 
 class FakeGroupedScorer:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def __call__(self, images: list[np.ndarray]) -> dict[str, np.ndarray]:
+        self.calls += 1
         rows = len(images)
         result = {
             "media_type": np.tile([0.94, 0.03, 0.03], (rows, 1)),
@@ -56,6 +66,20 @@ class FakeGroupedScorer:
         return {name: np.asarray(value, dtype=np.float32) for name, value in result.items()}
 
 
+class FixedTasteHead:
+    def __init__(self, probability: float) -> None:
+        self.probability = float(probability)
+
+    def predict_probability(self, _feature: np.ndarray) -> float:
+        return self.probability
+
+
+class FaceMaskSensitiveHead:
+    def predict_probability(self, feature: np.ndarray) -> float:
+        # The final two feature values are face-present/body-present flags.
+        return 0.10 if float(np.asarray(feature)[-2]) > 0.5 else 0.80
+
+
 def legacy_records() -> list[dict[str, object]]:
     accepted = [1.0, 0.0] * 3 + [1.0, 1.0]
     rejected = [0.0, 1.0] * 3 + [1.0, 1.0]
@@ -72,13 +96,101 @@ def legacy_records() -> list[dict[str, object]]:
 
 
 class Local2VisionAdapterTests(unittest.TestCase):
-    def make_adapter(self, store: Local2NumericStore | None = None) -> Local2VisionAdapter:
+    def make_adapter(
+        self,
+        store: Local2NumericStore | None = None,
+        *,
+        group_scorer: FakeGroupedScorer | None = None,
+        runtime: FakeRuntime | None = None,
+    ) -> Local2VisionAdapter:
         return Local2VisionAdapter(
-            FakeRuntime(),
+            runtime or FakeRuntime(),
             numeric_store=store,
             legacy_record_provider=legacy_records,
-            group_scorer=FakeGroupedScorer(),
+            group_scorer=group_scorer or FakeGroupedScorer(),
         )
+
+    @staticmethod
+    def fixed_taste(adapter: Local2VisionAdapter, probability: float) -> None:
+        head = FixedTasteHead(probability)
+        adapter._taste_head = lambda _dimension: head  # type: ignore[method-assign]
+
+    def test_low_taste_prefilter_skips_grouped_siglip(self) -> None:
+        grouped = FakeGroupedScorer()
+        runtime = FakeRuntime()
+        adapter = self.make_adapter(group_scorer=grouped, runtime=runtime)
+        self.fixed_taste(adapter, 0.54)
+
+        result = adapter.classify_staged(
+            [np.asarray([1.0, 0.0]), np.asarray([2.0, 0.0])]
+        )
+
+        self.assertEqual(("reject", "personal_preference_mismatch"), (
+            result["decision"], result["reason_code"]
+        ))
+        self.assertEqual(0, grouped.calls)
+        self.assertEqual((1, 1), (runtime.view_calls, runtime.dino_calls))
+        self.assertFalse(result["taste_prefilter"]["siglip_ran"])
+        self.assertTrue(result["terminal_personal_reject"])
+        self.assertEqual(0.65, result["preference_threshold"])
+
+    def test_borderline_taste_runs_grouped_siglip_then_final_threshold_rejects(self) -> None:
+        grouped = FakeGroupedScorer()
+        runtime = FakeRuntime()
+        adapter = self.make_adapter(group_scorer=grouped, runtime=runtime)
+        self.fixed_taste(adapter, 0.55)
+
+        result = adapter.classify_staged(
+            [np.asarray([1.0, 0.0]), np.asarray([2.0, 0.0])]
+        )
+
+        self.assertEqual(1, grouped.calls)
+        self.assertEqual((1, 1), (runtime.view_calls, runtime.dino_calls))
+        self.assertTrue(result["taste_prefilter"]["siglip_ran"])
+        self.assertEqual(0.65, result["preference_threshold"])
+        self.assertEqual(("reject", "personal_preference_mismatch"), (
+            result["decision"], result["reason_code"]
+        ))
+
+    def test_prefilter_cannot_reject_on_a_face_mask_siglip_may_remove(self) -> None:
+        grouped = FakeGroupedScorer()
+        adapter = self.make_adapter(group_scorer=grouped)
+        head = FaceMaskSensitiveHead()
+        adapter._taste_head = lambda _dimension: head  # type: ignore[method-assign]
+
+        result = adapter.classify_staged(
+            [np.asarray([1.0, 0.0]), np.asarray([2.0, 0.0])]
+        )
+
+        self.assertEqual(1, grouped.calls)
+        self.assertGreaterEqual(result["taste_prefilter"]["probability"], 0.80)
+        self.assertGreater(result["taste_prefilter"]["plausible_feature_count"], 1)
+
+    def test_high_taste_still_obeys_grouped_hard_filter(self) -> None:
+        grouped = FakeGroupedScorer()
+        adapter = self.make_adapter(group_scorer=grouped)
+        self.fixed_taste(adapter, 0.90)
+
+        result = adapter.classify_staged(
+            [np.asarray([99.0, 0.0]), np.asarray([99.0, 0.0])]
+        )
+
+        self.assertEqual(1, grouped.calls)
+        self.assertEqual("visible_attached_anatomy", result["reason_code"])
+
+    def test_exact_save_bypasses_only_prefilter_and_still_runs_hard_filters(self) -> None:
+        grouped = FakeGroupedScorer()
+        adapter = self.make_adapter(group_scorer=grouped)
+        self.fixed_taste(adapter, 0.10)
+
+        result = adapter.classify_staged(
+            [np.asarray([99.0, 0.0]), np.asarray([99.0, 0.0])],
+            known_accept=True,
+        )
+
+        self.assertEqual(1, grouped.calls)
+        self.assertTrue(result["taste_prefilter"]["bypassed_for_exact_save"])
+        self.assertEqual("visible_attached_anatomy", result["reason_code"])
 
     def test_safe_mocked_views_accept(self) -> None:
         result = self.make_adapter().classify(

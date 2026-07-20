@@ -50,7 +50,7 @@ except ModuleNotFoundError as error:  # pragma: no cover - environment guidance
 
 MIN_DISTINCT_MEDIA = 15
 DEFAULT_SEED = 20260719
-PRODUCTION_RIDGE_THRESHOLD = 0.72
+PRODUCTION_RIDGE_THRESHOLD = 0.65
 HARD_REASON_RE = re.compile(
     r"\b(?:male|trans|feet|foot|logo|anime|illustration|placeholder|spam|"
     r"attached\s+anatomy|anatomy\s+conflict|adult[_ -]?safety|minor|underage|"

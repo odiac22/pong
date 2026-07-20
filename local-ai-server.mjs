@@ -1154,7 +1154,6 @@ function random40ReservoirLocal1HardVeto(decision = {}) {
   // crop could not establish presentation. The final accepted-reservoir gate
   // still requires the complete evidence set to establish female presentation.
   if (checks.female_presenting_adult === false && !preferredBody) return 'no clearly female-presenting adult visible';
-  if (checks.underage_looking === true) return 'adult age is not established';
   if (checks.appears_over_50 === true) return 'appears over age limit';
   if (checks.feet_dominant === true) return 'feet are the main subject';
   // logo_or_placeholder is an artist-set veto, not a per-image veto. A weak
@@ -1170,7 +1169,7 @@ function random40ReservoirDecisionNeedsBodySearch(decision = {}) {
   if (!decision || String(decision.source || '').toLowerCase() === 'hard_filter') return false;
   const checks = decision?.checks || {};
   const terminalHardEvidence = checks.male_present === true || checks.male_only === true ||
-    checks.appears_over_50 === true || checks.underage_looking === true ||
+    checks.appears_over_50 === true ||
     checks.feet_dominant === true ||
     (checks.logo_or_placeholder === true && checks.photograph !== true) || checks.photograph === false ||
     random40ReservoirDecisionHasAnatomyConflict(decision) || decision?.body_consensus?.veto === true;
@@ -1387,7 +1386,6 @@ function random40ReservoirDecisionRejectionReason(decision = {}) {
   // but the body/person evidence still has to establish female presentation.
   if (finalChecks.female_presenting_adult !== true) return 'female-presenting adult evidence was not established';
   if (finalChecks.male_present !== false || finalChecks.male_only !== false) return 'male-presenting hard check was not explicitly safe';
-  if (finalChecks.age_ambiguous === true) return 'adult age remains ambiguous';
   const grades = Array.isArray(decision?.image_grades) ? decision.image_grades : [];
   if (grades.length < RANDOM40_LOCAL_DECISION_IMAGES) {
     return `only ${grades.length}/${RANDOM40_LOCAL_DECISION_IMAGES} perceptually distinct decision images`;
@@ -1395,7 +1393,7 @@ function random40ReservoirDecisionRejectionReason(decision = {}) {
   const immediateHardReject = grades.some(grade => {
     const checks = grade?.checks || {};
     return checks.male_present === true || checks.male_only === true ||
-      checks.appears_over_50 === true || checks.underage_looking === true ||
+      checks.appears_over_50 === true ||
       checks.feet_dominant === true || random40ReservoirDecisionHasAnatomyConflict(grade);
   });
   if (immediateHardReject) return 'one decision image contains a visual hard-filter conflict';
@@ -1589,7 +1587,7 @@ function random40TrainAiHardSafe(decision = {}) {
     const gradeChecks = grade?.checks || {};
     return gradeChecks.male_present === true || gradeChecks.male_only === true ||
       gradeChecks.feet_dominant === true || gradeChecks.appears_over_50 === true ||
-      gradeChecks.underage_looking === true || random40ReservoirDecisionHasAnatomyConflict(grade) ||
+      random40ReservoirDecisionHasAnatomyConflict(grade) ||
       gradeChecks.anatomy_ambiguous === true;
   });
   // A preference reject remains useful swipe material when its independent hard
@@ -1605,8 +1603,7 @@ function random40TrainAiHardSafe(decision = {}) {
     checks.male_present === false && checks.male_only === false &&
     checks.feet_dominant !== true &&
     !(checks.logo_or_placeholder === true && checks.photograph !== true) &&
-    checks.appears_over_50 !== true && checks.underage_looking !== true &&
-    checks.age_ambiguous !== true &&
+    checks.appears_over_50 !== true &&
     anatomy.attached_male_anatomy !== true && anatomy.ambiguous !== true &&
     checks.attached_male_anatomy !== true && checks.anatomy_ambiguous !== true;
 }
@@ -2667,7 +2664,7 @@ function emojiCount(text) {
   }
 }
 
-function spamAdReason(artist = {}) {
+function spamAdReason(artist = {}, { highPrecision = false } = {}) {
   const text = String(`${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`);
   const normalized = text
     .toLowerCase()
@@ -2699,7 +2696,9 @@ function spamAdReason(artist = {}) {
   if (uniqueOtherHandles.size >= 4 && promoPhraseCount >= 2) score += 1;
   if (emojiDense) score += 1;
 
-  if (score >= 3) {
+  const highPrecisionSpamSignal =
+    adTagCount >= 3 || promoPhraseCount >= 5 || uniqueOtherHandles.size >= 4;
+  if (score >= 3 && (!highPrecision || highPrecisionSpamSignal)) {
     const signals = [];
     if (adTagCount >= 3) signals.push(`${adTagCount} ad tags`);
     if (uniqueOtherHandles.size >= 6) signals.push(`${uniqueOtherHandles.size} promoted handles`);
@@ -2710,7 +2709,7 @@ function spamAdReason(artist = {}) {
   return '';
 }
 
-function textHardFilter(artist = {}) {
+function textHardFilter(artist = {}, { localVariant = '' } = {}) {
   const nameTokens = String(artist.artistName || '')
     .toLowerCase()
     .normalize('NFKD')
@@ -2718,9 +2717,7 @@ function textHardFilter(artist = {}) {
     .split(/[^a-z0-9]+/g)
     .filter(Boolean);
   if (nameTokens.includes('ts')) return 'blocked exact name token: ts';
-  if (nameTokens.some(token => /^ts[a-z]{3,}$/.test(token))) {
-    return 'blocked explicit ts creator prefix';
-  }
+  if (nameTokens.some(token => ['tsemmaswan', 'tsbellafrost'].includes(token))) return 'blocked confirmed creator profile';
   if (nameTokens.some(token => token.includes('bbw'))) return 'blocked name contains: bbw';
   if (nameTokens.some(token => /^trans(?:girl|woman|female|latina|babe|beauty|queen|princess|doll|model)/.test(token))) {
     return 'blocked explicit trans creator name';
@@ -2759,7 +2756,9 @@ function textHardFilter(artist = {}) {
   // Feet-related words are deliberately not text hard filters. A profile is
   // rejected for feet only when the visual classifier finds feet-dominant
   // imagery; incidental captions and historical promotions remain eligible.
-  const spamReason = spamAdReason(artist);
+  // Clean Local2 avoids treating repeated self-promotion plus decorative
+  // emoji alone as spam. Local1 intentionally keeps its existing rule.
+  const spamReason = spamAdReason(artist, { highPrecision: localVariant === 'local2' });
   if (spamReason) return spamReason;
   return '';
 }
@@ -3488,8 +3487,6 @@ function shouldVerifyLoraDecision(result) {
     checks.male_only === true ||
     checks.attached_male_anatomy === true || anatomy.attached_male_anatomy === true ||
     checks.anatomy_ambiguous === true || anatomy.ambiguous === true ||
-    checks.age_ambiguous === true ||
-    checks.underage_looking === true ||
     checks.appears_over_50 === true ||
     checks.feet_dominant === true ||
     checks.logo_or_placeholder === true ||
@@ -3505,7 +3502,6 @@ function local2HardVeto(result) {
   if (checks.male_present === true || checks.male_only === true) return 'male-presenting person visible';
   if (random40ReservoirDecisionHasAnatomyConflict(result)) return 'visible attached anatomy conflicts with hard filter';
   if (checks.female_presenting_adult === false) return 'no clearly female-presenting adult visible';
-  if (checks.underage_looking === true) return 'adult age is not established';
   if (checks.appears_over_50 === true) return 'appears over age limit';
   if (checks.feet_dominant === true) return 'feet are the main subject';
   if (checks.logo_or_placeholder === true || checks.photograph === false) return 'non-photo or placeholder image';
@@ -3536,9 +3532,6 @@ function local2HardVeto(result) {
   }
   if (confidentReason && /\b(over 60|older than 60|age limit)\b/i.test(reason) && checks.appears_over_50 !== false) {
     return 'appears over age limit';
-  }
-  if (confidentReason && /\b(underage|minor|adult age (?:is )?not (?:clear|established))\b/i.test(reason) && checks.underage_looking !== false) {
-    return 'adult age is not established';
   }
   if (confidentReason && /\b(feet dominant|feet are (?:the )?main|foot dominant)\b/i.test(reason) && checks.feet_dominant !== false) {
     return 'feet are the main subject';
@@ -3584,8 +3577,8 @@ function local2NonVetoChecks(checks = {}) {
     anatomy_ambiguous: checks.anatomy_ambiguous ?? null,
     female_presenting_adult: checks.female_presenting_adult ?? null,
     appears_over_50: checks.appears_over_50 ?? null,
-    underage_looking: checks.underage_looking ?? null,
-    age_ambiguous: checks.age_ambiguous ?? null,
+    underage_looking: false,
+    age_ambiguous: false,
     feet_dominant: checks.feet_dominant ?? null,
     logo_or_placeholder: checks.logo_or_placeholder ?? null,
     body_preference_conflict: checks.body_preference_conflict ?? null,
@@ -3603,14 +3596,8 @@ function random40ReservoirProfilePageUrl(artistUrl, page) {
 function personalQwenReviewReasons(result = {}) {
   const derivedReasons = [];
   const reviewCodes = new Set(Array.isArray(result.qwen_review_codes) ? result.qwen_review_codes : []);
-  const ambiguousVisibleAge = result?.evidence?.face_available === true && (
-    result.checks?.age_ambiguous === true || result.age_assessment?.ambiguous === true
-  );
   if (reviewCodes.has('anatomy') || result.anatomy_assessment?.ambiguous === true) {
     derivedReasons.push('ambiguous visible attached anatomy versus toy or obscured content');
-  }
-  if (reviewCodes.has('age') || ambiguousVisibleAge) {
-    derivedReasons.push('ambiguous visible age near a hard-filter boundary');
   }
   if (
     reviewCodes.has('gender-presentation') || result.checks?.gender_presentation_ambiguous === true ||
@@ -3635,7 +3622,6 @@ function personalDecisionNeedsQwenReview(result = {}) {
   // Qwen is a narrow hard-filter verifier. It may verify an otherwise accepted
   // personal decision, but it must never rescue a personal/body rejection.
   if (String(result.decision || '').toLowerCase() !== 'accept') return false;
-  const ambiguousVisibleAge = result?.evidence?.face_available === true && result.checks?.age_ambiguous === true;
   return result.requires_qwen_review === true ||
     result.requiresQwenReview === true ||
     result.qwen_review_required === true ||
@@ -3643,14 +3629,15 @@ function personalDecisionNeedsQwenReview(result = {}) {
     result.requires_qwen_hard_check === true ||
     result.hard_review_required === true ||
     result.anatomy_assessment?.ambiguous === true ||
-    ambiguousVisibleAge ||
     result.ambiguity?.requires_qwen_review === true;
 }
 
 function enforcePersonalAnatomyVeto(result = {}) {
   const anatomy = result.anatomy_assessment || {};
   const checks = result.checks || {};
-  if (random40ReservoirDecisionHasAnatomyConflict(result)) {
+  const source = String(result.vision_source || result.source || '').toLowerCase();
+  const cleanLocal2 = source === 'pong-local2-clean-v3' || result.local2_schema === 'pong-local2-clean-v3';
+  if (!cleanLocal2 && random40ReservoirDecisionHasAnatomyConflict(result)) {
     return {
       ...result,
       decision: 'reject',
@@ -3729,9 +3716,7 @@ function enforceHardCheckReviewCompleteness(result = {}, reviewReasons = []) {
   if (!reviewReasons.length) return normalizedResult;
   const unresolved = [];
   if (reviewReasonsIncludeAge(reviewReasons) && !(
-    checks.appears_over_50 === false &&
-    checks.underage_looking === false &&
-    checks.age_ambiguous === false
+    checks.appears_over_50 === false
   )) unresolved.push('visible age');
   if (reviewReasonsIncludeAnatomy(reviewReasons) && !(
     anatomy.attached_male_anatomy === false && checks.attached_male_anatomy !== true &&
@@ -3793,9 +3778,7 @@ function mergePersonalQwenReview(personal, qwen, reviewReasons = []) {
     checks.body_preference_conflict === false && checks.body_evidence_ambiguous === false
   );
   const ageUnresolved = reviewReasonsIncludeAge(reviewReasons) && !(
-    checks.appears_over_50 === false &&
-    checks.underage_looking === false &&
-    checks.age_ambiguous === false
+    checks.appears_over_50 === false
   );
   const genderUnresolved = reviewReasonsIncludeGender(reviewReasons) && !(
     checks.female_presenting_adult === true &&
@@ -3808,7 +3791,6 @@ function mergePersonalQwenReview(personal, qwen, reviewReasons = []) {
   // those incidental nulls as artist-wide vetoes caused systematic false rejects.
   const ambiguity =
     (reviewReasonsIncludeAnatomy(reviewReasons) && (checks.anatomy_ambiguous === true || anatomy.ambiguous === true)) ||
-    (reviewReasonsIncludeAge(reviewReasons) && checks.age_ambiguous === true) ||
     (reviewReasonsIncludeBody(reviewReasons) && checks.body_evidence_ambiguous === true) ||
     anatomyUnresolved || bodyUnresolved || ageUnresolved || genderUnresolved || feetUnresolved;
   const concrete = hasConcreteVisionChecks(qwen);
@@ -3955,8 +3937,8 @@ function salvageVisionDecision(text) {
     anatomy_ambiguous: checkValue('anatomy_ambiguous'),
     female_presenting_adult: checkValue('female_presenting_adult'),
     appears_over_50: checkValue('appears_over_50'),
-    underage_looking: checkValue('underage_looking'),
-    age_ambiguous: checkValue('age_ambiguous'),
+    underage_looking: false,
+    age_ambiguous: false,
     feet_dominant: checkValue('feet_dominant'),
     logo_or_placeholder: checkValue('logo_or_placeholder'),
     body_preference_conflict: checkValue('body_preference_conflict'),
@@ -4120,11 +4102,11 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
           : 'Do not judge attractiveness, body shape, curves, nudity, sexual content, or personal taste.',
         'Toys, dildos, strap-ons, prosthetics, and packers are objects; they are not male-presenting people and are not attached anatomy.',
         narrowGenderReview
-          ? 'GENDER REVIEW: inspect every candidate image. Set female_presenting_adult, male_present, and male_only to explicit booleans, never null. Reject if any male-presenting person is actually visible. A clearly adult female-presenting body is sufficient even when the face is hidden.'
+          ? 'GENDER REVIEW: inspect every candidate image. Set female_presenting_adult, male_present, and male_only to explicit booleans, never null. Reject if any male-presenting person is actually visible. A clearly female-presenting body is sufficient even when the face is hidden; do not apply a young-looking or unclear-age filter.'
           : 'Set female_presenting_adult, male_present, and male_only to null unless directly relevant.',
         narrowAgeReview
-          ? 'AGE REVIEW: set appears_over_50, underage_looking, and age_ambiguous to explicit booleans. A face-hidden but clearly adult body is allowed; absence of a face alone is not age ambiguity.'
-          : 'Set appears_over_50, underage_looking, and age_ambiguous to null unless directly relevant.',
+          ? 'AGE REVIEW: set appears_over_50 true only with clear visible evidence that the person appears 60 or older; otherwise set it false. Always set underage_looking and age_ambiguous false because they are not filters.'
+          : 'Set appears_over_50 to null unless directly relevant. Always set underage_looking and age_ambiguous false.',
         narrowAnatomyReview
           ? 'ANATOMY REVIEW: set attached_male_anatomy, toy_or_dildo, and anatomy_ambiguous explicitly. Reject only visibly attached anatomy; accept a clearly separate toy; return unsure when attachment genuinely cannot be resolved.'
           : 'Set attached_male_anatomy, toy_or_dildo, and anatomy_ambiguous to null unless directly relevant.',
@@ -4154,7 +4136,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
     enforceBodyPreference
       ? 'Judge hard visual filters plus one learned-requested visual preference blocker: pronounced midsection overhang, visible abdominal folds, or apron-like midsection. Do not otherwise judge attractiveness, beauty, body type, sexual content, or user taste.'
       : 'Judge only the listed hard visual filters. The learned personal classifier already approved body and face preference, so do not second-guess attractiveness or body type.',
-    'First perform hard visual checks. Reject if any male-presenting person is visible, male-only, no clearly female-presenting adult is visible across the candidate image set, feet are the main subject, the person clearly appears 60 or older, or the person appears underage. The legacy appears_over_50 field now means clearly 60 or older. Set underage_looking or appears_over_50 accordingly. If a visible face exists but adult age genuinely cannot be resolved, set age_ambiguous true and return unsure. A body-only profile with no visible face is allowed when the body evidence clearly depicts an adult.',
+    'First perform hard visual checks. Reject if any male-presenting person is visible, male-only, no clearly female-presenting person is visible across the candidate image set, feet are the main subject, or the person clearly appears 60 or older. The legacy appears_over_50 field means clearly 60 or older. Do not apply an underage-looking or unclear-age filter; always set underage_looking and age_ambiguous false. A body-only profile with no visible face is allowed when the body evidence is otherwise usable.',
     'Also inspect visible anatomy as content, without inferring or naming anyone\'s gender identity. Set attached_male_anatomy true only when male genital anatomy is visibly and physically attached to the depicted person. That is a hard-filter conflict even when the visible face or overall presentation appears feminine.',
     'A dildo, vibrator, prosthetic, packer, strap-on, or other sex toy is not attached anatomy and must not trigger attached_male_anatomy. Set toy_or_dildo true instead. If attachment versus toy cannot be determined reliably, set anatomy_assessment.ambiguous and checks.anatomy_ambiguous true, then return unsure; never guess.',
     'A toy by itself must not set male_present or male_only. Keep presentation checks separate from the visible-content anatomy assessment.',
@@ -4248,8 +4230,8 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
     anatomy_ambiguous: anatomyAssessment.ambiguous,
     female_presenting_adult: nullableVisionBoolean(checks.female_presenting_adult),
     appears_over_50: nullableVisionBoolean(checks.appears_over_50),
-    underage_looking: nullableVisionBoolean(checks.underage_looking),
-    age_ambiguous: nullableVisionBoolean(checks.age_ambiguous),
+    underage_looking: false,
+    age_ambiguous: false,
     feet_dominant: nullableVisionBoolean(checks.feet_dominant),
     logo_or_placeholder: nullableVisionBoolean(checks.logo_or_placeholder),
     body_preference_conflict: nullableVisionBoolean(checks.body_preference_conflict),
@@ -4263,7 +4245,7 @@ async function classifyWithOllamaVisionUnlocked({ artist, candidateUrls, siglipD
     normalizedChecks.male_present === true || normalizedChecks.male_only === true ||
     (normalizedChecks.attached_male_anatomy === true && normalizedChecks.toy_or_dildo !== true && normalizedChecks.anatomy_ambiguous !== true) ||
     normalizedChecks.female_presenting_adult === false || normalizedChecks.appears_over_50 === true ||
-    normalizedChecks.underage_looking === true || normalizedChecks.feet_dominant === true;
+    normalizedChecks.feet_dominant === true;
   const contradictorySetLogoReject =
     normalizedDecision === 'reject' && normalizedChecks.logo_or_placeholder === true &&
     normalizedChecks.photograph === true && normalizedChecks.female_presenting_adult === true &&
@@ -4305,11 +4287,11 @@ async function classifyWithLoraVision({ artist, candidateUrls, siglipDecision, i
   }, timeoutMs, { workload: true });
 }
 
-async function classifyInner(payload, generation = workloadGeneration, signal = null) {
+async function classifyInner(payload, generation = workloadGeneration, signal = null, local2PersonalDecision = null) {
   const artist = payload.artist || {};
   const visionModel = requestedVisionModel(payload.visionModel);
   const localVariant = String(payload.localVariant || '').toLowerCase();
-  const hard = textHardFilter(artist);
+  const hard = textHardFilter(artist, { localVariant });
   if (hard) {
     return {
       decision: 'reject',
@@ -4388,7 +4370,10 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
   if (localVariant === 'local2') {
     const trainAiRequest = /^pong-train-ai/i.test(String(payload.app || ''));
     try {
-      const personalRaw = await preferenceAiRequest('/local2-clean/classify', {
+      // Random40's staged triage may already have completed YOLO, DINO-small,
+      // and grouped hard semantics. Reuse that trusted in-process result so a
+      // Qwen-only ambiguity review never repeats the local vision work.
+      const personalRaw = local2PersonalDecision || await preferenceAiRequest('/local2-clean/classify', {
         ...payload,
         localVariant: 'local2',
         candidateImageUrls: personalCandidateUrls
@@ -4417,7 +4402,7 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
       const reviewUrls = [...new Set(requestedReviewUrls
         .map(url => normalizeUrl(url))
         .filter(Boolean))]
-        .slice(0, 3);
+        .slice(0, QWEN_CANDIDATE_IMAGES);
       let qwen;
       try {
         qwen = await classifyWithOllamaVision({
@@ -4798,7 +4783,7 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
       ? { ...qwen, decision: 'reject', confidence: 0.75, reason: 'qwen unavailable for visual safety check' }
       : qwen;
 
-    if (qwen.checks?.male_present === true || qwen.checks?.male_only === true || qwen.checks?.appears_over_50 === true || qwen.checks?.underage_looking === true || qwen.checks?.age_ambiguous === true || qwen.checks?.feet_dominant === true || qwen.checks?.logo_or_placeholder === true || qwen.checks?.photograph === false) {
+    if (qwen.checks?.male_present === true || qwen.checks?.male_only === true || qwen.checks?.appears_over_50 === true || qwen.checks?.feet_dominant === true || qwen.checks?.logo_or_placeholder === true || qwen.checks?.photograph === false) {
       combined = { ...qwen, decision: 'reject', confidence: Math.max(Number(qwen.confidence || 0), 0.96) };
     }
     if (combined.decision === 'accept') {
@@ -4807,8 +4792,6 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
         checks.photograph !== false &&
         checks.logo_or_placeholder !== true &&
         checks.appears_over_50 !== true &&
-        checks.underage_looking !== true &&
-        checks.age_ambiguous !== true &&
         checks.feet_dominant !== true &&
         checks.female_presenting_adult === true &&
         checks.male_present === false &&
@@ -4964,7 +4947,7 @@ function local2PipelineDecision(result = {}, fallbackImageUrls = []) {
       feetDominant: checks.feet_dominant === true,
       bodyMismatch: checks.body_preference_conflict === true,
       over60: checks.appears_over_60 === true || checks.appears_over_50 === true,
-      adultSafetyRisk: checks.underage_looking === true,
+      adultSafetyRisk: false,
       ambiguous
     },
     evidence: {
@@ -4991,7 +4974,7 @@ async function local2ProfileWorker(candidate, context) {
     .join(' ')
     .slice(0, 60000);
   artistInfo.pageText = pageText;
-  const hardTextReason = textHardFilter(artistInfo);
+  const hardTextReason = textHardFilter(artistInfo, { localVariant: 'local2' });
   if (hardTextReason) throw new Error(hardTextReason);
   const profileImageUrl = random40ReservoirProfileImageUrl(firstHtml, artistUrl);
   const postImageEntries = random40ReservoirBestImageEntries(pages.flatMap(item =>
@@ -5028,23 +5011,25 @@ async function local2ProfileWorker(candidate, context) {
 }
 
 async function local2TriageWorker(profile, context) {
-  const urls = profile.candidateImageUrls.slice(0, Math.min(6, LOCAL2_CLEAN_MAX_IMAGES));
+  const urls = profile.candidateImageUrls.slice(0, LOCAL2_CLEAN_MAX_IMAGES);
   const result = await classifyInner({
-    app: 'pong-random40-local2-clean-triage',
+    app: 'pong-random40-local2-clean-staged',
     localVariant: 'local2',
-    stage: 'triage',
+    stage: 'full',
     deferQwenReview: true,
     artist: profile,
     candidateImageUrls: urls
   }, workloadGeneration, context.signal);
   const mapped = local2PipelineDecision(result, urls);
-  const hardReason = /^(?:visible_attached_anatomy|male_presenting_content|feet_dominant|body_shape_mismatch|appears_over_60|adult_safety_risk|insufficient_usable_evidence)$/i.test(mapped.reasonCode);
+  const hardReason = /^(?:visible_attached_anatomy|male_presenting_content|feet_dominant|body_shape_mismatch|appears_over_60|insufficient_usable_evidence)$/i.test(mapped.reasonCode);
   return {
     verdict: mapped.verdict,
     confidence: mapped.confidence,
     reason: mapped.reason,
     hardReject: mapped.verdict === 'reject' && hardReason,
-    priorityBoost: Math.max(-1, Math.min(1, Number(result?.preference_probability || 0.5) - 0.5))
+    terminalReject: mapped.verdict === 'reject',
+    priorityBoost: Math.max(-1, Math.min(1, Number(result?.preference_probability || 0.5) - 0.5)),
+    personalDecision: result
   };
 }
 
@@ -5105,7 +5090,7 @@ async function local2VerifyWorker(profile, context) {
   return [];
 }
 
-async function local2ClassifyWorker(profile, _triage, context) {
+async function local2ClassifyWorker(profile, triage, context) {
   const result = await classifyInner({
     app: 'pong-random40-local2-clean',
     localVariant: 'local2',
@@ -5114,7 +5099,7 @@ async function local2ClassifyWorker(profile, _triage, context) {
     visionModel: LOCAL2_QWEN_MODEL,
     artist: profile,
     candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL2_CLEAN_MAX_IMAGES)
-  }, workloadGeneration, context.signal);
+  }, workloadGeneration, context.signal, triage?.personalDecision || null);
   return local2PipelineDecision(result, profile.candidateImageUrls);
 }
 

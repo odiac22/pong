@@ -525,7 +525,11 @@ async function runTrial(chromePort, appUrl, trialNumber) {
       const incidentalTrap = random40HardFilter({ artistName: 'Example', artistUrl: 'https://coomerfans.com/u/example', pageText: 'standing beside a trap door' });
       if (incidentalTrap) failures.push('incidental trap text was hard-rejected');
       const explicitTrap = random40HardFilter({ artistName: 'trapgirl', artistUrl: 'https://coomerfans.com/u/trapgirl', pageText: '' });
-      if (!explicitTrap) failures.push('explicit contextual trap clue was not rejected');
+      if (explicitTrap) failures.push('trap creator name was hard-rejected instead of using explicit trans evidence');
+      const innocentTsPrefix = random40HardFilter({ artistName: 'tsunami', artistUrl: 'https://coomerfans.com/u/tsunami', pageText: '' });
+      if (innocentTsPrefix) failures.push('innocent ts-prefix creator name was hard-rejected');
+      const confirmedTsProfile = random40HardFilter({ artistName: 'tsemmaswan', artistUrl: 'https://coomerfans.com/u/onlyfans/375651/tsemmaswan', pageText: '' });
+      if (!confirmedTsProfile) failures.push('confirmed blocked creator profile was not rejected');
       const transText = random40HardFilter({ artistName: 'Example', artistUrl: 'https://coomerfans.com/u/example', pageText: 'trans creator' });
       if (!transText) failures.push('explicit text hard filter was not rejected');
       const transName = random40HardFilter({ artistName: 'translatina69', artistUrl: 'https://coomerfans.com/u/example', pageText: '' });
