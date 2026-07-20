@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.20</div>
+  <div class="version-number">24.21</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4099,7 +4099,10 @@ function createVideoElements() {
 
     video.addEventListener('play', () => {
       prepareVideoForPlayback(video);
-      if (videoNeedsForegroundPriority(video)) random40PauseHiddenPreloadsForPlayback();
+      // Give the visible card the connection first. Hidden warming resumes at
+      // a low rate once this card has a healthy forward buffer, and at full
+      // speed as soon as playback pauses.
+      random40PauseHiddenPreloadsForPlayback();
       random40PumpPostFetchQueue();
       random40PumpPreloadQueue(350);
       setTimeout(()=>{ if(video.muted){video.muted=false;video.volume=1.0;} },100);
@@ -4775,9 +4778,19 @@ function random40FinishPreloadRecord(record, status) {
   record.touchedAt = Date.now();
 }
 
+function random40RecordOwnsHiddenVideo(record) {
+  const video = record?.video;
+  return Boolean(
+    record?.ownsVideo &&
+    !record.claimedVisible &&
+    video &&
+    !video.closest?.('.video-wrapper')
+  );
+}
+
 function random40ReleaseProvenPreloadMedia(record) {
   if (
-    !record?.ownsVideo ||
+    !random40RecordOwnsHiddenVideo(record) ||
     record.status !== 'ready' ||
     record.browserPlayableProof !== true ||
     record.video?.closest?.('.video-wrapper')
@@ -4811,7 +4824,7 @@ async function random40RunAdvancingPlaybackProof(record, generation) {
     !['loading', 'ready'].includes(record.status)
   ) return false;
 
-  const borrowedProofVideo = !record.ownsVideo;
+  const borrowedProofVideo = !random40RecordOwnsHiddenVideo(record);
   const video = borrowedProofVideo ? document.createElement('video') : record.video;
   const proofUrl = borrowedProofVideo
     ? (record.proofActiveUrl || record.activeUrl || record.url)
@@ -4878,11 +4891,7 @@ function random40PumpPlaybackProofQueue(delay = 0) {
   random40PlaybackProofPumpTimer = setTimeout(() => {
     random40PlaybackProofPumpTimer = null;
     const foregroundVideo = getForegroundPriorityVideo();
-    if (
-      foregroundVideo &&
-      !foregroundVideo.paused &&
-      videoNeedsForegroundPriority(foregroundVideo)
-    ) {
+    if (foregroundVideo && !foregroundVideo.paused) {
       random40PumpPlaybackProofQueue(250);
       return;
     }
@@ -4914,7 +4923,7 @@ function random40PumpPlaybackProofQueue(delay = 0) {
             }
             if (record.status === 'loading') record.finalizeReady?.();
           } else {
-            if (record.ownsVideo) {
+            if (random40RecordOwnsHiddenVideo(record)) {
               // Cover the artist broadly before spending time retrying one slow
               // object. A canplay-proven miss remains available to the player,
               // while the next distinct URL gets the freed preload lane.
@@ -4950,7 +4959,7 @@ function random40PumpPlaybackProofQueue(delay = 0) {
 
 function random40QueueAdvancingPlaybackProof(record) {
   if (!record || record.actualPlaybackProof === true || record.verificationPending) return false;
-  if (record.ownsVideo) {
+  if (random40RecordOwnsHiddenVideo(record)) {
     clearTimeout(record.loadTimer);
     record.loadTimer = null;
   } else {
@@ -5033,7 +5042,12 @@ function random40RetryOrFailPreload(record, { allowGateway = true } = {}) {
 }
 
 function random40StartPreloadRecord(record) {
-  if (!record || record.status !== 'queued' || !document.body.contains(record.video)) return;
+  if (
+    !record ||
+    record.status !== 'queued' ||
+    !document.body.contains(record.video) ||
+    !random40RecordOwnsHiddenVideo(record)
+  ) return;
   const video = record.video;
   record.status = 'loading';
   record.attempts = Number(record.attempts || 0) + 1;
@@ -5044,7 +5058,7 @@ function random40StartPreloadRecord(record) {
   const loadUrl = record.activeUrl || record.url;
   const sourceChanged = String(video.currentSrc || video.src || '') !== String(loadUrl || '');
   if (sourceChanged) video.src = loadUrl;
-  if (record.ownsVideo || sourceChanged || video.networkState === HTMLMediaElement.NETWORK_EMPTY) {
+  if (random40RecordOwnsHiddenVideo(record) || sourceChanged || video.networkState === HTMLMediaElement.NETWORK_EMPTY) {
     try { video.load(); } catch (_) {}
   }
   const loadTimeout = random40PlaybackReadyExpectedBundles.has(record.bundleKey)
@@ -5115,6 +5129,9 @@ function random40PauseHiddenPreloadsForPlayback() {
   const keep = new Set(loading.slice(0, Math.max(0, RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY - 1)));
   loading.forEach(record => {
     if (keep.has(record)) return;
+    // Cancelling an in-flight proof must make the record retryable after the
+    // foreground video pauses; otherwise verificationPending can strand it.
+    record.verificationPending = false;
     random40FinishPreloadRecord(record, 'queued');
     record.retryAt = Date.now() + 500;
     try {
@@ -5143,7 +5160,7 @@ function random40DisposePreloadRecord(record, { removeVideo = true } = {}) {
   if (!removeVideo) return;
   const wrapper = video?.closest?.('.video-wrapper');
   if (wrapper && document.body.contains(wrapper)) return;
-  if (!record.ownsVideo && document.body.contains(video)) return;
+  if (!random40RecordOwnsHiddenVideo(record) && document.body.contains(video)) return;
   try {
     video.pause();
     video.removeAttribute('src');
@@ -5172,7 +5189,7 @@ function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order
     record.fastStart = record.fastStart || allVideoMetadata[globalIndex]?.playbackFastStart === true;
     record.touchedAt = Date.now();
     if (record.status === 'proven' && priority === 0) {
-      record.status = record.ownsVideo ? 'queued' : 'visible';
+      record.status = random40RecordOwnsHiddenVideo(record) ? 'queued' : 'visible';
       record.ready = false;
       record.mediaReleased = false;
       record.attempts = 0;
@@ -5182,7 +5199,7 @@ function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order
     if (record.status === 'ready' && (record.video?.error || Number(record.video?.readyState || 0) < 3)) {
       // Mobile browsers can evict a previously warm buffer. Player-owned videos
       // stay on the visible path; only hidden elements enter the retry/gateway queue.
-      record.status = record.ownsVideo ? 'queued' : 'visible';
+      record.status = random40RecordOwnsHiddenVideo(record) ? 'queued' : 'visible';
       record.ready = false;
       record.browserPlayableProof = false;
       record.attempts = 0;
@@ -5196,7 +5213,7 @@ function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order
       record.status === 'error' &&
       (priority === 0 || random40PlaybackReadyExpectedBundles.has(record.bundleKey))
     ) {
-      record.status = record.ownsVideo ? 'queued' : 'visible';
+      record.status = random40RecordOwnsHiddenVideo(record) ? 'queued' : 'visible';
       record.attempts = 0;
       record.retryAt = 0;
     }
@@ -5251,7 +5268,7 @@ function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order
     // A borrowed deck video belongs to the player. Never pause, mute, or seek
     // it from the background warmer; that caused visible clips to play briefly
     // and then stop when canplay fired.
-    if (record.ownsVideo && !video.__pongBenchProbing) {
+    if (random40RecordOwnsHiddenVideo(record) && !video.__pongBenchProbing) {
       try {
         video.pause();
         if (Number.isFinite(video.duration) && video.currentTime > 0.1) video.currentTime = 0;
@@ -5268,11 +5285,11 @@ function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order
       random40PreloadWarmedByBundle.set(record.bundleKey, new Set());
     }
     random40PreloadWarmedByBundle.get(record.bundleKey).add(record.key);
-    if (record.ownsVideo) {
+    if (random40RecordOwnsHiddenVideo(record)) {
       video.preload = 'metadata';
       const residentReady = [...random40PreloadMap.values()].filter(candidate =>
         candidate.bundleKey === record.bundleKey &&
-        candidate.ownsVideo &&
+        random40RecordOwnsHiddenVideo(candidate) &&
         candidate.status === 'ready' &&
         candidate.browserPlayableProof === true
       ).length;
@@ -5302,11 +5319,11 @@ function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order
     if (record.activeUrl && record.activeUrl !== record.url) {
       random40RememberPlaybackOverride(record.url, record.activeUrl);
     }
-    if (record.ownsVideo && record.actualPlaybackProof !== true) {
+    if (random40RecordOwnsHiddenVideo(record) && record.actualPlaybackProof !== true) {
       if (random40QueueAdvancingPlaybackProof(record)) return;
     }
     finalizeReady();
-    if (!record.ownsVideo && record.actualPlaybackProof !== true) {
+    if (!random40RecordOwnsHiddenVideo(record) && record.actualPlaybackProof !== true) {
       random40QueueAdvancingPlaybackProof(record);
     }
   };
@@ -5346,6 +5363,11 @@ function random40ClaimReadyPreloadVideo(globalIndex, url) {
   );
   if (!record) return null;
   record.claimedVisible = true;
+  // Ownership transfers permanently to the visible player. Without this, the
+  // background warmer can call load(), play(), pause(), or seek on the card
+  // whenever its readyState changes, producing a play/pause loop.
+  record.ownsVideo = false;
+  record.priority = 0;
   record.touchedAt = Date.now();
   try { record.video.pause(); } catch (_) {}
   return record;
@@ -7803,9 +7825,9 @@ const RANDOM40_LOCAL_CONCURRENCY = 10;
 const RANDOM40_SOURCE_CONCURRENCY = 18;
 const RANDOM40_SOURCE_BACKGROUND_CONCURRENCY = 4;
 const RANDOM40_POST_CONCURRENCY = 18;
-const RANDOM40_POST_PLAYING_CONCURRENCY = 8;
-const RANDOM40_POST_BUFFERING_CONCURRENCY = 2;
-const RANDOM40_POST_FOREGROUND_CONCURRENCY = 4;
+const RANDOM40_POST_PLAYING_CONCURRENCY = 2;
+const RANDOM40_POST_BUFFERING_CONCURRENCY = 0;
+const RANDOM40_POST_FOREGROUND_CONCURRENCY = 1;
 const RANDOM40_POST_SLOW_CONCURRENCY = 4;
 const RANDOM40_POST_ENTRIES_CACHE_MAX = 6000;
 const RANDOM40_PAGE_BATCH_SIZE = 2;
@@ -7870,8 +7892,8 @@ let random40MemoryLoadPromise = null;
 let random40MemoryEndpoint = '';
 const RANDOM40_PRELOAD_MAX_ELEMENTS = 180;
 const RANDOM40_PRELOAD_IDLE_CONCURRENCY = 12;
-const RANDOM40_PRELOAD_PLAYING_CONCURRENCY = 10;
-const RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY = 8;
+const RANDOM40_PRELOAD_PLAYING_CONCURRENCY = 2;
+const RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY = 0;
 const RANDOM40_PRELOAD_LOAD_TIMEOUT_MS = 12000;
 const RANDOM40_PRELOAD_RETRY_DELAY_MS = 2000;
 let random40State = null;
