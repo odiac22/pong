@@ -66,9 +66,9 @@ SEMANTIC_PROMPTS = [
     "an unclear, tiny, heavily cropped, or unusable image",
 ]
 BODY_PROMPTS = [
-    "a clear adult torso with a smooth midsection and no pronounced abdominal overhang",
-    "a clear adult torso with ordinary softness but no pronounced abdominal overhang",
-    "a clear adult torso with pronounced abdominal overhang, multiple visible abdominal folds, or an apron-like midsection",
+    "a clear adult torso with a visibly slim or lean figure, a narrow waist, and little abdominal fullness",
+    "a clear adult torso with a visibly fit, athletic, or proportionate medium-build figure and no large abdomen",
+    "a clear adult torso with substantial visible body fat, a large or wide abdomen, a pronounced belly, multiple abdominal folds, or an apron-like midsection",
     "the abdomen and midsection are hidden, cropped out, distorted by perspective, or impossible to judge",
 ]
 ANATOMY_PROMPTS = [
@@ -96,10 +96,10 @@ BODY_HEAD_MIN = float(os.environ.get("PONG_BODY_REJECT_HEAD_MIN", "0.50"))
 BODY_HEAD_IMAGE_MIN = float(os.environ.get("PONG_BODY_REJECT_IMAGE_MIN", "0.48"))
 BODY_HEAD_STRONG_MIN = float(os.environ.get("PONG_BODY_REJECT_HEAD_STRONG_MIN", "0.68"))
 BODY_CONSENSUS_MIN = max(2, int(os.environ.get("PONG_BODY_CONSENSUS_MIN", "2")))
-BODY_PRONOUNCED_MIN = float(os.environ.get("PONG_BODY_PRONOUNCED_MIN", "0.42"))
-BODY_PRONOUNCED_MARGIN = float(os.environ.get("PONG_BODY_PRONOUNCED_MARGIN", "0.12"))
-BODY_STRONG_MIN = float(os.environ.get("PONG_BODY_STRONG_MIN", "0.58"))
-BODY_STRONG_MARGIN = float(os.environ.get("PONG_BODY_STRONG_MARGIN", "0.18"))
+BODY_LARGER_MIN = float(os.environ.get("PONG_BODY_LARGER_MIN", os.environ.get("PONG_BODY_PRONOUNCED_MIN", "0.42")))
+BODY_LARGER_MARGIN = float(os.environ.get("PONG_BODY_LARGER_MARGIN", os.environ.get("PONG_BODY_PRONOUNCED_MARGIN", "0.10")))
+BODY_STRONG_MIN = float(os.environ.get("PONG_BODY_STRONG_MIN", "0.54"))
+BODY_STRONG_MARGIN = float(os.environ.get("PONG_BODY_STRONG_MARGIN", "0.14"))
 BODY_STRONG_PREFERENCE = float(os.environ.get("PONG_BODY_STRONG_PREFERENCE", "0.62"))
 BODY_CLEAR_UNCLEAR_MAX = float(os.environ.get("PONG_BODY_CLEAR_UNCLEAR_MAX", "0.45"))
 BODY_PREFERRED_MIN = float(os.environ.get("PONG_BODY_PREFERRED_MIN", "0.56"))
@@ -783,8 +783,8 @@ class VisionRuntime:
             ]
             return cached
         # Ultralytics has substantial per-call setup overhead. Send the complete
-        # five-image artist set through one pose batch so crops and evidence stay
-        # identical while avoiding five serial GPU launches.
+        # artist image set through one pose batch so crops and evidence stay
+        # identical while avoiding separate serial GPU launches.
         views = self.detect_views_batch(images, image_urls=image_urls)
         full_images = [v["full"] for v in views]
         body_prompt_images = [v["body"] if v["body"] is not None else v["full"] for v in views]
@@ -1518,9 +1518,9 @@ def hard_checks(
             "reason": grade_reason or "visual evidence checked",
             "checks": checks,
             "body_profile": {
-                "smooth_midsection": float(body_scores[index][0]) if len(body_scores) > index else 0,
-                "ordinary_softness": float(body_scores[index][1]) if len(body_scores) > index else 0,
-                "pronounced_overhang": float(body_scores[index][2]) if len(body_scores) > index else 0,
+                "slim_or_lean": float(body_scores[index][0]) if len(body_scores) > index else 0,
+                "fit_or_proportionate": float(body_scores[index][1]) if len(body_scores) > index else 0,
+                "larger_midsection": float(body_scores[index][2]) if len(body_scores) > index else 0,
                 "unclear": float(body_scores[index][3]) if len(body_scores) > index else 0,
             },
             "body_visible": bool((analysis.get("bodyVisibleByImage") or [False] * len(semantic))[index]),
@@ -1581,23 +1581,24 @@ def body_preference_veto(
         if not grade.get("body_visible"):
             continue
         image_head = body_heads_by_image[index] if index < len(body_heads_by_image) else None
-        smooth = float(profile.get("smooth_midsection") or 0)
-        soft = float(profile.get("ordinary_softness") or 0)
-        pronounced = float(profile.get("pronounced_overhang") or 0)
+        slim = float(profile.get("slim_or_lean", profile.get("smooth_midsection")) or 0)
+        fit = float(profile.get("fit_or_proportionate", profile.get("ordinary_softness")) or 0)
+        larger = float(profile.get("larger_midsection", profile.get("pronounced_overhang")) or 0)
         unclear = float(profile.get("unclear") or 0)
-        semantic_available = smooth + soft + pronounced + unclear > 0.001
+        semantic_available = slim + fit + larger + unclear > 0.001
         # Never score or veto from a body crop that the semantic pass considers
         # hidden/cropped/unclear, even if a learned head happens to fire on it.
         if not semantic_available or unclear >= BODY_CLEAR_UNCLEAR_MAX:
             continue
         clear += 1
         clear_image_indices.append(int(grade.get("image_index", index + 1)))
-        normal = max(smooth, soft)
-        margin = pronounced - normal
+        preferred_shape = slim + fit
+        strongest_preferred_label = max(slim, fit)
+        margin = larger - strongest_preferred_label
         # A direct strong semantic mismatch cannot simultaneously be counted as
         # acceptable merely because an embedding-neighbour head disagrees.
-        strong_semantic_mismatch = pronounced >= BODY_STRONG_MIN and margin >= BODY_STRONG_MARGIN
-        if normal >= pronounced + 0.04 or (
+        strong_semantic_mismatch = larger >= BODY_STRONG_MIN and margin >= BODY_STRONG_MARGIN
+        if (preferred_shape >= 0.50 and preferred_shape >= larger + 0.10) or (
             image_head is not None and image_head <= 0.46 and not strong_semantic_mismatch
         ):
             acceptable += 1
@@ -1607,7 +1608,7 @@ def body_preference_veto(
             image_head is not None and image_head >= BODY_HEAD_IMAGE_MIN
         ) or (
             body_head is not None and body_head >= BODY_HEAD_MIN and
-            pronounced >= BODY_PRONOUNCED_MIN and margin >= BODY_PRONOUNCED_MARGIN
+            larger >= BODY_LARGER_MIN and margin >= BODY_LARGER_MARGIN
         )
         if strong_visual or learned_visual:
             supporters.append(grade)
@@ -1650,32 +1651,47 @@ def positive_body_preference(
         profile = grade.get("body_profile") or {}
         if not grade.get("body_visible"):
             continue
-        smooth = float(profile.get("smooth_midsection") or 0)
-        soft = float(profile.get("ordinary_softness") or 0)
-        pronounced = float(profile.get("pronounced_overhang") or 0)
+        slim = float(profile.get("slim_or_lean", profile.get("smooth_midsection")) or 0)
+        fit = float(profile.get("fit_or_proportionate", profile.get("ordinary_softness")) or 0)
+        larger = float(profile.get("larger_midsection", profile.get("pronounced_overhang")) or 0)
         unclear = float(profile.get("unclear") or 0)
-        if smooth + soft + pronounced + unclear <= 0.001 or unclear >= BODY_CLEAR_UNCLEAR_MAX:
+        if slim + fit + larger + unclear <= 0.001 or unclear >= BODY_CLEAR_UNCLEAR_MAX:
             continue
         vector = body_features_by_image[index] if index < len(body_features_by_image) else None
         learned = (
             preference_view_probability(vector, variant, "body", BODY_REASON_PATTERN)
             if vector is not None and np.any(vector) else None
         )
-        normal = smooth + soft
-        semantic = normal / max(1e-6, normal + pronounced)
-        # References lead the decision once sufficient body-labelled examples
-        # exist; the semantic score supplies a stable prior and recognizes both
-        # smooth and ordinarily soft acceptable bodies.
-        score = semantic if learned is None else learned * 0.62 + semantic * 0.38
+        # Keep larger-body and unclear probabilities in the denominator.  The
+        # former ratio normalized both away and could turn a highly uncertain
+        # body crop into a misleading 95% match.
+        semantic = max(0.0, min(1.0, slim + fit))
+        semantic_match = semantic >= 0.50 and semantic >= larger + 0.10
+        semantic_mismatch = larger >= BODY_LARGER_MIN and larger >= max(slim, fit) + BODY_LARGER_MARGIN
+        # Personal references remain the leading signal, but a mediocre learned
+        # score may no longer be rescued by a generic softness label.
+        score = semantic if learned is None else learned * 0.72 + semantic * 0.28
+        preferred_match = bool(
+            score >= BODY_PREFERRED_MIN
+            and not semantic_mismatch
+            and (semantic_match or (learned is not None and learned >= BODY_STRONG_PREFERENCE))
+        )
         scored.append({
             "image_index": int(grade.get("image_index", index + 1)),
             "score": float(max(0.0, min(1.0, score))),
             "learned_score": learned,
             "semantic_score": float(semantic),
+            "semantic_match": semantic_match,
+            "semantic_mismatch": semantic_mismatch,
+            "slim_or_lean": slim,
+            "fit_or_proportionate": fit,
+            "larger_midsection": larger,
+            "unclear": unclear,
+            "preferred": preferred_match,
         })
 
     ranked = sorted(scored, key=lambda item: item["score"], reverse=True)
-    preferred = [item for item in ranked if item["score"] >= BODY_PREFERRED_MIN]
+    preferred = [item for item in ranked if item["preferred"]]
     # Positive evidence and negative consensus are intentionally asymmetric:
     # one clearly preferred body can establish a match, while rejection still
     # requires two agreeing clear body images. A single odd crop must not drag an
