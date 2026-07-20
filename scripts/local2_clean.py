@@ -26,7 +26,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 
-ENGINE_SCHEMA = "pong-local2-clean-v2"
+ENGINE_SCHEMA = "pong-local2-clean-v3"
 
 # Keep overlapping concepts out of a single softmax.  A Local2 vision adapter
 # should score/normalize each group independently.  "Transgender" is purposely
@@ -176,7 +176,10 @@ class Local2ImageEvidence:
             adult_probability=adult_safety["adult"],
             adult_safety_risk=adult_safety["minor_risk"],
             adult_safety_unclear=adult_safety["unclear"],
-            body_clear=bool(body_visible and body["unclear"] < 0.45),
+            # The crop exists only when YOLO established a usable body region.
+            # Do not let an uncalibrated generic SigLIP "unclear" score erase
+            # that independent evidence; SigLIP still supplies the mismatch vote.
+            body_clear=bool(body_visible),
             anatomy_clear=bool(lower_torso_visible and anatomy["unclear"] < 0.48),
             face_clear=bool(face_visible and age["unclear"] < 0.48),
         )
@@ -275,7 +278,9 @@ class Local2Policy:
 
         usable = [
             row for row in rows
-            if row.photo >= t.usable_photo and row.person >= t.usable_person
+            if row.photo >= t.usable_photo and (
+                row.person >= t.usable_person or row.body_clear or row.face_clear
+            )
         ]
         clear_body = [row for row in usable if row.body_clear]
         clear_anatomy = [row for row in rows if row.anatomy_clear]
@@ -469,7 +474,12 @@ class Local2Policy:
             or not adult_safety_established
         ):
             review_codes.append("adult-safety")
-        if len(clear_body) < t.required_clear_body_images or not body_preferred:
+        # Two YOLO-backed body views are still required so the two-view mismatch
+        # veto is meaningful. A generic zero-shot "preferred" label is not an
+        # additional taste gate when the trained DINO head is available.
+        if len(clear_body) < t.required_clear_body_images or (
+            taste_probability is None and not body_preferred
+        ):
             review_codes.append("body-evidence")
         if review_codes:
             return result(

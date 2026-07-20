@@ -5171,7 +5171,7 @@ async function local2CleanHealth() {
   return fetchJsonWithTimeout(`${PREFERENCE_AI_URL}/local2-clean/health`, {}, 5000);
 }
 
-let local2LastKnownRevision = 'pong-local2-clean-v2:uninitialized';
+let local2LastKnownRevision = 'pong-local2-clean-v3:uninitialized';
 const local2Adapter = createLocal2NodeAdapter({
   createWorkers: createPongLocal2Workers,
   producer: pongLocal2Producer,
@@ -5186,8 +5186,8 @@ const local2Adapter = createLocal2NodeAdapter({
     }
     return local2LastKnownRevision;
   },
-  initialRevision: 'pong-local2-clean-v2:uninitialized',
-  modelRevision: 'siglip2-grouped-dinov2-small-ridge-local2-clean-v2',
+  initialRevision: 'pong-local2-clean-v3:uninitialized',
+  modelRevision: 'siglip2-grouped-dinov2-small-ridge-local2-clean-v3',
   pipelineOptions: {
     targetAccepted: 48,
     readyMinimum: 4,

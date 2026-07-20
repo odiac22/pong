@@ -52,6 +52,14 @@ class Local2PolicyTests(unittest.TestCase):
         self.assertEqual("accept", result.decision)
         self.assertTrue(result.as_dict()["hard_verified"])
 
+    def test_yolo_body_or_face_evidence_can_establish_a_person(self) -> None:
+        rows = [
+            evidence(1, person=0.05, body_preferred=0.05),
+            evidence(2, person=0.06, body_preferred=0.04),
+        ]
+        result = self.policy.decide(rows, taste_probability=0.84)
+        self.assertEqual("accept", result.decision)
+
     def test_two_body_mismatch_views_reject(self) -> None:
         result = self.policy.decide(
             [evidence(1, body_mismatch=0.91, body_preferred=0.04), evidence(2, body_mismatch=0.87, body_preferred=0.05)],
