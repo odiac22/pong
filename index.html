@@ -296,7 +296,9 @@
     .autoplay-button { left: 132px; font-size: 8px; font-weight: 850; letter-spacing: 0; }
     .autoplay-button.on { background: rgba(103,232,249,0.28) !important; opacity: 0.74 !important; }
     .update-app-button { left: 162px; font-size: 8px; font-weight: 850; letter-spacing: 0; }
-    .reset-ai-stats-button { left: 192px; font-size: 9px; font-weight: 900; letter-spacing: 0; background: rgba(127,29,29,0.32) !important; }
+    .auto-scroll-button { left: 192px; font-size: 7px; font-weight: 900; letter-spacing: 0; }
+    .auto-scroll-button.on { background: rgba(34,197,94,0.30) !important; opacity: 0.78 !important; }
+    .reset-ai-stats-button { left: 222px; font-size: 9px; font-weight: 900; letter-spacing: 0; background: rgba(127,29,29,0.32) !important; }
     .next-batch-button {
       position: fixed; left: 46px; top: 50%; transform: translateY(-50%);
       width: 30px; height: 30px; background: var(--ui-bg); opacity: 0.44;
@@ -824,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.38</div>
+  <div class="version-number">24.39</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -912,6 +914,7 @@ const VIDEO_LOAD_RETRY_POLL_MS = 1000;
 const VIDEO_NETWORK_PROGRESS_TIMEOUT_MS = 20000;
 const VIDEO_ACTIVE_NETWORK_PROGRESS_TIMEOUT_MS = 8000;
 const PONG_PLAYER_AUDIO_PREF_KEY = 'pong_player_audio_pref_v2';
+const PONG_AUTO_SCROLL_KEY = 'pong_auto_scroll_v1';
 let visibleBatchRetryTimer = null;
 let visibleBatchRetryToken = 0;
 let sessionSaveTimer = null;
@@ -938,6 +941,9 @@ let deckNavigationLockedUntil = 0;
 let deckAutoPromotionLockedUntil = 0;
 let deckReadyPromotionTimer = null;
 let deckLastEmptyNoticeAt = 0;
+let pongAutoScrollEnabled = false;
+let pongAutoScrollSeconds = 10;
+let pongAutoScrollTimer = null;
 let viewedVideoKeys = new Set();
 let random40PreloadTimer = null;
 let random40PreloadContainer = null;
@@ -1769,6 +1775,7 @@ const UPDATE_PRESERVED_PONG_KEYS = new Set([
   'pong_random40_openai_key_v1',
   'pong_save_counts_v1',
   'pong_autoplay',
+  PONG_AUTO_SCROLL_KEY,
   'pong_repair_item_concurrency_v1',
   'pong_saved_videos_v1',
   'pong_saved_artists_v1'
@@ -3883,6 +3890,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
     transferForegroundVideoPriority(target.querySelector('video'));
     updateBatchReadyCounter();
     updateViewedRemainingCounter();
+    schedulePongAutoScroll();
     return true;
   }
 
@@ -3938,6 +3946,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
     recycleNextEromeVideoIntoWrapper(recycleIndex);
   }
 
+  schedulePongAutoScroll();
   return true;
 }
 
@@ -4020,6 +4029,108 @@ function goToNextDeckVideo() {
 
   setDeckActiveIndex(nextIndex, 'up', { pushHistory: true });
   return true;
+}
+
+function persistPongAutoScroll() {
+  try {
+    localStorage.setItem(PONG_AUTO_SCROLL_KEY, JSON.stringify({
+      enabled: pongAutoScrollEnabled,
+      seconds: pongAutoScrollSeconds
+    }));
+  } catch (_) {}
+}
+
+function loadPongAutoScroll() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(PONG_AUTO_SCROLL_KEY) || 'null');
+    const seconds = Number(stored?.seconds);
+    if (Number.isFinite(seconds) && seconds >= 1) {
+      pongAutoScrollSeconds = Math.max(1, Math.min(3600, Math.round(seconds)));
+    }
+    pongAutoScrollEnabled = stored?.enabled === true;
+  } catch (_) {
+    pongAutoScrollEnabled = false;
+    pongAutoScrollSeconds = 10;
+  }
+}
+
+function updatePongAutoScrollButton(button = document.querySelector('.auto-scroll-button')) {
+  if (!button) return;
+  const compactSeconds = pongAutoScrollSeconds > 99 ? '99+' : `${pongAutoScrollSeconds}s`;
+  button.textContent = compactSeconds;
+  button.classList.toggle('on', pongAutoScrollEnabled);
+  button.title = pongAutoScrollEnabled
+    ? `Auto-scroll every ${pongAutoScrollSeconds}s · tap to change · 0 turns off`
+    : `Auto-scroll off · tap to set seconds`;
+  button.setAttribute('aria-label', button.title);
+}
+
+function schedulePongAutoScroll(delayMs = pongAutoScrollSeconds * 1000) {
+  clearTimeout(pongAutoScrollTimer);
+  pongAutoScrollTimer = null;
+  if (!pongAutoScrollEnabled) return;
+  pongAutoScrollTimer = setTimeout(advancePongAutoScroll, Math.max(100, Number(delayMs) || 100));
+}
+
+function advancePongAutoScroll() {
+  clearTimeout(pongAutoScrollTimer);
+  pongAutoScrollTimer = null;
+  if (!pongAutoScrollEnabled) return false;
+  if (isDeckNavigationLocked()) {
+    schedulePongAutoScroll(300);
+    return false;
+  }
+
+  const currentWrapper = getDeckWrapper(deckCurrentIndex);
+  if (!currentWrapper) {
+    schedulePongAutoScroll();
+    return false;
+  }
+
+  markVideoViewed(currentWrapper);
+  const previousIndex = deckCurrentIndex;
+  const previousGlobalIndex = getCurrentLoadedGlobalVideoIndex();
+  goToNextDeckVideo();
+
+  const advancedVideo = deckCurrentIndex !== previousIndex ||
+    getCurrentLoadedGlobalVideoIndex() !== previousGlobalIndex ||
+    eromeSlidingRenderPending;
+  if (advancedVideo) return true;
+
+  if (canNavigateToNextPasteEvent()) {
+    navigateToNextPasteEvent();
+    return true;
+  }
+
+  showSortingIndicator('Auto-scroll waiting for another artist');
+  schedulePongAutoScroll();
+  return false;
+}
+
+function configurePongAutoScroll(button) {
+  const answer = window.prompt(
+    'Auto-scroll every how many seconds? Enter 0 to turn it off.',
+    String(pongAutoScrollSeconds)
+  );
+  if (answer == null) return;
+  const seconds = Number(String(answer).trim());
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    showSortingIndicator('Enter seconds from 1–3600, or 0 for off');
+    return;
+  }
+
+  if (seconds === 0) {
+    pongAutoScrollEnabled = false;
+  } else {
+    pongAutoScrollSeconds = Math.max(1, Math.min(3600, Math.round(seconds)));
+    pongAutoScrollEnabled = true;
+  }
+  persistPongAutoScroll();
+  updatePongAutoScrollButton(button);
+  schedulePongAutoScroll();
+  showSortingIndicator(pongAutoScrollEnabled
+    ? `Auto-scroll every ${pongAutoScrollSeconds}s`
+    : 'Auto-scroll OFF');
 }
 
 function goToPreviousDeckVideo() {
@@ -4502,7 +4613,12 @@ function createVideoElements() {
       updateVideoBufferedProgressBar(video);
       updateVideoReadyLoader(video);
     });
-    video.addEventListener('ended', () => { refreshForegroundVideoPriority(video, true); });
+    video.addEventListener('ended', () => {
+      refreshForegroundVideoPriority(video, true);
+      if (pongAutoScrollEnabled && wrapper.classList.contains('deck-active')) {
+        schedulePongAutoScroll(80);
+      }
+    });
     video.addEventListener('error', () => {
       if (wrapper.dataset.networkSuspended === 'true') return;
       loadingIndicator.style.display='none';
@@ -6577,6 +6693,16 @@ function createGearButton(){
     }, 80);
   });
   document.body.appendChild(updateBtn);
+
+  const autoScrollBtn = document.createElement('div');
+  autoScrollBtn.className = 'control-button auto-scroll-button';
+  updatePongAutoScrollButton(autoScrollBtn);
+  autoScrollBtn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    configurePongAutoScroll(autoScrollBtn);
+  });
+  document.body.appendChild(autoScrollBtn);
 
   const resetAiStatsBtn = document.createElement('div');
   resetAiStatsBtn.className = 'control-button reset-ai-stats-button';
@@ -16034,6 +16160,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     window.autoplayEnabled = true;
   }
 
+  loadPongAutoScroll();
   createGearButton();
   createUnwatchedVideosButton();
   updatePasteNavigationButton();
