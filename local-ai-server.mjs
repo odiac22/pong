@@ -6650,6 +6650,15 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/video-cache/warm') {
       const payload = JSON.parse(await readBody(req) || '{}');
       touchVideoFileCacheHeartbeat();
+      videoFileCacheGlobalPlaybackConstrainedUntil = Date.now() + 60000;
+      const runningBackground = [...videoFileCacheRecords.values()]
+        .filter(record => record.status === 'downloading' && record.downloadPromise && currentVideoFileCachePriority(record) > 0)
+        .sort((left, right) => Number(left.order || 0) - Number(right.order || 0));
+      runningBackground.slice(VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY).forEach(record => {
+        if (Number(record.activeReaders || 0) > 0) return;
+        record.deferWhenIdle = true;
+        record.controller?.abort();
+      });
       const activeUrl = String(payload?.activeUrl || '');
       if (payload?.authoritative === true) beginVideoFileCachePriorityEpoch();
       const urls = [];
