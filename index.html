@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.59</div>
+    <div class="version-number">24.60</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8966,6 +8966,7 @@ async function random40TryKnownLocalEndpoint(timeoutMs = 2200) {
 function random40PcGatewayUrl(rawUrl) {
   const endpoint = random40GatewayEndpoint || random40State?.localEndpoint || '';
   if (!endpoint) return '';
+  if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) return '';
   return `${endpoint}/proxy?url=${encodeURIComponent(rawUrl)}`;
 }
 
@@ -8976,7 +8977,11 @@ function random40PcFileCacheStreamUrl(rawUrl) {
 }
 
 function random40ServerVideoCacheEndpoint() {
-  return random40GatewayEndpoint || random40State?.localEndpoint || '';
+  const endpoint = random40GatewayEndpoint || random40State?.localEndpoint || '';
+  // HTTPS media elements reject an HTTP LAN cache as mixed content. Preserve
+  // Local2 API calls, but let browser-native preloading own this media path.
+  if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) return '';
+  return endpoint;
 }
 
 function random40IsPcProxyPlaybackUrl(rawUrl) {
@@ -9108,6 +9113,7 @@ function random40PromoteWrapperToServerCache(wrapper, { forceActive = false } = 
 
 function random40ForegroundPlaybackUrl(rawUrl) {
   const key = String(rawUrl || '');
+  if (!random40ServerVideoCacheEndpoint()) return key;
   const serverRecord = random40ServerVideoCacheTracked.get(key);
   if (serverRecord?.ready === true && serverRecord.playbackUrl) return serverRecord.playbackUrl;
   return random40PcGatewayUrl(key) || key;
