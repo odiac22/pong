@@ -35,9 +35,9 @@ const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(proces
 const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_TTL_MS || 60 * 60 * 1000));
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
 const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 6)));
-const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY - 1, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || 4)));
+const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY - 1, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || 2)));
 const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || 1)));
-const VIDEO_FILE_CACHE_QUEUE_MAX = Math.max(100, Math.min(3000, Number(process.env.PONG_VIDEO_FILE_CACHE_QUEUE_MAX || 900)));
+const VIDEO_FILE_CACHE_QUEUE_MAX = Math.max(60, Math.min(3000, Number(process.env.PONG_VIDEO_FILE_CACHE_QUEUE_MAX || 120)));
 const VIDEO_FILE_CACHE_ACTIVE_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_ACTIVE_HOLD_MS || 20000));
 const VIDEO_FILE_CACHE_CURRENT_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_CURRENT_HOLD_MS || 30000));
 const VIDEO_FILE_CACHE_READ_WAIT_MS = Math.max(10000, Number(process.env.PONG_VIDEO_FILE_CACHE_READ_WAIT_MS || 45000));
@@ -2460,7 +2460,9 @@ function assertVideoFileCachePathIsSafe(targetPath = VIDEO_FILE_CACHE_DIR) {
 
 function videoFileCacheCanonical(rawUrl) {
   const target = gatewayTargetUrl(rawUrl);
-  const identity = `${target.hostname.toLowerCase()}${target.pathname}${target.search}`;
+  // e/hash are short-lived signatures for the same physical media object.
+  // Key by object path and always retain the newest signed source URL.
+  const identity = `${target.hostname.toLowerCase()}${target.pathname}`;
   const id = crypto.createHash('sha256').update(identity).digest('hex').slice(0, 32);
   return { id, targetUrl: target.href, identity };
 }
