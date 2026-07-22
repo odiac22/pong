@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.40</div>
+    <div class="version-number">24.41</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -924,7 +924,10 @@ let deckOrder = [];
 let deckHistory = [];
 let deckForwardHistory = [];
 const DECK_HISTORY_LIMIT = 80;
-const DECK_PRELOAD_RADIUS = 1;
+// Random40 publishes artist bundles of at least fifteen videos.  Keep the
+// active card plus ten upcoming cards attached to the PC stream/cache path so
+// a normal swipe never begins with an empty media element.
+const DECK_PRELOAD_RADIUS = 10;
 const DECK_INITIAL_WARM_COUNT = 1;
 const FOREGROUND_VIDEO_BUFFER_TARGET_SECONDS = 10;
 const FOREGROUND_VIDEO_BUFFER_CRITICAL_SECONDS = 6;
