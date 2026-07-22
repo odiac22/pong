@@ -126,9 +126,16 @@
       position: relative; margin-bottom: 2px; touch-action: none;
       user-select: none; -webkit-user-select: none;
     }
+    .video-buffered-fill {
+      position: absolute; top: 0; left: 0; height: 100%; width: 0;
+      background: rgba(255,255,255,0.52); border-radius: 5px;
+      transition: width 0.16s ease-out; pointer-events: none; z-index: 1;
+      will-change: width;
+    }
     .video-progress-fill {
       height: 100%; width: 0; background: var(--ui-accent); border-radius: 5px;
-      transition: width 0.1s linear; position: relative; will-change: width;
+      transition: width 0.1s linear; position: absolute; top: 0; left: 0;
+      will-change: width; z-index: 2;
     }
     .video-progress-fill.active-scrubbing { transition: none; background: #a7f3d0; }
     .scrubber-handle {
@@ -139,7 +146,7 @@
     .preview-fill {
       position: absolute; height: 100%; width: 0;
       background: rgba(103,232,249,0.34); border-radius: 5px;
-      top: 0; left: 0; z-index: 0; pointer-events: none;
+      top: 0; left: 0; z-index: 3; pointer-events: none;
     }
     .video-duration {
       color: white; font-size: 12px; text-shadow: 1px 1px 1px rgba(0,0,0,0.5);
@@ -817,7 +824,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.25</div>
+  <div class="version-number">24.26</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2157,6 +2164,7 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   wrapper.style.setProperty('--ready-pct', 0);
 
   const progressFill = wrapper.querySelector('.video-progress-fill');
+  const bufferedFill = wrapper.querySelector('.video-buffered-fill');
   const previewFill = wrapper.querySelector('.preview-fill');
   const timeIndicator = wrapper.querySelector('.time-indicator');
   const durationText = wrapper.querySelector('.video-duration');
@@ -2165,6 +2173,7 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   const artistLabel = wrapper.querySelector('.artist-label');
 
   if (progressFill) progressFill.style.width = '0%';
+  if (bufferedFill) bufferedFill.style.width = '0%';
   if (previewFill) previewFill.remove();
   if (timeIndicator) timeIndicator.style.display = 'none';
   if (durationText) durationText.textContent = '0:00';
@@ -3090,6 +3099,29 @@ function getVideoBufferedAheadSeconds(video) {
   return 0;
 }
 
+function getVideoBufferedLoadedPercent(video) {
+  const duration = Number(video?.duration || 0);
+  if (!video || !Number.isFinite(duration) || duration <= 0 || !video.buffered?.length) return 0;
+
+  let bufferedEnd = 0;
+  try {
+    for (let i = 0; i < video.buffered.length; i++) {
+      bufferedEnd = Math.max(bufferedEnd, Number(video.buffered.end(i) || 0));
+    }
+  } catch (_) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, (bufferedEnd / duration) * 100));
+}
+
+function updateVideoBufferedProgressBar(video) {
+  const wrapper = video && video.closest('.video-wrapper');
+  const bufferedFill = wrapper && wrapper.querySelector('.video-buffered-fill');
+  if (!bufferedFill) return;
+  bufferedFill.style.width = `${getVideoBufferedLoadedPercent(video).toFixed(2)}%`;
+}
+
 function videoNeedsForegroundPriority(video) {
   if (!video || video.error || video.ended) return false;
   if (video.readyState < 3) return true;
@@ -3421,6 +3453,7 @@ function updateVideoReadyLoader(video, forceReady = false) {
   const percent = forceReady ? 100 : getVideoReadyPercent(video);
   const rounded = Math.round(percent);
 
+  updateVideoBufferedProgressBar(video);
   wrapper.style.setProperty('--ready-pct', rounded);
 
   if (percentText) {
@@ -4138,11 +4171,14 @@ function createVideoElements() {
     progressContainer.className = 'video-progress-container';
     const progressBar = document.createElement('div');
     progressBar.className = 'video-progress-bar';
+    const bufferedFill = document.createElement('div');
+    bufferedFill.className = 'video-buffered-fill';
     const progressFill = document.createElement('div');
     progressFill.className = 'video-progress-fill';
     const scrubberHandle = document.createElement('div');
     scrubberHandle.className = 'scrubber-handle';
     progressFill.appendChild(scrubberHandle);
+    progressBar.appendChild(bufferedFill);
     progressBar.appendChild(progressFill);
     const durationText = document.createElement('div');
     durationText.className = 'video-duration'; durationText.textContent = '0:00';
@@ -4381,6 +4417,7 @@ function createVideoElements() {
     });
     video.addEventListener('timeupdate', () => {
       if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`;
+      updateVideoBufferedProgressBar(video);
       const viewThreshold = video.duration ? 0.01 : 0.75;
       if (!video.paused && video.currentTime >= viewThreshold) markVideoViewed(wrapper);
       refreshForegroundVideoPriority(video);
@@ -4389,6 +4426,7 @@ function createVideoElements() {
       const metadataIndex = Number(wrapper.dataset.index || index);
       durationText.textContent=formatTime(video.duration);
       videoMetadata[metadataIndex]={...videoMetadata[metadataIndex],duration:video.duration||0};
+      updateVideoBufferedProgressBar(video);
       updateVideoReadyLoader(video);
     });
     video.addEventListener('ended', () => { refreshForegroundVideoPriority(video, true); });
