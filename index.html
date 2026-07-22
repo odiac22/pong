@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.52</div>
+    <div class="version-number">24.53</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4901,6 +4901,9 @@ function createVideoElements() {
   setupVisibilityObserver();
   warmCurrentBatchVideos();
   startVisibleBatchAutoRetry();
+  if (document.querySelector('.video-wrapper[data-random40-card="true"]')) {
+    [0, 500, 1500].forEach(delay => setTimeout(random40StartServerVideoCacheTimers, delay));
+  }
 }
 
 // ─── Visibility observer ──────────────────────────────────────────────────────
