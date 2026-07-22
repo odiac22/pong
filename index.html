@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.42</div>
+    <div class="version-number">24.43</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8921,6 +8921,21 @@ function random40PromoteWrapperToServerCache(wrapper, { forceActive = false } = 
   return random40SwapRenderedVideoSource(wrapper, record.playbackUrl, { forceActive });
 }
 
+function random40KeepReadyCacheCardAttached(wrapper) {
+  if (!wrapper || !isRandom40PlaybackActive()) return false;
+  const activeWrapper = document.querySelector('.video-wrapper.deck-active');
+  const activeLocalIndex = Number(activeWrapper?.dataset?.index);
+  const candidateLocalIndex = Number(wrapper.dataset?.index);
+  if (!Number.isInteger(activeLocalIndex) || !Number.isInteger(candidateLocalIndex)) return false;
+  const activeGlobalIndex = Number(currentLoadedRangeStart || 0) + activeLocalIndex;
+  const candidateGlobalIndex = Number(currentLoadedRangeStart || 0) + candidateLocalIndex;
+  const eventIndex = getPasteEventIndexForGlobalVideo(activeGlobalIndex);
+  const bounds = eventIndex >= 0 ? getPasteEventVideoBounds(pasteEvents[eventIndex]) : null;
+  return Boolean(bounds &&
+    candidateGlobalIndex >= bounds.start &&
+    candidateGlobalIndex < Math.min(bounds.end, bounds.start + DECK_PRELOAD_RADIUS + 1));
+}
+
 function random40ApplyServerVideoCacheRecords(records, endpoint = random40ServerVideoCacheEndpoint()) {
   if (!endpoint || !Array.isArray(records)) return;
   let changed = false;
@@ -8953,6 +8968,15 @@ function random40ApplyServerVideoCacheRecords(records, endpoint = random40Server
       if (record.ready === true && playbackUrl) {
         random40RememberPlaybackOverride(key, playbackUrl);
         changed = random40ApplyServerCachePlaybackUrl(key, playbackUrl, { forceActive: false }) || changed;
+        // A completed PC file is local and cannot starve the foreground origin
+        // stream. Keep the first ten cards of the current artist attached so
+        // their decoder metadata is ready before the user swipes.
+        document.querySelectorAll('.video-wrapper').forEach(wrapper => {
+          if (String(wrapper.dataset.originalVideoUrl || '') !== key) return;
+          if (!random40KeepReadyCacheCardAttached(wrapper)) return;
+          const video = wrapper.querySelector('video');
+          if (restoreDeckVideoNetwork(wrapper, video)) changed = true;
+        });
       } else if (playbackUrl && random40PlaybackUrlsMatch(random40PlaybackUrlOverrides.get(key), playbackUrl)) {
         random40PlaybackUrlOverrides.delete(key);
         document.querySelectorAll('.video-wrapper').forEach(wrapper => {
