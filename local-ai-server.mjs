@@ -36,7 +36,7 @@ const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
 const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 12)));
 const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(10, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
-const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY)));
+const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || 4)));
 // Random40 artist bundles commonly place every verified video on one CDN host.
 // Two slots leaves thirteen videos queued behind the current card; four keeps
 // the active stream responsive while materially warming the rest of that artist.
@@ -2464,6 +2464,7 @@ let videoFileCacheBytes = 0;
 let videoFileCacheOrder = 0;
 let videoFileCacheGeneration = 0;
 let videoFileCacheLastHeartbeatAt = 0;
+let videoFileCacheGlobalPlaybackConstrainedUntil = 0;
 let videoFileCachePriorityEpoch = 0;
 let videoFileCacheRetryTimer = null;
 let videoFileCacheHealthy = false;
@@ -2777,6 +2778,7 @@ function videoFileCacheHasActivePlayback(now = Date.now()) {
 }
 
 function videoFileCachePlaybackIsConstrained(now = Date.now()) {
+  if (now < videoFileCacheGlobalPlaybackConstrainedUntil) return true;
   for (const record of videoFileCacheRecords.values()) {
     if (record.status === 'ready' || currentVideoFileCachePriority(record, now) !== 0) continue;
     if (record.playbackBufferConstrained !== false) return true;
@@ -2785,7 +2787,7 @@ function videoFileCachePlaybackIsConstrained(now = Date.now()) {
 }
 
 function videoFileCacheEffectiveBackgroundConcurrency(now = Date.now()) {
-  return videoFileCacheHasActivePlayback(now) && videoFileCachePlaybackIsConstrained(now)
+  return videoFileCachePlaybackIsConstrained(now)
     ? VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY
     : VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY;
 }
@@ -6707,9 +6709,16 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/video-cache/status') {
       touchVideoFileCacheHeartbeat();
       const activeId = String(url.searchParams.get('activeId') || '');
+      const reportedBufferedSeconds = Number(url.searchParams.get('bufferedSeconds'));
+      const reportedCritical = url.searchParams.get('critical') === '1';
+      if (reportedCritical || (Number.isFinite(reportedBufferedSeconds) && reportedBufferedSeconds <= VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS)) {
+        videoFileCacheGlobalPlaybackConstrainedUntil = Date.now() + 5000;
+      } else if (Number.isFinite(reportedBufferedSeconds) && reportedBufferedSeconds >= VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS) {
+        videoFileCacheGlobalPlaybackConstrainedUntil = 0;
+      }
       if (activeId) {
-        updateVideoFileCachePlaybackBuffer(activeId, url.searchParams.get('bufferedSeconds'), {
-          critical: url.searchParams.get('critical') === '1'
+        updateVideoFileCachePlaybackBuffer(activeId, reportedBufferedSeconds, {
+          critical: reportedCritical
         });
         normalizeVideoFileCachePriorities();
         rebalanceVideoFileCacheDownloads();

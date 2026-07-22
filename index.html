@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.45</div>
+    <div class="version-number">24.46</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -9163,8 +9163,8 @@ async function random40PollServerVideoCache() {
   const activeVideo = activeWrapper?.querySelector('video');
   const activeOriginalUrl = String(activeWrapper?.dataset?.originalVideoUrl || '');
   const activeRecord = activeOriginalUrl ? random40ServerVideoCacheTracked.get(activeOriginalUrl) : null;
-  const playbackQuery = activeRecord?.id && activeVideo
-    ? `&activeId=${encodeURIComponent(activeRecord.id)}` +
+  const playbackQuery = activeVideo
+    ? `${activeRecord?.id ? `&activeId=${encodeURIComponent(activeRecord.id)}` : ''}` +
       `&bufferedSeconds=${encodeURIComponent(getVideoBufferedAheadSeconds(activeVideo).toFixed(3))}` +
       `&critical=${videoHasCriticalForegroundBuffer(activeVideo) ? '1' : '0'}`
     : '';
