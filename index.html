@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.50</div>
+    <div class="version-number">24.51</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3270,7 +3270,11 @@ function restoreDeckVideoNetwork(wrapper, video) {
   if (!wrapper || !video || wrapper.dataset.networkSuspended !== 'true') return false;
 
   const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
-  const preferredUrl = String(random40PlaybackUrl(originalUrl) || '');
+  const preferredUrl = String(
+    wrapper.dataset.random40Card === 'true'
+      ? (random40PcFileCacheStreamUrl(originalUrl) || random40PlaybackUrl(originalUrl))
+      : random40PlaybackUrl(originalUrl)
+  );
   // Resolve the live override again instead of trusting the URL captured when
   // this card was suspended. Cache/proxy routing can change while it is hidden.
   const playbackUrl = String(preferredUrl || wrapper.dataset.suspendedVideoSrc || originalUrl);
@@ -4457,6 +4461,7 @@ function createVideoElements() {
     const globalIndex = Number(currentLoadedRangeStart || 0) + index;
     const isRandom40Card = String(videoMetadata[index]?.source || '') === 'random40' ||
       Boolean(videoMetadata[index]?.random40Mode);
+    if (isRandom40Card) wrapper.dataset.random40Card = 'true';
     const shouldAttachInitially = !DECK_MODE_ENABLED || index === initialDeckIndex;
     const claimedPreload = shouldAttachInitially ? random40ClaimReadyPreloadVideo(globalIndex, url) : null;
     const video = claimedPreload?.video || document.createElement('video');
@@ -4483,7 +4488,9 @@ function createVideoElements() {
       if (playbackUrl && String(video.currentSrc || video.src || '') !== playbackUrl) video.src = playbackUrl;
     } else if (!shouldAttachInitially) {
       wrapper.dataset.networkSuspended = 'true';
-      wrapper.dataset.suspendedVideoSrc = random40PlaybackUrl(url);
+      wrapper.dataset.suspendedVideoSrc = isRandom40Card
+        ? (random40PcFileCacheStreamUrl(url) || random40PlaybackUrl(url))
+        : random40PlaybackUrl(url);
     }
     video.playsInline = true; video.controls = false; video.autoplay = false;
     video.muted = window.pongUserWantsAudio !== true; video.volume = window.pongUserWantsAudio === true ? 1.0 : 0;
