@@ -3,7 +3,7 @@ import https from 'node:https';
 import http2 from 'node:http2';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
@@ -35,9 +35,10 @@ const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(proces
 const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_TTL_MS || 60 * 60 * 1000));
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
 const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 6)));
-const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY - 1, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || 2)));
-const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || 1)));
-const VIDEO_FILE_CACHE_QUEUE_MAX = Math.max(60, Math.min(3000, Number(process.env.PONG_VIDEO_FILE_CACHE_QUEUE_MAX || 120)));
+const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY)));
+const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY)));
+const VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.PONG_VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY || 2)));
+const VIDEO_FILE_CACHE_QUEUE_MAX = Math.max(60, Math.min(6000, Number(process.env.PONG_VIDEO_FILE_CACHE_QUEUE_MAX || 5000)));
 const VIDEO_FILE_CACHE_ACTIVE_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_ACTIVE_HOLD_MS || 20000));
 const VIDEO_FILE_CACHE_CURRENT_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_CURRENT_HOLD_MS || 30000));
 const VIDEO_FILE_CACHE_READ_WAIT_MS = Math.max(10000, Number(process.env.PONG_VIDEO_FILE_CACHE_READ_WAIT_MS || 45000));
@@ -2526,6 +2527,7 @@ function videoFileCacheSnapshot() {
     concurrency: VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY,
     background_concurrency: VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY,
     playback_background_concurrency: VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY,
+    per_host_concurrency: VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY,
     active_readers: activeReaders,
     idle_wipe_ms: VIDEO_FILE_CACHE_IDLE_WIPE_MS,
     last_heartbeat_at: videoFileCacheLastHeartbeatAt ? new Date(videoFileCacheLastHeartbeatAt).toISOString() : ''
@@ -2623,34 +2625,11 @@ function videoFileCacheHasActivePlayback(now = Date.now()) {
 function rebalanceVideoFileCacheDownloads() {
   const now = Date.now();
   normalizeVideoFileCachePriorities(now);
-  const activePlayback = videoFileCacheHasActivePlayback(now);
-  const runningBackground = [...videoFileCacheRecords.values()]
-    .filter(record => record.status === 'downloading' && currentVideoFileCachePriority(record, now) > 0 && record.upstreamResponse)
-    .sort((a, b) => (
-      Number(a.priority || 2) - Number(b.priority || 2) ||
-      Number(a.startedAt || 0) - Number(b.startedAt || 0)
-    ));
-  const allowed = activePlayback
-    ? VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY
-    : VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY;
-  for (let index = 0; index < runningBackground.length; index++) {
-    const record = runningBackground[index];
-    const shouldPause = index >= allowed;
-    if (shouldPause && !record.pausedForPlayback) {
-      record.pausedForPlayback = true;
-      record.upstreamResponse.pause();
-    } else if (!shouldPause && record.pausedForPlayback) {
-      record.pausedForPlayback = false;
-      record.upstreamResponse.resume();
-    }
-  }
+  // Never park live CDN responses to favor one card. Paused sockets retain a
+  // connection while producing no bytes, and Android then waits longer for
+  // every future card. Priority zero still wins the next scheduler slot.
   for (const record of videoFileCacheRecords.values()) {
-    if (
-      record.status === 'downloading' &&
-      currentVideoFileCachePriority(record, now) === 0 &&
-      record.pausedForPlayback &&
-      record.upstreamResponse
-    ) {
+    if (record.pausedForPlayback && record.upstreamResponse) {
       record.pausedForPlayback = false;
       record.upstreamResponse.resume();
     }
@@ -2684,7 +2663,7 @@ function trimVideoFileCacheQueue() {
 async function evictVideoFileCacheIfNeeded(extraBytes = 0) {
   const now = Date.now();
   const candidates = [...videoFileCacheRecords.values()]
-    .filter(record => record.status === 'ready')
+    .filter(record => record.status === 'ready' && Number(record.activeReaders || 0) === 0)
     .sort((a, b) => Number(a.lastAccessedAt || a.updatedAt || 0) - Number(b.lastAccessedAt || b.updatedAt || 0));
   for (const record of candidates) {
     const expired = now - Number(record.updatedAt || 0) > VIDEO_FILE_CACHE_TTL_MS;
@@ -2883,16 +2862,26 @@ async function downloadVideoFileCacheRecord(record, generation) {
     record.upstreamResponse = null;
     record.pausedForPlayback = false;
     if (generation === videoFileCacheGeneration) {
-      record.status = 'error';
-      record.error = error.message || String(error);
       record.updatedAt = Date.now();
-      if (Number(record.retries || 0) < 2) {
-        record.retries = Number(record.retries || 0) + 1;
-        record.retryNotBefore = Date.now() + 500 * (2 ** record.retries);
-        enqueueVideoFileCacheRecord(record);
+      if (record.deferWhenIdle) {
+        // A growing-file reader switched to proxy/direct playback. Preserve the
+        // partial file for a later resume, but do not keep a duplicate origin
+        // transfer alive while that fallback is the foreground connection.
+        record.deferWhenIdle = false;
+        record.status = 'idle';
+        record.error = '';
+        record.retryNotBefore = 0;
       } else {
-        await fs.rm(partPath, { force: true }).catch(() => {});
-        record.bytes = 0;
+        record.status = 'error';
+        record.error = error.message || String(error);
+        if (Number(record.retries || 0) < 2) {
+          record.retries = Number(record.retries || 0) + 1;
+          record.retryNotBefore = Date.now() + 500 * (2 ** record.retries);
+          enqueueVideoFileCacheRecord(record);
+        } else {
+          await fs.rm(partPath, { force: true }).catch(() => {});
+          record.bytes = 0;
+        }
       }
     }
   } finally {
@@ -2908,19 +2897,40 @@ function pumpVideoFileCache() {
   rebalanceVideoFileCacheDownloads();
   const nowForCounts = Date.now();
   const running = [...videoFileCacheRecords.values()].filter(record => record.status === 'downloading' && record.downloadPromise);
+  const activeByHost = new Map();
+  const activeByArtist = new Map();
+  for (const record of running) {
+    let hostname = '';
+    try { hostname = new URL(record.sourceUrl).hostname.toLowerCase(); } catch (_) {}
+    if (hostname) activeByHost.set(hostname, Number(activeByHost.get(hostname) || 0) + 1);
+    const artistKey = String(record.artistKey || '');
+    if (artistKey) activeByArtist.set(artistKey, Number(activeByArtist.get(artistKey) || 0) + 1);
+  }
   videoFileCacheActive = running.length;
   videoFileCacheBackgroundActive = running.filter(record => currentVideoFileCachePriority(record, nowForCounts) > 0).length;
   while (videoFileCacheActive < VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY && videoFileCacheQueue.length) {
     const now = Date.now();
     videoFileCacheQueue.sort((a, b) => (
       currentVideoFileCachePriority(a, now) - currentVideoFileCachePriority(b, now) ||
+      Number(activeByArtist.get(String(a.artistKey || '')) || 0) - Number(activeByArtist.get(String(b.artistKey || '')) || 0) ||
       Number(a.order || 0) - Number(b.order || 0)
     ));
-    const index = videoFileCacheQueue.findIndex(record => {
+    const canStartRecord = (record, enforceHostLimit) => {
       if (!record || record.status !== 'queued' || record.downloadPromise) return false;
       if (Number(record.retryNotBefore || 0) > now) return false;
-      return currentVideoFileCachePriority(record, now) === 0 || videoFileCacheBackgroundActive < VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY;
-    });
+      const priority = currentVideoFileCachePriority(record, now);
+      let hostname = '';
+      try { hostname = new URL(record.sourceUrl).hostname.toLowerCase(); } catch (_) {}
+      if (
+        enforceHostLimit && priority > 0 && hostname &&
+        Number(activeByHost.get(hostname) || 0) >= VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY
+      ) return false;
+      return priority === 0 || videoFileCacheBackgroundActive < VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY;
+    };
+    // Prefer spreading work over CDN shards. If every queued file is on a busy
+    // shard, fill the remaining global lanes instead of leaving bandwidth idle.
+    let index = videoFileCacheQueue.findIndex(record => canStartRecord(record, true));
+    if (index < 0) index = videoFileCacheQueue.findIndex(record => canStartRecord(record, false));
     if (index < 0) {
       const nextRetryAt = videoFileCacheQueue.reduce((minimum, record) => {
         const retryAt = Number(record?.retryNotBefore || 0);
@@ -2942,6 +2952,11 @@ function pumpVideoFileCache() {
     record.retryNotBefore = 0;
     videoFileCacheActive++;
     if (isBackground) videoFileCacheBackgroundActive++;
+    let hostname = '';
+    try { hostname = new URL(record.sourceUrl).hostname.toLowerCase(); } catch (_) {}
+    if (hostname) activeByHost.set(hostname, Number(activeByHost.get(hostname) || 0) + 1);
+    const artistKey = String(record.artistKey || '');
+    if (artistKey) activeByArtist.set(artistKey, Number(activeByArtist.get(artistKey) || 0) + 1);
     const generation = videoFileCacheGeneration;
     record.downloadPromise = downloadVideoFileCacheRecord(record, generation)
       .catch(() => {})
@@ -2953,7 +2968,7 @@ function pumpVideoFileCache() {
   }
 }
 
-function queueVideoFileCacheUrl(rawUrl, priority = 2) {
+function queueVideoFileCacheUrl(rawUrl, priority = 2, metadata = {}) {
   if (!rawUrl) return null;
   const canonical = videoFileCacheCanonical(rawUrl);
   let record = videoFileCacheRecords.get(canonical.id);
@@ -2977,6 +2992,8 @@ function queueVideoFileCacheUrl(rawUrl, priority = 2) {
   const now = Date.now();
   record.aliases.add(rawUrl);
   record.sourceUrl = canonical.targetUrl;
+  record.deferWhenIdle = false;
+  if (metadata?.artistKey) record.artistKey = String(metadata.artistKey).slice(0, 300);
   record.updatedAt = Date.now();
   record.priorityEpoch = videoFileCachePriorityEpoch;
   if (Number(priority) === 0) {
@@ -3118,6 +3135,29 @@ async function streamGrowingVideoFileCacheRange(req, res, record, start, end, ge
   if (!res.destroyed && !res.writableEnded) res.end();
 }
 
+async function streamCompletedVideoFileCacheRange(req, res, record, start, end) {
+  await new Promise((resolve, reject) => {
+    const input = createReadStream(record.filePath, { start, end });
+    let settled = false;
+    const finish = error => {
+      if (settled) return;
+      settled = true;
+      input.removeAllListeners();
+      res.off('close', closed);
+      if (error) reject(error);
+      else resolve();
+    };
+    const closed = () => {
+      input.destroy();
+      finish();
+    };
+    input.once('error', finish);
+    input.once('end', () => finish());
+    res.once('close', closed);
+    input.pipe(res);
+  });
+}
+
 async function serveVideoFileCacheMedia(req, res, id) {
   const safeId = String(id || '').replace(/[^a-f0-9]/gi, '');
   const record = videoFileCacheRecords.get(safeId);
@@ -3149,7 +3189,8 @@ async function serveVideoFileCacheMedia(req, res, id) {
     const headers = videoFileCacheHeaders({
       'content-type': record.contentType || 'video/mp4',
       'accept-ranges': 'bytes',
-      'content-length': String(selectedRange.end - selectedRange.start + 1)
+      'content-length': String(selectedRange.end - selectedRange.start + 1),
+      'cache-control': 'no-store'
     });
     if (record.etag) headers.etag = record.etag;
     if (record.lastModified) headers['last-modified'] = record.lastModified;
@@ -3161,7 +3202,11 @@ async function serveVideoFileCacheMedia(req, res, id) {
       res.end();
       return;
     }
-    await streamGrowingVideoFileCacheRange(req, res, record, selectedRange.start, selectedRange.end, generation);
+    if (record.status === 'ready' && record.filePath) {
+      await streamCompletedVideoFileCacheRange(req, res, record, selectedRange.start, selectedRange.end);
+    } else {
+      await streamGrowingVideoFileCacheRange(req, res, record, selectedRange.start, selectedRange.end, generation);
+    }
   } catch (error) {
     if (!res.headersSent && !res.writableEnded) {
       json(res, 502, { ok: false, error: error.message || String(error) });
@@ -3170,6 +3215,11 @@ async function serveVideoFileCacheMedia(req, res, id) {
     }
   } finally {
     record.activeReaders = Math.max(0, Number(record.activeReaders || 0) - 1);
+    if (
+      record.deferWhenIdle &&
+      record.status === 'downloading' &&
+      Number(record.activeReaders || 0) === 0
+    ) record.controller?.abort();
     if (record.status === 'ready' || (record.status === 'error' && !record.downloadPromise && !videoFileCacheQueue.includes(record))) {
       record.playbackLease = false;
     }
@@ -5997,7 +6047,23 @@ const local2Adapter = createLocal2NodeAdapter({
 });
 
 const server = http.createServer(async (req, res) => {
-  if (!isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
+  let requestUrl;
+  try {
+    requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  } catch (_) {
+    json(res, 400, { ok: false, error: 'invalid request URL' });
+    return;
+  }
+  const anonymousLanMediaRead =
+    !req.headers.origin &&
+    (req.method === 'GET' || req.method === 'HEAD') &&
+    isPrivateLanAddress(req.socket.remoteAddress) &&
+    (
+      requestUrl.pathname === '/proxy' ||
+      requestUrl.pathname === '/video-cache/stream' ||
+      requestUrl.pathname.startsWith('/video-cache/media/')
+    );
+  if (!anonymousLanMediaRead && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
     json(res, 403, { ok: false, error: 'browser origin is not allowed' });
     return;
   }
@@ -6008,7 +6074,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const url = requestUrl;
     if (url.pathname.startsWith('/local2/')) {
       const body = ['POST', 'PUT', 'PATCH'].includes(String(req.method || '').toUpperCase())
         ? JSON.parse(await readBody(req))
@@ -6156,6 +6222,23 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/video-cache/stream') {
+      const target = url.searchParams.get('url') || '';
+      let record;
+      try {
+        record = queueVideoFileCacheUrl(target, 0);
+      } catch (error) {
+        json(res, 400, { ok: false, error: error.message || 'bad video cache stream request' });
+        return;
+      }
+      if (!record) {
+        json(res, 400, { ok: false, error: 'video cache stream URL is required' });
+        return;
+      }
+      await serveVideoFileCacheMedia(req, res, record.id);
+      return;
+    }
+
     if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/video-cache/media/')) {
       const id = decodeURIComponent(url.pathname.slice('/video-cache/media/'.length));
       await serveVideoFileCacheMedia(req, res, id);
@@ -6165,23 +6248,49 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/video-cache/warm') {
       const payload = JSON.parse(await readBody(req) || '{}');
       touchVideoFileCacheHeartbeat();
-      beginVideoFileCachePriorityEpoch();
+      if (payload?.authoritative === true) beginVideoFileCachePriorityEpoch();
       const urls = [];
-      const addUrl = value => {
+      const metadataByUrl = new Map();
+      const addUrl = (value, metadata = {}) => {
         const raw = String(value || '');
-        if (raw && urls.length < 700 && !urls.includes(raw)) urls.push(raw);
+        if (!raw || urls.length >= 4000) return;
+        if (!urls.includes(raw)) urls.push(raw);
+        if (metadata?.artistKey) metadataByUrl.set(raw, { artistKey: String(metadata.artistKey) });
       };
       addUrl(payload?.activeUrl);
       (Array.isArray(payload?.currentUrls) ? payload.currentUrls : []).forEach(addUrl);
       (Array.isArray(payload?.urls) ? payload.urls : []).forEach(addUrl);
+      (Array.isArray(payload?.items) ? payload.items : []).forEach(item => {
+        addUrl(item?.url, { artistKey: item?.artistKey || item?.bundleKey || '' });
+      });
       const activeUrl = String(payload?.activeUrl || '');
       const currentUrls = new Set((Array.isArray(payload?.currentUrls) ? payload.currentUrls : []).map(String));
       const records = [];
       for (const rawUrl of urls) {
         try {
           const priority = rawUrl === activeUrl ? 0 : currentUrls.has(rawUrl) ? 1 : 2;
-          const record = queueVideoFileCacheUrl(rawUrl, priority);
+          const record = queueVideoFileCacheUrl(rawUrl, priority, metadataByUrl.get(rawUrl));
           if (record) records.push(videoFileCacheRecordJson(record, videoFileCacheEndpointFromRequest(req)));
+        } catch (_) {}
+      }
+      const deferredUrl = String(payload?.deferredUrl || '');
+      if (deferredUrl) {
+        try {
+          const deferred = videoFileCacheCanonical(deferredUrl);
+          const record = videoFileCacheRecords.get(deferred.id);
+          if (record?.status === 'queued' && !record.downloadPromise) {
+            videoFileCacheQueue = videoFileCacheQueue.filter(candidate => candidate !== record);
+            record.status = 'idle';
+            record.playbackLease = false;
+            record.activeUntil = 0;
+            record.currentUntil = 0;
+            record.priority = 2;
+            record.updatedAt = Date.now();
+          } else if (record?.status === 'downloading') {
+            record.deferWhenIdle = true;
+            record.updatedAt = Date.now();
+            if (Number(record.activeReaders || 0) === 0) record.controller?.abort();
+          }
         } catch (_) {}
       }
       rebalanceVideoFileCacheDownloads();

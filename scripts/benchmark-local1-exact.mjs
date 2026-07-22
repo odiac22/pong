@@ -401,7 +401,13 @@ const playbackProbeExpression = `(async () => {
   // Let Pong's production proof lanes finish already-warm clips before this
   // harness creates a foreground player. Continuously foreground-probing one
   // cold URL previously paused the very background queue being measured.
-  if (Number(random40PlaybackProofActive || 0) > 0 || (random40PlaybackProofQueue || []).length > 0) {
+  const productionProofActive = typeof random40PlaybackProofActive === 'undefined'
+    ? 0
+    : Number(random40PlaybackProofActive || 0);
+  const productionProofQueued = typeof random40PlaybackProofQueue === 'undefined'
+    ? 0
+    : Number((random40PlaybackProofQueue || []).length || 0);
+  if (productionProofActive > 0 || productionProofQueued > 0) {
     return { attempted: 0, passed: passed.size, errors: errors.size };
   }
   // Pong has one foreground player. Probe one clip at a time, round-robin
