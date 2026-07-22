@@ -824,7 +824,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.29</div>
+  <div class="version-number">24.30</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -956,10 +956,6 @@ let random40PreloadWarmedKeys = new Set();
 let random40PreloadWarmedByBundle = new Map();
 let random40PreloadActive = 0;
 let random40PreloadPumpTimer = null;
-let random40PlaybackProofQueue = [];
-let random40PlaybackProofActive = 0;
-let random40PlaybackProofPumpTimer = null;
-let random40PlaybackProofGeneration = 0;
 let foregroundPriorityVideo = null;
 let random40PostFetchActive = 0;
 let random40PostFetchSlowActive = 0;
@@ -3207,7 +3203,11 @@ function transferForegroundVideoPriority(video) {
 
   nextVideo.dataset.foregroundPriority = 'true';
   const nextWrapper = nextVideo.closest('.video-wrapper');
-  if (nextWrapper) restoreDeckVideoNetwork(nextWrapper, nextVideo);
+  if (nextWrapper) {
+    random40PromoteWrapperToServerCache(nextWrapper, { forceActive: true });
+    restoreDeckVideoNetwork(nextWrapper, nextVideo);
+    if (isRandom40PlaybackActive()) random40WarmServerVideoCacheForActiveWrapper(nextWrapper);
+  }
   nextVideo.preload = 'auto';
 
   const now = Date.now();
@@ -3224,7 +3224,11 @@ function suspendDeckVideoNetwork(wrapper, video) {
   if (!DECK_MODE_ENABLED || !wrapper || !video || wrapper.dataset.networkSuspended === 'true') return false;
 
   const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
-  const activeUrl = String(video.currentSrc || video.src || random40PlaybackUrl(originalUrl) || '');
+  const preferredUrl = String(random40PlaybackUrl(originalUrl) || '');
+  const activeUrl = String(
+    (preferredUrl && preferredUrl !== originalUrl ? preferredUrl : '') ||
+    video.currentSrc || video.src || preferredUrl
+  );
   if (activeUrl) wrapper.dataset.suspendedVideoSrc = activeUrl;
   wrapper.dataset.networkSuspended = 'true';
   wrapper.dataset.readyPlayable = 'false';
@@ -3244,14 +3248,17 @@ function restoreDeckVideoNetwork(wrapper, video) {
   if (!wrapper || !video || wrapper.dataset.networkSuspended !== 'true') return false;
 
   const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
-  const playbackUrl = String(wrapper.dataset.suspendedVideoSrc || random40PlaybackUrl(originalUrl) || originalUrl);
+  const preferredUrl = String(random40PlaybackUrl(originalUrl) || '');
+  // Resolve the live override again instead of trusting the URL captured when
+  // this card was suspended. Cache/proxy routing can change while it is hidden.
+  const playbackUrl = String(preferredUrl || wrapper.dataset.suspendedVideoSrc || originalUrl);
   delete wrapper.dataset.networkSuspended;
   delete wrapper.dataset.suspendedVideoSrc;
   if (!playbackUrl) return false;
 
   video.preload = 'auto';
   video.src = playbackUrl;
-  if (originalUrl && playbackUrl !== originalUrl) wrapper.dataset.gatewayFallbackTried = 'true';
+  if (random40IsPcProxyPlaybackUrl(playbackUrl)) wrapper.dataset.gatewayFallbackTried = 'true';
   video.dataset.lastLoadKick = String(Date.now());
   delete video.dataset.lastNetworkProgressAt;
   video.dataset.lastNetworkAttemptAt = String(Date.now());
@@ -4138,10 +4145,9 @@ function createVideoElements() {
     if (shouldAttachInitially && (!claimedPreload || video.error || !video.currentSrc)) {
       const playbackUrl = random40PlaybackUrl(url);
       video.src = playbackUrl;
-      // The global override may already select the PC gateway for a newly
-      // rendered card. Mark that attempt so its first error restores the
-      // direct source instead of repeatedly retrying the same failed gateway.
-      if (playbackUrl && playbackUrl !== url) wrapper.dataset.gatewayFallbackTried = 'true';
+      // A proxy attempt has its own direct fallback. The PC file-cache route is
+      // separate: if it fails, the normal proxy should still get one attempt.
+      if (random40IsPcProxyPlaybackUrl(playbackUrl)) wrapper.dataset.gatewayFallbackTried = 'true';
     } else if (!shouldAttachInitially) {
       wrapper.dataset.networkSuspended = 'true';
       wrapper.dataset.suspendedVideoSrc = random40PlaybackUrl(url);
@@ -4363,6 +4369,7 @@ function createVideoElements() {
       random40PumpPreloadQueue(350);
     });
     video.addEventListener('pause', () => {
+      if (wrapper.dataset.serverCachePromoting === 'true') return;
       const wasCurrent = window.currentlyPlayingVideo === video;
       const ownedForeground = foregroundPriorityVideo === video;
       const isActive = wrapper.classList.contains('deck-active');
@@ -4382,11 +4389,18 @@ function createVideoElements() {
     });
     video.addEventListener('waiting', () => {
       refreshForegroundVideoPriority(video, true);
-      random40WarmServerVideoCacheForActiveWrapper(wrapper);
+      random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
+      random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
       random40PauseHiddenPreloadsForPlayback();
       random40PumpPostFetchQueue();
       loadingIndicator.style.display='none';
       updateVideoReadyLoader(video);
+    });
+    video.addEventListener('stalled', () => {
+      if (!wrapper.classList.contains('deck-active')) return;
+      random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
+      random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
+      random40PauseHiddenPreloadsForPlayback();
     });
     video.addEventListener('progress', () => {
       video.dataset.lastNetworkProgressAt = String(Date.now());
@@ -5064,6 +5078,24 @@ function getRandom40PreloadBundleStats(event, index = -1) {
   const bundleKey = getPasteEventPaperclipKey(event, index);
   if (!bundleKey) return { ready: 0, loading: 0, total: 0 };
 
+  const bounds = getPasteEventVideoBounds(event);
+  const serverEndpoint = random40ServerVideoCacheEndpoint();
+  if (serverEndpoint && bounds) {
+    let ready = 0;
+    let loading = 0;
+    let total = 0;
+    for (let globalIndex = bounds.start; globalIndex < bounds.end; globalIndex++) {
+      const url = String(allVideoUrls[globalIndex] || '');
+      if (!url) continue;
+      const record = random40ServerVideoCacheTracked.get(url);
+      if (!record) continue;
+      total++;
+      if (record.ready === true) ready++;
+      else if (record.playable === true) loading++;
+    }
+    return { ready, loading, total };
+  }
+
   let ready = 0;
   let loading = 0;
   random40PreloadMap.forEach(record => {
@@ -5072,7 +5104,6 @@ function getRandom40PreloadBundleStats(event, index = -1) {
       (record.status === 'ready' || record.status === 'proven') &&
       record.ready === true &&
       record.browserPlayableProof === true &&
-      record.actualPlaybackProof === true &&
       document.body.contains(record.video) &&
       (record.status === 'proven' || Number(record.video?.readyState || 0) >= 3)
     ) ready++;
@@ -5151,171 +5182,11 @@ function random40ReleaseProvenPreloadMedia(record) {
   return true;
 }
 
-function random40ResetPlaybackProofQueue() {
-  random40PlaybackProofGeneration++;
-  random40PlaybackProofQueue = [];
-  clearTimeout(random40PlaybackProofPumpTimer);
-  random40PlaybackProofPumpTimer = null;
-}
-
-async function random40RunAdvancingPlaybackProof(record, generation) {
-  if (
-    !record ||
-    !record.verificationPending ||
-    !document.body.contains(record.video) ||
-    !['loading', 'ready'].includes(record.status)
-  ) return false;
-
-  const borrowedProofVideo = !random40RecordOwnsHiddenVideo(record);
-  const video = borrowedProofVideo ? document.createElement('video') : record.video;
-  const proofUrl = borrowedProofVideo
-    ? (record.proofActiveUrl || record.activeUrl || record.url)
-    : (record.activeUrl || record.url);
-  const sleepProof = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const originalMuted = video.muted;
-  const originalVolume = video.volume;
-  try {
-    if (borrowedProofVideo) {
-      video.preload = 'auto';
-      video.style.cssText = 'width:1px;height:1px;opacity:0.01;';
-      video.src = proofUrl;
-      ensureRandom40PreloadContainer().appendChild(video);
-      video.load();
-    }
-    video.__pongBackgroundProof = true;
-    video.muted = true;
-    video.volume = 0;
-    video.playsInline = true;
-    if (Number.isFinite(video.duration) && video.duration - video.currentTime < 0.8) video.currentTime = 0;
-    const startedAt = Number(video.currentTime || 0);
-    await Promise.race([
-      Promise.resolve(video.play()),
-      sleepProof(RANDOM40_PRELOAD_PLAYBACK_PROOF_TIMEOUT_MS).then(() => {
-        throw new Error('playback proof timed out');
-      })
-    ]);
-    const deadline = performance.now() + RANDOM40_PRELOAD_PLAYBACK_PROOF_TIMEOUT_MS;
-    while (
-      generation === random40PlaybackProofGeneration &&
-      ['loading', 'ready'].includes(record.status) &&
-      performance.now() < deadline &&
-      !video.error
-    ) {
-      if (
-        video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA &&
-        Number(video.currentTime || 0) - startedAt >= RANDOM40_PRELOAD_PLAYBACK_PROOF_SECONDS
-      ) return true;
-      await sleepProof(20);
-    }
-  } catch (_) {
-    return false;
-  } finally {
-    video.__pongBackgroundProof = false;
-    try {
-      video.pause();
-      if (Number.isFinite(video.duration) && video.currentTime > 0.1) video.currentTime = 0;
-    } catch (_) {}
-    video.muted = originalMuted;
-    video.volume = originalVolume;
-    if (borrowedProofVideo) {
-      try {
-        video.removeAttribute('src');
-        video.load();
-        video.remove();
-      } catch (_) {}
-    }
-  }
-  return false;
-}
-
-function random40PumpPlaybackProofQueue(delay = 0) {
-  clearTimeout(random40PlaybackProofPumpTimer);
-  random40PlaybackProofPumpTimer = setTimeout(() => {
-    random40PlaybackProofPumpTimer = null;
-    const foregroundVideo = getForegroundPriorityVideo();
-    if (foregroundVideo && !foregroundVideo.paused) {
-      random40PumpPlaybackProofQueue(250);
-      return;
-    }
-    while (
-      random40PlaybackProofActive < RANDOM40_PRELOAD_PLAYBACK_PROOF_CONCURRENCY &&
-      random40PlaybackProofQueue.length
-    ) {
-      const record = random40PlaybackProofQueue.shift();
-      if (
-        !record?.verificationPending ||
-        !['loading', 'ready'].includes(record.status) ||
-        !document.body.contains(record.video)
-      ) continue;
-      const generation = random40PlaybackProofGeneration;
-      random40PlaybackProofActive++;
-      random40RunAdvancingPlaybackProof(record, generation)
-        .then(passed => {
-          if (
-            generation !== random40PlaybackProofGeneration ||
-            !['loading', 'ready'].includes(record.status) ||
-            !record.verificationPending
-          ) return;
-          record.verificationPending = false;
-          if (passed) {
-            record.actualPlaybackProof = true;
-            record.actualPlaybackProofAt = Date.now();
-            if (record.proofActiveUrl && record.proofActiveUrl !== record.url) {
-              random40RememberPlaybackOverride(record.url, record.proofActiveUrl);
-            }
-            if (record.status === 'loading') record.finalizeReady?.();
-          } else {
-            if (random40RecordOwnsHiddenVideo(record)) {
-              // Cover the artist broadly before spending time retrying one slow
-              // object. A canplay-proven miss remains available to the player,
-              // while the next distinct URL gets the freed preload lane.
-              record.actualPlaybackProofFailed = true;
-              if (record.video?.error) {
-                random40RetryOrFailPreload(record, { allowGateway: true });
-              } else {
-                record.finalizeReady?.();
-              }
-              random40PumpPreloadQueue(0);
-            } else {
-              record.proofAttempts = Number(record.proofAttempts || 0) + 1;
-              const proofAlternates = [
-                ...(record.alternateUrls || []),
-                random40PcGatewayUrl(record.url)
-              ].filter(Boolean);
-              const nextProofUrl = proofAlternates[record.proofAttempts - 1] || '';
-              if (nextProofUrl && record.proofAttempts <= 3) {
-                record.proofActiveUrl = nextProofUrl;
-                record.verificationPending = true;
-                random40PlaybackProofQueue.push(record);
-              }
-            }
-          }
-        })
-        .finally(() => {
-          random40PlaybackProofActive = Math.max(0, random40PlaybackProofActive - 1);
-          random40PumpPlaybackProofQueue(0);
-        });
-    }
-  }, Math.max(0, Number(delay) || 0));
-}
-
-function random40QueueAdvancingPlaybackProof(record) {
-  if (!record || record.actualPlaybackProof === true || record.verificationPending) return false;
-  if (random40RecordOwnsHiddenVideo(record)) {
-    clearTimeout(record.loadTimer);
-    record.loadTimer = null;
-  } else {
-    record.proofAttempts = 0;
-    record.proofActiveUrl = record.activeUrl || record.url;
-  }
-  record.verificationPending = true;
-  random40PlaybackProofQueue.push(record);
-  random40PumpPlaybackProofQueue(0);
-  return true;
-}
-
 function random40PlaybackUrl(rawUrl) {
-  return random40PlaybackUrlOverrides.get(String(rawUrl || '')) || rawUrl;
+  const key = String(rawUrl || '');
+  const serverRecord = random40ServerVideoCacheTracked.get(key);
+  return random40PlaybackUrlOverrides.get(key) ||
+    (serverRecord?.playable === true ? serverRecord.playbackUrl : '') || rawUrl;
 }
 
 function random40InstallPlaybackFallback(record) {
@@ -5478,9 +5349,6 @@ function random40PauseHiddenPreloadsForPlayback() {
   const keep = new Set(loading.slice(0, Math.max(0, RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY - 1)));
   loading.forEach(record => {
     if (keep.has(record)) return;
-    // Cancelling an in-flight proof must make the record retryable after the
-    // foreground video pauses; otherwise verificationPending can strand it.
-    record.verificationPending = false;
     random40FinishPreloadRecord(record, 'queued');
     record.retryAt = Date.now() + 500;
     try {
@@ -5653,7 +5521,7 @@ function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order
   };
   record.finalizeReady = finalizeReady;
   const markReady = () => {
-    if (record.status === 'ready' || record.status === 'proven' || record.verificationPending) return;
+    if (record.status === 'ready' || record.status === 'proven') return;
     if (!['visible', 'queued', 'loading'].includes(record.status) || !document.body.contains(video) || video.error || video.readyState < 3) return;
     const expectedUrl = String(record.activeUrl || record.url || '');
     const currentUrl = String(video.currentSrc || video.src || '');
@@ -5668,19 +5536,13 @@ function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order
     if (record.activeUrl && record.activeUrl !== record.url) {
       random40RememberPlaybackOverride(record.url, record.activeUrl);
     }
-    if (random40RecordOwnsHiddenVideo(record) && record.actualPlaybackProof !== true) {
-      if (random40QueueAdvancingPlaybackProof(record)) return;
-    }
     finalizeReady();
-    if (!random40RecordOwnsHiddenVideo(record) && record.actualPlaybackProof !== true) {
-      random40QueueAdvancingPlaybackProof(record);
-    }
   };
   const markTouched = () => {
     record.touchedAt = Date.now();
   };
   const markError = () => {
-    if (record.status !== 'loading' || record.verificationPending) return;
+    if (record.status !== 'loading') return;
     random40RetryOrFailPreload(record);
     random40PumpPreloadQueue(0);
   };
@@ -5792,6 +5654,10 @@ function runRandom40PreloadPool() {
   const backgroundCandidates = candidates.filter(candidate =>
     candidate.index !== currentIndex && !protectedIndexes.has(candidate.index)
   );
+  // The PC cache owns speculative Random40 downloading. Creating the same
+  // hidden <video> requests in Android wastes the shared source connection and
+  // can starve the visible card. Keep browser preloads only as a no-PC fallback.
+  const useServerFileCache = Boolean(random40ServerVideoCacheEndpoint());
   random40PreloadMap.forEach(record => {
     record.priority = 2;
     record.order = Number.MAX_SAFE_INTEGER;
@@ -5813,14 +5679,16 @@ function runRandom40PreloadPool() {
     const url = allVideoUrls[globalIndex];
     if (!url) return true;
     const key = `${bundleKey}|${url}`;
-    neededKeys.add(key);
+    if (!useServerFileCache) neededKeys.add(key);
     if (serverCacheUrls.length < RANDOM40_SERVER_VIDEO_CACHE_BATCH && !serverCacheUrls.includes(url)) {
       serverCacheUrls.push(url);
     }
     if (index === currentIndex && serverCacheCurrentUrls.length < 30 && !serverCacheCurrentUrls.includes(url)) {
       serverCacheCurrentUrls.push(url);
     }
-    random40PreloadVideo(bundleKey, globalIndex, url, { priority, order: preloadOrder++ });
+    if (!useServerFileCache) {
+      random40PreloadVideo(bundleKey, globalIndex, url, { priority, order: preloadOrder++ });
+    }
     return true;
   };
 
@@ -5870,8 +5738,11 @@ function runRandom40PreloadPool() {
 
   cleanupRandom40PreloadPool(neededKeys);
   if (serverCacheUrls.length) {
+    const activeWrapper = document.querySelector('.video-wrapper.deck-active') ||
+      getForegroundPriorityVideo()?.closest?.('.video-wrapper');
+    const actualActiveUrl = String(activeWrapper?.dataset?.originalVideoUrl || '');
     void random40WarmServerVideoCache(serverCacheUrls, {
-      activeUrl: serverCacheCurrentUrls[0] || '',
+      activeUrl: actualActiveUrl || serverCacheCurrentUrls[0] || '',
       currentUrls: serverCacheCurrentUrls
     });
   }
@@ -6345,7 +6216,6 @@ function stopBrowserWorkloadForRefresh() {
 
   clearTimeout(random40PreloadTimer);
   clearTimeout(random40PreloadPumpTimer);
-  random40ResetPlaybackProofQueue();
   cleanupRandom40PreloadPool(new Set());
   random40PreloadActive = 0;
   try { window.currentlyPlayingVideo?.pause?.(); } catch (_) {}
@@ -8247,9 +8117,6 @@ const RANDOM40_LOCAL2_LEARN_IMAGES_PER_EXAMPLE = 12;
 const RANDOM40_LOCAL2_OVERLAP_TIMEOUT_MS = 20000;
 const RANDOM40_PRELOAD_CURRENT_RESERVE = 4;
 const RANDOM40_PRELOAD_RESIDENT_PER_BACKGROUND_ARTIST = 2;
-const RANDOM40_PRELOAD_PLAYBACK_PROOF_CONCURRENCY = 6;
-const RANDOM40_PRELOAD_PLAYBACK_PROOF_TIMEOUT_MS = 2200;
-const RANDOM40_PRELOAD_PLAYBACK_PROOF_SECONDS = 0.12;
 const RANDOM40_PRELOAD_GUARANTEED_ARTISTS = 8;
 const RANDOM40_PRELOAD_GUARANTEED_VIDEOS = 10;
 let random40AcceptedArtistsMemory = [];
@@ -8272,10 +8139,12 @@ let random40ServerVideoCachePollTimer = null;
 let random40ServerVideoCacheHeartbeatTimer = null;
 let random40ServerVideoCacheLastWarmAt = 0;
 let random40ServerVideoCacheTracked = new Map();
+let random40ServerVideoCachePollCursor = 0;
 const RANDOM40_SERVER_VIDEO_CACHE_STATUS_MS = 1800;
 const RANDOM40_SERVER_VIDEO_CACHE_HEARTBEAT_MS = 45000;
 const RANDOM40_SERVER_VIDEO_CACHE_WARM_MIN_MS = 900;
 const RANDOM40_SERVER_VIDEO_CACHE_BATCH = 650;
+const RANDOM40_SERVER_VIDEO_CACHE_STATUS_BATCH = 120;
 
 function clampRandom40PanelPosition(left, top, rect) {
   const margin = 8;
@@ -8608,25 +8477,133 @@ function random40ServerVideoCacheEndpoint() {
   return random40GatewayEndpoint || random40State?.localEndpoint || '';
 }
 
+function random40IsPcProxyPlaybackUrl(rawUrl) {
+  const endpoint = random40ServerVideoCacheEndpoint();
+  return Boolean(endpoint && String(rawUrl || '').startsWith(`${endpoint}/proxy?`));
+}
+
+function random40PlaybackUrlsMatch(left, right) {
+  if (!left || !right) return false;
+  try {
+    return new URL(left, location.href).href === new URL(right, location.href).href;
+  } catch (_) {
+    return String(left) === String(right);
+  }
+}
+
+function random40SwapRenderedVideoSource(wrapper, playbackUrl, { forceActive = false } = {}) {
+  if (!wrapper || !playbackUrl) return false;
+  wrapper.dataset.serverCachePlaybackSrc = playbackUrl;
+  if (wrapper.dataset.networkSuspended === 'true') {
+    wrapper.dataset.suspendedVideoSrc = playbackUrl;
+    return true;
+  }
+
+  const video = wrapper.querySelector('video');
+  if (!video) return false;
+  const currentUrl = String(video.currentSrc || video.src || '');
+  if (random40PlaybackUrlsMatch(currentUrl, playbackUrl)) return false;
+
+  const isActive = wrapper.classList.contains('deck-active') || foregroundPriorityVideo === video;
+  const wasPlaying = !video.paused && !video.ended;
+  if (isActive && wasPlaying && !forceActive) return false;
+
+  const resumePlayback = isActive && (wasPlaying || wrapper.dataset.playIntent === 'true');
+  const resumeAt = Number(video.currentTime || 0);
+  const wasMuted = video.muted;
+  const priorVolume = video.volume;
+  wrapper.dataset.serverCachePromoting = 'true';
+  delete wrapper.dataset.gatewayFallbackTried;
+  delete wrapper.dataset.directFallbackRestored;
+  delete video.dataset.lastNetworkProgressAt;
+  video.dataset.lastNetworkAttemptAt = String(Date.now());
+
+  const restorePlaybackState = () => {
+    video.muted = wasMuted;
+    video.volume = priorVolume;
+    if (resumeAt > 0 && Number.isFinite(video.duration)) {
+      try { video.currentTime = Math.min(resumeAt, Math.max(0, video.duration - 0.05)); } catch (_) {}
+    }
+  };
+  const resumeIfNeeded = () => {
+    restorePlaybackState();
+    delete wrapper.dataset.serverCachePromoting;
+    if (
+      resumePlayback &&
+      document.body.contains(video) &&
+      (wrapper.classList.contains('deck-active') || foregroundPriorityVideo === video)
+    ) void playVideoCleanly(video);
+  };
+
+  video.addEventListener('loadedmetadata', restorePlaybackState, { once: true });
+  video.addEventListener('canplay', resumeIfNeeded, { once: true });
+  video.src = playbackUrl;
+  video.preload = isActive ? 'auto' : video.preload;
+  try { video.load(); } catch (_) {}
+  return true;
+}
+
+function random40ApplyServerCachePlaybackUrl(originalUrl, playbackUrl, { forceActive = false } = {}) {
+  if (!originalUrl || !playbackUrl) return false;
+  let changed = false;
+  document.querySelectorAll('.video-wrapper').forEach(wrapper => {
+    if (String(wrapper.dataset.originalVideoUrl || '') !== String(originalUrl)) return;
+    if (wrapper.dataset.networkSuspended === 'true') wrapper.dataset.suspendedVideoSrc = playbackUrl;
+    changed = random40SwapRenderedVideoSource(wrapper, playbackUrl, { forceActive }) || changed;
+  });
+  return changed;
+}
+
+function random40PromoteWrapperToServerCache(wrapper, { forceActive = true } = {}) {
+  const originalUrl = String(wrapper?.dataset?.originalVideoUrl || '');
+  const record = originalUrl ? random40ServerVideoCacheTracked.get(originalUrl) : null;
+  if (!record?.playable || !record.playbackUrl) return false;
+  random40RememberPlaybackOverride(originalUrl, record.playbackUrl);
+  return random40SwapRenderedVideoSource(wrapper, record.playbackUrl, { forceActive });
+}
+
 function random40ApplyServerVideoCacheRecords(records, endpoint = random40ServerVideoCacheEndpoint()) {
   if (!endpoint || !Array.isArray(records)) return;
+  let changed = false;
   for (const record of records) {
     if (!record?.id) continue;
-    const playbackUrl = record.playbackUrl || (record.playbackPath ? `${endpoint}${record.playbackPath}` : '');
+    const playbackUrl = record.playbackPath
+      ? `${endpoint}${record.playbackPath}`
+      : String(record.playbackUrl || '');
     const urls = Array.isArray(record.urls) ? record.urls : [];
     for (const url of urls) {
       const key = String(url || '');
       if (!key) continue;
+      const playable = record.playable === true || record.ready === true;
       random40ServerVideoCacheTracked.set(key, {
         id: record.id,
+        status: String(record.status || ''),
         ready: record.ready === true,
+        playable,
+        bytes: Number(record.bytes || record.availableBytes || 0),
+        totalBytes: Number(record.totalBytes || 0),
+        playbackUrl,
         updatedAt: Date.now()
       });
-      if (record.ready === true && playbackUrl) {
+      if (playable && playbackUrl) {
         random40RememberPlaybackOverride(key, playbackUrl);
+        changed = random40ApplyServerCachePlaybackUrl(key, playbackUrl, { forceActive: true }) || changed;
+      } else if (playbackUrl && random40PlaybackUrlsMatch(random40PlaybackUrlOverrides.get(key), playbackUrl)) {
+        random40PlaybackUrlOverrides.delete(key);
+        document.querySelectorAll('.video-wrapper').forEach(wrapper => {
+          if (String(wrapper.dataset.originalVideoUrl || '') !== key) return;
+          delete wrapper.dataset.serverCachePlaybackSrc;
+          if (
+            wrapper.dataset.networkSuspended === 'true' &&
+            random40PlaybackUrlsMatch(wrapper.dataset.suspendedVideoSrc, playbackUrl)
+          ) wrapper.dataset.suspendedVideoSrc = key;
+        });
       }
     }
   }
+  if (changed) tuneVideoPreloadAround(document.querySelector('.video-wrapper.deck-active'));
+  random40MaybeAcknowledgePlaybackReady();
+  updatePasteNavigationButton();
 }
 
 function random40StartServerVideoCacheTimers() {
@@ -8649,8 +8626,17 @@ function random40StartServerVideoCacheTimers() {
 async function random40PollServerVideoCache() {
   const endpoint = random40ServerVideoCacheEndpoint();
   if (!endpoint || !random40ServerVideoCacheTracked.size) return;
-  const ids = [...new Set([...random40ServerVideoCacheTracked.values()].map(record => record.id).filter(Boolean))].slice(0, 700);
-  if (!ids.length) return;
+  const pendingIds = [...new Set(
+    [...random40ServerVideoCacheTracked.values()]
+      .filter(record => record.ready !== true)
+      .map(record => record.id)
+      .filter(Boolean)
+  )];
+  if (!pendingIds.length) return;
+  const start = random40ServerVideoCachePollCursor % pendingIds.length;
+  const take = Math.min(RANDOM40_SERVER_VIDEO_CACHE_STATUS_BATCH, pendingIds.length);
+  const ids = Array.from({ length: take }, (_, offset) => pendingIds[(start + offset) % pendingIds.length]);
+  random40ServerVideoCachePollCursor = (start + take) % pendingIds.length;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 2200);
   try {
@@ -8667,7 +8653,7 @@ async function random40PollServerVideoCache() {
   }
 }
 
-async function random40WarmServerVideoCache(urls, { activeUrl = '', currentUrls = [] } = {}) {
+async function random40WarmServerVideoCache(urls, { activeUrl = '', currentUrls = [], urgent = false } = {}) {
   const endpoint = random40ServerVideoCacheEndpoint();
   if (!endpoint || RANDOM40_BENCHMARK_NO_MEDIA) return false;
   const now = Date.now();
@@ -8696,7 +8682,9 @@ async function random40WarmServerVideoCache(urls, { activeUrl = '', currentUrls 
       body: JSON.stringify({
         activeUrl: activeUrl || '',
         currentUrls: currentUrls.slice(0, 80),
-        urls: uniqueUrls.slice(0, RANDOM40_SERVER_VIDEO_CACHE_BATCH)
+        urls: uniqueUrls.slice(0, RANDOM40_SERVER_VIDEO_CACHE_BATCH),
+        urgent: urgent === true,
+        foregroundStalled: urgent === true
       })
     });
     if (!response.ok) return false;
@@ -8711,25 +8699,31 @@ async function random40WarmServerVideoCache(urls, { activeUrl = '', currentUrls 
   }
 }
 
-function random40WarmServerVideoCacheForActiveWrapper(wrapper = document.querySelector('.video-wrapper.deck-active')) {
+function random40WarmServerVideoCacheForActiveWrapper(
+  wrapper = document.querySelector('.video-wrapper.deck-active'),
+  { urgent = false } = {}
+) {
   if (!wrapper || !isRandom40PlaybackActive()) return;
   const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
   if (!originalUrl) return;
-  const currentUrls = [];
-  const eventIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
+  const currentUrls = [originalUrl];
+  const localIndex = Number(wrapper.dataset.index || 0);
+  const activeGlobalIndex = Number(currentLoadedRangeStart || 0) + (Number.isInteger(localIndex) ? localIndex : 0);
+  const eventIndex = getPasteEventIndexForGlobalVideo(activeGlobalIndex);
   const event = eventIndex >= 0 ? pasteEvents[eventIndex] : null;
   const bounds = getPasteEventVideoBounds(event);
   if (bounds) {
     for (let index = bounds.start; index < Math.min(bounds.end, bounds.start + 20); index++) {
-      if (allVideoUrls[index]) currentUrls.push(allVideoUrls[index]);
+      if (allVideoUrls[index] && !currentUrls.includes(allVideoUrls[index])) currentUrls.push(allVideoUrls[index]);
     }
   }
-  void random40WarmServerVideoCache(currentUrls, { activeUrl: originalUrl, currentUrls });
+  void random40WarmServerVideoCache(currentUrls, { activeUrl: originalUrl, currentUrls, urgent });
 }
 
 function resetRandom40ServerVideoCacheClientState() {
   random40ServerVideoCacheTracked.clear();
   random40ServerVideoCacheLastWarmAt = 0;
+  random40ServerVideoCachePollCursor = 0;
 }
 
 function random40ResetServerVideoCacheOnClose() {
@@ -13445,8 +13439,11 @@ function random40PublishEntries(entries, runState = random40State) {
     return payload;
   }
 
+  const activeDeckOriginalUrl = String(
+    document.querySelector('.video-wrapper.deck-active')?.dataset?.originalVideoUrl || ''
+  );
   void random40WarmServerVideoCache(payload.urls, {
-    activeUrl: payload.urls[0] || '',
+    activeUrl: activeDeckOriginalUrl || (!runState.cardsStarted ? payload.urls[0] || '' : ''),
     currentUrls: payload.urls.slice(0, 30)
   });
 
@@ -13590,8 +13587,11 @@ function random40AppendEntriesToExistingArtist(entries, runState = random40State
 
   runState.videos += urls.length;
   if (!RANDOM40_BENCHMARK_NO_MEDIA) {
+    const activeDeckOriginalUrl = String(
+      document.querySelector('.video-wrapper.deck-active')?.dataset?.originalVideoUrl || ''
+    );
     void random40WarmServerVideoCache(urls, {
-      activeUrl: urls[0] || '',
+      activeUrl: activeDeckOriginalUrl,
       currentUrls: urls.slice(0, 30)
     });
     scheduleRandom40PreloadPool(150);
@@ -13995,7 +13995,6 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now()) {
   });
   clearTimeout(random40PreloadTimer);
   clearTimeout(random40PreloadPumpTimer);
-  random40ResetPlaybackProofQueue();
   cleanupRandom40PreloadPool(new Set());
   random40PreloadActive = 0;
 
