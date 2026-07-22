@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.47</div>
+    <div class="version-number">24.48</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8606,7 +8606,10 @@ let random40ServerVideoCacheManifestInFlightSignature = '';
 const RANDOM40_SERVER_VIDEO_CACHE_STATUS_MS = 1000;
 const RANDOM40_SERVER_VIDEO_CACHE_HEARTBEAT_MS = 45000;
 const RANDOM40_SERVER_VIDEO_CACHE_WARM_MIN_MS = 900;
-const RANDOM40_SERVER_VIDEO_CACHE_BATCH = 4000;
+// A giant speculative manifest starves the cards the user can actually reach.
+// Keep the current artist plus the next two artists hot; later artists enter
+// this rolling window as navigation advances.
+const RANDOM40_SERVER_VIDEO_CACHE_BATCH = 60;
 const RANDOM40_SERVER_VIDEO_CACHE_STATUS_BATCH = 240;
 
 function clampRandom40PanelPosition(left, top, rect) {
