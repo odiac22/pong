@@ -37,7 +37,10 @@ const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PON
 const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 12)));
 const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(10, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
 const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY)));
-const VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.PONG_VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY || 2)));
+// Random40 artist bundles commonly place every verified video on one CDN host.
+// Two slots leaves thirteen videos queued behind the current card; four keeps
+// the active stream responsive while materially warming the rest of that artist.
+const VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.PONG_VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY || 4)));
 const VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS = Math.max(1, Math.min(60, Number(process.env.PONG_VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS || 10)));
 const VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS = Math.max(
   VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS + 1,
