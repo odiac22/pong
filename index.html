@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.62</div>
+    <div class="version-number">24.63</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8966,7 +8966,6 @@ async function random40TryKnownLocalEndpoint(timeoutMs = 2200) {
 function random40PcGatewayUrl(rawUrl) {
   const endpoint = random40GatewayEndpoint || random40State?.localEndpoint || '';
   if (!endpoint) return '';
-  if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) return '';
   return `${endpoint}/proxy?url=${encodeURIComponent(rawUrl)}`;
 }
 
