@@ -38,12 +38,18 @@ const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(pr
 const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(10, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
 const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY)));
 const VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.PONG_VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY || 2)));
+const VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS = Math.max(1, Math.min(60, Number(process.env.PONG_VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS || 10)));
+const VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS = Math.max(
+  VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS + 1,
+  Math.min(120, Number(process.env.PONG_VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS || 20))
+);
 const VIDEO_FILE_CACHE_QUEUE_MAX = Math.max(60, Math.min(6000, Number(process.env.PONG_VIDEO_FILE_CACHE_QUEUE_MAX || 5000)));
 const VIDEO_FILE_CACHE_ACTIVE_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_ACTIVE_HOLD_MS || 20000));
 const VIDEO_FILE_CACHE_CURRENT_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_CURRENT_HOLD_MS || 30000));
 const VIDEO_FILE_CACHE_READ_WAIT_MS = Math.max(10000, Number(process.env.PONG_VIDEO_FILE_CACHE_READ_WAIT_MS || 45000));
 const VIDEO_FILE_CACHE_IO_SETTLE_MS = 8000;
 const VIDEO_FILE_CACHE_WIPE_RETRIES = 12;
+const VIDEO_FILE_CACHE_TAIL_RANGE_ENABLED = process.env.PONG_VIDEO_TAIL_RANGE_ENABLED !== '0';
 const VIDEO_FILE_CACHE_TAIL_RANGE_BYTES = 8 * 1024 * 1024;
 const VIDEO_FILE_CACHE_TAIL_RANGE_MIN_GAP_BYTES = 1024 * 1024;
 const VIDEO_FILE_CACHE_TAIL_RANGE_HEADER_TIMEOUT_MS = Math.max(
@@ -2512,6 +2518,9 @@ function videoFileCacheRecordJson(record, endpoint = '') {
     availableBytes: Number(record.bytes || 0),
     totalBytes: Number(record.totalBytes || 0),
     contentType: record.contentType || 'video/mp4',
+    priority: currentVideoFileCachePriority(record),
+    playbackBufferedSeconds: Number(record.playbackBufferedSeconds || 0),
+    playbackBufferConstrained: record.playbackBufferConstrained === true,
     updatedAt: record.updatedAt ? new Date(record.updatedAt).toISOString() : '',
     playbackPath,
     playbackUrl: endpoint ? `${endpoint}${playbackPath}` : playbackPath,
@@ -2554,8 +2563,15 @@ function videoFileCacheSnapshot() {
     background_concurrency: VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY,
     playback_background_concurrency: VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY,
     per_host_concurrency: VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY,
+    buffer_scheduler: {
+      low_seconds: VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS,
+      high_seconds: VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS,
+      constrained: videoFileCachePlaybackIsConstrained(),
+      effective_background_concurrency: videoFileCacheEffectiveBackgroundConcurrency()
+    },
     active_readers: activeReaders,
     tail_range: {
+      enabled: VIDEO_FILE_CACHE_TAIL_RANGE_ENABLED,
       window_bytes: VIDEO_FILE_CACHE_TAIL_RANGE_BYTES,
       minimum_gap_bytes: VIDEO_FILE_CACHE_TAIL_RANGE_MIN_GAP_BYTES,
       max_active: VIDEO_FILE_CACHE_TAIL_RANGE_MAX_ACTIVE,
@@ -2733,10 +2749,13 @@ function promoteVideoFileCachePlaybackRecord(activeRecord) {
     if (record === activeRecord) continue;
     if (Number(record.activeReaders || 0) > 0) continue;
     record.playbackLease = false;
+    record.playbackBufferConstrained = false;
     record.activeUntil = 0;
     record.priority = currentVideoFileCachePriority(record);
   }
+  const alreadyActive = activeRecord.playbackLease === true;
   activeRecord.playbackLease = true;
+  if (!alreadyActive && activeRecord.status !== 'ready') activeRecord.playbackBufferConstrained = true;
   activeRecord.activeUntil = Number.MAX_SAFE_INTEGER;
   activeRecord.priority = 0;
 }
@@ -2752,6 +2771,35 @@ function videoFileCacheHasActivePlayback(now = Date.now()) {
     if (record.status !== 'ready' && currentVideoFileCachePriority(record, now) === 0) return true;
   }
   return false;
+}
+
+function videoFileCachePlaybackIsConstrained(now = Date.now()) {
+  for (const record of videoFileCacheRecords.values()) {
+    if (record.status === 'ready' || currentVideoFileCachePriority(record, now) !== 0) continue;
+    if (record.playbackBufferConstrained !== false) return true;
+  }
+  return false;
+}
+
+function videoFileCacheEffectiveBackgroundConcurrency(now = Date.now()) {
+  return videoFileCacheHasActivePlayback(now) && videoFileCachePlaybackIsConstrained(now)
+    ? VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY
+    : VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY;
+}
+
+function updateVideoFileCachePlaybackBuffer(id, bufferedSeconds, { critical = false } = {}) {
+  const record = videoFileCacheRecords.get(String(id || ''));
+  if (!record) return false;
+  const parsedSeconds = Number(bufferedSeconds || 0);
+  const seconds = Number.isFinite(parsedSeconds)
+    ? Math.max(0, Math.min(24 * 60 * 60, parsedSeconds))
+    : 0;
+  record.playbackBufferedSeconds = seconds;
+  record.playbackBufferReportedAt = Date.now();
+  if (record.status === 'ready') record.playbackBufferConstrained = false;
+  else if (critical || seconds <= VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS) record.playbackBufferConstrained = true;
+  else if (seconds >= VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS) record.playbackBufferConstrained = false;
+  return true;
 }
 
 function rebalanceVideoFileCacheDownloads() {
@@ -3041,6 +3089,7 @@ function pumpVideoFileCache() {
   }
   videoFileCacheActive = running.length;
   videoFileCacheBackgroundActive = running.filter(record => currentVideoFileCachePriority(record, nowForCounts) > 0).length;
+  const backgroundConcurrency = videoFileCacheEffectiveBackgroundConcurrency(nowForCounts);
   while (videoFileCacheActive < VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY && videoFileCacheQueue.length) {
     const now = Date.now();
     videoFileCacheQueue.sort((a, b) => (
@@ -3058,7 +3107,7 @@ function pumpVideoFileCache() {
         enforceHostLimit && priority > 0 && hostname &&
         Number(activeByHost.get(hostname) || 0) >= VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY
       ) return false;
-      return priority === 0 || videoFileCacheBackgroundActive < VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY;
+      return priority === 0 || videoFileCacheBackgroundActive < backgroundConcurrency;
     };
     // Prefer spreading work over CDN shards. If every queued file is on a busy
     // shard, fill the remaining global lanes instead of leaving bandwidth idle.
@@ -3126,6 +3175,7 @@ function queueVideoFileCacheUrl(rawUrl, priority = 2, metadata = {}) {
     videoFileCacheRecords.set(record.id, record);
   }
   const now = Date.now();
+  const alreadyPlaybackLease = record.playbackLease === true;
   record.aliases.add(rawUrl);
   record.sourceUrl = canonical.targetUrl;
   record.deferWhenIdle = false;
@@ -3134,6 +3184,7 @@ function queueVideoFileCacheUrl(rawUrl, priority = 2, metadata = {}) {
   record.priorityEpoch = videoFileCachePriorityEpoch;
   if (Number(priority) === 0) {
     record.playbackLease = true;
+    if (!alreadyPlaybackLease && record.status !== 'ready') record.playbackBufferConstrained = true;
     record.activeUntil = Math.max(Number(record.activeUntil || 0), now + VIDEO_FILE_CACHE_ACTIVE_HOLD_MS);
   }
   else if (Number(priority) === 1) record.currentUntil = Math.max(Number(record.currentUntil || 0), now + VIDEO_FILE_CACHE_CURRENT_HOLD_MS);
@@ -3149,6 +3200,7 @@ function beginVideoFileCachePriorityEpoch() {
   for (const record of videoFileCacheRecords.values()) {
     if (record.status === 'ready') continue;
     record.playbackLease = false;
+    record.playbackBufferConstrained = false;
     record.activeUntil = Number(record.activeReaders || 0) > 0 ? Number.MAX_SAFE_INTEGER : 0;
     record.currentUntil = 0;
     record.priorityEpoch = videoFileCachePriorityEpoch;
@@ -3228,6 +3280,7 @@ async function writeVideoFileCacheChunk(res, chunk) {
 
 function videoFileCacheTailRangeEligible(record, selectedRange, size, availableBytes) {
   if (
+    !VIDEO_FILE_CACHE_TAIL_RANGE_ENABLED ||
     !record ||
     record.status !== 'downloading' ||
     !record.downloadPromise ||
@@ -6591,6 +6644,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/video-cache/warm') {
       const payload = JSON.parse(await readBody(req) || '{}');
       touchVideoFileCacheHeartbeat();
+      const activeUrl = String(payload?.activeUrl || '');
       if (payload?.authoritative === true) beginVideoFileCachePriorityEpoch();
       const urls = [];
       const metadataByUrl = new Map();
@@ -6606,7 +6660,6 @@ const server = http.createServer(async (req, res) => {
       (Array.isArray(payload?.items) ? payload.items : []).forEach(item => {
         addUrl(item?.url, { artistKey: item?.artistKey || item?.bundleKey || '' });
       });
-      const activeUrl = String(payload?.activeUrl || '');
       const currentUrls = new Set((Array.isArray(payload?.currentUrls) ? payload.currentUrls : []).map(String));
       const records = [];
       for (const rawUrl of urls) {
@@ -6650,6 +6703,15 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/video-cache/status') {
       touchVideoFileCacheHeartbeat();
+      const activeId = String(url.searchParams.get('activeId') || '');
+      if (activeId) {
+        updateVideoFileCachePlaybackBuffer(activeId, url.searchParams.get('bufferedSeconds'), {
+          critical: url.searchParams.get('critical') === '1'
+        });
+        normalizeVideoFileCachePriorities();
+        rebalanceVideoFileCacheDownloads();
+        pumpVideoFileCache();
+      }
       const ids = new Set(String(url.searchParams.get('ids') || '')
         .split(',')
         .map(item => item.trim())

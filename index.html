@@ -824,7 +824,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.37</div>
+  <div class="version-number">24.38</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8837,10 +8837,19 @@ async function random40PollServerVideoCache() {
   const take = Math.min(RANDOM40_SERVER_VIDEO_CACHE_STATUS_BATCH, pendingIds.length);
   const ids = Array.from({ length: take }, (_, offset) => pendingIds[(start + offset) % pendingIds.length]);
   random40ServerVideoCachePollCursor = (start + take) % pendingIds.length;
+  const activeWrapper = document.querySelector('.video-wrapper.deck-active');
+  const activeVideo = activeWrapper?.querySelector('video');
+  const activeOriginalUrl = String(activeWrapper?.dataset?.originalVideoUrl || '');
+  const activeRecord = activeOriginalUrl ? random40ServerVideoCacheTracked.get(activeOriginalUrl) : null;
+  const playbackQuery = activeRecord?.id && activeVideo
+    ? `&activeId=${encodeURIComponent(activeRecord.id)}` +
+      `&bufferedSeconds=${encodeURIComponent(getVideoBufferedAheadSeconds(activeVideo).toFixed(3))}` +
+      `&critical=${videoHasCriticalForegroundBuffer(activeVideo) ? '1' : '0'}`
+    : '';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 2200);
   try {
-    const response = await fetch(`${endpoint}/video-cache/status?ids=${encodeURIComponent(ids.join(','))}&t=${Date.now()}`, {
+    const response = await fetch(`${endpoint}/video-cache/status?ids=${encodeURIComponent(ids.join(','))}${playbackQuery}&t=${Date.now()}`, {
       cache: 'no-store',
       signal: controller.signal
     });

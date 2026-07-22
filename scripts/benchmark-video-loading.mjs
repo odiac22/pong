@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -8,10 +9,15 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const INDEX_PATH = path.join(ROOT, 'index.html');
 const LOCAL_AI = String(process.env.PONG_BENCH_LOCAL_AI || 'http://127.0.0.1:8787').replace(/\/+$/, '');
 const CHROME = process.env.PONG_BENCH_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const FIXTURE_INPUT_PATH = String(process.env.PONG_MEDIA_BENCH_FIXTURE_IN || '').trim();
+const FIXTURE_OUTPUT_PATH = String(process.env.PONG_MEDIA_BENCH_FIXTURE_OUT || '').trim();
+const FIXTURE_FIRST_VIDEO_INDEX_RAW = String(process.env.PONG_MEDIA_BENCH_FIRST_VIDEO_INDEX || '').trim();
+const FIXTURE_MODE = Boolean(FIXTURE_INPUT_PATH);
 const PAGES = [...new Set(String(process.env.PONG_BENCH_PAGES || '1095,2498,2431')
   .split(',').map(Number).filter(value => Number.isInteger(value) && value >= 1 && value <= 3500))];
 const TARGET_VIDEO_COUNT = 10;
-const ATTEMPT_POOL_SIZE = 15;
+const FIXTURE_FIRST_VIDEO_INDEX = FIXTURE_FIRST_VIDEO_INDEX_RAW ? Number(FIXTURE_FIRST_VIDEO_INDEX_RAW) : 0;
+const ATTEMPT_POOL_SIZE = FIXTURE_MODE ? TARGET_VIDEO_COUNT : 15;
 const DISCOVERY_TIMEOUT_MS = Math.max(60_000, Number(process.env.PONG_MEDIA_BENCH_DISCOVERY_MS || 600_000));
 const FIRST_FRAME_TIMEOUT_MS = Math.max(15_000, Number(process.env.PONG_MEDIA_BENCH_FIRST_FRAME_MS || 45_000));
 const MAX_VIDEO_WALL_MS = Math.max(120_000, Number(process.env.PONG_MEDIA_BENCH_MAX_VIDEO_MS || 1_200_000));
@@ -21,12 +27,18 @@ const requestedMethods = [...new Set(String(process.env.PONG_MEDIA_BENCH_METHODS
   .filter(value => ['direct', 'proxy', 'growing', 'hybrid', 'complete'].includes(value)))];
 // Current production must run first. It is the only method that intentionally
 // retains the live Local2 discovery workload and its real background warming.
-const METHOD_ORDER = requestedMethods.includes('hybrid')
-  ? ['hybrid', ...requestedMethods.filter(method => method !== 'hybrid')]
-  : requestedMethods;
+const METHOD_ORDER = FIXTURE_MODE
+  ? ['hybrid']
+  : requestedMethods.includes('hybrid')
+    ? ['hybrid', ...requestedMethods.filter(method => method !== 'hybrid')]
+    : requestedMethods;
 
-if (PAGES.length !== 3) throw new Error('PONG_BENCH_PAGES must contain exactly three distinct pages');
+if (!FIXTURE_MODE && PAGES.length !== 3) throw new Error('PONG_BENCH_PAGES must contain exactly three distinct pages');
 if (!METHOD_ORDER.length) throw new Error('PONG_MEDIA_BENCH_METHODS did not contain a supported method');
+if (FIXTURE_FIRST_VIDEO_INDEX_RAW && (!FIXTURE_MODE || !Number.isInteger(FIXTURE_FIRST_VIDEO_INDEX)
+  || FIXTURE_FIRST_VIDEO_INDEX < 1 || FIXTURE_FIRST_VIDEO_INDEX > TARGET_VIDEO_COUNT)) {
+  throw new Error(`PONG_MEDIA_BENCH_FIRST_VIDEO_INDEX requires fixture mode and an integer from 1 to ${TARGET_VIDEO_COUNT}`);
+}
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -315,8 +327,12 @@ async function trustedSwipeUp(session, selector = '.video-wrapper.deck-active .t
   const endY = Math.min(bottom - 100, top + 180);
   const touch = y => [{ x, y, radiusX: 1, radiusY: 1, force: 1, id: 1 }];
   await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: touch(startY) });
-  await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: touch((startY + endY) / 2) });
-  await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: touch(endY) });
+  for (let step = 1; step <= 5; step++) {
+    await delay(18);
+    const y = startY + ((endY - startY) * step / 5);
+    await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: touch(y) });
+  }
+  await delay(18);
   await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
 }
 
@@ -476,6 +492,143 @@ function summarize(values) {
     p95: Number(percentile(0.95).toFixed(1)),
     max: Number(numbers.at(-1).toFixed(1)),
     mean: Number((numbers.reduce((sum, value) => sum + value, 0) / numbers.length).toFixed(1)),
+  };
+}
+
+function resolveBenchmarkFile(rawPath) {
+  const value = String(rawPath || '').trim();
+  if (!value) return '';
+  return path.isAbsolute(value) ? path.resolve(value) : path.resolve(ROOT, value);
+}
+
+function benchmarkFixtureHash(videos) {
+  return createHash('sha256')
+    .update(videos.map(item => String(item?.url || '')).join('\n'))
+    .digest('hex');
+}
+
+function benchmarkFixtureFromAcquisition(acquisition) {
+  const videos = acquisition.frozen.slice(0, TARGET_VIDEO_COUNT).map(item => ({
+    url: String(item.url || ''),
+    metadata: { ...(item.metadata || {}) },
+  }));
+  if (videos.length !== TARGET_VIDEO_COUNT || new Set(videos.map(item => item.url)).size !== TARGET_VIDEO_COUNT) {
+    throw new Error(`fixture capture requires ${TARGET_VIDEO_COUNT} distinct ordered media URLs`);
+  }
+  return {
+    schema: 'pong-local2-video-fixture-v1',
+    generatedAt: new Date().toISOString(),
+    orderedUrlSha256: benchmarkFixtureHash(videos),
+    artist: String(acquisition.artist || ''),
+    artistUrl: String(acquisition.artistUrl || ''),
+    sourcePage: Number(acquisition.sourcePage || 0),
+    event: {
+      ...(acquisition.event || {}),
+      source: 'random40',
+      startIndex: 0,
+      count: TARGET_VIDEO_COUNT,
+      ready: true,
+      pending: false,
+    },
+    videos,
+  };
+}
+
+async function writeBenchmarkFixture(acquisition) {
+  if (!FIXTURE_OUTPUT_PATH) return null;
+  const fixture = benchmarkFixtureFromAcquisition(acquisition);
+  const filePath = resolveBenchmarkFile(FIXTURE_OUTPUT_PATH);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, `${JSON.stringify(fixture, null, 2)}\n`, 'utf8');
+  return { filePath, fixture };
+}
+
+async function writeLoadedBenchmarkFixture(loadedFixture) {
+  if (!FIXTURE_OUTPUT_PATH || !loadedFixture?.fixture) return null;
+  const filePath = resolveBenchmarkFile(FIXTURE_OUTPUT_PATH);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, `${JSON.stringify(loadedFixture.fixture, null, 2)}\n`, 'utf8');
+  return { filePath, fixture: loadedFixture.fixture };
+}
+
+async function readBenchmarkFixture() {
+  const filePath = resolveBenchmarkFile(FIXTURE_INPUT_PATH);
+  const bytes = await readFile(filePath);
+  const sourceText = bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe
+    ? bytes.subarray(2).toString('utf16le')
+    : bytes.toString('utf8').replace(/^\uFEFF/, '');
+  const source = JSON.parse(sourceText);
+  const fixture = source?.schema === 'pong-local2-video-fixture-v1'
+    ? source
+    : source?.schema === 'pong-local2-natural-end-video-benchmark-v3' && Array.isArray(source?.acquisition?.frozenVideos)
+      ? {
+          schema: 'pong-local2-video-fixture-v1',
+          generatedAt: new Date().toISOString(),
+          artist: String(source.acquisition.artist || ''),
+          artistUrl: String(source.acquisition.artistUrl || ''),
+          sourcePage: Number(source.acquisition.sourcePage || 0),
+          event: {
+            source: 'random40',
+            artistKey: String(source.acquisition.artistUrl || source.acquisition.artist || 'benchmark-artist'),
+            artistName: String(source.acquisition.artist || 'benchmark artist'),
+            artistDisplayName: String(source.acquisition.artist || 'benchmark artist'),
+            artistUrl: String(source.acquisition.artistUrl || ''),
+            sourcePage: Number(source.acquisition.sourcePage || 0)
+          },
+          videos: source.acquisition.frozenVideos.slice(0, TARGET_VIDEO_COUNT).map(item => ({
+            url: String(item?.url || ''),
+            metadata: {
+              artistDisplayName: String(item?.artist || source.acquisition.artist || ''),
+              artistUrl: String(source.acquisition.artistUrl || ''),
+              sourcePage: Number(source.acquisition.sourcePage || 0),
+              playbackProbeVerified: item?.playbackProbeVerified === true
+            }
+          }))
+        }
+      : null;
+  if (!fixture) throw new Error(`unsupported Pong media fixture schema: ${source?.schema || 'missing'}`);
+  const videos = Array.isArray(fixture.videos) ? fixture.videos.map(item => ({
+    url: String(item?.url || '').trim(),
+    metadata: { ...(item?.metadata || {}) },
+  })) : [];
+  if (videos.length !== TARGET_VIDEO_COUNT) {
+    throw new Error(`fixture must contain exactly ${TARGET_VIDEO_COUNT} ordered videos`);
+  }
+  if (new Set(videos.map(item => item.url)).size !== TARGET_VIDEO_COUNT) {
+    throw new Error(`fixture must contain ${TARGET_VIDEO_COUNT} distinct media URLs`);
+  }
+  for (const item of videos) {
+    let parsed;
+    try { parsed = new URL(item.url); } catch (_) {}
+    if (!parsed || !['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error(`fixture contains an invalid media URL: ${item.url.slice(0, 120)}`);
+    }
+  }
+  const originalOrderedUrlSha256 = benchmarkFixtureHash(videos);
+  if (fixture.orderedUrlSha256 && fixture.orderedUrlSha256 !== originalOrderedUrlSha256) {
+    throw new Error('fixture ordered URL hash does not match its video list');
+  }
+  const effectiveVideos = FIXTURE_FIRST_VIDEO_INDEX
+    ? [videos[FIXTURE_FIRST_VIDEO_INDEX - 1], ...videos.filter((_, index) => index !== FIXTURE_FIRST_VIDEO_INDEX - 1)]
+    : videos;
+  const effectiveOrderedUrlSha256 = benchmarkFixtureHash(effectiveVideos);
+  return {
+    filePath,
+    originalOrderedUrlSha256,
+    firstVideoIndexOverride: FIXTURE_FIRST_VIDEO_INDEX || null,
+    fixture: {
+      ...fixture,
+      orderedUrlSha256: effectiveOrderedUrlSha256,
+      videos: effectiveVideos,
+      event: {
+        ...(fixture.event || {}),
+        source: 'random40',
+        startIndex: 0,
+        count: TARGET_VIDEO_COUNT,
+        ready: true,
+        pending: false,
+      },
+    },
   };
 }
 
@@ -688,6 +841,81 @@ async function acquireFirstLocal2Artist(session) {
   };
 }
 
+async function prepareFrozenFixtureAcquisition(session, loadedFixture) {
+  const fixture = loadedFixture.fixture;
+  await waitFor(() => session.evaluate(`document.readyState === 'complete' && typeof startRandom40 === 'function'`), 20_000, 'Pong page');
+  const priorTimeOrigin = Number(await session.evaluate(`performance.timeOrigin`));
+  await session.evaluate(`
+    ['pong_session_v1','pong_random40_model_reject_cache_v1','pong_random40_stage_timing_v2','pong_random40_model_accuracy_v2']
+      .forEach(key => localStorage.removeItem(key));
+    localStorage.setItem('pong_random40_local_endpoint_v1', ${JSON.stringify(LOCAL_AI)});
+    localStorage.setItem('pong_player_audio_pref_v2', 'muted');
+    setTimeout(() => location.reload(), 0);
+    true
+  `);
+  await waitFor(() => session.evaluate(`
+    document.readyState === 'complete' &&
+    typeof startRandom40 === 'function' &&
+    performance.timeOrigin !== ${Number(priorTimeOrigin)}
+  `), 20_000, 'Pong fixture reload');
+  await dismissPongSplash(session);
+  const browserEnvironment = await session.evaluate(`(() => {
+    // A real Local2 acceptance already has the reachable PC gateway selected.
+    // Fixture replay begins at that acceptance boundary, so restore the same
+    // runtime state (localStorage alone is not read into this global on load).
+    random40GatewayEndpoint = ${JSON.stringify(LOCAL_AI)};
+    window.autoplayEnabled = false;
+    return {
+      userAgent: navigator.userAgent,
+      platform: navigator.userAgentData?.platform || navigator.platform || '',
+      mobile: navigator.userAgentData?.mobile === true,
+      viewportCssPixels: { width: innerWidth, height: innerHeight },
+      deviceScaleFactor: devicePixelRatio,
+      maxTouchPoints: Number(navigator.maxTouchPoints || 0),
+      visibilityState: document.visibilityState
+    };
+  })()`);
+  const videos = fixture.videos.map((item, globalIndex) => ({
+    url: item.url,
+    metadata: { ...(item.metadata || {}) },
+    globalIndex,
+  }));
+  return {
+    acquisitionMode: 'frozen-fixture',
+    fixturePath: loadedFixture.filePath,
+    fixtureHash: fixture.orderedUrlSha256,
+    touch: null,
+    click: null,
+    firstAcceptance: null,
+    eventIndex: 0,
+    event: { ...fixture.event },
+    artist: String(fixture.artist || fixture.event?.artistDisplayName || ''),
+    artistUrl: String(fixture.artistUrl || fixture.event?.artistUrl || ''),
+    sourcePage: Number(fixture.sourcePage || fixture.event?.sourcePage || 0),
+    videos,
+    frozen: videos,
+    activeOriginalUrl: '',
+    browserEnvironment,
+    state: {
+      mode: 'local2-fixture',
+      startedAt: 0,
+      firstVideoRecordedAt: 0,
+      accepted: 1,
+      videos: TARGET_VIDEO_COUNT,
+      pages: 0,
+      api: 0,
+      stageTimings: {},
+      verdictAudit: [],
+    },
+    observedAt: Date.now(),
+    firstArtistAcceptedAt: 0,
+    firstArtistAcceptedPerformanceAt: 0,
+    buttonToFirstArtistAcceptedMs: null,
+    buttonToDiscoveryMs: null,
+    buttonToActiveCardMs: null,
+  };
+}
+
 async function quiesceProductionWork(session) {
   await session.evaluate(`(async () => {
     if (random40State) {
@@ -795,6 +1023,11 @@ async function prepareActualPongCards(session, acquisition, routes, {
     setActivePlaybackRangeForPasteEvent(0, { recordHistory: true });
     window.PongFastNextBatchOnce = true;
     loadNextBatch(0);
+    // Production Random40 publication reaches this path through the Load
+    // Videos button, which hides the fixed controls before player gestures.
+    // Fixture mode installs the same cards directly, so mirror that side
+    // effect without changing any touch or deck-navigation handlers.
+    setTimeout(hideControls, 1000);
     setTimeout(() => {
       try { scheduleRandom40PreloadPool(0); } catch (_) {}
     }, 0);
@@ -1331,7 +1564,22 @@ async function navigateToNextUnseenPongCard(session, seen, frozenSet, priorUrl, 
   throw new Error(`${method} could not reach an unattempted Pong card through production swipe navigation`);
 }
 
-async function runMethod(session, networkRecorder, method, acquisition, { productionLive }) {
+async function runMethod(session, networkRecorder, method, acquisition, { productionLive, fixtureMode = false }) {
+  if (fixtureMode) {
+    const accepted = await session.evaluate(`({ wallAt: Date.now(), performanceAt: performance.now() })`);
+    acquisition.firstAcceptance = {
+      wallAt: Number(accepted.wallAt),
+      performanceAt: Number(accepted.performanceAt),
+      accepted: 1,
+      artist: acquisition.artist,
+      artistUrl: acquisition.artistUrl,
+    };
+    acquisition.firstArtistAcceptedAt = Number(accepted.wallAt);
+    acquisition.firstArtistAcceptedPerformanceAt = Number(accepted.performanceAt);
+    acquisition.observedAt = Number(accepted.wallAt);
+    acquisition.state.startedAt = Number(accepted.wallAt);
+    acquisition.state.firstVideoRecordedAt = Number(accepted.wallAt);
+  }
   const methodStartedAt = productionLive ? acquisition.firstArtistAcceptedAt : Date.now();
   const methodStartedPerformanceAt = productionLive
     ? acquisition.firstArtistAcceptedPerformanceAt
@@ -1411,6 +1659,11 @@ async function runMethod(session, networkRecorder, method, acquisition, { produc
 
   const naturalEnds = probes.filter(probe => probe.success && probe.endedNaturally).length;
   setup.cacheAtMethodEnd = await cacheSnapshotsForUrls(frozenUrls);
+  const endingHealth = await fetch(`${LOCAL_AI}/health`, { cache: 'no-store' }).then(response => response.json());
+  if (!endingHealth?.ok || !endingHealth?.video_file_cache) {
+    throw new Error(`${method} could not capture the ending server transport state`);
+  }
+  setup.serverVideoCacheAtMethodEnd = endingHealth.video_file_cache;
   const distinctNaturalEnds = new Set(
     probes.filter(probe => probe.success && probe.endedNaturally).map(probe => probe.originalUrl)
   ).size;
@@ -1472,6 +1725,8 @@ async function runMethod(session, networkRecorder, method, acquisition, { produc
 }
 
 async function main() {
+  const loadedFixture = FIXTURE_MODE ? await readBenchmarkFixture() : null;
+  const normalizedFixture = loadedFixture ? await writeLoadedBenchmarkFixture(loadedFixture) : null;
   const health = await fetch(`${LOCAL_AI}/health`).then(response => response.json());
   if (!health?.ok || !health?.ready) throw new Error('Pong Local AI core is not ready');
   // Cold production begins before Local2 is clicked. Hybrid/current production
@@ -1492,11 +1747,26 @@ async function main() {
     session = opened.session;
     emulation = opened.emulation;
     const networkRecorder = createNetworkRecorder(session);
-    const acquisition = await acquireFirstLocal2Artist(session);
+    const acquisition = loadedFixture
+      ? await prepareFrozenFixtureAcquisition(session, loadedFixture)
+      : await acquireFirstLocal2Artist(session);
+    if (!acquisition.acquisitionMode) acquisition.acquisitionMode = 'live-local2';
+    const capturedFixture = !loadedFixture && FIXTURE_OUTPUT_PATH
+      ? await writeBenchmarkFixture(acquisition)
+      : normalizedFixture;
     const frozenUrls = acquisition.frozen.map(item => item.url);
-    // Capture discovery cache state immediately without holding the first real
-    // Pong tap behind a full status response.
-    const acquisitionCachePromise = cacheSnapshotsForUrls(frozenUrls).catch(() => null);
+    let acquisitionCachePromise;
+    if (FIXTURE_MODE) {
+      // Fixture trials begin from a verified empty PC cache. Capture that state
+      // before t0 so status instrumentation cannot delay or contend with the
+      // first production warm request.
+      await resetCache({ verify: true });
+      acquisitionCachePromise = Promise.resolve(await cacheSnapshotsForUrls(frozenUrls));
+    } else {
+      // Capture discovery cache state immediately without holding the first real
+      // Pong tap behind a full status response.
+      acquisitionCachePromise = cacheSnapshotsForUrls(frozenUrls).catch(() => null);
+    }
     const results = [];
     let productionQuiesced = false;
 
@@ -1508,6 +1778,7 @@ async function main() {
       try {
         const result = await runMethod(session, networkRecorder, method, acquisition, {
           productionLive: method === 'hybrid' && !productionQuiesced,
+          fixtureMode: FIXTURE_MODE,
         });
         results.push(result);
         console.error(JSON.stringify({ method, summary: result.summary }));
@@ -1541,6 +1812,21 @@ async function main() {
     report = {
       schema: 'pong-local2-natural-end-video-benchmark-v3',
       generatedAt: new Date().toISOString(),
+      benchmarkMode: FIXTURE_MODE ? 'frozen-fixture' : 'live-local2',
+      fixture: FIXTURE_MODE ? {
+        inputPath: loadedFixture.filePath,
+        originalOrderedUrlSha256: loadedFixture.originalOrderedUrlSha256,
+        firstVideoIndexOverride: loadedFixture.firstVideoIndexOverride,
+        effectiveOrderedUrlSha256: loadedFixture.fixture.orderedUrlSha256,
+        orderedUrlSha256: loadedFixture.fixture.orderedUrlSha256,
+        orderedVideoCount: loadedFixture.fixture.videos.length,
+        exactTenRequired: true,
+      } : capturedFixture ? {
+        outputPath: capturedFixture.filePath,
+        orderedUrlSha256: capturedFixture.fixture.orderedUrlSha256,
+        orderedVideoCount: capturedFixture.fixture.videos.length,
+        captureRunShouldNotBeUsedForVariantTiming: true,
+      } : null,
       safety: {
         headless: true,
         chromeMuteAudio: true,
@@ -1559,12 +1845,15 @@ async function main() {
         },
         resultScope: 'Android-like Chrome viewport, UA, DPR, and touch input running on this PC; not a physical-phone measurement',
       },
-      exactFlow: 'trusted Local2 CDP touch -> observe first production accepted artist (hybrid timer zero) -> freeze 15-card attempt pool -> up to 15 trusted card touches and production vertical swipes -> require 10 distinct natural ends at 1x',
-      pages: PAGES,
+      exactFlow: FIXTURE_MODE
+        ? 'verified empty PC cache -> stamp first-artist-accepted timer zero -> install the same 10 ordered fixture cards through production Pong warming/rendering -> 10 trusted card touches and production vertical swipes -> require all 10 distinct natural ends at 1x'
+        : 'trusted Local2 CDP touch -> observe first production accepted artist (hybrid timer zero) -> freeze 15-card attempt pool -> up to 15 trusted card touches and production vertical swipes -> require 10 distinct natural ends at 1x',
+      pages: FIXTURE_MODE ? [] : PAGES,
       methods: METHOD_ORDER,
       targetNaturalEndsPerMethod: TARGET_VIDEO_COUNT,
       maxAttemptsPerMethod: ATTEMPT_POOL_SIZE,
       acquisition: {
+        mode: acquisition.acquisitionMode,
         trustedTouch: acquisition.touch,
         productionClickFromTouch: acquisition.click,
         artist: acquisition.artist,

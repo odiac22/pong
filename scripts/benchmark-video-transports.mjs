@@ -1,8 +1,9 @@
 import https from 'node:https';
+import http2 from 'node:http2';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, mkdtemp, open, readFile, rm, rmdir } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { performance } from 'node:perf_hooks';
@@ -48,7 +49,35 @@ const ADAPTIVE_CONFIGS = parseAdaptiveConfigs(
   process.env.PONG_TRANSPORT_ADAPTIVE_CONFIGS || '6:2'
 );
 const INCLUDE_SERIAL_BASELINE = process.env.PONG_TRANSPORT_INCLUDE_SERIAL !== '0';
+const INCLUDE_HTTP1_WHOLE = process.env.PONG_TRANSPORT_INCLUDE_HTTP1 !== '0';
+// HTTP/2 remains an opt-in benchmark transport. Production continues using
+// HTTP/1.1 until identical-manifest A/B runs prove that H2 is faster.
+// For a focused pair, also set PONG_TRANSPORT_INCLUDE_SERIAL=0,
+// PONG_TRANSPORT_INCLUDE_ADAPTIVE=0, and one CONCURRENCIES/PER_HOST value.
+// Repeat once with PONG_TRANSPORT_HTTP2_FIRST=0 and once with it set to 1.
+const INCLUDE_HTTP2_WHOLE = process.env.PONG_TRANSPORT_INCLUDE_HTTP2 === '1';
+// Flip this on the repeat run to balance CDN/cache/order effects:
+//   PONG_TRANSPORT_HTTP2_FIRST=0, then PONG_TRANSPORT_HTTP2_FIRST=1.
+const HTTP2_FIRST = process.env.PONG_TRANSPORT_HTTP2_FIRST === '1';
 const INCLUDE_ADAPTIVE = process.env.PONG_TRANSPORT_INCLUDE_ADAPTIVE !== '0';
+const ADAPTIVE_FIRST = process.env.PONG_TRANSPORT_ADAPTIVE_FIRST === '1';
+const HTTP2_SESSIONS_PER_ORIGIN = parseIntegerList(
+  process.env.PONG_TRANSPORT_HTTP2_SESSION_COUNTS || '1,2',
+  1,
+  4
+);
+const HTTP2_CONNECT_TIMEOUT_MS = boundedInteger(
+  process.env.PONG_TRANSPORT_HTTP2_CONNECT_TIMEOUT_MS,
+  Math.min(10_000, REQUEST_TIMEOUT_MS),
+  1_000,
+  REQUEST_TIMEOUT_MS
+);
+const HTTP2_INITIAL_WINDOW_BYTES = boundedInteger(
+  process.env.PONG_TRANSPORT_HTTP2_INITIAL_WINDOW_BYTES,
+  2 * 1024 * 1024,
+  64 * 1024,
+  16 * 1024 * 1024
+);
 const ALLOWED_HOST_SUFFIXES = [...new Set(
   String(process.env.PONG_TRANSPORT_ALLOWED_HOSTS || 'coomerfans.com,onlyfaphouse.com')
     .split(',')
@@ -176,6 +205,12 @@ function safeFileName(index, item) {
   return `${String(index + 1).padStart(3, '0')}-${item.id}.transport`;
 }
 
+async function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
 function sanitizeError(error) {
   const value = String(error?.message || error || 'unknown error');
   return value
@@ -217,6 +252,26 @@ function linkAbortSignals(...signals) {
   };
 }
 
+function awaitPromiseOrAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason || new Error('request aborted'));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abort);
+      callback(value);
+    };
+    const abort = () => finish(reject, signal.reason || new Error('request aborted'));
+    signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve(promise).then(
+      value => finish(resolve, value),
+      error => finish(reject, error)
+    );
+  });
+}
+
 class TransportFailure extends Error {
   constructor(message, result = {}) {
     super(message);
@@ -225,7 +280,7 @@ class TransportFailure extends Error {
   }
 }
 
-function requestHeaders(url, range = '') {
+function requestHeaders(url, range = '', validators = {}) {
   const headers = {
     accept: 'video/*,*/*;q=0.8',
     'accept-encoding': 'identity',
@@ -233,20 +288,438 @@ function requestHeaders(url, range = '') {
     referer: `${url.protocol}//${url.host}/`
   };
   if (range) headers.range = range;
+  if (validators.strongEtag) headers['if-match'] = validators.strongEtag;
+  else if (validators.lastModified) headers['if-unmodified-since'] = validators.lastModified;
   return headers;
 }
 
-function openResponse(url, { agent, method = 'GET', range = '', signal }) {
+class Http1RequestMetrics {
+  constructor() {
+    this.requestsStarted = 0;
+    this.responsesReceived = 0;
+    this.requestErrors = 0;
+    this.requestTimeouts = 0;
+    this.newSocketRequests = 0;
+    this.reusedSocketRequests = 0;
+    this.sessionsCreated = 0;
+    this.sessionsConnected = 0;
+    this.sessionsClosed = 0;
+    this.sessionErrors = 0;
+    this.nextSessionId = 0;
+    this.socketIds = new WeakMap();
+    this.alpnObserved = new WeakSet();
+    this.alpnProtocols = new Map();
+  }
+
+  observeRequest(request) {
+    this.requestsStarted++;
+    request.once('socket', socket => {
+      if (!this.socketIds.has(socket)) {
+        this.socketIds.set(socket, ++this.nextSessionId);
+        this.sessionsCreated++;
+        socket.once('close', () => { this.sessionsClosed++; });
+        socket.once('error', () => { this.sessionErrors++; });
+      }
+      const recordAlpn = () => {
+        if (this.alpnObserved.has(socket)) return;
+        this.alpnObserved.add(socket);
+        this.sessionsConnected++;
+        const protocol = String(socket.alpnProtocol || 'none');
+        this.alpnProtocols.set(protocol, Number(this.alpnProtocols.get(protocol) || 0) + 1);
+      };
+      if (socket.connecting) socket.once('secureConnect', recordAlpn);
+      else recordAlpn();
+    });
+  }
+
+  observeResponse(request, response) {
+    this.responsesReceived++;
+    if (request.reusedSocket) this.reusedSocketRequests++;
+    else this.newSocketRequests++;
+    response.pongProtocol = `http/${String(response.httpVersion || '1.1')}`;
+    response.pongSessionId = Number(this.socketIds.get(response.socket) || 0);
+  }
+
+  snapshot() {
+    return {
+      requestedProtocol: 'http/1.1',
+      sessionsPerOrigin: null,
+      sessionsCreated: this.sessionsCreated,
+      sessionsConnected: this.sessionsConnected,
+      sessionsClosed: this.sessionsClosed,
+      sessionErrors: this.sessionErrors,
+      goaways: null,
+      requestsStarted: this.requestsStarted,
+      responsesReceived: this.responsesReceived,
+      requestErrors: this.requestErrors,
+      requestTimeouts: this.requestTimeouts,
+      newSocketRequests: this.newSocketRequests,
+      reusedSocketRequests: this.reusedSocketRequests,
+      retriesBeforeHeaders: 0,
+      streamErrors: 0,
+      peakStreamsPerSession: 1,
+      alpnProtocols: Object.fromEntries(this.alpnProtocols),
+      remoteMaxConcurrentStreams: []
+    };
+  }
+}
+
+function retryableHttp2Error(error) {
+  if (
+    String(error?.code || '') === 'ERR_HTTP2_STREAM_ERROR' &&
+    Number(error?.pongHttp2RstCode) === http2.constants.NGHTTP2_REFUSED_STREAM
+  ) return true;
+  return [
+    'ERR_HTTP2_GOAWAY_SESSION',
+    'ERR_HTTP2_INVALID_SESSION',
+    'ERR_HTTP2_STREAM_CANCEL',
+    'ECONNRESET',
+    'EPIPE'
+  ].includes(String(error?.code || ''));
+}
+
+class PersistentHttp2Pool {
+  constructor(sessionsPerOrigin) {
+    this.sessionsPerOrigin = sessionsPerOrigin;
+    this.origins = new Map();
+    this.allSessions = new Set();
+    this.nextSessionId = 0;
+    this.closed = false;
+    this.metrics = {
+      sessionsCreated: 0,
+      sessionsConnected: 0,
+      sessionsClosed: 0,
+      sessionErrors: 0,
+      goaways: 0,
+      requestsStarted: 0,
+      responsesReceived: 0,
+      retriesBeforeHeaders: 0,
+      streamErrors: 0,
+      requestTimeouts: 0,
+      connectErrors: 0,
+      alpnFailures: 0,
+      requestCreateErrors: 0,
+      preHeaderErrors: 0,
+      preHeaderAborts: 0,
+      preHeaderCloses: 0,
+      refusedStreamRetries: 0,
+      peakStreamsPerSession: 0,
+      alpnProtocols: new Map(),
+      remoteMaxConcurrentStreams: new Set()
+    };
+  }
+
+  originState(url) {
+    const origin = url.origin;
+    let state = this.origins.get(origin);
+    if (!state) {
+      state = {
+        origin,
+        slots: Array.from({ length: this.sessionsPerOrigin }, () => null),
+        cursor: 0
+      };
+      this.origins.set(origin, state);
+    }
+    return state;
+  }
+
+  createSlot(state, index) {
+    if (this.closed) throw new Error('HTTP/2 pool is closed');
+    const session = http2.connect(state.origin, {
+      settings: {
+        enablePush: false,
+        initialWindowSize: HTTP2_INITIAL_WINDOW_BYTES
+      }
+    });
+    const slot = {
+      id: ++this.nextSessionId,
+      session,
+      active: 0,
+      peakActive: 0,
+      retiring: false,
+      ready: null
+    };
+    state.slots[index] = slot;
+    this.allSessions.add(session);
+    this.metrics.sessionsCreated++;
+
+    slot.ready = new Promise((resolve, reject) => {
+      let settled = false;
+      let timer = null;
+      const cleanup = () => {
+        clearTimeout(timer);
+        session.off('connect', connected);
+        session.off('error', failed);
+      };
+      const finish = (error = null) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(error);
+        else resolve(slot);
+      };
+      const connected = () => {
+        const alpn = String(session.socket?.alpnProtocol || 'none');
+        this.metrics.alpnProtocols.set(alpn, Number(this.metrics.alpnProtocols.get(alpn) || 0) + 1);
+        if (alpn !== 'h2') {
+          this.metrics.alpnFailures++;
+          const error = new Error(`origin negotiated ${alpn} instead of h2`);
+          error.code = 'PONG_HTTP2_ALPN_MISMATCH';
+          slot.retiring = true;
+          if (state.slots[index] === slot) state.slots[index] = null;
+          session.destroy(error);
+          finish(error);
+          return;
+        }
+        this.metrics.sessionsConnected++;
+        finish();
+      };
+      const failed = error => {
+        if (!settled) this.metrics.connectErrors++;
+        slot.retiring = true;
+        if (state.slots[index] === slot) state.slots[index] = null;
+        finish(error);
+      };
+      timer = setTimeout(() => {
+        const error = new Error('HTTP/2 connection timed out');
+        error.code = 'PONG_HTTP2_CONNECT_TIMEOUT';
+        slot.retiring = true;
+        if (state.slots[index] === slot) state.slots[index] = null;
+        session.destroy(error);
+        finish(error);
+      }, HTTP2_CONNECT_TIMEOUT_MS);
+      session.once('connect', connected);
+      session.once('error', failed);
+    });
+
+    session.on('remoteSettings', settings => {
+      const maximum = Number(settings?.maxConcurrentStreams);
+      if (Number.isFinite(maximum)) this.metrics.remoteMaxConcurrentStreams.add(maximum);
+    });
+    session.on('goaway', () => {
+      this.metrics.goaways++;
+      slot.retiring = true;
+      if (state.slots[index] === slot) state.slots[index] = null;
+    });
+    session.on('error', () => {
+      this.metrics.sessionErrors++;
+    });
+    session.on('close', () => {
+      this.metrics.sessionsClosed++;
+      this.allSessions.delete(session);
+      slot.retiring = true;
+      if (state.slots[index] === slot) state.slots[index] = null;
+    });
+    return slot;
+  }
+
+  async selectSlot(url, signal = null) {
+    const state = this.originState(url);
+    const index = state.cursor++ % this.sessionsPerOrigin;
+    let slot = state.slots[index];
+    if (!slot || slot.retiring || slot.session.closed || slot.session.destroyed) {
+      slot = this.createSlot(state, index);
+    }
+    await awaitPromiseOrAbort(slot.ready, signal);
+    return slot;
+  }
+
+  async openResponse(url, { method = 'GET', range = '', validators = {}, signal }) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await this.openResponseOnce(url, { method, range, validators, signal });
+      } catch (error) {
+        lastError = error;
+        if (attempt || signal?.aborted || !retryableHttp2Error(error)) throw error;
+        this.metrics.retriesBeforeHeaders++;
+        if (
+          String(error?.code || '') === 'ERR_HTTP2_STREAM_ERROR' &&
+          Number(error?.pongHttp2RstCode) === http2.constants.NGHTTP2_REFUSED_STREAM
+        ) this.metrics.refusedStreamRetries++;
+      }
+    }
+    throw lastError || new Error('HTTP/2 request failed');
+  }
+
+  async openResponseOnce(url, { method = 'GET', range = '', validators = {}, signal }) {
+    if (signal?.aborted) throw signal.reason || new Error('request aborted');
+    const target = validateSourceUrl(url);
+    const slot = await this.selectSlot(target, signal);
+    if (signal?.aborted) throw signal.reason || new Error('request aborted');
+    const headers = {
+      ':method': method,
+      ':scheme': target.protocol.slice(0, -1),
+      ':authority': target.host,
+      ':path': `${target.pathname}${target.search}`,
+      ...requestHeaders(target, range, validators)
+    };
+    this.metrics.requestsStarted++;
+    let stream;
+    try {
+      stream = slot.session.request(headers);
+    } catch (error) {
+      this.metrics.requestCreateErrors++;
+      slot.retiring = true;
+      throw error;
+    }
+    slot.active++;
+    slot.peakActive = Math.max(slot.peakActive, slot.active);
+    this.metrics.peakStreamsPerSession = Math.max(
+      this.metrics.peakStreamsPerSession,
+      slot.peakActive
+    );
+
+    return new Promise((resolve, reject) => {
+      let responseReceived = false;
+      let preHeaderFailureRecorded = false;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        slot.active = Math.max(0, slot.active - 1);
+        signal?.removeEventListener('abort', abort);
+      };
+      const failBeforeResponse = (error, kind) => {
+        if (responseReceived || preHeaderFailureRecorded) return;
+        preHeaderFailureRecorded = true;
+        if (kind === 'error') this.metrics.preHeaderErrors++;
+        else if (kind === 'aborted') this.metrics.preHeaderAborts++;
+        else if (kind === 'close') this.metrics.preHeaderCloses++;
+        reject(error);
+      };
+      const abort = () => {
+        const error = signal?.reason instanceof Error ? signal.reason : new Error('request aborted');
+        stream.destroy(error);
+      };
+      signal?.addEventListener('abort', abort, { once: true });
+      if (typeof stream.setTimeout === 'function') {
+        stream.setTimeout(REQUEST_TIMEOUT_MS, () => {
+          this.metrics.requestTimeouts++;
+          const error = new Error('request inactivity timeout');
+          error.code = 'PONG_HTTP2_REQUEST_TIMEOUT';
+          stream.destroy(error);
+        });
+      }
+      stream.once('response', rawHeaders => {
+        responseReceived = true;
+        this.metrics.responsesReceived++;
+        const responseHeaders = {};
+        for (const [name, value] of Object.entries(rawHeaders || {})) {
+          if (!name.startsWith(':')) responseHeaders[name] = value;
+        }
+        stream.statusCode = Number(rawHeaders?.[':status'] || 0);
+        stream.headers = responseHeaders;
+        stream.httpVersion = '2.0';
+        stream.pongProtocol = 'h2';
+        stream.pongSessionId = slot.id;
+        resolve(stream);
+      });
+      stream.once('error', error => {
+        this.metrics.streamErrors++;
+        error.pongHttp2RstCode = Number(stream.rstCode);
+        failBeforeResponse(error, 'error');
+      });
+      stream.once('aborted', () => {
+        failBeforeResponse(new Error('HTTP/2 stream aborted before response'), 'aborted');
+      });
+      stream.once('close', () => {
+        release();
+        failBeforeResponse(new Error('HTTP/2 stream closed before response'), 'close');
+      });
+      stream.end();
+    });
+  }
+
+  snapshot() {
+    return {
+      requestedProtocol: 'h2',
+      sessionsPerOrigin: this.sessionsPerOrigin,
+      origins: this.origins.size,
+      sessionsCreated: this.metrics.sessionsCreated,
+      sessionsConnected: this.metrics.sessionsConnected,
+      sessionsClosed: this.metrics.sessionsClosed,
+      sessionErrors: this.metrics.sessionErrors,
+      goaways: this.metrics.goaways,
+      requestsStarted: this.metrics.requestsStarted,
+      responsesReceived: this.metrics.responsesReceived,
+      requestErrors: this.metrics.connectErrors + this.metrics.alpnFailures +
+        this.metrics.requestCreateErrors + this.metrics.preHeaderErrors +
+        this.metrics.preHeaderAborts + this.metrics.preHeaderCloses,
+      requestTimeouts: this.metrics.requestTimeouts,
+      newSocketRequests: null,
+      reusedSocketRequests: null,
+      retriesBeforeHeaders: this.metrics.retriesBeforeHeaders,
+      streamErrors: this.metrics.streamErrors,
+      connectErrors: this.metrics.connectErrors,
+      alpnFailures: this.metrics.alpnFailures,
+      requestCreateErrors: this.metrics.requestCreateErrors,
+      preHeaderErrors: this.metrics.preHeaderErrors,
+      preHeaderAborts: this.metrics.preHeaderAborts,
+      preHeaderCloses: this.metrics.preHeaderCloses,
+      refusedStreamRetries: this.metrics.refusedStreamRetries,
+      peakStreamsPerSession: this.metrics.peakStreamsPerSession,
+      alpnProtocols: Object.fromEntries(this.metrics.alpnProtocols),
+      remoteMaxConcurrentStreams: [...this.metrics.remoteMaxConcurrentStreams].sort((a, b) => a - b)
+    };
+  }
+
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    const sessions = [...this.allSessions];
+    const waits = sessions.map(session => new Promise(resolve => {
+      if (session.closed || session.destroyed) {
+        resolve();
+        return;
+      }
+      session.once('close', resolve);
+      session.close();
+    }));
+    await Promise.race([
+      Promise.allSettled(waits),
+      delay(1_000)
+    ]);
+    for (const session of sessions) {
+      if (!session.destroyed) session.destroy();
+    }
+    await Promise.race([
+      Promise.allSettled(waits),
+      delay(500)
+    ]);
+  }
+}
+
+function openResponse(url, {
+  agent,
+  h2Pool = null,
+  requestMetrics = null,
+  method = 'GET',
+  range = '',
+  validators = {},
+  signal
+}) {
+  if (h2Pool) return h2Pool.openResponse(url, { method, range, validators, signal });
   return new Promise((resolve, reject) => {
     const request = https.request(url, {
       method,
       agent,
       signal,
       timeout: REQUEST_TIMEOUT_MS,
-      headers: requestHeaders(url, range)
-    }, resolve);
-    request.once('timeout', () => request.destroy(new Error('request inactivity timeout')));
-    request.once('error', reject);
+      headers: requestHeaders(url, range, validators)
+    }, response => {
+      requestMetrics?.observeResponse(request, response);
+      resolve(response);
+    });
+    requestMetrics?.observeRequest(request);
+    request.once('timeout', () => {
+      if (requestMetrics) requestMetrics.requestTimeouts++;
+      request.destroy(new Error('request inactivity timeout'));
+    });
+    request.once('error', error => {
+      if (requestMetrics) requestMetrics.requestErrors++;
+      reject(error);
+    });
     request.end();
   });
 }
@@ -303,9 +776,20 @@ async function probeMetadata(item, agent, signal) {
       response.destroy();
     }
     const size = contentRange?.total || (status === 200 ? contentLength : 0) || Number(item.size || 0);
+    const finalUrl = validateSourceUrl(resolved.finalUrl);
+    const etag = String(response.headers.etag || '');
     return {
       ...item,
+      sourceUrl: item.url,
+      url: finalUrl.href,
+      host: finalUrl.hostname.toLowerCase(),
+      path: finalUrl.pathname,
+      finalUrl: finalUrl.href,
+      redirects: resolved.redirects,
       size,
+      etag,
+      strongEtag: etag && !/^W\//i.test(etag) ? etag : '',
+      lastModified: String(response.headers['last-modified'] || ''),
       rangeSupported: status === 206 && contentRange?.start === 0 && contentRange?.end === 0,
       probeStatus: status,
       probeBytes: bytes,
@@ -316,6 +800,12 @@ async function probeMetadata(item, agent, signal) {
     response?.destroy();
     return {
       ...item,
+      sourceUrl: item.url,
+      finalUrl: '',
+      redirects: 0,
+      etag: '',
+      strongEtag: '',
+      lastModified: '',
       size: Number(item.size || 0),
       rangeSupported: false,
       probeStatus: Number(error?.result?.status || 0),
@@ -324,6 +814,53 @@ async function probeMetadata(item, agent, signal) {
       probeError: sanitizeError(error)
     };
   }
+}
+
+async function qualifyHttp2Origins(items, signal) {
+  const candidates = items.filter(item => (
+    item.finalUrl &&
+    Number(item.size || 0) > 0 &&
+    [200, 206].includes(Number(item.probeStatus || 0))
+  ));
+  const representativeByOrigin = new Map();
+  for (const item of candidates) {
+    const url = validateSourceUrl(item.finalUrl);
+    if (!representativeByOrigin.has(url.origin)) representativeByOrigin.set(url.origin, url);
+  }
+  const pool = new PersistentHttp2Pool(1);
+  const eligibleOrigins = new Set();
+  const origins = [];
+  try {
+    for (const [origin, url] of representativeByOrigin) {
+      if (signal.aborted) throw signal.reason || new Error('benchmark aborted');
+      try {
+        await pool.selectSlot(url, signal);
+        eligibleOrigins.add(origin);
+        origins.push({ originSha256: crypto.createHash('sha256').update(origin).digest('hex'), h2: true, error: '' });
+      } catch (error) {
+        if (signal.aborted) throw signal.reason || error;
+        origins.push({
+          originSha256: crypto.createHash('sha256').update(origin).digest('hex'),
+          h2: false,
+          error: sanitizeError(error)
+        });
+      }
+    }
+  } finally {
+    await pool.close();
+  }
+  return {
+    items: candidates.filter(item => eligibleOrigins.has(new URL(item.finalUrl).origin)),
+    report: {
+      checkedOrigins: origins.length,
+      eligibleOrigins: eligibleOrigins.size,
+      excludedFiles: items.length - candidates.filter(item => (
+        eligibleOrigins.has(new URL(item.finalUrl).origin)
+      )).length,
+      origins,
+      connectionMetrics: pool.snapshot()
+    }
+  };
 }
 
 async function downloadRequest({
@@ -335,6 +872,9 @@ async function downloadRequest({
   expectedTotal = 0,
   flags = 'w',
   agent,
+  h2Pool = null,
+  requestMetrics = null,
+  validators = {},
   signal,
   fileStartedAt
 }) {
@@ -344,12 +884,23 @@ async function downloadRequest({
   let firstByteAt = 0;
   let status = 0;
   let redirects = 0;
+  let protocol = '';
+  let sessionId = 0;
   try {
     const range = expectedStart === null ? '' : `bytes=${expectedStart}-${expectedEnd}`;
-    const resolved = await resolveResponse(rawUrl, { agent, range, signal });
+    const resolved = await resolveResponse(rawUrl, {
+      agent,
+      h2Pool,
+      requestMetrics,
+      validators,
+      range,
+      signal
+    });
     response = resolved.response;
     redirects = resolved.redirects;
     status = Number(response.statusCode || 0);
+    protocol = String(response.pongProtocol || `http/${response.httpVersion || '1.1'}`);
+    sessionId = Number(response.pongSessionId || 0);
     if (status === 429) {
       await drainResponse(response);
       throw new TransportFailure('upstream returned HTTP 429', {
@@ -385,6 +936,29 @@ async function downloadRequest({
         });
       }
     }
+    const responseEtag = String(response.headers.etag || '');
+    const responseLastModified = String(response.headers['last-modified'] || '');
+    if (validators.strongEtag && responseEtag && validators.strongEtag !== responseEtag) {
+      response.destroy();
+      throw new TransportFailure('response ETag changed after manifest freeze', {
+        status,
+        networkBytes,
+        firstByteMs: null
+      });
+    }
+    if (
+      !validators.strongEtag &&
+      validators.lastModified &&
+      responseLastModified &&
+      validators.lastModified !== responseLastModified
+    ) {
+      response.destroy();
+      throw new TransportFailure('response Last-Modified changed after manifest freeze', {
+        status,
+        networkBytes,
+        firstByteMs: null
+      });
+    }
 
     response.on('data', chunk => {
       if (!firstByteAt) firstByteAt = performance.now();
@@ -419,6 +993,8 @@ async function downloadRequest({
       firstByteMs: firstByteAt ? firstByteAt - fileStartedAt : null,
       requestFirstByteMs: firstByteAt ? firstByteAt - requestStartedAt : null,
       completionMs: endedAt - fileStartedAt,
+      protocol,
+      sessionId,
       error: ''
     };
   } catch (error) {
@@ -428,6 +1004,8 @@ async function downloadRequest({
         status,
         redirects,
         networkBytes,
+        protocol,
+        sessionId,
         firstByteMs: firstByteAt ? firstByteAt - fileStartedAt : null,
         completionMs: performance.now() - fileStartedAt,
         ...error.result
@@ -438,19 +1016,25 @@ async function downloadRequest({
       status,
       redirects,
       networkBytes,
+      protocol,
+      sessionId,
       firstByteMs: firstByteAt ? firstByteAt - fileStartedAt : null,
       completionMs: performance.now() - fileStartedAt
     });
   }
 }
 
-async function downloadWholeFile(item, filePath, agent, signal) {
+async function downloadWholeFile(item, filePath, requestContext, signal) {
   const fileStartedAt = performance.now();
   try {
     const request = await downloadRequest({
       rawUrl: item.url,
       filePath,
-      agent,
+      ...requestContext,
+      validators: {
+        strongEtag: item.strongEtag,
+        lastModified: item.lastModified
+      },
       signal,
       fileStartedAt
     });
@@ -467,6 +1051,10 @@ async function downloadWholeFile(item, filePath, agent, signal) {
       status: request.status,
       redirects: request.redirects,
       segments: 1,
+      protocol: request.protocol,
+      sessionId: request.sessionId,
+      filePath,
+      contentSha256: '',
       sizeMismatch,
       ok: !sizeMismatch,
       error: sizeMismatch ? `metadata size ${item.size} differed from ${request.networkBytes}` : ''
@@ -485,6 +1073,10 @@ async function downloadWholeFile(item, filePath, agent, signal) {
       status: Number(result.status || 0),
       redirects: Number(result.redirects || 0),
       segments: 1,
+      protocol: String(result.protocol || ''),
+      sessionId: Number(result.sessionId || 0),
+      filePath,
+      contentSha256: '',
       sizeMismatch: false,
       ok: false,
       error: sanitizeError(error)
@@ -501,7 +1093,7 @@ async function prepareSparseFile(filePath, size) {
   }
 }
 
-async function downloadTwoRangeFile(item, filePath, agent, scenarioSignal) {
+async function downloadTwoRangeFile(item, filePath, requestContext, scenarioSignal) {
   const fileStartedAt = performance.now();
   const midpoint = Math.floor(item.size / 2);
   const segments = [
@@ -521,7 +1113,11 @@ async function downloadTwoRangeFile(item, filePath, agent, scenarioSignal) {
       expectedEnd: segment.end,
       expectedTotal: item.size,
       flags: 'r+',
-      agent,
+      ...requestContext,
+      validators: {
+        strongEtag: item.strongEtag,
+        lastModified: item.lastModified
+      },
       signal: linked.signal,
       fileStartedAt
     }).catch(error => {
@@ -557,6 +1153,10 @@ async function downloadTwoRangeFile(item, filePath, agent, scenarioSignal) {
       status: 206,
       redirects: results.reduce((sum, result) => sum + Number(result.redirects || 0), 0),
       segments: 2,
+      protocol: String(results.find(result => result.protocol)?.protocol || ''),
+      sessionId: 0,
+      filePath,
+      contentSha256: '',
       sizeMismatch: networkBytes !== item.size,
       ok: networkBytes === item.size,
       error: networkBytes === item.size ? '' : `range pair ended at ${networkBytes} of ${item.size}`
@@ -575,6 +1175,10 @@ async function downloadTwoRangeFile(item, filePath, agent, scenarioSignal) {
       status: Number(failure.status || 0),
       redirects: results.reduce((sum, result) => sum + Number(result.redirects || 0), 0),
       segments: 2,
+      protocol: String(results.find(result => result.protocol)?.protocol || ''),
+      sessionId: 0,
+      filePath,
+      contentSha256: '',
       sizeMismatch: false,
       ok: false,
       error: sanitizeError(error)
@@ -603,13 +1207,29 @@ function percentile(values, fraction) {
   return Number(sorted[index].toFixed(2));
 }
 
-function summarizeScenario(definition, results, elapsedMs) {
+function summarizeScenario(definition, results, elapsedMs, connectionMetrics) {
   const networkBytes = results.reduce((sum, result) => sum + Number(result.networkBytes || 0), 0);
   const usefulBytes = results.reduce((sum, result) => sum + Number(result.usefulBytes || 0), 0);
   const errors = results.filter(result => !result.ok);
+  const successful = results.filter(result => result.ok);
+  const protocolCounts = {};
+  for (const result of results) {
+    const protocol = String(result.protocol || 'unknown');
+    protocolCounts[protocol] = Number(protocolCounts[protocol] || 0) + 1;
+  }
   return {
     name: definition.name,
-    transport: definition.adaptive ? 'adaptive-two-range-large-files' : 'http1-whole-file',
+    transport: definition.adaptive
+      ? 'adaptive-two-range-large-files'
+      : definition.protocol === 'http2'
+        ? 'http2-whole-file'
+        : 'http1-whole-file',
+    requestedProtocol: definition.protocol === 'http2' ? 'h2' : 'http/1.1',
+    protocolsObserved: protocolCounts,
+    sessionsPerOrigin: definition.protocol === 'http2'
+      ? Number(definition.sessionsPerOrigin || 1)
+      : null,
+    connectionMetrics,
     concurrency: definition.concurrency,
     perHost: definition.perHost,
     largeFileBytes: definition.adaptive ? LARGE_FILE_BYTES : null,
@@ -623,16 +1243,16 @@ function summarizeScenario(definition, results, elapsedMs) {
     aggregateMbps: elapsedMs > 0 ? Number((networkBytes * 8 / elapsedMs / 1000).toFixed(2)) : 0,
     usefulMbps: elapsedMs > 0 ? Number((usefulBytes * 8 / elapsedMs / 1000).toFixed(2)) : 0,
     firstByteMs: {
-      min: percentile(results.map(result => result.firstByteMs), 0),
-      p50: percentile(results.map(result => result.firstByteMs), 0.5),
-      p95: percentile(results.map(result => result.firstByteMs), 0.95),
-      max: percentile(results.map(result => result.firstByteMs), 1)
+      min: percentile(successful.map(result => result.firstByteMs), 0),
+      p50: percentile(successful.map(result => result.firstByteMs), 0.5),
+      p95: percentile(successful.map(result => result.firstByteMs), 0.95),
+      max: percentile(successful.map(result => result.firstByteMs), 1)
     },
     completionMs: {
-      min: percentile(results.map(result => result.completionMs), 0),
-      p50: percentile(results.map(result => result.completionMs), 0.5),
-      p95: percentile(results.map(result => result.completionMs), 0.95),
-      max: percentile(results.map(result => result.completionMs), 1)
+      min: percentile(successful.map(result => result.completionMs), 0),
+      p50: percentile(successful.map(result => result.completionMs), 0.5),
+      p95: percentile(successful.map(result => result.completionMs), 0.95),
+      max: percentile(successful.map(result => result.completionMs), 1)
     },
     filesDetail: results.map(result => ({
       id: result.id,
@@ -641,12 +1261,40 @@ function summarizeScenario(definition, results, elapsedMs) {
       ok: result.ok,
       expectedBytes: result.expectedBytes,
       networkBytes: result.networkBytes,
+      usefulBytes: result.usefulBytes,
+      sizeMismatch: result.sizeMismatch,
       firstByteMs: result.firstByteMs === null ? null : Number(Number(result.firstByteMs).toFixed(2)),
       completionMs: Number(Number(result.completionMs || 0).toFixed(2)),
       status: result.status,
       segments: result.segments,
+      protocol: result.protocol,
+      sessionId: result.sessionId || null,
+      contentSha256: result.contentSha256 || '',
       error: result.error
     }))
+  };
+}
+
+function pairedContentIntegrity(scenarioReports) {
+  if (scenarioReports.length < 2) {
+    return { scenarios: scenarioReports.length, comparableFiles: 0, hashMismatches: [], complete: false };
+  }
+  const ids = new Set(scenarioReports.flatMap(report => report.filesDetail.map(file => file.id)));
+  const comparable = [];
+  const hashMismatches = [];
+  for (const id of ids) {
+    const entries = scenarioReports.map(report => report.filesDetail.find(file => file.id === id));
+    if (entries.some(entry => !entry?.ok || !entry.contentSha256)) continue;
+    const hashes = new Set(entries.map(entry => entry.contentSha256));
+    if (hashes.size === 1) comparable.push(id);
+    else hashMismatches.push(id);
+  }
+  return {
+    scenarios: scenarioReports.length,
+    comparableFiles: comparable.length,
+    comparableFileIds: comparable,
+    hashMismatches,
+    complete: comparable.length === ids.size && hashMismatches.length === 0
   };
 }
 
@@ -658,13 +1306,18 @@ async function runScenario(definition, items, runDirectory, signal) {
   );
   await mkdir(scenarioDirectory, { recursive: false });
   await markHidden(scenarioDirectory);
-  const agent = new https.Agent({
+  const h2Pool = definition.protocol === 'http2'
+    ? new PersistentHttp2Pool(Number(definition.sessionsPerOrigin || 1))
+    : null;
+  const requestMetrics = h2Pool ? null : new Http1RequestMetrics();
+  const agent = h2Pool ? null : new https.Agent({
     keepAlive: true,
     keepAliveMsecs: 15_000,
     maxSockets: Math.max(2, definition.concurrency),
     maxFreeSockets: Math.max(2, definition.concurrency),
     scheduling: 'lifo'
   });
+  const requestContext = { agent, h2Pool, requestMetrics };
   const pending = items.map((item, index) => {
     const segmented = Boolean(
       definition.adaptive &&
@@ -696,8 +1349,8 @@ async function runScenario(definition, items, runDirectory, signal) {
     activeByHost.set(entry.item.host, Number(activeByHost.get(entry.item.host) || 0) + entry.slots);
     let task;
     task = (entry.segmented
-      ? downloadTwoRangeFile(entry.item, filePath, agent, signal)
-      : downloadWholeFile(entry.item, filePath, agent, signal))
+      ? downloadTwoRangeFile(entry.item, filePath, requestContext, signal)
+      : downloadWholeFile(entry.item, filePath, requestContext, signal))
       .then(result => results.push({ index: entry.index, ...result }))
       .finally(() => {
         activeSlots = Math.max(0, activeSlots - entry.slots);
@@ -734,9 +1387,27 @@ async function runScenario(definition, items, runDirectory, signal) {
       }
     }
     results.sort((a, b) => a.index - b.index);
-    return summarizeScenario(definition, results, performance.now() - startedAt);
+    const elapsedMs = performance.now() - startedAt;
+    for (const result of results.filter(item => item.ok)) {
+      try {
+        result.contentSha256 = await sha256File(result.filePath);
+      } catch (error) {
+        result.ok = false;
+        result.usefulBytes = 0;
+        result.error = `content hash failed: ${sanitizeError(error)}`;
+      }
+    }
+    if (h2Pool) await h2Pool.close();
+    else agent.destroy();
+    return summarizeScenario(
+      definition,
+      results,
+      elapsedMs,
+      h2Pool ? h2Pool.snapshot() : requestMetrics.snapshot()
+    );
   } finally {
-    agent.destroy();
+    if (h2Pool) await h2Pool.close();
+    else agent.destroy();
     await Promise.allSettled([...active]);
     await removeScenarioDirectory(runDirectory, scenarioDirectory);
   }
@@ -757,8 +1428,10 @@ async function loadInputManifest() {
   }
 
   if (supplied !== null) {
-    const values = Array.isArray(supplied) ? supplied : supplied?.urls;
-    if (!Array.isArray(values)) throw new Error('supplied URL JSON must be an array or {"urls": [...]}');
+    const values = Array.isArray(supplied) ? supplied : supplied?.urls || supplied?.videos;
+    if (!Array.isArray(values)) {
+      throw new Error('supplied URL JSON must be an array, {"urls": [...]}, or a Pong video fixture');
+    }
     return values.map(value => typeof value === 'string'
       ? { url: value, size: 0, sourceStatus: 'supplied' }
       : {
@@ -813,9 +1486,11 @@ function freezeManifest(rawItems) {
 
 function createScenarios() {
   const scenarios = [];
-  if (INCLUDE_SERIAL_BASELINE) {
+  const adaptiveScenarios = [];
+  if (INCLUDE_SERIAL_BASELINE && INCLUDE_HTTP1_WHOLE) {
     scenarios.push({
       name: 'whole-c1-h1',
+      protocol: 'http1',
       adaptive: false,
       concurrency: 1,
       perHost: 1
@@ -823,25 +1498,46 @@ function createScenarios() {
   }
   for (const concurrency of GLOBAL_CONCURRENCIES) {
     for (const perHost of PER_HOST_CONCURRENCIES) {
-      scenarios.push({
-        name: `whole-c${concurrency}-h${Math.min(concurrency, perHost)}`,
-        adaptive: false,
-        concurrency,
-        perHost: Math.min(concurrency, perHost)
-      });
+      const boundedPerHost = Math.min(concurrency, perHost);
+      const http1 = INCLUDE_HTTP1_WHOLE
+        ? [{
+          name: `whole-c${concurrency}-h${boundedPerHost}`,
+          protocol: 'http1',
+          adaptive: false,
+          concurrency,
+          perHost: boundedPerHost
+        }]
+        : [];
+      const http2Scenarios = INCLUDE_HTTP2_WHOLE
+        ? HTTP2_SESSIONS_PER_ORIGIN.map(sessionsPerOrigin => ({
+            name: `h2s${sessionsPerOrigin}-whole-c${concurrency}-h${boundedPerHost}`,
+            protocol: 'http2',
+            sessionsPerOrigin,
+            adaptive: false,
+            concurrency,
+            perHost: boundedPerHost
+          }))
+        : [];
+      scenarios.push(...(HTTP2_FIRST
+        ? [...http2Scenarios, ...http1]
+        : [...http1, ...http2Scenarios]));
     }
   }
   if (INCLUDE_ADAPTIVE) {
     for (const config of ADAPTIVE_CONFIGS) {
-      scenarios.push({
+      adaptiveScenarios.push({
         name: `adaptive2-c${config.concurrency}-h${config.perHost}`,
+        protocol: 'http1',
         adaptive: true,
         ...config
       });
     }
   }
-  if (!scenarios.length) throw new Error('transport benchmark has no enabled scenarios');
-  return scenarios;
+  const ordered = ADAPTIVE_FIRST
+    ? [...adaptiveScenarios, ...scenarios]
+    : [...scenarios, ...adaptiveScenarios];
+  if (!ordered.length) throw new Error('transport benchmark has no enabled scenarios');
+  return ordered;
 }
 
 async function main() {
@@ -868,6 +1564,17 @@ async function main() {
       probeAgent.destroy();
     }
 
+    let scenarioItems = probed;
+    let http2Qualification = null;
+    if (INCLUDE_HTTP2_WHOLE) {
+      const qualification = await qualifyHttp2Origins(probed, rootAbortController.signal);
+      scenarioItems = qualification.items;
+      http2Qualification = qualification.report;
+      if (!scenarioItems.length) {
+        throw new Error('none of the resolved media origins negotiated HTTP/2');
+      }
+    }
+
     const scenarios = createScenarios();
     const scenarioReports = [];
     for (let index = 0; index < scenarios.length; index++) {
@@ -878,14 +1585,15 @@ async function main() {
       );
       const report = await runScenario(
         definition,
-        probed,
+        scenarioItems,
         runDirectory,
         rootAbortController.signal
       );
       scenarioReports.push(report);
       process.stderr.write(
         `[transport-bench] ${definition.name}: ${report.completed}/${report.files}, ` +
-        `${report.aggregateMbps} Mbps, ${report.http429} HTTP 429\n`
+        `${report.usefulMbps} useful Mbps (${report.aggregateMbps} wire), ` +
+        `${report.http429} HTTP 429\n`
       );
       if (index + 1 < scenarios.length && SCENARIO_COOLDOWN_MS) {
         await delay(SCENARIO_COOLDOWN_MS);
@@ -896,7 +1604,7 @@ async function main() {
       .update(probed.map(item => item.url).join('\n'))
       .digest('hex');
     const report = {
-      schema: 'pong-video-transport-benchmark-v1',
+      schema: 'pong-video-transport-benchmark-v2',
       generatedAt: new Date().toISOString(),
       safety: {
         transportOnly: true,
@@ -915,11 +1623,17 @@ async function main() {
             ? 'url-env'
             : 'local-video-cache-status',
       manifestSha256: manifestDigest,
+      scenarioFiles: scenarioItems.length,
+      http2Qualification,
+      pairedContentIntegrity: pairedContentIntegrity(scenarioReports),
       files: probed.map(item => ({
         id: item.id,
         host: item.host,
         path: item.path,
         size: item.size,
+        redirects: item.redirects,
+        strongValidator: Boolean(item.strongEtag),
+        lastModifiedValidator: !item.strongEtag && Boolean(item.lastModified),
         rangeSupported: item.rangeSupported,
         probeStatus: item.probeStatus,
         probeBytes: item.probeBytes,
@@ -935,7 +1649,14 @@ async function main() {
         perHostConcurrencies: PER_HOST_CONCURRENCIES,
         adaptiveConfigs: ADAPTIVE_CONFIGS,
         includeSerialBaseline: INCLUDE_SERIAL_BASELINE,
-        includeAdaptive: INCLUDE_ADAPTIVE
+        includeHttp1Whole: INCLUDE_HTTP1_WHOLE,
+        includeHttp2Whole: INCLUDE_HTTP2_WHOLE,
+        http2First: HTTP2_FIRST,
+        http2SessionsPerOrigin: HTTP2_SESSIONS_PER_ORIGIN,
+        http2ConnectTimeoutMs: HTTP2_CONNECT_TIMEOUT_MS,
+        http2InitialWindowBytes: HTTP2_INITIAL_WINDOW_BYTES,
+        includeAdaptive: INCLUDE_ADAPTIVE,
+        adaptiveFirst: ADAPTIVE_FIRST
       },
       scenarios: scenarioReports
     };
