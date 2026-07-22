@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.57</div>
+    <div class="version-number">24.58</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3318,8 +3318,19 @@ function getDeckNetworkWarmIndexes(activeWrapper) {
 
   const criticallyLow = videoHasCriticalForegroundBuffer(activeVideo);
   const nextWasWarming = activeWrapper.dataset.deckNextWarm === 'true';
+  if (criticallyLow) {
+    // Keep two escape probes alive. A verified URL can still be a dead CDN
+    // object; without another attached card the deck cannot recover.
+    ensureDeckOrder();
+    for (const index of deckOrder) {
+      if (index === activeIndex || !getDeckWrapper(index)) continue;
+      warmIndexes.add(index);
+      if (warmIndexes.size >= 3) break;
+    }
+    delete activeWrapper.dataset.deckNextWarm;
+    return warmIndexes;
+  }
   if ((nextWasWarming && criticallyLow) || (!nextWasWarming && videoNeedsForegroundPriority(activeVideo))) {
-    if (criticallyLow) delete activeWrapper.dataset.deckNextWarm;
     return warmIndexes;
   }
   activeWrapper.dataset.deckNextWarm = 'true';
