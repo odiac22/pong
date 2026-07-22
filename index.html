@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.44</div>
+    <div class="version-number">24.45</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4309,6 +4309,22 @@ function updatePongPlaybackBenchmarkOutput() {
       ? (pongPlaybackBenchmarkState.completedAt || Date.now()) - pongPlaybackBenchmarkState.startedAt
       : 0
   });
+}
+
+function resetPongPlaybackBenchmark() {
+  if (!PONG_PLAYBACK_BENCHMARK) return;
+  document.querySelectorAll('video').forEach(video => {
+    delete video.dataset.benchmarkStallStartedAt;
+  });
+  pongPlaybackBenchmarkState = {
+    startedAt: 0,
+    completedAt: 0,
+    done: false,
+    artists: [],
+    totalBuffers: 0,
+    totalBufferMs: 0
+  };
+  updatePongPlaybackBenchmarkOutput();
 }
 
 function pongPlaybackBenchmarkArtistKey(wrapper) {
@@ -14590,6 +14606,7 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now()) {
     updateRandom40Progress({ detail: 'Stopping after current work...', force: true });
     return;
   }
+  if (random40NormalizeMode(mode) === 'local2') resetPongPlaybackBenchmark();
   // A completed run may still be filling its accepted artists. Starting a new
   // run intentionally retires that background generation so it cannot mutate
   // the new run's counters, mode, or artist list.
