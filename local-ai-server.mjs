@@ -36,7 +36,7 @@ const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
 const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 12)));
 const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(10, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
-const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || 0)));
+const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || 1)));
 const VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE = Math.max(20, Math.min(500, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE || 120)));
 // Random40 artist bundles commonly place every verified video on one CDN host.
 // Two slots leaves thirteen videos queued behind the current card; four keeps
@@ -6788,6 +6788,15 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/video-cache/heartbeat') {
       touchVideoFileCacheHeartbeat();
+      videoFileCacheGlobalPlaybackConstrainedUntil = Date.now() + 5000;
+      const runningBackground = [...videoFileCacheRecords.values()]
+        .filter(record => record.status === 'downloading' && record.downloadPromise && currentVideoFileCachePriority(record) > 0)
+        .sort((left, right) => Number(left.order || 0) - Number(right.order || 0));
+      runningBackground.slice(VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY).forEach(record => {
+        if (Number(record.activeReaders || 0) > 0) return;
+        record.deferWhenIdle = true;
+        record.controller?.abort();
+      });
       normalizeVideoFileCachePriorities();
       rebalanceVideoFileCacheDownloads();
       pumpVideoFileCache();
