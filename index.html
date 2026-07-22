@@ -824,7 +824,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.26</div>
+  <div class="version-number">24.27</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -924,7 +924,7 @@ const DECK_PRELOAD_RADIUS = 1;
 const DECK_INITIAL_WARM_COUNT = 1;
 const FOREGROUND_VIDEO_BUFFER_TARGET_SECONDS = 10;
 const FOREGROUND_VIDEO_BUFFER_CRITICAL_SECONDS = 6;
-const VIDEO_START_BUFFER_SECONDS = 8;
+const VIDEO_PLAYABLE_BUFFER_SECONDS = 0.35;
 const EROME_SESSION_SAVE_MIN_DELAY_MS = 6000;
 const EROME_LARGE_SESSION_SAVE_MIN_DELAY_MS = 22000;
 const EROME_LARGE_SESSION_URL_THRESHOLD = 600;
@@ -3376,17 +3376,17 @@ function isVideoReadyForInitialPlayback(video) {
   if (!video) return true;
   if (video.error || video.readyState < 3) return false;
 
-  const target = getVideoInitialPlaybackBufferTarget(video);
+  const target = getVideoPlayableBufferTarget(video);
   return getVideoBufferedAheadSeconds(video) + 0.08 >= target;
 }
 
-function getVideoInitialPlaybackBufferTarget(video) {
+function getVideoPlayableBufferTarget(video) {
   const duration = Number(video.duration || 0);
   const currentTime = Math.max(0, Number(video.currentTime || 0));
   const remaining = Number.isFinite(duration) && duration > 0
     ? Math.max(0, duration - currentTime)
-    : VIDEO_START_BUFFER_SECONDS;
-  return Math.min(VIDEO_START_BUFFER_SECONDS, Math.max(0.5, remaining));
+    : VIDEO_PLAYABLE_BUFFER_SECONDS;
+  return Math.min(VIDEO_PLAYABLE_BUFFER_SECONDS, Math.max(0.1, remaining));
 }
 
 function getVideoReadyPercent(video) {
@@ -3401,7 +3401,7 @@ function getVideoReadyPercent(video) {
   if (video.readyState >= 3) percent = 28;
 
   try {
-    const target = getVideoInitialPlaybackBufferTarget(video);
+    const target = getVideoPlayableBufferTarget(video);
     if (target > 0) {
       percent = Math.max(percent, Math.min(99, (getVideoBufferedAheadSeconds(video) / target) * 100));
     }
