@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.60</div>
+    <div class="version-number">24.61</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3311,7 +3311,7 @@ function getDeckNetworkWarmIndexes(activeWrapper) {
   warmIndexes.add(activeIndex);
   const activeVideo = activeWrapper?.querySelector('video');
   if (!activeVideo || DECK_PRELOAD_RADIUS < 1) return warmIndexes;
-  if (random40ForegroundPlaybackExclusive()) {
+  if (random40ForegroundPlaybackExclusive() && activeVideo.readyState > 0) {
     delete activeWrapper.dataset.deckNextWarm;
     return warmIndexes;
   }
