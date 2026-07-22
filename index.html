@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.48</div>
+    <div class="version-number">24.49</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4467,11 +4467,18 @@ function createVideoElements() {
       video.dataset.lastNetworkAttemptAt = String(Date.now());
     }
     if (shouldAttachInitially && (!claimedPreload || video.error || !video.currentSrc)) {
-      const playbackUrl = random40PlaybackUrl(url);
+      // Route the visible Random40 card through the PC's priority-zero growing
+      // stream instead of letting an earlier direct-CDN preload bypass it.
+      const playbackUrl = isRandom40PlaybackActive()
+        ? (random40PcFileCacheStreamUrl(url) || random40PlaybackUrl(url))
+        : random40PlaybackUrl(url);
       video.src = playbackUrl;
       // A proxy attempt has its own direct fallback. The PC file-cache route is
       // separate: if it fails, the normal proxy should still get one attempt.
       if (random40IsPcProxyPlaybackUrl(playbackUrl)) wrapper.dataset.gatewayFallbackTried = 'true';
+    } else if (shouldAttachInitially && isRandom40PlaybackActive()) {
+      const playbackUrl = random40PcFileCacheStreamUrl(url) || random40PlaybackUrl(url);
+      if (playbackUrl && String(video.currentSrc || video.src || '') !== playbackUrl) video.src = playbackUrl;
     } else if (!shouldAttachInitially) {
       wrapper.dataset.networkSuspended = 'true';
       wrapper.dataset.suspendedVideoSrc = random40PlaybackUrl(url);

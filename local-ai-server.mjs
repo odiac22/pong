@@ -37,6 +37,7 @@ const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PON
 const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 12)));
 const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(10, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
 const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || 4)));
+const VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE = Math.max(20, Math.min(500, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE || 120)));
 // Random40 artist bundles commonly place every verified video on one CDN host.
 // Two slots leaves thirteen videos queued behind the current card; four keeps
 // the active stream responsive while materially warming the rest of that artist.
@@ -6655,7 +6656,7 @@ const server = http.createServer(async (req, res) => {
       const metadataByUrl = new Map();
       const addUrl = (value, metadata = {}) => {
         const raw = String(value || '');
-        if (!raw || urls.length >= 4000) return;
+        if (!raw || urls.length >= VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE) return;
         if (!urls.includes(raw)) urls.push(raw);
         if (metadata?.artistKey) metadataByUrl.set(raw, { artistKey: String(metadata.artistKey) });
       };
@@ -6695,6 +6696,22 @@ const server = http.createServer(async (req, res) => {
           const record = queueVideoFileCacheUrl(rawUrl, priority, metadataByUrl.get(rawUrl));
           if (record) records.push(videoFileCacheRecordJson(record, videoFileCacheEndpointFromRequest(req)));
         } catch (_) {}
+      }
+      if (videoFileCacheQueue.length > VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE) {
+        const now = Date.now();
+        videoFileCacheQueue.sort((left, right) => (
+          currentVideoFileCachePriority(left, now) - currentVideoFileCachePriority(right, now) ||
+          Number(left.order || 0) - Number(right.order || 0)
+        ));
+        const retained = videoFileCacheQueue.slice(0, VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE);
+        const retainedSet = new Set(retained);
+        for (const record of videoFileCacheQueue) {
+          if (retainedSet.has(record) || record.status !== 'queued' || record.downloadPromise) continue;
+          record.status = 'idle';
+          record.retryNotBefore = 0;
+          record.priority = 2;
+        }
+        videoFileCacheQueue = retained;
       }
       const deferredUrl = String(payload?.deferredUrl || '');
       if (deferredUrl) {
