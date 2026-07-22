@@ -824,7 +824,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.31</div>
+  <div class="version-number">24.32</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3204,7 +3204,7 @@ function transferForegroundVideoPriority(video) {
   nextVideo.dataset.foregroundPriority = 'true';
   const nextWrapper = nextVideo.closest('.video-wrapper');
   if (nextWrapper) {
-    random40PromoteWrapperToServerCache(nextWrapper, { forceActive: true });
+    random40PromoteWrapperToServerCache(nextWrapper, { forceActive: false });
     restoreDeckVideoNetwork(nextWrapper, nextVideo);
     if (isRandom40PlaybackActive()) random40WarmServerVideoCacheForActiveWrapper(nextWrapper);
   }
@@ -4389,7 +4389,7 @@ function createVideoElements() {
     });
     video.addEventListener('waiting', () => {
       refreshForegroundVideoPriority(video, true);
-      random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
+      random40PromoteWrapperToServerCache(wrapper, { forceActive: false });
       random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
       random40PauseHiddenPreloadsForPlayback();
       random40PumpPostFetchQueue();
@@ -4398,7 +4398,7 @@ function createVideoElements() {
     });
     video.addEventListener('stalled', () => {
       if (!wrapper.classList.contains('deck-active')) return;
-      random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
+      random40PromoteWrapperToServerCache(wrapper, { forceActive: false });
       random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
       random40PauseHiddenPreloadsForPlayback();
     });
@@ -8536,7 +8536,12 @@ function random40SwapRenderedVideoSource(wrapper, playbackUrl, { forceActive = f
 
   const isActive = wrapper.classList.contains('deck-active') || foregroundPriorityVideo === video;
   const wasPlaying = !video.paused && !video.ended;
-  if (isActive && wasPlaying && !forceActive) return false;
+  const playbackStarted = wasPlaying || Number(video.currentTime || 0) > 0.05 ||
+    wrapper.classList.contains('video-playing');
+  // Never replace the src of a video after playback has begun. Changing src
+  // resets the decoder and is visible as a flash/pause even when currentTime is
+  // restored. The LAN URL will be used the next time this card is attached.
+  if (isActive && playbackStarted) return false;
 
   const resumePlayback = isActive && (wasPlaying || wrapper.dataset.playIntent === 'true');
   const resumeAt = Number(video.currentTime || 0);
@@ -8584,7 +8589,7 @@ function random40ApplyServerCachePlaybackUrl(originalUrl, playbackUrl, { forceAc
   return changed;
 }
 
-function random40PromoteWrapperToServerCache(wrapper, { forceActive = true } = {}) {
+function random40PromoteWrapperToServerCache(wrapper, { forceActive = false } = {}) {
   const originalUrl = String(wrapper?.dataset?.originalVideoUrl || '');
   const record = originalUrl ? random40ServerVideoCacheTracked.get(originalUrl) : null;
   // Only replace a working source after the complete LAN file is ready. A
@@ -8620,7 +8625,7 @@ function random40ApplyServerVideoCacheRecords(records, endpoint = random40Server
       });
       if (record.ready === true && playbackUrl) {
         random40RememberPlaybackOverride(key, playbackUrl);
-        changed = random40ApplyServerCachePlaybackUrl(key, playbackUrl, { forceActive: true }) || changed;
+        changed = random40ApplyServerCachePlaybackUrl(key, playbackUrl, { forceActive: false }) || changed;
       } else if (playbackUrl && random40PlaybackUrlsMatch(random40PlaybackUrlOverrides.get(key), playbackUrl)) {
         random40PlaybackUrlOverrides.delete(key);
         document.querySelectorAll('.video-wrapper').forEach(wrapper => {
