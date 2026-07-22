@@ -824,7 +824,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.30</div>
+  <div class="version-number">24.31</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4453,6 +4453,31 @@ function createVideoElements() {
       updateVideoReadyLoader(video);
       refreshForegroundVideoPriority(video, true);
       const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
+      const failedUrl = String(video.currentSrc || video.src || '');
+      if (originalUrl && random40IsPcFileCachePlaybackUrl(failedUrl)) {
+        // A reset/expired LAN cache must never strand the player. Restore the
+        // known source immediately and preserve the user's play intent.
+        const shouldResume = wrapper.classList.contains('deck-active') &&
+          (wrapper.dataset.playIntent === 'true' || window.currentlyPlayingVideo === video);
+        random40PlaybackUrlOverrides.delete(originalUrl);
+        random40ServerVideoCacheTracked.delete(originalUrl);
+        delete wrapper.dataset.serverCachePlaybackSrc;
+        delete wrapper.dataset.serverCachePromoting;
+        delete wrapper.dataset.gatewayFallbackTried;
+        delete wrapper.dataset.directFallbackRestored;
+        delete video.dataset.lastNetworkProgressAt;
+        video.dataset.lastNetworkAttemptAt = String(Date.now());
+        if (shouldResume) {
+          video.addEventListener('canplay', () => {
+            if (wrapper.classList.contains('deck-active') && wrapper.dataset.playIntent === 'true') {
+              void playVideoCleanly(video);
+            }
+          }, { once: true });
+        }
+        video.src = originalUrl;
+        try { video.load(); } catch (_) {}
+        return;
+      }
       const gatewayUrl = originalUrl ? random40PcGatewayUrl(originalUrl) : '';
       const gatewayEndpoint = random40GatewayEndpoint || random40State?.localEndpoint || '';
       if (
@@ -8482,6 +8507,11 @@ function random40IsPcProxyPlaybackUrl(rawUrl) {
   return Boolean(endpoint && String(rawUrl || '').startsWith(`${endpoint}/proxy?`));
 }
 
+function random40IsPcFileCachePlaybackUrl(rawUrl) {
+  const endpoint = random40ServerVideoCacheEndpoint();
+  return Boolean(endpoint && String(rawUrl || '').startsWith(`${endpoint}/video-cache/media/`));
+}
+
 function random40PlaybackUrlsMatch(left, right) {
   if (!left || !right) return false;
   try {
@@ -8557,7 +8587,10 @@ function random40ApplyServerCachePlaybackUrl(originalUrl, playbackUrl, { forceAc
 function random40PromoteWrapperToServerCache(wrapper, { forceActive = true } = {}) {
   const originalUrl = String(wrapper?.dataset?.originalVideoUrl || '');
   const record = originalUrl ? random40ServerVideoCacheTracked.get(originalUrl) : null;
-  if (!record?.playable || !record.playbackUrl) return false;
+  // Only replace a working source after the complete LAN file is ready. A
+  // growing file remains useful to the PC downloader, but Android media stacks
+  // can reject it while probing/seek-reading the MP4 index.
+  if (!record?.ready || !record.playbackUrl) return false;
   random40RememberPlaybackOverride(originalUrl, record.playbackUrl);
   return random40SwapRenderedVideoSource(wrapper, record.playbackUrl, { forceActive });
 }
@@ -8585,7 +8618,7 @@ function random40ApplyServerVideoCacheRecords(records, endpoint = random40Server
         playbackUrl,
         updatedAt: Date.now()
       });
-      if (playable && playbackUrl) {
+      if (record.ready === true && playbackUrl) {
         random40RememberPlaybackOverride(key, playbackUrl);
         changed = random40ApplyServerCachePlaybackUrl(key, playbackUrl, { forceActive: true }) || changed;
       } else if (playbackUrl && random40PlaybackUrlsMatch(random40PlaybackUrlOverrides.get(key), playbackUrl)) {
@@ -8628,7 +8661,6 @@ async function random40PollServerVideoCache() {
   if (!endpoint || !random40ServerVideoCacheTracked.size) return;
   const pendingIds = [...new Set(
     [...random40ServerVideoCacheTracked.values()]
-      .filter(record => record.ready !== true)
       .map(record => record.id)
       .filter(Boolean)
   )];
@@ -8646,7 +8678,26 @@ async function random40PollServerVideoCache() {
     });
     if (!response.ok) return;
     const payload = await response.json().catch(() => null);
-    random40ApplyServerVideoCacheRecords(payload?.records, endpoint);
+    const returnedRecords = Array.isArray(payload?.records) ? payload.records : [];
+    const returnedIds = new Set(returnedRecords.map(record => String(record?.id || '')).filter(Boolean));
+    const missingIds = new Set(ids.filter(id => !returnedIds.has(String(id))));
+    if (missingIds.size) {
+      for (const [originalUrl, record] of [...random40ServerVideoCacheTracked.entries()]) {
+        if (!missingIds.has(String(record?.id || ''))) continue;
+        random40ServerVideoCacheTracked.delete(originalUrl);
+        const override = random40PlaybackUrlOverrides.get(originalUrl);
+        if (random40IsPcFileCachePlaybackUrl(override)) random40PlaybackUrlOverrides.delete(originalUrl);
+        document.querySelectorAll('.video-wrapper').forEach(wrapper => {
+          if (String(wrapper.dataset.originalVideoUrl || '') !== originalUrl) return;
+          delete wrapper.dataset.serverCachePlaybackSrc;
+          if (
+            wrapper.dataset.networkSuspended === 'true' &&
+            random40IsPcFileCachePlaybackUrl(wrapper.dataset.suspendedVideoSrc)
+          ) wrapper.dataset.suspendedVideoSrc = originalUrl;
+        });
+      }
+    }
+    random40ApplyServerVideoCacheRecords(returnedRecords, endpoint);
   } catch (_) {
   } finally {
     clearTimeout(timer);
@@ -8737,7 +8788,10 @@ function random40ResetServerVideoCacheOnClose() {
   fetch(`${endpoint}/video-cache/reset`, { method: 'POST', cache: 'no-store', keepalive: true }).catch(() => {});
 }
 
-window.addEventListener('pagehide', random40ResetServerVideoCacheOnClose);
+// Mobile browsers fire pagehide while temporarily backgrounding or refreshing.
+// Do not wipe a cache shared by another live tab/device at that moment. The PC
+// still scrubs it on server startup and after the short heartbeat idle timeout.
+window.addEventListener('pagehide', resetRandom40ServerVideoCacheClientState);
 
 function random40VideoVerifierEndpoints() {
   const pc = random40GatewayEndpoint || random40State?.localEndpoint || '';
