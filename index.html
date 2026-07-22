@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.55</div>
+    <div class="version-number">24.56</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -9229,7 +9229,7 @@ async function random40PollServerVideoCache() {
   const playbackQuery = activeVideo
     ? `${activeRecord?.id ? `&activeId=${encodeURIComponent(activeRecord.id)}` : ''}` +
       `&bufferedSeconds=${encodeURIComponent(getVideoBufferedAheadSeconds(activeVideo).toFixed(3))}` +
-      `&critical=${videoHasCriticalForegroundBuffer(activeVideo) ? '1' : '0'}`
+      `&critical=${activeVideo.readyState < 3 || videoHasCriticalForegroundBuffer(activeVideo) ? '1' : '0'}`
     : '';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 2200);
