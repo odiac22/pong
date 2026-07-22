@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.24</div>
+  <div class="version-number">24.25</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -903,6 +903,7 @@ let eromeSlidingRenderPending = false;
 const VIDEO_LOAD_RETRY_DELAYS_MS = [3000, 5000, 7000, 10000, 15000, 20000];
 const VIDEO_LOAD_RETRY_POLL_MS = 1000;
 const VIDEO_NETWORK_PROGRESS_TIMEOUT_MS = 20000;
+const PONG_PLAYER_AUDIO_PREF_KEY = 'pong_player_audio_pref_v1';
 let visibleBatchRetryTimer = null;
 let visibleBatchRetryToken = 0;
 let sessionSaveTimer = null;
@@ -964,6 +965,12 @@ let random40SourceFetchSlowActive = 0;
 let random40SourceFetchQueue = [];
 let random40SourceFetchSequence = 0;
 let pongWorkloadAbortControllers = new Set();
+
+try {
+  const storedPlayerAudioPreference = localStorage.getItem(PONG_PLAYER_AUDIO_PREF_KEY);
+  if (storedPlayerAudioPreference === 'unmuted') window.pongUserWantsAudio = true;
+  else if (storedPlayerAudioPreference === 'muted') window.pongUserWantsAudio = false;
+} catch (_) {}
 
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
@@ -2181,12 +2188,15 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   video.muted = true;
   video.volume = 0;
   video.dataset.lastLoadKick = '0';
+  applyPlayerAudioPreference(video, wrapper);
 
   const audioBtn = wrapper.querySelector('.audio-toggle-button');
   if (audioBtn) {
     audioBtn.innerHTML = '🔇';
     audioBtn.setAttribute('data-muted', 'true');
   }
+
+  applyPlayerAudioPreference(video, wrapper);
 
   const spacer = wrapper.nextElementSibling && wrapper.nextElementSibling.classList.contains('blank-space')
     ? wrapper.nextElementSibling
@@ -2886,6 +2896,30 @@ function unmuteSafely(video) {
       setTimeout(() => { if (video.muted) { video.muted = false; video.volume = 0.99; setTimeout(() => { video.volume = 1.0; }, 50); } }, 100);
     }
   } catch(e) {}
+}
+
+function updatePlayerAudioButton(wrapper, wantsAudio) {
+  const audioBtn = wrapper && wrapper.querySelector('.audio-toggle-button');
+  if (!audioBtn) return;
+  audioBtn.innerHTML = wantsAudio ? '&#128266;' : '&#128263;';
+  audioBtn.setAttribute('data-muted', wantsAudio ? 'false' : 'true');
+}
+
+function rememberPlayerAudioPreference(wantsAudio) {
+  window.pongUserWantsAudio = wantsAudio === true;
+  try {
+    localStorage.setItem(PONG_PLAYER_AUDIO_PREF_KEY, window.pongUserWantsAudio ? 'unmuted' : 'muted');
+  } catch (_) {}
+}
+
+function applyPlayerAudioPreference(video, wrapper, wantsAudio = window.pongUserWantsAudio === true) {
+  if (!video) return;
+  if (wantsAudio) unmuteSafely(video);
+  else {
+    video.muted = true;
+    video.volume = 0;
+  }
+  updatePlayerAudioButton(wrapper || video.closest('.video-wrapper'), wantsAudio);
 }
 
 // ─── Sorting ──────────────────────────────────────────────────────────────────
@@ -4079,7 +4113,7 @@ function createVideoElements() {
       wrapper.dataset.suspendedVideoSrc = random40PlaybackUrl(url);
     }
     video.playsInline = true; video.controls = false; video.autoplay = false;
-    video.muted = true; video.volume = 0;
+    video.muted = window.pongUserWantsAudio !== true; video.volume = window.pongUserWantsAudio === true ? 1.0 : 0;
     video.setAttribute('playsinline',''); video.setAttribute('webkit-playsinline',''); video.setAttribute('poster','data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
     video.style.transform = 'translateZ(0)'; video.style.willChange = 'transform'; video.style.background = '#000';
 
@@ -4123,10 +4157,14 @@ function createVideoElements() {
 
     const audioBtn = document.createElement('div');
     audioBtn.className = 'audio-toggle-button'; audioBtn.innerHTML = '🔇'; audioBtn.setAttribute('data-muted','true');
+    audioBtn.innerHTML = window.pongUserWantsAudio === true ? '&#128266;' : '&#128263;';
+    audioBtn.setAttribute('data-muted', window.pongUserWantsAudio === true ? 'false' : 'true');
     audioBtn.addEventListener('click', e => {
       e.preventDefault(); e.stopPropagation();
       if (video.muted) { window.pongUserWantsAudio=true; unmuteSafely(video); audioBtn.innerHTML='🔊'; audioBtn.setAttribute('data-muted','false'); }
       else { window.pongUserWantsAudio=false; video.muted=true; video.volume=0; audioBtn.innerHTML='🔇'; audioBtn.setAttribute('data-muted','true'); }
+      rememberPlayerAudioPreference(!video.muted);
+      updatePlayerAudioButton(wrapper, !video.muted);
       const n = document.createElement('div'); n.className='audio-notification';
       n.textContent = video.muted ? '🔈 Audio disabled' : '🔊 Audio enabled';
       wrapper.appendChild(n);
@@ -4582,7 +4620,7 @@ function markVideoPlayIntent(wrapper, video) {
   wrapper.dataset.playIntent = 'true';
   wrapper.dataset.userAudioIntent = 'true';
   if (video?.muted && isVideoReadyForInitialPlayback(video)) {
-    window.pongUserWantsAudio = true;
+    rememberPlayerAudioPreference(true);
     unmuteSafely(video);
     delete wrapper.dataset.userAudioIntent;
     const audioBtn = wrapper.querySelector('.audio-toggle-button');
@@ -4597,7 +4635,7 @@ function toggleVideoPlaybackFromIntent(wrapper, video) {
   if (!wrapper || !video) return;
   if (!video.paused) {
     if (video.muted && wrapper.dataset.userAudioIntent === 'true') {
-      window.pongUserWantsAudio = true;
+      rememberPlayerAudioPreference(true);
       unmuteSafely(video);
       delete wrapper.dataset.userAudioIntent;
       const audioBtn = wrapper.querySelector('.audio-toggle-button');
