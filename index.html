@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.51</div>
+    <div class="version-number">24.52</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -9169,6 +9169,22 @@ function random40ApplyServerVideoCacheRecords(records, endpoint = random40Server
 function random40StartServerVideoCacheTimers() {
   const endpoint = random40ServerVideoCacheEndpoint();
   if (!endpoint) return;
+  document.querySelectorAll('.video-wrapper[data-random40-card="true"]').forEach(wrapper => {
+    const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
+    const streamUrl = random40PcFileCacheStreamUrl(originalUrl);
+    if (!streamUrl) return;
+    if (wrapper.dataset.networkSuspended === 'true') {
+      wrapper.dataset.suspendedVideoSrc = streamUrl;
+      return;
+    }
+    const video = wrapper.querySelector('video');
+    if (!video || Number(video.currentTime || 0) > 0.01 || video.dataset.hasPlayedFrame === 'true') return;
+    if (String(video.currentSrc || video.src || '') === streamUrl) return;
+    video.src = streamUrl;
+    video.preload = 'auto';
+    video.dataset.lastNetworkAttemptAt = String(Date.now());
+    try { video.load(); } catch (_) {}
+  });
   if (!random40ServerVideoCachePollTimer) {
     random40ServerVideoCachePollTimer = setInterval(() => {
       void random40PollServerVideoCache();
