@@ -34,7 +34,7 @@ const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.en
 const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 2 * 1024 * 1024 * 1024));
 const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_TTL_MS || 60 * 60 * 1000));
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
-const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 6)));
+const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 8)));
 const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY)));
 const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY)));
 const VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.PONG_VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY || 2)));
@@ -42,6 +42,18 @@ const VIDEO_FILE_CACHE_QUEUE_MAX = Math.max(60, Math.min(6000, Number(process.en
 const VIDEO_FILE_CACHE_ACTIVE_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_ACTIVE_HOLD_MS || 20000));
 const VIDEO_FILE_CACHE_CURRENT_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_CURRENT_HOLD_MS || 30000));
 const VIDEO_FILE_CACHE_READ_WAIT_MS = Math.max(10000, Number(process.env.PONG_VIDEO_FILE_CACHE_READ_WAIT_MS || 45000));
+const VIDEO_FILE_CACHE_IO_SETTLE_MS = 8000;
+const VIDEO_FILE_CACHE_WIPE_RETRIES = 12;
+const VIDEO_FILE_CACHE_TAIL_RANGE_BYTES = 8 * 1024 * 1024;
+const VIDEO_FILE_CACHE_TAIL_RANGE_MIN_GAP_BYTES = 1024 * 1024;
+const VIDEO_FILE_CACHE_TAIL_RANGE_HEADER_TIMEOUT_MS = Math.max(
+  1500,
+  Math.min(15000, Number(process.env.PONG_VIDEO_FILE_CACHE_TAIL_RANGE_HEADER_TIMEOUT_MS || 8000) || 8000)
+);
+const VIDEO_FILE_CACHE_TAIL_RANGE_MAX_ACTIVE = Math.max(
+  1,
+  Math.min(8, Number(process.env.PONG_VIDEO_FILE_CACHE_TAIL_RANGE_MAX_ACTIVE || 4) || 4)
+);
 const LEARNED_STORE_PATH = path.join(LOCAL_AI_DIR, 'learned-examples.json');
 const FINETUNE_DATASET_PATH = path.join(LOCAL_AI_DIR, 'finetune-dataset.json');
 const FINETUNE_JSONL_PATH = path.join(LOCAL_AI_DIR, 'qwen-lora-dataset.jsonl');
@@ -2445,7 +2457,19 @@ let videoFileCacheGeneration = 0;
 let videoFileCacheLastHeartbeatAt = 0;
 let videoFileCachePriorityEpoch = 0;
 let videoFileCacheRetryTimer = null;
+let videoFileCacheHealthy = false;
+let videoFileCacheHidden = false;
+let videoFileCacheResetPromise = null;
 const videoFileCacheControllers = new Set();
+const videoFileCacheReaders = new Set();
+const videoFileCacheTailRangeStats = {
+  active: 0,
+  attempts: 0,
+  successes: 0,
+  bytes: 0,
+  failures: 0,
+  cancellations: 0
+};
 
 function videoFileCachePathFor(id, suffix = '.cache') {
   return path.join(VIDEO_FILE_CACHE_DIR, `${id}${suffix}`);
@@ -2515,7 +2539,9 @@ function videoFileCacheSnapshot() {
     folder: VIDEO_FILE_CACHE_DIR,
     plays_media_on_pc: false,
     wiped_on_startup: true,
-    hidden_folder: true,
+    healthy: videoFileCacheHealthy,
+    resetting: Boolean(videoFileCacheResetPromise),
+    hidden_folder: videoFileCacheHidden,
     ready,
     downloading,
     queued,
@@ -2529,28 +2555,116 @@ function videoFileCacheSnapshot() {
     playback_background_concurrency: VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY,
     per_host_concurrency: VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY,
     active_readers: activeReaders,
+    tail_range: {
+      window_bytes: VIDEO_FILE_CACHE_TAIL_RANGE_BYTES,
+      minimum_gap_bytes: VIDEO_FILE_CACHE_TAIL_RANGE_MIN_GAP_BYTES,
+      max_active: VIDEO_FILE_CACHE_TAIL_RANGE_MAX_ACTIVE,
+      active: videoFileCacheTailRangeStats.active,
+      attempts: videoFileCacheTailRangeStats.attempts,
+      successes: videoFileCacheTailRangeStats.successes,
+      bytes: videoFileCacheTailRangeStats.bytes,
+      failures: videoFileCacheTailRangeStats.failures,
+      cancellations: videoFileCacheTailRangeStats.cancellations
+    },
     idle_wipe_ms: VIDEO_FILE_CACHE_IDLE_WIPE_MS,
     last_heartbeat_at: videoFileCacheLastHeartbeatAt ? new Date(videoFileCacheLastHeartbeatAt).toISOString() : ''
   };
 }
 
 async function markVideoFileCacheHidden() {
-  if (process.platform !== 'win32') return;
-  await new Promise(resolve => {
-    const child = spawn('attrib', ['+H', VIDEO_FILE_CACHE_DIR], {
+  if (process.platform !== 'win32') {
+    if (!path.basename(VIDEO_FILE_CACHE_DIR).startsWith('.')) throw new Error('video cache folder is not hidden');
+    return true;
+  }
+  const runAttrib = args => new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    const child = spawn('attrib', args, {
       windowsHide: true,
-      stdio: 'ignore'
+      stdio: ['ignore', 'pipe', 'pipe']
     });
-    child.once('exit', resolve);
-    child.once('error', resolve);
+    child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    child.once('error', reject);
+    child.once('close', code => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`attrib failed (${code}): ${stderr.trim() || 'unknown error'}`));
+    });
   });
+  await runAttrib(['+H', VIDEO_FILE_CACHE_DIR]);
+  const output = await runAttrib([VIDEO_FILE_CACHE_DIR]);
+  const target = path.resolve(VIDEO_FILE_CACHE_DIR).toLowerCase();
+  const line = output.split(/\r?\n/).find(value => value.toLowerCase().includes(target));
+  const targetIndex = line ? line.toLowerCase().indexOf(target) : -1;
+  if (!line || !/(?:^|\s)H(?:\s|$)/i.test(line.slice(0, targetIndex))) {
+    throw new Error('video cache hidden attribute verification failed');
+  }
+  return true;
+}
+
+async function removeVideoFileCacheDirectory() {
+  assertVideoFileCachePathIsSafe(VIDEO_FILE_CACHE_DIR);
+  let lastError = null;
+  for (let attempt = 0; attempt < VIDEO_FILE_CACHE_WIPE_RETRIES; attempt++) {
+    try {
+      await fs.rm(VIDEO_FILE_CACHE_DIR, { recursive: true, force: true, maxRetries: 0 });
+      try {
+        await fs.stat(VIDEO_FILE_CACHE_DIR);
+        throw new Error('video cache directory still exists after wipe');
+      } catch (error) {
+        if (error?.code === 'ENOENT') return;
+        throw error;
+      }
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < VIDEO_FILE_CACHE_WIPE_RETRIES) {
+        await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError || new Error('video cache wipe failed');
+}
+
+function registerVideoFileCacheReader(res) {
+  let resolveDone;
+  let finished = false;
+  const entry = {
+    done: new Promise(resolve => { resolveDone = resolve; }),
+    abort: () => { if (!res.destroyed && !res.writableEnded) res.destroy(); },
+    finish: () => {
+      if (finished) return;
+      finished = true;
+      videoFileCacheReaders.delete(entry);
+      resolveDone();
+    }
+  };
+  videoFileCacheReaders.add(entry);
+  return entry;
+}
+
+async function waitForVideoFileCacheIo(readers, downloads) {
+  const tasks = [...readers.map(entry => entry.done), ...downloads];
+  let timer = null;
+  const settled = await Promise.race([
+    Promise.allSettled(tasks).then(() => true),
+    new Promise(resolve => { timer = setTimeout(() => resolve(false), VIDEO_FILE_CACHE_IO_SETTLE_MS); })
+  ]);
+  clearTimeout(timer);
+  if (
+    !settled ||
+    videoFileCacheReaders.size ||
+    videoFileCacheControllers.size ||
+    [...videoFileCacheRecords.values()].some(record => record.downloadPromise)
+  ) throw new Error('video cache I/O did not settle before wipe');
 }
 
 async function initializeVideoFileCache() {
+  videoFileCacheHealthy = false;
+  videoFileCacheHidden = false;
   assertVideoFileCachePathIsSafe(VIDEO_FILE_CACHE_DIR);
-  await fs.rm(VIDEO_FILE_CACHE_DIR, { recursive: true, force: true });
+  await removeVideoFileCacheDirectory();
   await fs.mkdir(VIDEO_FILE_CACHE_DIR, { recursive: true });
-  await markVideoFileCacheHidden();
+  videoFileCacheHidden = await markVideoFileCacheHidden();
   videoFileCacheRecords.clear();
   videoFileCacheQueue = [];
   videoFileCacheActive = 0;
@@ -2561,24 +2675,42 @@ async function initializeVideoFileCache() {
   videoFileCacheRetryTimer = null;
   videoFileCacheGeneration++;
   videoFileCacheLastHeartbeatAt = 0;
+  videoFileCacheHealthy = true;
 }
 
 async function resetVideoFileCache(reason = 'reset') {
-  videoFileCacheGeneration++;
-  for (const controller of [...videoFileCacheControllers]) controller.abort();
-  videoFileCacheControllers.clear();
-  videoFileCacheRecords.clear();
-  videoFileCacheQueue = [];
-  videoFileCacheActive = 0;
-  videoFileCacheBackgroundActive = 0;
-  videoFileCacheBytes = 0;
-  videoFileCachePriorityEpoch = 0;
-  if (videoFileCacheRetryTimer) clearTimeout(videoFileCacheRetryTimer);
-  videoFileCacheRetryTimer = null;
-  await fs.rm(VIDEO_FILE_CACHE_DIR, { recursive: true, force: true });
-  await fs.mkdir(VIDEO_FILE_CACHE_DIR, { recursive: true });
-  await markVideoFileCacheHidden();
-  console.log(`Video file cache wiped: ${reason}`);
+  if (videoFileCacheResetPromise) return videoFileCacheResetPromise;
+  const operation = (async () => {
+    videoFileCacheHealthy = false;
+    videoFileCacheHidden = false;
+    videoFileCacheGeneration++;
+    if (videoFileCacheRetryTimer) clearTimeout(videoFileCacheRetryTimer);
+    videoFileCacheRetryTimer = null;
+    const readers = [...videoFileCacheReaders];
+    const downloads = [...videoFileCacheRecords.values()].map(record => record.downloadPromise).filter(Boolean);
+    for (const controller of [...videoFileCacheControllers]) controller.abort();
+    for (const reader of readers) reader.abort();
+    await waitForVideoFileCacheIo(readers, downloads);
+    await removeVideoFileCacheDirectory();
+    await fs.mkdir(VIDEO_FILE_CACHE_DIR, { recursive: true });
+    videoFileCacheHidden = await markVideoFileCacheHidden();
+    videoFileCacheControllers.clear();
+    videoFileCacheRecords.clear();
+    videoFileCacheQueue = [];
+    videoFileCacheActive = 0;
+    videoFileCacheBackgroundActive = 0;
+    videoFileCacheBytes = 0;
+    videoFileCachePriorityEpoch = 0;
+    videoFileCacheLastHeartbeatAt = 0;
+    videoFileCacheHealthy = true;
+    console.log(`Video file cache wiped: ${reason}`);
+  })();
+  videoFileCacheResetPromise = operation;
+  try {
+    return await operation;
+  } finally {
+    if (videoFileCacheResetPromise === operation) videoFileCacheResetPromise = null;
+  }
 }
 
 function touchVideoFileCacheHeartbeat() {
@@ -2893,6 +3025,7 @@ async function downloadVideoFileCacheRecord(record, generation) {
 }
 
 function pumpVideoFileCache() {
+  if (!videoFileCacheHealthy || videoFileCacheResetPromise) return;
   trimVideoFileCacheQueue();
   rebalanceVideoFileCacheDownloads();
   const nowForCounts = Date.now();
@@ -2969,6 +3102,9 @@ function pumpVideoFileCache() {
 }
 
 function queueVideoFileCacheUrl(rawUrl, priority = 2, metadata = {}) {
+  if (!videoFileCacheHealthy || videoFileCacheResetPromise) {
+    throw new Error('video cache is temporarily unavailable');
+  }
   if (!rawUrl) return null;
   const canonical = videoFileCacheCanonical(rawUrl);
   let record = videoFileCacheRecords.get(canonical.id);
@@ -3090,6 +3226,180 @@ async function writeVideoFileCacheChunk(res, chunk) {
   });
 }
 
+function videoFileCacheTailRangeEligible(record, selectedRange, size, availableBytes) {
+  if (
+    !record ||
+    record.status !== 'downloading' ||
+    !record.downloadPromise ||
+    selectedRange?.status !== 206 ||
+    !Number.isSafeInteger(size) ||
+    size <= 0
+  ) return false;
+  const start = Number(selectedRange.start);
+  const end = Number(selectedRange.end);
+  const prefixBytes = Math.max(0, Number(availableBytes || 0));
+  const tailStart = Math.max(0, size - VIDEO_FILE_CACHE_TAIL_RANGE_BYTES);
+  return (
+    Number.isSafeInteger(start) &&
+    Number.isSafeInteger(end) &&
+    start >= tailStart &&
+    end < size &&
+    start >= prefixBytes + VIDEO_FILE_CACHE_TAIL_RANGE_MIN_GAP_BYTES
+  );
+}
+
+async function tryOpenVideoFileCacheTailRange(req, res, record, start, end, totalBytes) {
+  if (videoFileCacheTailRangeStats.active >= VIDEO_FILE_CACHE_TAIL_RANGE_MAX_ACTIVE) return null;
+  videoFileCacheTailRangeStats.attempts++;
+  videoFileCacheTailRangeStats.active++;
+  const controller = new AbortController();
+  videoFileCacheControllers.add(controller);
+  let finalized = false;
+  let response = null;
+  const abort = () => controller.abort();
+  req.once('aborted', abort);
+  res.once('close', abort);
+  const finalize = outcome => {
+    if (finalized) return;
+    finalized = true;
+    req.off('aborted', abort);
+    res.off('close', abort);
+    videoFileCacheControllers.delete(controller);
+    videoFileCacheTailRangeStats.active = Math.max(0, videoFileCacheTailRangeStats.active - 1);
+    if (outcome === 'success') videoFileCacheTailRangeStats.successes++;
+    else if (outcome === 'canceled') videoFileCacheTailRangeStats.cancellations++;
+    else videoFileCacheTailRangeStats.failures++;
+  };
+  const expectedLength = end - start + 1;
+  const headerDeadline = Date.now() + VIDEO_FILE_CACHE_TAIL_RANGE_HEADER_TIMEOUT_MS;
+  try {
+    let current = gatewayTargetUrl(record.sourceUrl);
+    for (let redirect = 0; redirect <= GATEWAY_MAX_REDIRECTS; redirect++) {
+      if (controller.signal.aborted) throw new Error('video cache tail range aborted');
+      const remainingHeaderMs = headerDeadline - Date.now();
+      if (remainingHeaderMs <= 0) throw new Error('video cache tail range header timeout');
+      const strongEtag = record.etag && !/^W\//i.test(String(record.etag))
+        ? String(record.etag)
+        : '';
+      const ifRange = strongEtag || String(record.lastModified || '');
+      response = await new Promise((resolve, reject) => {
+        let settled = false;
+        let headerTimer = null;
+        const headers = {
+          accept: 'video/*,*/*;q=0.8',
+          'accept-encoding': 'identity',
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+          referer: `${current.protocol}//${current.host}/`,
+          range: `bytes=${start}-${end}`
+        };
+        if (ifRange) headers['if-range'] = ifRange;
+        const finish = (error, value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(headerTimer);
+          if (error) reject(error);
+          else resolve(value);
+        };
+        const request = https.request(current, {
+          method: 'GET',
+          agent: GATEWAY_AGENT,
+          signal: controller.signal,
+          timeout: GATEWAY_TIMEOUT_MS,
+          headers
+        }, value => finish(null, value));
+        headerTimer = setTimeout(() => {
+          request.destroy(new Error('video cache tail range header timeout'));
+        }, remainingHeaderMs);
+        request.once('timeout', () => request.destroy(new Error('video cache tail range timeout')));
+        request.once('error', error => finish(error));
+        request.end();
+      });
+      const status = Number(response.statusCode || 0);
+      if ([301, 302, 303, 307, 308].includes(status) && response.headers.location) {
+        response.resume();
+        if (redirect >= GATEWAY_MAX_REDIRECTS) throw new Error('too many video cache tail range redirects');
+        current = gatewayTargetUrl(new URL(String(response.headers.location), current).href);
+        response = null;
+        continue;
+      }
+      const contentRange = String(response.headers['content-range'] || '');
+      const match = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
+      const contentLengthHeader = response.headers['content-length'];
+      const contentLength = contentLengthHeader === undefined ? expectedLength : Number(contentLengthHeader);
+      const contentEncoding = String(response.headers['content-encoding'] || '').trim().toLowerCase();
+      const responseEtag = String(response.headers.etag || '');
+      const responseLastModified = String(response.headers['last-modified'] || '');
+      const validatorMismatch = Boolean(
+        (strongEtag && responseEtag && strongEtag !== responseEtag) ||
+        (!strongEtag && record.lastModified && responseLastModified && record.lastModified !== responseLastModified)
+      );
+      if (
+        status !== 206 ||
+        !match ||
+        Number(match[1]) !== start ||
+        Number(match[2]) !== end ||
+        Number(match[3]) !== totalBytes ||
+        !Number.isSafeInteger(contentLength) ||
+        contentLength !== expectedLength ||
+        (contentEncoding && contentEncoding !== 'identity') ||
+        validatorMismatch
+      ) {
+        response.destroy();
+        throw new Error('video cache upstream rejected the exact tail range');
+      }
+      return {
+        response,
+        controller,
+        expectedLength,
+        contentType: String(response.headers['content-type'] || '').split(';')[0],
+        etag: responseEtag,
+        lastModified: responseLastModified,
+        finalize
+      };
+    }
+    throw new Error('video cache tail range redirect failed');
+  } catch (_) {
+    response?.destroy();
+    finalize(controller.signal.aborted && (req.destroyed || res.destroyed) ? 'canceled' : 'failure');
+    return null;
+  }
+}
+
+async function streamVideoFileCacheTailRange(req, res, record, tailRange) {
+  let streamedBytes = 0;
+  let outcome = 'failure';
+  try {
+    for await (const chunk of tailRange.response) {
+      if (streamedBytes + chunk.length > tailRange.expectedLength) {
+        throw new Error('video cache tail range exceeded its declared length');
+      }
+      const wrote = await writeVideoFileCacheChunk(res, chunk);
+      if (!wrote) {
+        outcome = 'canceled';
+        return;
+      }
+      streamedBytes += chunk.length;
+      videoFileCacheTailRangeStats.bytes += chunk.length;
+      record.lastAccessedAt = Date.now();
+      record.activeUntil = Number.MAX_SAFE_INTEGER;
+    }
+    if (streamedBytes !== tailRange.expectedLength) {
+      throw new Error(`video cache tail range ended at ${streamedBytes} of ${tailRange.expectedLength} bytes`);
+    }
+    if (!res.destroyed && !res.writableEnded) res.end();
+    outcome = 'success';
+  } catch (error) {
+    if (req.destroyed || res.destroyed) {
+      outcome = 'canceled';
+      return;
+    }
+    throw error;
+  } finally {
+    tailRange.response.destroy();
+    tailRange.finalize(outcome);
+  }
+}
+
 async function streamGrowingVideoFileCacheRange(req, res, record, start, end, generation) {
   let position = start;
   let lastProgressAt = Date.now();
@@ -3159,12 +3469,17 @@ async function streamCompletedVideoFileCacheRange(req, res, record, start, end) 
 }
 
 async function serveVideoFileCacheMedia(req, res, id) {
+  if (!videoFileCacheHealthy || videoFileCacheResetPromise) {
+    json(res, 503, { ok: false, error: 'video cache is resetting' });
+    return;
+  }
   const safeId = String(id || '').replace(/[^a-f0-9]/gi, '');
   const record = videoFileCacheRecords.get(safeId);
   if (!record) {
     json(res, 404, { ok: false, error: 'video cache record was not found' });
     return;
   }
+  const reader = registerVideoFileCacheReader(res);
   const generation = videoFileCacheGeneration;
   record.lastAccessedAt = Date.now();
   record.activeReaders = Number(record.activeReaders || 0) + 1;
@@ -3174,6 +3489,7 @@ async function serveVideoFileCacheMedia(req, res, id) {
   touchVideoFileCacheHeartbeat();
   rebalanceVideoFileCacheDownloads();
   pumpVideoFileCache();
+  let tailRangeSession = null;
   try {
     const size = await waitForVideoFileCacheMetadata(record, generation);
     const selectedRange = videoFileCacheRange(req.headers.range, size);
@@ -3186,14 +3502,32 @@ async function serveVideoFileCacheMedia(req, res, id) {
       res.end();
       return;
     }
+    if (req.method === 'GET') {
+      const available = await videoFileCacheAvailableFile(record);
+      if (videoFileCacheTailRangeEligible(record, selectedRange, size, available.size)) {
+        // Chrome commonly asks for MP4 metadata at the end while the normal
+        // cache writer is still near the beginning. Fetch only that exact tail
+        // range on a second origin connection; never create a sparse cache file.
+        tailRangeSession = await tryOpenVideoFileCacheTailRange(
+          req,
+          res,
+          record,
+          selectedRange.start,
+          selectedRange.end,
+          size
+        );
+      }
+    }
     const headers = videoFileCacheHeaders({
-      'content-type': record.contentType || 'video/mp4',
+      'content-type': tailRangeSession?.contentType || record.contentType || 'video/mp4',
       'accept-ranges': 'bytes',
       'content-length': String(selectedRange.end - selectedRange.start + 1),
       'cache-control': 'no-store'
     });
-    if (record.etag) headers.etag = record.etag;
-    if (record.lastModified) headers['last-modified'] = record.lastModified;
+    if (tailRangeSession?.etag || record.etag) headers.etag = tailRangeSession?.etag || record.etag;
+    if (tailRangeSession?.lastModified || record.lastModified) {
+      headers['last-modified'] = tailRangeSession?.lastModified || record.lastModified;
+    }
     if (selectedRange.status === 206) {
       headers['content-range'] = `bytes ${selectedRange.start}-${selectedRange.end}/${size}`;
     }
@@ -3202,7 +3536,9 @@ async function serveVideoFileCacheMedia(req, res, id) {
       res.end();
       return;
     }
-    if (record.status === 'ready' && record.filePath) {
+    if (tailRangeSession) {
+      await streamVideoFileCacheTailRange(req, res, record, tailRangeSession);
+    } else if (record.status === 'ready' && record.filePath) {
       await streamCompletedVideoFileCacheRange(req, res, record, selectedRange.start, selectedRange.end);
     } else {
       await streamGrowingVideoFileCacheRange(req, res, record, selectedRange.start, selectedRange.end, generation);
@@ -3214,6 +3550,9 @@ async function serveVideoFileCacheMedia(req, res, id) {
       res.destroy(error);
     }
   } finally {
+    tailRangeSession?.response?.destroy();
+    tailRangeSession?.finalize('canceled');
+    reader.finish();
     record.activeReaders = Math.max(0, Number(record.activeReaders || 0) - 1);
     if (
       record.deferWhenIdle &&
@@ -3236,6 +3575,10 @@ function videoFileCacheEndpointFromRequest(req) {
 }
 
 async function periodicVideoFileCacheMaintenance() {
+  if (!videoFileCacheHealthy) {
+    await resetVideoFileCache('cache recovery');
+    return;
+  }
   const hasActiveReaders = [...videoFileCacheRecords.values()]
     .some(record => Number(record.activeReaders || 0) > 0);
   if (
@@ -3244,7 +3587,7 @@ async function periodicVideoFileCacheMaintenance() {
     !hasActiveReaders &&
     Date.now() - videoFileCacheLastHeartbeatAt > VIDEO_FILE_CACHE_IDLE_WIPE_MS
   ) {
-    await resetVideoFileCache('idle timeout').catch(() => {});
+    await resetVideoFileCache('idle timeout');
     return;
   }
   normalizeVideoFileCachePriorities();
@@ -6746,9 +7089,9 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-await initializeVideoFileCache().catch(error => {
-  console.error(`Video file cache startup wipe failed: ${error.message || error}`);
-});
+// Privacy is fail-closed: do not expose the server unless stale bytes were
+// removed and the new cache directory is verifiably hidden.
+await initializeVideoFileCache();
 
 server.listen(PORT, HOST, () => {
   console.log(`Pong local AI listening on http://${HOST}:${PORT}`);
@@ -6769,7 +7112,8 @@ server.listen(PORT, HOST, () => {
   }, GATEWAY_KEEP_WARM_MS);
   gatewayKeepWarmTimer.unref();
   const videoFileCacheMaintenanceTimer = setInterval(() => {
-    periodicVideoFileCacheMaintenance().catch(() => {});
+    periodicVideoFileCacheMaintenance()
+      .catch(error => console.error(`Video file cache maintenance failed: ${error.message || error}`));
   }, 30000);
   videoFileCacheMaintenanceTimer.unref();
   const reservoirKeepWarmTimer = setInterval(() => {

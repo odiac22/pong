@@ -824,7 +824,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.35</div>
+  <div class="version-number">24.36</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3542,7 +3542,17 @@ function videoNetworkRequestIsMakingProgress(video, wrapper, now = Date.now()) {
   const initialAttemptGrace = attemptCount === 0 &&
     attemptAt > 0 &&
     now - attemptAt < progressTimeoutMs;
-  return recentRealProgress || initialAttemptGrace;
+  const originalUrl = String(wrapper?.dataset?.originalVideoUrl || '');
+  const serverRecord = originalUrl ? random40ServerVideoCacheTracked.get(originalUrl) : null;
+  const currentUrl = String(video.currentSrc || video.src || '');
+  // Tail-indexed MP4s can keep filling the PC cache without producing a
+  // browser progress event until their final metadata bytes arrive. Preserve
+  // that useful download instead of restarting it through proxy/direct routes.
+  const recentServerCacheProgress = random40IsPcGrowingCachePlaybackUrl(currentUrl) &&
+    serverRecord &&
+    Number(serverRecord.byteProgressAt || 0) > 0 &&
+    now - Number(serverRecord.byteProgressAt || 0) < progressTimeoutMs;
+  return recentRealProgress || recentServerCacheProgress || initialAttemptGrace;
 }
 
 function rotateVideoRetrySource(wrapper, video) {
@@ -4463,6 +4473,7 @@ function createVideoElements() {
       maybeAutoplayReadyDeckVideo(video, wrapper, 'canplaythrough');
     });
     video.addEventListener('playing', () => {
+      video.dataset.hasPlayedFrame = 'true';
       if (isVideoReadyForInitialPlayback(video)) markVideoAutoRetryDone(video, 'playing');
       else updateVideoReadyLoader(video);
       markVideoViewed(wrapper);
@@ -8249,7 +8260,7 @@ const RANDOM40_LOCAL_LEARN_IMAGES_PER_EXAMPLE = 6;
 const RANDOM40_LOCAL2_MAX_REVIEW_IMAGES = 12;
 const RANDOM40_LOCAL2_LEARN_IMAGES_PER_EXAMPLE = 12;
 const RANDOM40_LOCAL2_OVERLAP_TIMEOUT_MS = 20000;
-const RANDOM40_PRELOAD_CURRENT_RESERVE = 4;
+const RANDOM40_PRELOAD_CURRENT_RESERVE = 10;
 const RANDOM40_PRELOAD_RESIDENT_PER_BACKGROUND_ARTIST = 2;
 const RANDOM40_PRELOAD_GUARANTEED_ARTISTS = 8;
 const RANDOM40_PRELOAD_GUARANTEED_VIDEOS = 10;
@@ -8276,7 +8287,7 @@ let random40ServerVideoCacheTracked = new Map();
 let random40ServerVideoCachePollCursor = 0;
 let random40ServerVideoCacheManifestSignature = '';
 let random40ServerVideoCacheManifestInFlightSignature = '';
-const RANDOM40_SERVER_VIDEO_CACHE_STATUS_MS = 1800;
+const RANDOM40_SERVER_VIDEO_CACHE_STATUS_MS = 1000;
 const RANDOM40_SERVER_VIDEO_CACHE_HEARTBEAT_MS = 45000;
 const RANDOM40_SERVER_VIDEO_CACHE_WARM_MIN_MS = 900;
 const RANDOM40_SERVER_VIDEO_CACHE_BATCH = 4000;
@@ -8674,8 +8685,16 @@ function random40SwapRenderedVideoSource(wrapper, playbackUrl, { forceActive = f
 
   const isActive = wrapper.classList.contains('deck-active') || foregroundPriorityVideo === video;
   const wasPlaying = !video.paused && !video.ended;
-  const playbackStarted = wasPlaying || Number(video.currentTime || 0) > 0.05 ||
-    wrapper.classList.contains('video-playing');
+  // A pending play() reports paused=false before Chrome has rendered a frame.
+  // Upgrade only in that zero-frame window; changing src after `playing` or a
+  // decoded frame can visibly reset the decoder even while currentTime is 0.
+  let decodedFrames = Number(video.webkitDecodedFrameCount || 0);
+  try {
+    decodedFrames = Math.max(decodedFrames, Number(video.getVideoPlaybackQuality?.().totalVideoFrames || 0));
+  } catch (_) {}
+  const playbackStarted = video.dataset.hasPlayedFrame === 'true' ||
+    decodedFrames > 0 ||
+    Number(video.currentTime || 0) > 0.01;
   // Never replace the src of a video after playback has begun. Changing src
   // resets the decoder and is visible as a flash/pause even when currentTime is
   // restored. The LAN URL will be used the next time this card is attached.
@@ -8751,14 +8770,20 @@ function random40ApplyServerVideoCacheRecords(records, endpoint = random40Server
       const key = String(url || '');
       if (!key) continue;
       const playable = record.playable === true || record.ready === true;
+      const previous = random40ServerVideoCacheTracked.get(key);
+      const bytes = Number(record.bytes || record.availableBytes || 0);
+      const byteProgressAt = bytes > Number(previous?.bytes || 0)
+        ? Date.now()
+        : Number(previous?.byteProgressAt || 0);
       random40ServerVideoCacheTracked.set(key, {
         id: record.id,
         status: String(record.status || ''),
         ready: record.ready === true,
         playable,
-        bytes: Number(record.bytes || record.availableBytes || 0),
+        bytes,
         totalBytes: Number(record.totalBytes || 0),
         playbackUrl,
+        byteProgressAt,
         updatedAt: Date.now()
       });
       if (record.ready === true && playbackUrl) {
@@ -9004,10 +9029,9 @@ function random40ResetServerVideoCacheOnClose() {
   fetch(`${endpoint}/video-cache/reset`, { method: 'POST', cache: 'no-store', keepalive: true }).catch(() => {});
 }
 
-// Mobile browsers fire pagehide while temporarily backgrounding or refreshing.
-// Do not wipe a cache shared by another live tab/device at that moment. The PC
-// still scrubs it on server startup and after the short heartbeat idle timeout.
-window.addEventListener('pagehide', resetRandom40ServerVideoCacheClientState);
+// Refreshing, closing, or discarding Pong requests an immediate scrub. The
+// server also keeps the short heartbeat idle wipe as a crash/network fallback.
+window.addEventListener('pagehide', random40ResetServerVideoCacheOnClose);
 window.addEventListener('pageshow', () => {
   if (!isRandom40PlaybackActive()) return;
   random40StartServerVideoCacheTimers();

@@ -4,6 +4,7 @@
     "benchmark:local1": "node scripts/benchmark-local1-exact.mjs",
     "benchmark:local-buttons": "node scripts/benchmark-local-buttons.mjs",
     "benchmark:video-loading": "node scripts/benchmark-video-loading.mjs",
+    "benchmark:video-transports": "node scripts/benchmark-video-transports.mjs",
     "benchmark:feedback-memory": "python scripts\\benchmark-exact-feedback-memory.py",
     "benchmark:local2:live-regressions": "node scripts/benchmark-local2-live-regressions.mjs",
     "benchmark:local2:offline": ".\\.pong-local-ai\\lora-venv\\Scripts\\python.exe scripts\\benchmark-local2-offline.py",
