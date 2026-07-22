@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.23</div>
+  <div class="version-number">24.24</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3082,6 +3082,15 @@ function videoHasCriticalForegroundBuffer(video) {
   return getVideoBufferedAheadSeconds(video) + 0.08 < target;
 }
 
+function random40ForegroundPlaybackExclusive() {
+  const video = getForegroundPriorityVideo();
+  if (!video || video.error || video.ended || !document.body.contains(video)) return false;
+
+  const wrapper = video.closest('.video-wrapper');
+  return videoNeedsForegroundPriority(video) ||
+    (wrapper?.dataset.playIntent === 'true' && !isVideoReadyForInitialPlayback(video));
+}
+
 function getForegroundPriorityVideo() {
   if (foregroundPriorityVideo && document.body.contains(foregroundPriorityVideo)) {
     return foregroundPriorityVideo;
@@ -3109,6 +3118,7 @@ function refreshForegroundVideoPriority(video, force = false) {
   tuneVideoPreloadAround(wrapper);
 
   if (needsPriority) random40PauseHiddenPreloadsForPlayback();
+  random40PumpSourceFetchQueue();
   random40PumpPostFetchQueue();
   random40PumpPreloadQueue(needsPriority ? 450 : 50);
 }
@@ -3122,6 +3132,7 @@ function transferForegroundVideoPriority(video) {
 
   foregroundPriorityVideo = nextVideo;
   if (!nextVideo) {
+    random40PumpSourceFetchQueue();
     random40PumpPostFetchQueue();
     random40PumpPreloadQueue(50);
     return;
@@ -3200,6 +3211,10 @@ function getDeckNetworkWarmIndexes(activeWrapper) {
   warmIndexes.add(activeIndex);
   const activeVideo = activeWrapper?.querySelector('video');
   if (!activeVideo || DECK_PRELOAD_RADIUS < 1) return warmIndexes;
+  if (random40ForegroundPlaybackExclusive()) {
+    delete activeWrapper.dataset.deckNextWarm;
+    return warmIndexes;
+  }
 
   const criticallyLow = videoHasCriticalForegroundBuffer(activeVideo);
   const nextWasWarming = activeWrapper.dataset.deckNextWarm === 'true';
@@ -4263,10 +4278,11 @@ function createVideoElements() {
 
     video.addEventListener('play', () => {
       prepareVideoForPlayback(video);
-      // Give the visible card the connection first. Hidden warming resumes at
-      // a low rate once this card has a healthy forward buffer, and at full
-      // speed as soon as playback pauses.
+      if (isRandom40PlaybackActive()) void random40RequestPlaybackProtection(random40State);
+      // Give the visible card the connection first. Current/next warming
+      // resumes only after the foreground video has a healthy buffer.
       random40PauseHiddenPreloadsForPlayback();
+      random40PumpSourceFetchQueue();
       random40PumpPostFetchQueue();
       random40PumpPreloadQueue(350);
     });
@@ -4283,6 +4299,7 @@ function createVideoElements() {
         transferForegroundVideoPriority(null);
         const activeWrapper = document.querySelector('.video-wrapper.deck-active');
         if (activeWrapper) tuneVideoPreloadAround(activeWrapper);
+        random40PumpSourceFetchQueue();
         random40PumpPostFetchQueue();
         random40PumpPreloadQueue(100);
       }
@@ -5824,7 +5841,7 @@ async function random40RequestPlaybackProtection(runState = random40State) {
   ) return false;
   if (
     runState.playbackProtectionRequested &&
-    (!foregroundLiveScan || Date.now() - Number(runState.playbackProtectionStartedAt || 0) < 75000)
+    Date.now() - Number(runState.playbackProtectionStartedAt || 0) < 75000
   ) return true;
   if (runState.playbackProtectionPromise) return runState.playbackProtectionPromise;
   const endpoint = runState.localEndpoint || random40GatewayEndpoint || '';
@@ -8077,10 +8094,12 @@ const RANDOM40_AI_CONCURRENCY = 12;
 const RANDOM40_LOCAL_CONCURRENCY = 10;
 const RANDOM40_SOURCE_CONCURRENCY = 18;
 const RANDOM40_SOURCE_BACKGROUND_CONCURRENCY = 4;
+const RANDOM40_SOURCE_PLAYING_CONCURRENCY = 1;
+const RANDOM40_SOURCE_PLAYBACK_CONCURRENCY = 0;
 const RANDOM40_POST_CONCURRENCY = 18;
-const RANDOM40_POST_PLAYING_CONCURRENCY = 2;
+const RANDOM40_POST_PLAYING_CONCURRENCY = 1;
 const RANDOM40_POST_BUFFERING_CONCURRENCY = 0;
-const RANDOM40_POST_FOREGROUND_CONCURRENCY = 1;
+const RANDOM40_POST_FOREGROUND_CONCURRENCY = 0;
 const RANDOM40_POST_SLOW_CONCURRENCY = 4;
 const RANDOM40_POST_ENTRIES_CACHE_MAX = 6000;
 const RANDOM40_PAGE_BATCH_SIZE = 2;
@@ -8535,7 +8554,15 @@ async function random40VerifyPostLinksBatch(postLinks, artistInfo, stopAt, signa
 }
 
 function random40PumpSourceFetchQueue() {
-  while (random40SourceFetchActive < RANDOM40_SOURCE_CONCURRENCY && random40SourceFetchQueue.length) {
+  const video = getForegroundPriorityVideo();
+  const limit = random40ForegroundPlaybackExclusive()
+    ? RANDOM40_SOURCE_PLAYBACK_CONCURRENCY
+    : video && !video.paused
+      ? RANDOM40_SOURCE_PLAYING_CONCURRENCY
+      : RANDOM40_SOURCE_CONCURRENCY;
+  if (limit <= 0) return;
+
+  while (random40SourceFetchActive < limit && random40SourceFetchQueue.length) {
     random40SourceFetchQueue = random40SourceFetchQueue.filter(item => {
       if (!item.signal?.aborted) return true;
       item.reject(new DOMException('Source request aborted', 'AbortError'));
@@ -12897,6 +12924,8 @@ function random40ActiveArtistIdentity() {
 }
 
 function random40PostFetchConcurrencyLimit() {
+  if (random40ForegroundPlaybackExclusive()) return 0;
+
   const video = getForegroundPriorityVideo();
   if (video && videoNeedsForegroundPriority(video)) {
     return video.paused
