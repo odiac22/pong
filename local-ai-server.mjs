@@ -200,6 +200,19 @@ function isLoopbackAddress(rawAddress) {
   return value === '127.0.0.1' || value === '::1' || value === '::ffff:127.0.0.1';
 }
 
+function normalizeIpv4Address(rawAddress) {
+  return String(rawAddress || '').trim().toLowerCase().replace(/^::ffff:/, '');
+}
+
+function isPrivateLanAddress(rawAddress) {
+  const value = normalizeIpv4Address(rawAddress);
+  const parts = value.split('.').map(part => Number(part));
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  if (parts[0] === 10) return true;
+  if (parts[0] === 192 && parts[1] === 168) return true;
+  return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
+}
+
 function isAllowedBrowserOrigin(rawOrigin, remoteAddress = '') {
   // CLI/benchmark requests omit Origin; only accept those on loopback. Phone
   // browsers must present the deployed Pong origin, preventing arbitrary LAN
@@ -208,7 +221,10 @@ function isAllowedBrowserOrigin(rawOrigin, remoteAddress = '') {
   try {
     const origin = new URL(rawOrigin);
     if (origin.origin === 'https://odiac22.github.io') return true;
-    return ['127.0.0.1', 'localhost'].includes(origin.hostname) && ['http:', 'https:'].includes(origin.protocol);
+    if (['127.0.0.1', 'localhost'].includes(origin.hostname) && ['http:', 'https:'].includes(origin.protocol)) return true;
+    return ['http:', 'https:'].includes(origin.protocol) &&
+      isPrivateLanAddress(origin.hostname) &&
+      (isPrivateLanAddress(remoteAddress) || isLoopbackAddress(remoteAddress));
   } catch (_) {
     return false;
   }
