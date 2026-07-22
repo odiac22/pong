@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.43</div>
+    <div class="version-number">24.44</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -947,6 +947,16 @@ let deckLastEmptyNoticeAt = 0;
 let pongAutoScrollEnabled = false;
 let pongAutoScrollSeconds = 10;
 let pongAutoScrollTimer = null;
+const PONG_PLAYBACK_BENCHMARK = new URLSearchParams(location.search).get('pongPlaybackBenchmark') === '1';
+const PONG_PLAYBACK_BENCHMARK_TARGETS = [10, 5];
+let pongPlaybackBenchmarkState = {
+  startedAt: 0,
+  completedAt: 0,
+  done: false,
+  artists: [],
+  totalBuffers: 0,
+  totalBufferMs: 0
+};
 let viewedVideoKeys = new Set();
 let random40PreloadTimer = null;
 let random40PreloadContainer = null;
@@ -4284,6 +4294,110 @@ function setupDeckSwipeController() {
 }
 
 // ─── Video elements ───────────────────────────────────────────────────────────
+function updatePongPlaybackBenchmarkOutput() {
+  if (!PONG_PLAYBACK_BENCHMARK) return;
+  let output = document.getElementById('pong-playback-benchmark-state');
+  if (!output) {
+    output = document.createElement('output');
+    output.id = 'pong-playback-benchmark-state';
+    output.hidden = true;
+    document.body.appendChild(output);
+  }
+  output.textContent = JSON.stringify({
+    ...pongPlaybackBenchmarkState,
+    elapsedMs: pongPlaybackBenchmarkState.startedAt
+      ? (pongPlaybackBenchmarkState.completedAt || Date.now()) - pongPlaybackBenchmarkState.startedAt
+      : 0
+  });
+}
+
+function pongPlaybackBenchmarkArtistKey(wrapper) {
+  const localIndex = Number(wrapper?.dataset?.index || 0);
+  const globalIndex = Number(currentLoadedRangeStart || 0) + localIndex;
+  const meta = allVideoMetadata[globalIndex] || videoMetadata[localIndex] || {};
+  return String(meta.artistKey || meta.artistUrl || getArtistDisplayName(meta) || `artist-${currentPasteIndex}`);
+}
+
+function pongPlaybackBenchmarkArtist(wrapper) {
+  const key = pongPlaybackBenchmarkArtistKey(wrapper);
+  let artist = pongPlaybackBenchmarkState.artists.find(item => item.key === key);
+  if (!artist) {
+    artist = { key, completed: 0, buffers: 0, bufferMs: 0, videos: [] };
+    pongPlaybackBenchmarkState.artists.push(artist);
+  }
+  return artist;
+}
+
+function pongPlaybackBenchmarkCloseStall(video, wrapper) {
+  const startedAt = Number(video?.dataset?.benchmarkStallStartedAt || 0);
+  if (!startedAt) return;
+  const elapsed = Math.max(0, Date.now() - startedAt);
+  delete video.dataset.benchmarkStallStartedAt;
+  const artist = pongPlaybackBenchmarkArtist(wrapper);
+  artist.bufferMs += elapsed;
+  pongPlaybackBenchmarkState.totalBufferMs += elapsed;
+  updatePongPlaybackBenchmarkOutput();
+}
+
+function pongPlaybackBenchmarkOnPlaying(video, wrapper) {
+  if (!PONG_PLAYBACK_BENCHMARK || !wrapper.classList.contains('deck-active')) return;
+  video.muted = true;
+  video.volume = 0;
+  if (!pongPlaybackBenchmarkState.startedAt) pongPlaybackBenchmarkState.startedAt = Date.now();
+  pongPlaybackBenchmarkArtist(wrapper);
+  pongPlaybackBenchmarkCloseStall(video, wrapper);
+  updatePongPlaybackBenchmarkOutput();
+}
+
+function pongPlaybackBenchmarkOnWaiting(video, wrapper) {
+  if (
+    !PONG_PLAYBACK_BENCHMARK ||
+    !wrapper.classList.contains('deck-active') ||
+    video.paused || video.ended || video.seeking || Number(video.currentTime || 0) < 0.05 ||
+    video.dataset.benchmarkStallStartedAt
+  ) return;
+  video.dataset.benchmarkStallStartedAt = String(Date.now());
+  const artist = pongPlaybackBenchmarkArtist(wrapper);
+  artist.buffers++;
+  pongPlaybackBenchmarkState.totalBuffers++;
+  updatePongPlaybackBenchmarkOutput();
+}
+
+function pongPlaybackBenchmarkAdvanceArtist(attempt = 0) {
+  if (!PONG_PLAYBACK_BENCHMARK || pongPlaybackBenchmarkState.done) return;
+  if (canNavigateToNextPasteEvent()) {
+    navigateToNextPasteEvent();
+    return;
+  }
+  if (attempt < 90) setTimeout(() => pongPlaybackBenchmarkAdvanceArtist(attempt + 1), 1000);
+}
+
+function pongPlaybackBenchmarkOnEnded(video, wrapper) {
+  if (!PONG_PLAYBACK_BENCHMARK || !wrapper.classList.contains('deck-active')) return;
+  pongPlaybackBenchmarkCloseStall(video, wrapper);
+  const artist = pongPlaybackBenchmarkArtist(wrapper);
+  const originalUrl = String(wrapper.dataset.originalVideoUrl || video.currentSrc || '');
+  if (!artist.videos.includes(originalUrl)) {
+    artist.videos.push(originalUrl);
+    artist.completed++;
+  }
+  const artistIndex = pongPlaybackBenchmarkState.artists.indexOf(artist);
+  const target = PONG_PLAYBACK_BENCHMARK_TARGETS[Math.min(artistIndex, PONG_PLAYBACK_BENCHMARK_TARGETS.length - 1)];
+  if (artistIndex >= 1 && artist.completed >= target) {
+    pongPlaybackBenchmarkState.done = true;
+    pongPlaybackBenchmarkState.completedAt = Date.now();
+    updatePongPlaybackBenchmarkOutput();
+    return;
+  }
+  if (artist.completed >= target) {
+    setTimeout(() => pongPlaybackBenchmarkAdvanceArtist(), 100);
+    updatePongPlaybackBenchmarkOutput();
+    return;
+  }
+  setTimeout(() => goToNextDeckVideo(), 100);
+  updatePongPlaybackBenchmarkOutput();
+}
+
 function createVideoElements() {
   stopVisibleBatchAutoRetry();
   transferForegroundVideoPriority(null);
@@ -4596,6 +4710,7 @@ function createVideoElements() {
     });
     video.addEventListener('playing', () => {
       video.dataset.hasPlayedFrame = 'true';
+      pongPlaybackBenchmarkOnPlaying(video, wrapper);
       if (isVideoReadyForInitialPlayback(video)) markVideoAutoRetryDone(video, 'playing');
       else updateVideoReadyLoader(video);
       markVideoViewed(wrapper);
@@ -4624,7 +4739,10 @@ function createVideoElements() {
       updateVideoBufferedProgressBar(video);
       updateVideoReadyLoader(video);
     });
+    video.addEventListener('waiting', () => pongPlaybackBenchmarkOnWaiting(video, wrapper));
+    video.addEventListener('stalled', () => pongPlaybackBenchmarkOnWaiting(video, wrapper));
     video.addEventListener('ended', () => {
+      pongPlaybackBenchmarkOnEnded(video, wrapper);
       refreshForegroundVideoPriority(video, true);
       if (pongAutoScrollEnabled && wrapper.classList.contains('deck-active')) {
         schedulePongAutoScroll(80);
