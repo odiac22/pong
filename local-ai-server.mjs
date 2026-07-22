@@ -36,7 +36,7 @@ const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
 const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 12)));
 const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(10, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
-const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || 4)));
+const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY || 0)));
 const VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE = Math.max(20, Math.min(500, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE || 120)));
 // Random40 artist bundles commonly place every verified video on one CDN host.
 // Two slots leaves thirteen videos queued behind the current card; four keeps
@@ -6752,6 +6752,14 @@ const server = http.createServer(async (req, res) => {
       const reportedCritical = url.searchParams.get('critical') === '1';
       if (reportedCritical || (Number.isFinite(reportedBufferedSeconds) && reportedBufferedSeconds <= VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS)) {
         videoFileCacheGlobalPlaybackConstrainedUntil = Date.now() + 5000;
+        for (const record of videoFileCacheRecords.values()) {
+          if (
+            record.status !== 'downloading' || !record.downloadPromise ||
+            currentVideoFileCachePriority(record) === 0 || Number(record.activeReaders || 0) > 0
+          ) continue;
+          record.deferWhenIdle = true;
+          record.controller?.abort();
+        }
       } else if (Number.isFinite(reportedBufferedSeconds) && reportedBufferedSeconds >= VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS) {
         videoFileCacheGlobalPlaybackConstrainedUntil = 0;
       }
