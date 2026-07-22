@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.41</div>
+    <div class="version-number">24.42</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3309,9 +3309,17 @@ function getDeckNetworkWarmIndexes(activeWrapper) {
   }
   activeWrapper.dataset.deckNextWarm = 'true';
 
+  // Warm a real forward window, not only the next card.  The previous code
+  // exposed a radius setting but always attached exactly one future source.
+  // Keep the explicit forward-history card first, then walk the deck order.
   const forwardIndex = [...deckForwardHistory].reverse().find(index => getDeckWrapper(index));
-  const nextIndex = forwardIndex != null ? forwardIndex : getNextDeckIndex();
-  if (nextIndex != null) warmIndexes.add(nextIndex);
+  if (forwardIndex != null) warmIndexes.add(forwardIndex);
+  ensureDeckOrder();
+  for (const index of deckOrder) {
+    if (warmIndexes.size >= DECK_PRELOAD_RADIUS + 1) break;
+    if (index === activeIndex || !getDeckWrapper(index)) continue;
+    warmIndexes.add(index);
+  }
   return warmIndexes;
 }
 
