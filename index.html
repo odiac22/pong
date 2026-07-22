@@ -824,7 +824,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.36</div>
+  <div class="version-number">24.37</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -13743,11 +13743,14 @@ function random40PublishEntries(entries, runState = random40State) {
     return payload;
   }
 
-  if (!runState.cardsStarted && payload.urls.length > 1) {
-    const upcomingUrls = payload.urls.slice(1, 21);
-    void random40WarmServerVideoCache(upcomingUrls, {
-      activeUrl: '',
-      currentUrls: upcomingUrls
+  if (!runState.cardsStarted && payload.urls.length) {
+    const currentUrls = payload.urls.slice(0, 20);
+    // Queue the first visible card as priority zero before its media element is
+    // rendered. Previously videos 2-20 could occupy every PC download lane
+    // while video 1 waited for a slot.
+    void random40WarmServerVideoCache(currentUrls, {
+      activeUrl: currentUrls[0],
+      currentUrls
     });
   }
 

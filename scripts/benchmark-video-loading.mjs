@@ -565,6 +565,29 @@ async function acquireFirstLocal2Artist(session) {
     window.autoplayEnabled = false;
     window.__pongMediaBenchTouch = null;
     window.__pongMediaBenchClick = null;
+    window.__pongMediaBenchFirstAcceptance = null;
+    const acceptanceObserver = setInterval(() => {
+      if (window.__pongMediaBenchFirstAcceptance) {
+        clearInterval(acceptanceObserver);
+        return;
+      }
+      const state = typeof random40State === 'object' && random40State ? random40State : null;
+      const firstPublishedAt = Number(state?.firstVideoRecordedAt || 0);
+      if (!window.__pongMediaBenchTouch?.trusted || state?.mode !== 'local2' || firstPublishedAt <= 0) return;
+      const acceptedEvent = Array.isArray(pasteEvents)
+        ? pasteEvents.find(event => isRandom40PasteEvent(event))
+        : null;
+      window.__pongMediaBenchFirstAcceptance = {
+        // Production stamps this synchronously when the first accepted artist
+        // is published. Reuse that exact timestamp instead of the later poll.
+        wallAt: firstPublishedAt,
+        performanceAt: firstPublishedAt - performance.timeOrigin,
+        accepted: Math.max(1, Number(state.accepted || 0)),
+        artist: acceptedEvent?.artistDisplayName || acceptedEvent?.artistKey || acceptedEvent?.artistUrl || '',
+        artistUrl: acceptedEvent?.artistUrl || ''
+      };
+      clearInterval(acceptanceObserver);
+    }, 0);
     document.querySelector('#random-40-local2').addEventListener('touchend', event => {
       window.__pongMediaBenchTouch = {
         trusted: event.isTrusted,
@@ -584,7 +607,7 @@ async function acquireFirstLocal2Artist(session) {
   await trustedTouchTap(session, '#random-40-local2');
 
   const manifest = await waitFor(() => session.evaluate(`(() => {
-    if (!window.__pongMediaBenchTouch?.trusted || !window.__pongMediaBenchClick?.trusted || !Array.isArray(pasteEvents) || !Array.isArray(allVideoUrls)) return null;
+    if (!window.__pongMediaBenchTouch?.trusted || !window.__pongMediaBenchClick?.trusted || !window.__pongMediaBenchFirstAcceptance || !Array.isArray(pasteEvents) || !Array.isArray(allVideoUrls)) return null;
     for (let eventIndex = 0; eventIndex < pasteEvents.length; eventIndex++) {
       const event = pasteEvents[eventIndex];
       if (!isRandom40PasteEvent(event)) continue;
@@ -610,6 +633,7 @@ async function acquireFirstLocal2Artist(session) {
       return {
         touch: window.__pongMediaBenchTouch,
         click: window.__pongMediaBenchClick,
+        firstAcceptance: { ...window.__pongMediaBenchFirstAcceptance },
         eventIndex,
         event: { ...event },
         artist: event.artistDisplayName || event.artistKey || event.artistUrl || '',
@@ -654,6 +678,9 @@ async function acquireFirstLocal2Artist(session) {
   return {
     ...manifest,
     frozen,
+    firstArtistAcceptedAt: Number(manifest.firstAcceptance.wallAt),
+    firstArtistAcceptedPerformanceAt: Number(manifest.firstAcceptance.performanceAt),
+    buttonToFirstArtistAcceptedMs: Number(manifest.firstAcceptance.wallAt) - Number(manifest.touch.wallAt),
     buttonToDiscoveryMs: manifest.state.firstVideoRecordedAt && manifest.state.startedAt
       ? manifest.state.firstVideoRecordedAt - manifest.state.startedAt
       : manifest.observedAt - manifest.touch.wallAt,
@@ -986,6 +1013,8 @@ function installNaturalEndProbeExpression(maxVideoWallMs, firstFrameTimeoutMs, r
         completionRatio,
         playIntentTrusted: playIntentAt > 0,
         playIntentPerformanceAt: playIntentAt || null,
+        firstFramePerformanceAt: firstFrameAt || null,
+        endedPerformanceAt: endedAt || null,
         firstPlayingMs: firstPlayingAt ? firstPlayingAt - playIntentAt : null,
         firstFrameMs: firstFrameAt ? firstFrameAt - playIntentAt : null,
         firstFrameMetadata,
@@ -1303,8 +1332,10 @@ async function navigateToNextUnseenPongCard(session, seen, frozenSet, priorUrl, 
 }
 
 async function runMethod(session, networkRecorder, method, acquisition, { productionLive }) {
-  const methodStartedAt = Date.now();
-  const methodStartedPerformanceAt = Number(await session.evaluate(`performance.now()`));
+  const methodStartedAt = productionLive ? acquisition.firstArtistAcceptedAt : Date.now();
+  const methodStartedPerformanceAt = productionLive
+    ? acquisition.firstArtistAcceptedPerformanceAt
+    : Number(await session.evaluate(`performance.now()`));
   const setup = await prepareMethod(session, method, acquisition, { productionLive });
   const frozenUrls = acquisition.frozen.map(item => item.url);
   const frozenSet = new Set(frozenUrls);
@@ -1364,6 +1395,12 @@ async function runMethod(session, networkRecorder, method, acquisition, { produc
       routeIntegrity,
       methodElapsedAtEndMs: Date.now() - methodStartedAt,
       ...probe,
+      acceptanceToFirstFrameMs: productionLive && probe.firstFramePerformanceAt != null && Number.isFinite(Number(probe.firstFramePerformanceAt))
+        ? Number(probe.firstFramePerformanceAt) - acquisition.firstArtistAcceptedPerformanceAt
+        : null,
+      acceptanceToEndMs: productionLive && probe.endedPerformanceAt != null && Number.isFinite(Number(probe.endedPerformanceAt))
+        ? Number(probe.endedPerformanceAt) - acquisition.firstArtistAcceptedPerformanceAt
+        : null,
     });
     const qualifyingNow = new Set(probes
       .filter(item => item.success && item.endedNaturally && item.routeIntegrity)
@@ -1378,6 +1415,16 @@ async function runMethod(session, networkRecorder, method, acquisition, { produc
     probes.filter(probe => probe.success && probe.endedNaturally).map(probe => probe.originalUrl)
   ).size;
   const qualifyingProbes = probes.filter(probe => probe.success && probe.endedNaturally && probe.routeIntegrity);
+  const firstFrameProbe = probes.find(probe => (
+    probe.firstFramePerformanceAt != null && Number.isFinite(Number(probe.firstFramePerformanceAt))
+  ));
+  const tenthQualifyingEnd = qualifyingProbes[TARGET_VIDEO_COUNT - 1];
+  const naturalMediaDurationMs = Number((qualifyingProbes
+    .slice(0, TARGET_VIDEO_COUNT)
+    .reduce((sum, probe) => sum + Number(probe.durationSeconds || 0) * 1000, 0)).toFixed(1));
+  const acceptanceTo10thEndMs = productionLive && tenthQualifyingEnd
+    ? tenthQualifyingEnd.acceptanceToEndMs
+    : null;
   const qualifyingNaturalEnds = qualifyingProbes.length;
   const distinctQualifyingNaturalEnds = new Set(qualifyingProbes.map(probe => probe.originalUrl)).size;
   const summary = {
@@ -1386,7 +1433,18 @@ async function runMethod(session, networkRecorder, method, acquisition, { produc
     qualifyingNaturalEnds,
     distinctQualifyingNaturalEnds,
     total: probes.length,
-    methodToFirstFrameMs: probes[0]?.methodToFirstFrameMs ?? null,
+    timingOrigin: productionLive ? 'first-artist-accepted' : 'isolated-method-start',
+    firstArtistAcceptedAt: acquisition.firstArtistAcceptedAt,
+    buttonToFirstArtistAcceptedMs: acquisition.buttonToFirstArtistAcceptedMs,
+    methodToFirstFrameMs: firstFrameProbe?.methodToFirstFrameMs ?? null,
+    acceptanceToFirstFrameMs: productionLive && firstFrameProbe
+      ? firstFrameProbe.acceptanceToFirstFrameMs
+      : null,
+    acceptanceTo10thEndMs,
+    naturalMediaDurationMs,
+    acceptanceTo10thEndOverheadMs: Number.isFinite(Number(acceptanceTo10thEndMs))
+      ? Number((Number(acceptanceTo10thEndMs) - naturalMediaDurationMs).toFixed(1))
+      : null,
     firstFrameMs: summarize(probes.map(probe => probe.firstFrameMs)),
     completionWallSeconds: summarize(probes.map(probe => probe.wallSeconds)),
     mediaDurationSeconds: summarize(probes.map(probe => probe.durationSeconds)),
@@ -1462,6 +1520,11 @@ async function main() {
             naturalEnds: 0,
             distinctNaturalEnds: 0,
             total: 0,
+            timingOrigin: method === 'hybrid' ? 'first-artist-accepted' : 'isolated-method-start',
+            firstArtistAcceptedAt: acquisition.firstArtistAcceptedAt,
+            buttonToFirstArtistAcceptedMs: acquisition.buttonToFirstArtistAcceptedMs,
+            acceptanceToFirstFrameMs: null,
+            acceptanceTo10thEndMs: null,
             passed: false,
             error: String(error?.stack || error),
           },
@@ -1476,7 +1539,7 @@ async function main() {
 
     const acquisitionCache = await acquisitionCachePromise;
     report = {
-      schema: 'pong-local2-natural-end-video-benchmark-v2',
+      schema: 'pong-local2-natural-end-video-benchmark-v3',
       generatedAt: new Date().toISOString(),
       safety: {
         headless: true,
@@ -1488,9 +1551,15 @@ async function main() {
       environment: {
         simulation: emulation,
         observedInPage: acquisition.browserEnvironment,
+        serverVideoCache: {
+          concurrency: Number(health.video_file_cache?.concurrency || 0),
+          backgroundConcurrency: Number(health.video_file_cache?.background_concurrency || 0),
+          playbackBackgroundConcurrency: Number(health.video_file_cache?.playback_background_concurrency || 0),
+          perHostConcurrency: Number(health.video_file_cache?.per_host_concurrency || 0),
+        },
         resultScope: 'Android-like Chrome viewport, UA, DPR, and touch input running on this PC; not a physical-phone measurement',
       },
-      exactFlow: 'trusted Local2 CDP touch -> first accepted artist/card -> frozen 15-card attempt pool -> up to 15 trusted card touches and production vertical swipes -> require 10 distinct natural ends at 1x',
+      exactFlow: 'trusted Local2 CDP touch -> observe first production accepted artist (hybrid timer zero) -> freeze 15-card attempt pool -> up to 15 trusted card touches and production vertical swipes -> require 10 distinct natural ends at 1x',
       pages: PAGES,
       methods: METHOD_ORDER,
       targetNaturalEndsPerMethod: TARGET_VIDEO_COUNT,
@@ -1501,6 +1570,9 @@ async function main() {
         artist: acquisition.artist,
         artistUrl: acquisition.artistUrl,
         sourcePage: acquisition.sourcePage,
+        firstArtistAcceptedAt: acquisition.firstArtistAcceptedAt,
+        firstArtistAcceptedAtIso: new Date(acquisition.firstArtistAcceptedAt).toISOString(),
+        buttonToFirstArtistAcceptedMs: acquisition.buttonToFirstArtistAcceptedMs,
         buttonToDiscoveryMs: acquisition.buttonToDiscoveryMs,
         buttonToActiveCardMs: acquisition.buttonToActiveCardMs,
         stateAtDiscovery: acquisition.state,
