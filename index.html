@@ -817,7 +817,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.22</div>
+  <div class="version-number">24.23</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2321,7 +2321,7 @@ function getPaperclipTopCounterText() {
 }
 
 function getArtistLabelCounterText(fallbackText = '') {
-  return isRandom40PlaybackActive() ? getPaperclipTopCounterText() : fallbackText;
+  return fallbackText;
 }
 
 function getViewedVideoKeyForGlobalIndex(globalIndex) {
@@ -3295,43 +3295,54 @@ function isVideoReadyForInitialPlayback(video) {
   if (!video) return true;
   if (video.error || video.readyState < 3) return false;
 
+  const target = getVideoInitialPlaybackBufferTarget(video);
+  return getVideoBufferedAheadSeconds(video) + 0.08 >= target;
+}
+
+function getVideoInitialPlaybackBufferTarget(video) {
   const duration = Number(video.duration || 0);
   const currentTime = Math.max(0, Number(video.currentTime || 0));
   const remaining = Number.isFinite(duration) && duration > 0
     ? Math.max(0, duration - currentTime)
     : VIDEO_START_BUFFER_SECONDS;
-  const target = Math.min(VIDEO_START_BUFFER_SECONDS, Math.max(0.5, remaining));
-  return getVideoBufferedAheadSeconds(video) + 0.08 >= target;
+  return Math.min(VIDEO_START_BUFFER_SECONDS, Math.max(0.5, remaining));
 }
 
 function getVideoReadyPercent(video) {
   if (!video) return 0;
   if (isVideoReadyForInitialPlayback(video)) return 100;
+  if (video.error) return 0;
 
   let percent = 0;
 
-  if (video.readyState >= 1) percent = 35;
-  if (video.readyState >= 2) percent = 82;
+  if (video.readyState >= 1) percent = 8;
+  if (video.readyState >= 2) percent = 18;
+  if (video.readyState >= 3) percent = 28;
 
   try {
-    if (Number.isFinite(video.duration) && video.duration > 0 && video.buffered && video.buffered.length) {
-      let bufferedEnd = 0;
-
-      for (let i = 0; i < video.buffered.length; i++) {
-        bufferedEnd = Math.max(bufferedEnd, video.buffered.end(i));
-      }
-
-      percent = Math.max(percent, Math.min(96, (bufferedEnd / video.duration) * 100));
+    const target = getVideoInitialPlaybackBufferTarget(video);
+    if (target > 0) {
+      percent = Math.max(percent, Math.min(99, (getVideoBufferedAheadSeconds(video) / target) * 100));
     }
   } catch (_) {}
 
   return Math.max(0, Math.min(99, percent));
 }
 
+function isWrapperActuallyReady(wrapper) {
+  const video = wrapper && wrapper.querySelector('video');
+  return Boolean(
+    wrapper &&
+    wrapper.dataset.networkSuspended !== 'true' &&
+    video &&
+    isVideoReadyForInitialPlayback(video)
+  );
+}
+
 function updateBatchReadyCounter() {
   const wrappers = Array.from(document.querySelectorAll('.video-wrapper'));
   const total = wrappers.length || videoUrls.length || 0;
-  const ready = wrappers.filter(wrapper => wrapper.dataset.readyPlayable === 'true').length;
+  const ready = wrappers.filter(wrapper => isWrapperActuallyReady(wrapper)).length;
   const countText = getArtistLabelCounterText(`${ready}/${total}`);
 
   wrappers.forEach(wrapper => {
@@ -3396,7 +3407,7 @@ function markVideoAutoRetryDone(video, state) {
 
   wrapper.dataset.autoRetryDone = 'true';
   wrapper.dataset.autoRetryState = state || 'loaded';
-  updateVideoReadyLoader(video, true);
+  updateVideoReadyLoader(video);
 }
 
 function maybeAutoplayReadyDeckVideo(video, wrapper, state = 'buffered') {
@@ -4613,7 +4624,7 @@ function isWrapperViewed(wrapper) {
 }
 
 function isWrapperReady(wrapper) {
-  return wrapper && wrapper.dataset.readyPlayable === 'true';
+  return isWrapperActuallyReady(wrapper);
 }
 
 function moveArrayItemToEnd(items, index) {
