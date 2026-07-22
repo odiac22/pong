@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.46</div>
+    <div class="version-number">24.47</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -949,6 +949,7 @@ let pongAutoScrollSeconds = 10;
 let pongAutoScrollTimer = null;
 const PONG_PLAYBACK_BENCHMARK = new URLSearchParams(location.search).get('pongPlaybackBenchmark') === '1';
 const PONG_PLAYBACK_BENCHMARK_TARGETS = [10, 5];
+const PONG_PLAYBACK_BENCHMARK_SAMPLE_SECONDS = 10;
 let pongPlaybackBenchmarkState = {
   startedAt: 0,
   completedAt: 0,
@@ -4315,11 +4316,14 @@ function resetPongPlaybackBenchmark() {
   if (!PONG_PLAYBACK_BENCHMARK) return;
   document.querySelectorAll('video').forEach(video => {
     delete video.dataset.benchmarkStallStartedAt;
+    delete video.dataset.benchmarkSampleStartedAt;
+    delete video.dataset.benchmarkSampleComplete;
   });
   pongPlaybackBenchmarkState = {
     startedAt: 0,
     completedAt: 0,
     done: false,
+    sampleSeconds: PONG_PLAYBACK_BENCHMARK_SAMPLE_SECONDS,
     artists: [],
     totalBuffers: 0,
     totalBufferMs: 0
@@ -4360,6 +4364,9 @@ function pongPlaybackBenchmarkOnPlaying(video, wrapper) {
   video.muted = true;
   video.volume = 0;
   if (!pongPlaybackBenchmarkState.startedAt) pongPlaybackBenchmarkState.startedAt = Date.now();
+  if (!video.dataset.benchmarkSampleStartedAt) {
+    video.dataset.benchmarkSampleStartedAt = String(Math.max(0, Number(video.currentTime || 0)));
+  }
   pongPlaybackBenchmarkArtist(wrapper);
   pongPlaybackBenchmarkCloseStall(video, wrapper);
   updatePongPlaybackBenchmarkOutput();
@@ -4388,8 +4395,10 @@ function pongPlaybackBenchmarkAdvanceArtist(attempt = 0) {
   if (attempt < 90) setTimeout(() => pongPlaybackBenchmarkAdvanceArtist(attempt + 1), 1000);
 }
 
-function pongPlaybackBenchmarkOnEnded(video, wrapper) {
+function pongPlaybackBenchmarkCompleteVideo(video, wrapper) {
   if (!PONG_PLAYBACK_BENCHMARK || !wrapper.classList.contains('deck-active')) return;
+  if (video.dataset.benchmarkSampleComplete === 'true') return;
+  video.dataset.benchmarkSampleComplete = 'true';
   pongPlaybackBenchmarkCloseStall(video, wrapper);
   const artist = pongPlaybackBenchmarkArtist(wrapper);
   const originalUrl = String(wrapper.dataset.originalVideoUrl || video.currentSrc || '');
@@ -4412,6 +4421,14 @@ function pongPlaybackBenchmarkOnEnded(video, wrapper) {
   }
   setTimeout(() => goToNextDeckVideo(), 100);
   updatePongPlaybackBenchmarkOutput();
+}
+
+function pongPlaybackBenchmarkOnTimeUpdate(video, wrapper) {
+  if (!PONG_PLAYBACK_BENCHMARK || !wrapper.classList.contains('deck-active')) return;
+  if (!pongPlaybackBenchmarkState.startedAt) pongPlaybackBenchmarkOnPlaying(video, wrapper);
+  const startedAt = Number(video.dataset.benchmarkSampleStartedAt || 0);
+  if (Math.max(0, Number(video.currentTime || 0)) - startedAt < PONG_PLAYBACK_BENCHMARK_SAMPLE_SECONDS) return;
+  pongPlaybackBenchmarkCompleteVideo(video, wrapper);
 }
 
 function createVideoElements() {
@@ -4742,6 +4759,7 @@ function createVideoElements() {
       loadingIndicator.style.display='none';
     });
     video.addEventListener('timeupdate', () => {
+      pongPlaybackBenchmarkOnTimeUpdate(video, wrapper);
       if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`;
       updateVideoBufferedProgressBar(video);
       const viewThreshold = video.duration ? 0.01 : 0.75;
@@ -4758,7 +4776,7 @@ function createVideoElements() {
     video.addEventListener('waiting', () => pongPlaybackBenchmarkOnWaiting(video, wrapper));
     video.addEventListener('stalled', () => pongPlaybackBenchmarkOnWaiting(video, wrapper));
     video.addEventListener('ended', () => {
-      pongPlaybackBenchmarkOnEnded(video, wrapper);
+      pongPlaybackBenchmarkCompleteVideo(video, wrapper);
       refreshForegroundVideoPriority(video, true);
       if (pongAutoScrollEnabled && wrapper.classList.contains('deck-active')) {
         schedulePongAutoScroll(80);
