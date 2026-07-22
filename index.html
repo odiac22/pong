@@ -824,7 +824,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.28</div>
+  <div class="version-number">24.29</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4354,6 +4354,7 @@ function createVideoElements() {
     video.addEventListener('play', () => {
       prepareVideoForPlayback(video);
       if (isRandom40PlaybackActive()) void random40RequestPlaybackProtection(random40State);
+      random40WarmServerVideoCacheForActiveWrapper(wrapper);
       // Give the visible card the connection first. Current/next warming
       // resumes only after the foreground video has a healthy buffer.
       random40PauseHiddenPreloadsForPlayback();
@@ -4381,6 +4382,7 @@ function createVideoElements() {
     });
     video.addEventListener('waiting', () => {
       refreshForegroundVideoPriority(video, true);
+      random40WarmServerVideoCacheForActiveWrapper(wrapper);
       random40PauseHiddenPreloadsForPlayback();
       random40PumpPostFetchQueue();
       loadingIndicator.style.display='none';
@@ -5795,6 +5797,8 @@ function runRandom40PreloadPool() {
     record.order = Number.MAX_SAFE_INTEGER;
   });
   const neededKeys = new Set();
+  const serverCacheUrls = [];
+  const serverCacheCurrentUrls = [];
   let preloadOrder = 0;
   const addCandidateVideo = ({ event, index }, offset, priority, { includeWarmed = false } = {}) => {
     const bundleKey = getPasteEventPaperclipKey(event, index);
@@ -5810,6 +5814,12 @@ function runRandom40PreloadPool() {
     if (!url) return true;
     const key = `${bundleKey}|${url}`;
     neededKeys.add(key);
+    if (serverCacheUrls.length < RANDOM40_SERVER_VIDEO_CACHE_BATCH && !serverCacheUrls.includes(url)) {
+      serverCacheUrls.push(url);
+    }
+    if (index === currentIndex && serverCacheCurrentUrls.length < 30 && !serverCacheCurrentUrls.includes(url)) {
+      serverCacheCurrentUrls.push(url);
+    }
     random40PreloadVideo(bundleKey, globalIndex, url, { priority, order: preloadOrder++ });
     return true;
   };
@@ -5859,6 +5869,12 @@ function runRandom40PreloadPool() {
   }
 
   cleanupRandom40PreloadPool(neededKeys);
+  if (serverCacheUrls.length) {
+    void random40WarmServerVideoCache(serverCacheUrls, {
+      activeUrl: serverCacheCurrentUrls[0] || '',
+      currentUrls: serverCacheCurrentUrls
+    });
+  }
   random40PumpPreloadQueue(0);
   random40MaybeAcknowledgePlaybackReady();
   updatePasteNavigationButton();
@@ -6391,6 +6407,7 @@ function resetPasteEvents(){
   random40PlaybackReadyAcked = false;
   random40PlaybackReadyExpectedBundles = new Set();
   random40PlaybackUrlOverrides.clear();
+  resetRandom40ServerVideoCacheClientState();
   random40PreloadWarmedKeys = new Set();
   random40PreloadWarmedByBundle = new Map();
   pendingPastes=[];
@@ -8251,6 +8268,14 @@ let random40PlaybackReadyExpectedBundles = new Set();
 let random40GatewayEndpoint = '';
 let random40ReachableWarmingEndpoint = null;
 let random40ProgressHideTimer = null;
+let random40ServerVideoCachePollTimer = null;
+let random40ServerVideoCacheHeartbeatTimer = null;
+let random40ServerVideoCacheLastWarmAt = 0;
+let random40ServerVideoCacheTracked = new Map();
+const RANDOM40_SERVER_VIDEO_CACHE_STATUS_MS = 1800;
+const RANDOM40_SERVER_VIDEO_CACHE_HEARTBEAT_MS = 45000;
+const RANDOM40_SERVER_VIDEO_CACHE_WARM_MIN_MS = 900;
+const RANDOM40_SERVER_VIDEO_CACHE_BATCH = 650;
 
 function clampRandom40PanelPosition(left, top, rect) {
   const margin = 8;
@@ -8578,6 +8603,147 @@ function random40PcGatewayUrl(rawUrl) {
   if (!endpoint) return '';
   return `${endpoint}/proxy?url=${encodeURIComponent(rawUrl)}&t=${Date.now()}`;
 }
+
+function random40ServerVideoCacheEndpoint() {
+  return random40GatewayEndpoint || random40State?.localEndpoint || '';
+}
+
+function random40ApplyServerVideoCacheRecords(records, endpoint = random40ServerVideoCacheEndpoint()) {
+  if (!endpoint || !Array.isArray(records)) return;
+  for (const record of records) {
+    if (!record?.id) continue;
+    const playbackUrl = record.playbackUrl || (record.playbackPath ? `${endpoint}${record.playbackPath}` : '');
+    const urls = Array.isArray(record.urls) ? record.urls : [];
+    for (const url of urls) {
+      const key = String(url || '');
+      if (!key) continue;
+      random40ServerVideoCacheTracked.set(key, {
+        id: record.id,
+        ready: record.ready === true,
+        updatedAt: Date.now()
+      });
+      if (record.ready === true && playbackUrl) {
+        random40RememberPlaybackOverride(key, playbackUrl);
+      }
+    }
+  }
+}
+
+function random40StartServerVideoCacheTimers() {
+  const endpoint = random40ServerVideoCacheEndpoint();
+  if (!endpoint) return;
+  if (!random40ServerVideoCachePollTimer) {
+    random40ServerVideoCachePollTimer = setInterval(() => {
+      void random40PollServerVideoCache();
+    }, RANDOM40_SERVER_VIDEO_CACHE_STATUS_MS);
+  }
+  if (!random40ServerVideoCacheHeartbeatTimer) {
+    random40ServerVideoCacheHeartbeatTimer = setInterval(() => {
+      const liveEndpoint = random40ServerVideoCacheEndpoint();
+      if (!liveEndpoint) return;
+      fetch(`${liveEndpoint}/video-cache/heartbeat`, { method: 'POST', cache: 'no-store' }).catch(() => {});
+    }, RANDOM40_SERVER_VIDEO_CACHE_HEARTBEAT_MS);
+  }
+}
+
+async function random40PollServerVideoCache() {
+  const endpoint = random40ServerVideoCacheEndpoint();
+  if (!endpoint || !random40ServerVideoCacheTracked.size) return;
+  const ids = [...new Set([...random40ServerVideoCacheTracked.values()].map(record => record.id).filter(Boolean))].slice(0, 700);
+  if (!ids.length) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2200);
+  try {
+    const response = await fetch(`${endpoint}/video-cache/status?ids=${encodeURIComponent(ids.join(','))}&t=${Date.now()}`, {
+      cache: 'no-store',
+      signal: controller.signal
+    });
+    if (!response.ok) return;
+    const payload = await response.json().catch(() => null);
+    random40ApplyServerVideoCacheRecords(payload?.records, endpoint);
+  } catch (_) {
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function random40WarmServerVideoCache(urls, { activeUrl = '', currentUrls = [] } = {}) {
+  const endpoint = random40ServerVideoCacheEndpoint();
+  if (!endpoint || RANDOM40_BENCHMARK_NO_MEDIA) return false;
+  const now = Date.now();
+  const uniqueUrls = [];
+  const addUrl = value => {
+    const raw = String(value || '');
+    if (!raw || uniqueUrls.includes(raw)) return;
+    uniqueUrls.push(raw);
+  };
+  addUrl(activeUrl);
+  currentUrls.forEach(addUrl);
+  (Array.isArray(urls) ? urls : []).forEach(addUrl);
+  if (!uniqueUrls.length) return false;
+  if (!activeUrl && now - random40ServerVideoCacheLastWarmAt < RANDOM40_SERVER_VIDEO_CACHE_WARM_MIN_MS) return false;
+  random40ServerVideoCacheLastWarmAt = now;
+  random40StartServerVideoCacheTimers();
+  const controller = new AbortController();
+  const releaseController = trackPongWorkloadController(controller);
+  const timer = setTimeout(() => controller.abort(), 2600);
+  try {
+    const response = await fetch(`${endpoint}/video-cache/warm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      signal: controller.signal,
+      body: JSON.stringify({
+        activeUrl: activeUrl || '',
+        currentUrls: currentUrls.slice(0, 80),
+        urls: uniqueUrls.slice(0, RANDOM40_SERVER_VIDEO_CACHE_BATCH)
+      })
+    });
+    if (!response.ok) return false;
+    const payload = await response.json().catch(() => null);
+    random40ApplyServerVideoCacheRecords(payload?.records, endpoint);
+    return true;
+  } catch (_) {
+    return false;
+  } finally {
+    clearTimeout(timer);
+    releaseController();
+  }
+}
+
+function random40WarmServerVideoCacheForActiveWrapper(wrapper = document.querySelector('.video-wrapper.deck-active')) {
+  if (!wrapper || !isRandom40PlaybackActive()) return;
+  const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
+  if (!originalUrl) return;
+  const currentUrls = [];
+  const eventIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
+  const event = eventIndex >= 0 ? pasteEvents[eventIndex] : null;
+  const bounds = getPasteEventVideoBounds(event);
+  if (bounds) {
+    for (let index = bounds.start; index < Math.min(bounds.end, bounds.start + 20); index++) {
+      if (allVideoUrls[index]) currentUrls.push(allVideoUrls[index]);
+    }
+  }
+  void random40WarmServerVideoCache(currentUrls, { activeUrl: originalUrl, currentUrls });
+}
+
+function resetRandom40ServerVideoCacheClientState() {
+  random40ServerVideoCacheTracked.clear();
+  random40ServerVideoCacheLastWarmAt = 0;
+}
+
+function random40ResetServerVideoCacheOnClose() {
+  const endpoint = random40ServerVideoCacheEndpoint();
+  if (!endpoint) return;
+  resetRandom40ServerVideoCacheClientState();
+  try {
+    const payload = new Blob(['{}'], { type: 'text/plain' });
+    if (navigator.sendBeacon?.(`${endpoint}/video-cache/reset`, payload)) return;
+  } catch (_) {}
+  fetch(`${endpoint}/video-cache/reset`, { method: 'POST', cache: 'no-store', keepalive: true }).catch(() => {});
+}
+
+window.addEventListener('pagehide', random40ResetServerVideoCacheOnClose);
 
 function random40VideoVerifierEndpoints() {
   const pc = random40GatewayEndpoint || random40State?.localEndpoint || '';
@@ -13279,6 +13445,11 @@ function random40PublishEntries(entries, runState = random40State) {
     return payload;
   }
 
+  void random40WarmServerVideoCache(payload.urls, {
+    activeUrl: payload.urls[0] || '',
+    currentUrls: payload.urls.slice(0, 30)
+  });
+
   if (!runState.cardsStarted) {
     parsedVideoUrlsCache = payload.urls;
     parsedVideoMetadataCache = payload.metadata;
@@ -13418,7 +13589,13 @@ function random40AppendEntriesToExistingArtist(entries, runState = random40State
   }
 
   runState.videos += urls.length;
-  if (!RANDOM40_BENCHMARK_NO_MEDIA) scheduleRandom40PreloadPool(150);
+  if (!RANDOM40_BENCHMARK_NO_MEDIA) {
+    void random40WarmServerVideoCache(urls, {
+      activeUrl: urls[0] || '',
+      currentUrls: urls.slice(0, 30)
+    });
+    scheduleRandom40PreloadPool(150);
+  }
   updatePasteNavigationButton();
   updateViewedRemainingCounter();
   scheduleSessionSave(700);
