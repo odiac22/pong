@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-  <div class="version-number">24.39</div>
+  <div class="version-number">24.40</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4677,6 +4677,20 @@ function createVideoElements() {
         wrapper.dataset.gatewayFallbackTried === 'true' &&
         wrapper.dataset.directFallbackRestored !== 'true'
       ) {
+        if (isRandom40PlaybackActive()) {
+          const pcRetryUrl = random40PcFileCacheStreamUrl(originalUrl) || random40PcGatewayUrl(originalUrl);
+          if (!pcRetryUrl) return;
+          delete wrapper.dataset.directFallbackRestored;
+          delete video.dataset.lastNetworkProgressAt;
+          video.dataset.lastNetworkAttemptAt = String(Date.now());
+          random40RememberPlaybackOverride(originalUrl, pcRetryUrl);
+          setTimeout(() => {
+            if (!document.body.contains(video) || wrapper.dataset.networkSuspended === 'true') return;
+            video.src = pcRetryUrl;
+            try { video.load(); } catch (_) {}
+          }, 450);
+          return;
+        }
         wrapper.dataset.directFallbackRestored = 'true';
         random40PlaybackUrlOverrides.delete(originalUrl);
         delete video.dataset.lastNetworkProgressAt;
@@ -5470,6 +5484,19 @@ function random40RetryOrFailPreload(record, { allowGateway = true } = {}) {
   const switchedToGateway = allowGateway && !record.usingGateway && random40InstallPlaybackFallback(record);
   const maxAttempts = record.usingGateway ? 4 : 2;
   if (!switchedToGateway && record.usingGateway && record.attempts >= maxAttempts && !record.restoredDirectAfterGateway) {
+    if (isRandom40PlaybackActive()) {
+      random40FinishPreloadRecord(record, 'queued');
+      record.usingGateway = false;
+      record.activeUrl = random40PcFileCacheStreamUrl(record.url) || record.fallbackUrl || record.url;
+      record.attempts = 0;
+      record.retryAt = Date.now() + 500;
+      random40RememberPlaybackOverride(record.url, record.activeUrl);
+      try {
+        record.video.removeAttribute('src');
+        record.video.load();
+      } catch (_) {}
+      return;
+    }
     random40FinishPreloadRecord(record, 'queued');
     record.usingGateway = false;
     record.activeUrl = record.url;
