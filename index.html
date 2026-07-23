@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.71</div>
+    <div class="version-number">24.72</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -920,6 +920,8 @@ let visibleBatchRetryToken = 0;
 let sessionSaveTimer = null;
 let scrollThumbSuppressedUntil = 0;
 const DECK_MODE_ENABLED = true;
+const PONG_PLAYBACK_PROFILE = new URLSearchParams(location.search).get('pongPlaybackProfile') || 'current';
+const PONG_ADAPTIVE_PLAYBACK = PONG_PLAYBACK_PROFILE === 'adaptive';
 let deckOrder = [];
 let deckHistory = [];
 let deckForwardHistory = [];
@@ -927,11 +929,11 @@ const DECK_HISTORY_LIMIT = 80;
 // Random40 publishes artist bundles of at least fifteen videos.  Keep the
 // active card plus ten upcoming cards attached to the PC stream/cache path so
 // a normal swipe never begins with an empty media element.
-const DECK_PRELOAD_RADIUS = 10;
+const DECK_PRELOAD_RADIUS = PONG_ADAPTIVE_PLAYBACK ? 2 : 10;
 const DECK_INITIAL_WARM_COUNT = 1;
-const FOREGROUND_VIDEO_BUFFER_TARGET_SECONDS = 10;
+const FOREGROUND_VIDEO_BUFFER_TARGET_SECONDS = PONG_ADAPTIVE_PLAYBACK ? 16 : 10;
 const FOREGROUND_VIDEO_BUFFER_CRITICAL_SECONDS = 6;
-const VIDEO_PLAYABLE_BUFFER_SECONDS = 6;
+const VIDEO_PLAYABLE_BUFFER_SECONDS = PONG_ADAPTIVE_PLAYBACK ? 3 : 6;
 const EROME_SESSION_SAVE_MIN_DELAY_MS = 6000;
 const EROME_LARGE_SESSION_SAVE_MIN_DELAY_MS = 22000;
 const EROME_LARGE_SESSION_URL_THRESHOLD = 600;
@@ -948,6 +950,7 @@ let pongAutoScrollEnabled = false;
 let pongAutoScrollSeconds = 10;
 let pongAutoScrollTimer = null;
 const PONG_PLAYBACK_BENCHMARK = new URLSearchParams(location.search).get('pongPlaybackBenchmark') === '1';
+const PONG_PLAYBACK_BENCHMARK_FRESH = new URLSearchParams(location.search).get('pongPlaybackFresh') === '1';
 const PONG_PLAYBACK_BENCHMARK_TARGETS = (() => {
   const requested = new URLSearchParams(location.search).get('pongPlaybackTargets');
   const parsed = String(requested || '').split(',')
@@ -6155,7 +6158,10 @@ function runRandom40PreloadPool() {
     if (!bounds) return;
     const artistKey = getPasteEventPaperclipKey(candidate.event, candidate.index) ||
       String(candidate.event.artistKey || candidate.event.artistUrl || '');
-    for (let globalIndex = bounds.start; globalIndex < bounds.end; globalIndex++) {
+    const candidateEnd = PONG_ADAPTIVE_PLAYBACK
+      ? Math.min(bounds.end, bounds.start + (current ? 3 : 2))
+      : bounds.end;
+    for (let globalIndex = bounds.start; globalIndex < candidateEnd; globalIndex++) {
       const url = String(allVideoUrls[globalIndex] || '');
       if (!url || (deferActiveCache && url === activeOriginalUrl) || serverCacheUrlSet.has(url)) continue;
       serverCacheUrlSet.add(url);
@@ -8956,7 +8962,11 @@ async function getRandom40LocalEndpoint() {
 
 async function random40TryKnownLocalEndpoint(timeoutMs = 2200) {
   const stored = random40StoredLocalEndpoint();
+  const sameOriginEndpoint = /^\/(?:pong)?\/?$/i.test(location.pathname) && location.hostname !== 'odiac22.github.io'
+    ? location.origin
+    : '';
   const candidates = [
+    sameOriginEndpoint,
     stored,
     ...RANDOM40_LOCAL_ENDPOINTS,
     location.hostname && /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname) ? `http://${location.hostname}:8787` : ''
@@ -16466,7 +16476,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   setupMobileAudioUnlock();
   setupDeckSwipeController();
 
-  if (loadSession()) {
+  if (!PONG_PLAYBACK_BENCHMARK_FRESH && loadSession()) {
     console.log(`[Session] Restoring ${allVideoUrls.length} videos, batch ${currentBatch}, index ${currentVideoIndex}`);
     const savedBatch = currentBatch;
     const restoreBatchSize = getCurrentBatchSize();

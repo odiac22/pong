@@ -29,6 +29,7 @@ const QWEN_CANDIDATE_IMAGES = Number(process.env.PONG_QWEN_CANDIDATE_IMAGES || 2
 const LOCAL2_CLEAN_MAX_IMAGES = Math.max(4, Math.min(12, Number(process.env.PONG_LOCAL2_CLEAN_MAX_IMAGES || 8)));
 const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD || 40);
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
+const PONG_INDEX_PATH = path.join(process.cwd(), 'index.html');
 const VIDEO_FILE_CACHE_DIR = path.join(LOCAL_AI_DIR, '.ephemeral-video-cache');
 const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_BYTES || 12 * 1024 * 1024 * 1024));
 const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 2 * 1024 * 1024 * 1024));
@@ -6454,6 +6455,22 @@ const server = http.createServer(async (req, res) => {
     requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   } catch (_) {
     json(res, 400, { ok: false, error: 'invalid request URL' });
+    return;
+  }
+  if ((req.method === 'GET' || req.method === 'HEAD') && /^\/pong\/?$/.test(requestUrl.pathname)) {
+    try {
+      const html = await fs.readFile(PONG_INDEX_PATH);
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': html.length,
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'X-Content-Type-Options': 'nosniff'
+      });
+      if (req.method === 'HEAD') res.end();
+      else res.end(html);
+    } catch (error) {
+      json(res, 500, { error: error.message || String(error) });
+    }
     return;
   }
   const anonymousLanMediaRead =
