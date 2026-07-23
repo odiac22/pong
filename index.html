@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.67</div>
+    <div class="version-number">24.68</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2177,6 +2177,7 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   delete wrapper.dataset.readyOverlayDismissed;
   delete wrapper.dataset.gatewayFallbackTried;
   delete wrapper.dataset.directFallbackRestored;
+  delete wrapper.dataset.deadCardEscaped;
   wrapper.dataset.originalVideoUrl = nextUrl;
   wrapper.dataset.suspendedVideoSrc = random40PlaybackUrl(nextUrl);
   wrapper.dataset.readyPlayable = 'false';
@@ -3724,7 +3725,16 @@ function retryVisibleBatchVideoLoads(token) {
       const readyEscape = wrappers.find(candidate =>
         candidate !== wrapper && isWrapperReady(candidate) && !isWrapperViewed(candidate)
       );
-      if (readyEscape) maybePromoteReadyDeckVideo(readyEscape);
+      if (readyEscape) {
+        maybePromoteReadyDeckVideo(readyEscape);
+      } else if (wrapper.dataset.deadCardEscaped !== 'true') {
+        wrapper.dataset.deadCardEscaped = 'true';
+        setTimeout(() => {
+          if (getDeckWrapper(deckCurrentIndex) === wrapper && video.readyState === 0) {
+            goToNextDeckVideo();
+          }
+        }, 100);
+      }
     }
   });
 
