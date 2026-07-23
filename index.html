@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.09</div>
+    <div class="version-number">25.10</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -941,7 +941,10 @@ function pongLocal22PlaybackActive() {
   return new URLSearchParams(location.search).get('pongPlaybackProfile') === 'local22';
 }
 function pongDeckPreloadRadius() {
-  if (isBunkrPasteEvent(pasteEvents[currentPasteIndex])) return 5;
+  // Bunkr media commonly shares one CDN host.  Attaching six videos from the
+  // active album consumed every per-host connection and left queued albums
+  // with links but no prepared entry video.  Keep active + two attached.
+  if (isBunkrPasteEvent(pasteEvents[currentPasteIndex])) return 2;
   return pongLocal22PlaybackActive() ? 2 : DECK_PRELOAD_RADIUS;
 }
 function pongForegroundBufferTargetSeconds() {
@@ -16152,13 +16155,13 @@ async function loadBunkrAsCards(targets) {
     }
     loadedAlbums++;
     videoCount += imported.urls.length;
-    // On the LAN build, quietly stage the first two files of each newly
-    // available album.  They remain background priority until Paperclip makes
-    // that album active, so the current video keeps the foreground connection.
+    // On the LAN build, stage one entry video for every newly available album
+    // before spending bandwidth on second videos.  It remains background
+    // priority until Paperclip makes that album active.
     if (location.protocol !== 'https:' && Array.isArray(group.videos)) {
       postJson('/video-cache/warm', {
         playbackProfile: 'local22',
-        items: group.videos.slice(0, 2).map(url => ({
+        items: group.videos.slice(0, 1).map(url => ({
           url,
           artistKey: group.sourceUrl || group.url || ''
         })),

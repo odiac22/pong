@@ -43,7 +43,7 @@ const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_
 // background concurrency resumes after its buffer recovers.
 const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(
   VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY,
-  Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY ?? 1)
+  Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY ?? 3)
 ));
 const VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE = Math.max(20, Math.min(500, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE || 120)));
 // Random40 artist bundles commonly place every verified video on one CDN host.
