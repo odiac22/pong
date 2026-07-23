@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.97</div>
+    <div class="version-number">24.98</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2189,6 +2189,7 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   } catch (_) {}
 
   delete wrapper.dataset.viewed;
+  delete wrapper.dataset.everPlayed;
   delete wrapper.dataset.playIntent;
   delete wrapper.dataset.userPaused;
   delete wrapper.dataset.userAudioIntent;
@@ -4345,6 +4346,9 @@ function goToNextDeckVideo() {
 
   const currentWrapper = getDeckWrapper(deckCurrentIndex);
   const currentIndex = deckCurrentIndex;
+  const recycleSkippedCurrent = !!currentWrapper &&
+    currentWrapper.dataset.everPlayed !== 'true' &&
+    !isWrapperViewed(currentWrapper);
   clearDeckReadyPromotion();
   deckAutoPromotionLockedUntil = Date.now() + 1000;
 
@@ -4370,6 +4374,10 @@ function goToNextDeckVideo() {
   // video 1 to the old video 4 position.
   moveDeckIndexImmediatelyAfterCurrent(nextIndex);
   setDeckActiveIndex(nextIndex, 'up', { pushHistory: true });
+  if (recycleSkippedCurrent) {
+    moveDeckIndexToBack(currentIndex);
+    ensureVideoCounter().textContent = getDeckLogicalCounterText(deckCurrentIndex);
+  }
   return true;
 }
 
@@ -5015,6 +5023,8 @@ function createVideoElements() {
     });
 
     video.addEventListener('play', () => {
+      wrapper.dataset.everPlayed = 'true';
+      markVideoViewed(wrapper);
       prepareVideoForPlayback(video);
       if (isRandom40PlaybackActive()) void random40RequestPlaybackProtection(random40State);
       random40WarmServerVideoCacheForActiveWrapper(wrapper);
