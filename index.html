@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.66</div>
+    <div class="version-number">24.67</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3719,6 +3719,13 @@ function retryVisibleBatchVideoLoads(token) {
     } catch (error) {
       console.warn('[Video retry] Could not reload video', error);
     }
+
+    if (wrapper === activeWrapper && video.readyState === 0 && attempts + 1 >= 2) {
+      const readyEscape = wrappers.find(candidate =>
+        candidate !== wrapper && isWrapperReady(candidate) && !isWrapperViewed(candidate)
+      );
+      if (readyEscape) maybePromoteReadyDeckVideo(readyEscape);
+    }
   });
 
   if (stillPending > 0 && token === visibleBatchRetryToken) {
@@ -3887,7 +3894,10 @@ function isDeckCurrentBusy() {
 
   if (!wrapper) return false;
   if (isWrapperViewed(wrapper)) return true;
-  if (wrapper.dataset.playIntent === 'true') return true;
+  if (
+    wrapper.dataset.playIntent === 'true' &&
+    !(video?.readyState === 0 && Number(wrapper.dataset.autoRetryCount || 0) >= 2)
+  ) return true;
   if (video && !video.paused) return true;
 
   return false;
