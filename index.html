@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.11</div>
+    <div class="version-number">25.12</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -16217,27 +16217,19 @@ async function loadBunkrAsCards(targets) {
     }
   };
 
-  // Resolve one successful album first so playback starts immediately.  Only
-  // then use four background workers to rapidly maintain five unviewed albums.
-  let backgroundStartIndex = discovered.length;
-  for (let index = 0; index < discovered.length; index++) {
-    await scrapeAlbum(discovered[index]);
-    if (cardsStarted) {
-      backgroundStartIndex = index + 1;
-      break;
-    }
-  }
+  // Race four albums immediately. Large Balbums pages often put a huge or
+  // slow single-video album first; serially waiting for it made discovery show
+  // 100% while no other profile could enter Pong.
+  await eromePool(
+    discovered,
+    BUNKR_BACKGROUND_ALBUM_CONCURRENCY,
+    scrapeAlbum
+  );
 
   if (!cardsStarted) {
     alert('No browser-playable videos were found in those Bunkr albums.');
     return;
   }
-
-  await eromePool(
-    discovered.slice(backgroundStartIndex),
-    BUNKR_BACKGROUND_ALBUM_CONCURRENCY,
-    scrapeAlbum
-  );
 
   updateEromeProgress({
     title: 'Bunkr ready',
