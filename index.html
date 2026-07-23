@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.68</div>
+    <div class="version-number">24.69</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3725,8 +3725,11 @@ function retryVisibleBatchVideoLoads(token) {
       const readyEscape = wrappers.find(candidate =>
         candidate !== wrapper && isWrapperReady(candidate) && !isWrapperViewed(candidate)
       );
+      const deadCardCount = wrappers.filter(candidate => candidate.dataset.deadCardEscaped === 'true').length;
       if (readyEscape) {
         maybePromoteReadyDeckVideo(readyEscape);
+      } else if (deadCardCount >= 3 && canNavigateToNextPasteEvent()) {
+        setTimeout(() => navigateToNextPasteEvent(), 100);
       } else if (wrapper.dataset.deadCardEscaped !== 'true') {
         wrapper.dataset.deadCardEscaped = 'true';
         setTimeout(() => {
