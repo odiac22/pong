@@ -812,7 +812,7 @@
       <h3>Erome</h3>
       <p>Watch in-app, or tap Cards to rip the album into the Pong player (needs proxy).</p>
       <div class="auth-url-row">
-        <input id="erome-helper-url" type="url" placeholder="Erome album or artist URL" spellcheck="false" autocomplete="off">
+        <input id="erome-helper-url" type="url" placeholder="Erome, Bunkr album, or Balbums page URL" spellcheck="false" autocomplete="off">
         <button id="erome-helper-open" type="button">Open</button>
         <button id="erome-helper-cards" type="button">Cards</button>
       </div>
@@ -826,16 +826,16 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.01</div>
+    <div class="version-number">25.02</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
     <div class="url-input">
       <textarea id="video-urls" placeholder="Paste video links here (one per line)" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="done"></textarea>
-      <textarea id="erome-url" placeholder="Erome artist/album URLs" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="go"></textarea>
+      <textarea id="erome-url" placeholder="Erome, Bunkr album, or Balbums page URLs" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="go"></textarea>
       <div class="button-container">
         <button id="load-videos">Load Videos</button>
-        <button id="open-erome">Open Erome</button>
+        <button id="open-erome">Open Albums</button>
         <button id="saved-erome">Saved Erome</button>
         <button id="auth-button">Auth URL</button>
         <button id="random-40-local">R40 Local 2.2</button>
@@ -7370,7 +7370,7 @@ function normalizeEromeLaunchUrl(rawValue) {
 
   if (!raw) return '';
 
-  const embedded = raw.match(/(?:https?:\/\/)?(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?/i);
+  const embedded = raw.match(/(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*)/i);
   const candidate = embedded ? embedded[0] : raw;
   const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)
     ? candidate
@@ -7382,6 +7382,8 @@ function normalizeEromeLaunchUrl(rawValue) {
     const url = new URL(withScheme);
     const host = url.hostname.replace(/^www\./, '').toLowerCase();
 
+    if (host === 'bunkr.cr' && /^\/a\/[\w-]+\/?$/i.test(url.pathname)) return url.href;
+    if (host === 'balbums.st') return url.href;
     if (host !== 'erome.com') return '';
 
     return url.href;
@@ -7408,7 +7410,7 @@ function collectEromeLaunchUrls(rawValue, allowBareNames = true) {
     found.push(url);
   }
 
-  const linkRe = /(?:https?:\/\/)?(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?/gi;
+  const linkRe = /(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*)/gi;
   let match;
 
   while ((match = linkRe.exec(raw)) !== null) {
@@ -7420,7 +7422,7 @@ function collectEromeLaunchUrls(rawValue, allowBareNames = true) {
 
     if (!cleaned) return;
 
-    if (/erome\.com/i.test(cleaned)) {
+    if (/(?:erome\.com|bunkr\.cr|balbums\.st)/i.test(cleaned)) {
       add(cleaned);
     } else if (allowBareNames && /^(?:a\/)?[\w.-]+$/i.test(cleaned)) {
       add(cleaned.startsWith('a/') ? `https://www.erome.com/${cleaned}` : cleaned);
@@ -7462,6 +7464,16 @@ function isEromeAlbumLaunchUrl(rawUrl) {
     const url = new URL(rawUrl, window.location.href);
     return /^\/a\/[\w-]+\/?$/i.test(url.pathname);
   } catch (e) {
+    return false;
+  }
+}
+
+function isBunkrImportLaunchUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl, window.location.href);
+    const host = url.hostname.replace(/^www\./, '').toLowerCase();
+    return host === 'balbums.st' || (host === 'bunkr.cr' && /^\/a\/[\w-]+\/?$/i.test(url.pathname));
+  } catch (_) {
     return false;
   }
 }
@@ -8759,13 +8771,14 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
     const groupSourceTitle = group.sourceTitle || artistNameFromUrl(groupSourceUrl) || 'Erome';
 
     group.videos.forEach((rawUrl, videoIndex) => {
-      const proxiedUrl = proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
+      const isBunkr = group.source === 'bunkr';
+      const proxiedUrl = isBunkr ? rawUrl : proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
       const mediaKey = eromeMediaKey(rawUrl);
 
       urls.push(proxiedUrl);
       metadata.push({
         type: 'video',
-        source: 'erome',
+        source: isBunkr ? 'bunkr' : 'erome',
         artistName: groupSourceTitle,
         artistDisplayName: group.title || groupSourceTitle,
         artistKey: groupSourceUrl,
@@ -8784,8 +8797,8 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         startIndex: eventStartIndex,
         count: urls.length - groupStartIndex,
         artistKey: groupSourceUrl,
-        bundleKey: `erome-bundle:${group.url || groupSourceUrl || groupIndex}`,
-        source: 'erome',
+        bundleKey: `${group.source === 'bunkr' ? 'bunkr' : 'erome'}-bundle:${group.url || groupSourceUrl || groupIndex}`,
+        source: group.source === 'bunkr' ? 'bunkr' : 'erome',
         artistUrl: groupSourceUrl,
         postUrl: group.url || groupSourceUrl,
         artistDisplayName: groupSourceTitle,
@@ -15970,13 +15983,124 @@ async function waitForEromeBackgroundScrapeSlot() {
   }
 }
 
+async function loadBunkrAsCards(targets) {
+  const endpoint = await getRandom40LocalEndpoint(true);
+  if (!endpoint) {
+    alert('Bunkr imports need the Pong PC server to be running and reachable.');
+    return;
+  }
+
+  const postJson = async (pathname, payload) => {
+    const response = await fetch(`${endpoint}${pathname}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || `Local HTTP ${response.status}`);
+    return data;
+  };
+
+  updateEromeProgress({
+    title: 'Finding Bunkr albums',
+    detail: 'Reading only the pasted Balbums page',
+    completed: 0,
+    total: targets.length,
+    videos: 0
+  });
+
+  const discovered = [];
+  const seenAlbums = new Set();
+  for (let index = 0; index < targets.length; index++) {
+    const data = await postJson('/bunkr/discover', { url: targets[index] });
+    (data.albums || []).forEach(album => {
+      if (!album?.url || seenAlbums.has(album.url)) return;
+      seenAlbums.add(album.url);
+      discovered.push(album);
+    });
+    updateEromeProgress({
+      title: 'Finding Bunkr albums',
+      detail: `${discovered.length} albums on the pasted page`,
+      completed: index + 1,
+      total: targets.length,
+      videos: 0
+    });
+  }
+
+  if (!discovered.length) {
+    alert('No Bunkr albums were found on that page.');
+    return;
+  }
+
+  const groups = [];
+  let completed = 0;
+  let videoCount = 0;
+  await eromePool(discovered, Math.min(4, discovered.length), async album => {
+    try {
+      const data = await postJson('/bunkr/album', album);
+      if (Array.isArray(data.videos) && data.videos.length) {
+        groups.push({
+          url: album.url,
+          title: album.title || data.title || 'Bunkr album',
+          sourceUrl: album.url,
+          sourceTitle: album.title || data.title || 'Bunkr album',
+          source: 'bunkr',
+          videos: data.videos
+        });
+        videoCount += data.videos.length;
+      }
+    } catch (error) {
+      console.warn('Bunkr album import failed:', album.url, error);
+    } finally {
+      completed++;
+      updateEromeProgress({
+        title: 'Scraping Bunkr albums',
+        detail: `${completed}/${discovered.length} albums`,
+        completed,
+        total: discovered.length,
+        videos: videoCount
+      });
+    }
+  });
+
+  if (!groups.length) {
+    alert('No browser-playable videos were found in those Bunkr albums.');
+    return;
+  }
+
+  const imported = cacheEromeCardImport(groups, '');
+  closeEromeHelper();
+  setEromeTwentyCardMode(true);
+  window.PongEromeAutoAdvanceOnce = true;
+  window.PongLoadAllVideosOnce = false;
+  loadVideosButton.click();
+  showSortingIndicator(`Loaded ${imported.urls.length} Bunkr videos from ${groups.length} albums.`);
+  updateEromeProgress({
+    title: 'Bunkr ready',
+    detail: `${groups.length} albums from the pasted page`,
+    completed: groups.length,
+    total: groups.length,
+    videos: imported.urls.length
+  });
+}
+
 async function loadEromeAsCards() {
   window.PongActiveSavedEromeRefreshUrl = '';
 
   const targets = getEromeScrapeTargets();
 
   if (!targets.length) {
-    alert('Paste one or more Erome artist or album URLs first.');
+    alert('Paste one or more Erome, Bunkr album, or Balbums page URLs first.');
+    return;
+  }
+
+  const bunkrTargets = targets.filter(isBunkrImportLaunchUrl);
+  if (bunkrTargets.length) {
+    if (bunkrTargets.length !== targets.length) {
+      alert('Load Erome and Bunkr/Balbums URLs separately.');
+      return;
+    }
+    await loadBunkrAsCards(bunkrTargets);
     return;
   }
 

@@ -1888,6 +1888,192 @@ function decodeHtmlUrl(value) {
     .replace(/&#39;/g, "'");
 }
 
+function decodeBasicHtmlText(value) {
+  return decodeHtmlUrl(value)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeBunkrImportUrl(rawValue) {
+  try {
+    const url = new URL(String(rawValue || '').trim());
+    const host = url.hostname.replace(/^www\./, '').toLowerCase();
+    if (host === 'balbums.st') return { kind: 'listing', url: url.toString() };
+    if (host === 'bunkr.cr' && /^\/a\/[a-z0-9_-]+\/?$/i.test(url.pathname)) {
+      url.search = '';
+      url.hash = '';
+      return { kind: 'album', url: url.toString() };
+    }
+  } catch (_) {}
+  return null;
+}
+
+async function fetchBunkrImportHtml(rawUrl) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  timer.unref?.();
+  try {
+    const response = await fetch(rawUrl, {
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml'
+      }
+    });
+    if (!response.ok) throw new Error(`source HTTP ${response.status}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function bunkrAlbumTitleFromHtml(html, fallbackUrl) {
+  const match = String(html || '').match(/<meta\b[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i)
+    || String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (match?.[1]) return decodeBasicHtmlText(match[1]).replace(/\s*\|\s*Bunkr\s*$/i, '') || 'Bunkr album';
+  try { return decodeURIComponent(new URL(fallbackUrl).pathname.split('/').filter(Boolean).pop() || 'Bunkr album'); }
+  catch (_) { return 'Bunkr album'; }
+}
+
+async function discoverBunkrAlbums(rawUrl) {
+  const target = normalizeBunkrImportUrl(rawUrl);
+  if (!target) throw new Error('Use a Bunkr album URL or a Balbums page URL');
+  const html = await fetchBunkrImportHtml(target.url);
+  if (target.kind === 'album') {
+    return [{ url: target.url, title: bunkrAlbumTitleFromHtml(html, target.url) }];
+  }
+
+  // Deliberately inspect only the exact Balbums page supplied by the user.
+  // Pagination links are never followed.
+  const albums = [];
+  const seen = new Set();
+  const anchorRe = /<a\b[^>]*href=["'](https?:\/\/(?:www\.)?bunkr\.cr\/a\/[a-z0-9_-]+\/?)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of html.matchAll(anchorRe)) {
+    const normalized = normalizeBunkrImportUrl(decodeHtmlUrl(match[1]));
+    if (!normalized || seen.has(normalized.url)) continue;
+    seen.add(normalized.url);
+    const titleMatch = match[2].match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+    albums.push({
+      url: normalized.url,
+      title: decodeBasicHtmlText(titleMatch?.[1] || '') || bunkrAlbumTitleFromHtml('', normalized.url)
+    });
+  }
+  return albums;
+}
+
+function extractBunkrVideoUrlsWithGalleryDl(albumUrl) {
+  return new Promise((resolve, reject) => {
+    const python = path.join(LOCAL_AI_DIR, 'lora-venv', 'Scripts', 'python.exe');
+    const child = spawn(python, ['-m', 'gallery_dl', '-g', '--no-download', albumUrl], {
+      cwd: process.cwd(),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (error, urls = []) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(urls);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(new Error('Bunkr album extraction timed out'));
+    }, 60000);
+    timer.unref?.();
+    child.stdout.on('data', chunk => {
+      stdout += chunk.toString();
+      if (stdout.length > 4 * 1024 * 1024) child.kill();
+    });
+    child.stderr.on('data', chunk => { stderr += chunk.toString().slice(0, 65536); });
+    child.once('error', error => finish(error));
+    child.once('close', code => {
+      if (code !== 0) {
+        finish(new Error(stderr.trim() || `Bunkr extractor exited ${code}`));
+        return;
+      }
+      const seen = new Set();
+      const videos = stdout.split(/\r?\n/).map(line => line.trim()).filter(line => {
+        try {
+          const parsed = new URL(line);
+          if (!/^https?:$/.test(parsed.protocol) || !/\.(?:mp4|m4v|mov|webm)$/i.test(parsed.pathname)) return false;
+          if (seen.has(line)) return false;
+          seen.add(line);
+          return true;
+        } catch (_) { return false; }
+      });
+      finish(null, videos.slice(0, 300));
+    });
+  });
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await mapper(items[index], index);
+    }
+  }));
+  return results;
+}
+
+async function extractBunkrVideoUrls(albumUrl) {
+  const advancedUrl = new URL(albumUrl);
+  advancedUrl.searchParams.set('advanced', '1');
+  const html = await fetchBunkrImportHtml(advancedUrl.toString());
+  const script = html.match(/window\.albumFiles\s*=\s*\[([\s\S]*?)<\/script>/i)?.[1] || '';
+  const files = [];
+  for (const block of script.split(/\n\s*},\s*\n/)) {
+    const id = block.match(/\bid:\s*(\d+)/i)?.[1];
+    const type = block.match(/\btype:\s*["']([^"']+)/i)?.[1] || '';
+    const original = block.match(/\boriginal:\s*["']([^"']*)/i)?.[1] || '';
+    if (id && /^video\//i.test(type)) files.push({ id, original });
+    if (files.length >= 300) break;
+  }
+  if (!files.length) return extractBunkrVideoUrlsWithGalleryDl(albumUrl);
+
+  const headers = {
+    Referer: 'https://dl.bunkr.cr/',
+    Origin: 'https://dl.bunkr.cr',
+    'Content-Type': 'application/json'
+  };
+  const resolved = await mapWithConcurrency(files, 50, async file => {
+    try {
+      const fileResponse = await fetch('https://dl.bunkr.cr/api/_001_v2', {
+        method: 'POST',
+        headers,
+        signal: AbortSignal.timeout(8000),
+        body: JSON.stringify({ id: file.id })
+      });
+      if (!fileResponse.ok) return '';
+      const data = await fileResponse.json();
+      const signUrl = new URL('https://glb-apisign.cdn.cr/sign');
+      signUrl.searchParams.set('path', data.path);
+      const signResponse = await fetch(signUrl, { headers, signal: AbortSignal.timeout(8000) });
+      if (!signResponse.ok) return '';
+      const sign = await signResponse.json();
+      if (file.original) sign.n = file.original;
+      const mediaUrl = new URL(`${data.mediafiles}${data.path}`);
+      Object.entries(sign).forEach(([key, value]) => mediaUrl.searchParams.set(key, String(value)));
+      return mediaUrl.toString();
+    } catch (_) {
+      return '';
+    }
+  });
+  return [...new Set(resolved.filter(Boolean))];
+}
+
 function extractVideoUrlsFromHtml(html, postUrl) {
   const urls = [];
   const seen = new Set();
@@ -6668,6 +6854,26 @@ const server = http.createServer(async (req, res) => {
 
   try {
     const url = requestUrl;
+    if (req.method === 'POST' && url.pathname === '/bunkr/discover') {
+      const payload = JSON.parse(await readBody(req));
+      const albums = await discoverBunkrAlbums(payload?.url);
+      json(res, 200, { ok: true, albums, albumCount: albums.length });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/bunkr/album') {
+      const payload = JSON.parse(await readBody(req));
+      const target = normalizeBunkrImportUrl(payload?.url);
+      if (!target || target.kind !== 'album') throw new Error('A valid Bunkr album URL is required');
+      const videos = await extractBunkrVideoUrls(target.url);
+      json(res, 200, {
+        ok: true,
+        url: target.url,
+        title: String(payload?.title || '').trim() || bunkrAlbumTitleFromHtml('', target.url),
+        videos,
+        count: videos.length
+      });
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/browser-state/github-token') {
       const secrets = await readBrowserSecrets();
       json(res, 200, {
