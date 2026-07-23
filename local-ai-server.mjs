@@ -412,6 +412,7 @@ async function gatewayH2Fetch(rawUrl, { signal = null, timeoutMs = GATEWAY_TIMEO
 
 function gatewayRequest(current, req, controller, method = req.method === 'HEAD' ? 'HEAD' : 'GET') {
   return new Promise((resolve, reject) => {
+    let settled = false;
     const headers = {
       'User-Agent': 'Mozilla/5.0 PongLocalGateway/1.1',
       'Accept': String(req.headers?.accept || '*/*'),
@@ -422,16 +423,27 @@ function gatewayRequest(current, req, controller, method = req.method === 'HEAD'
     for (const name of ['range', 'if-none-match', 'if-modified-since']) {
       if (req.headers?.[name]) headers[name] = String(req.headers[name]);
     }
+    const finish = (error, response) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(response);
+    };
     const upstreamRequest = https.request(current, {
       method,
       headers,
       agent: GATEWAY_AGENT,
       timeout: GATEWAY_TIMEOUT_MS
-    }, resolve);
-    const abort = () => upstreamRequest.destroy(new Error('gateway request aborted'));
+    }, response => finish(null, response));
+    const abort = () => {
+      if (!upstreamRequest.destroyed) upstreamRequest.destroy(new Error('gateway request aborted'));
+    };
     controller?.signal?.addEventListener('abort', abort, { once: true });
     upstreamRequest.once('timeout', () => upstreamRequest.destroy(new Error('gateway request timed out')));
-    upstreamRequest.once('error', reject);
+    // Keep a permanent error sink after the promise settles. Android can close
+    // a downstream media request after headers arrive; destroying the already
+    // resolved ClientRequest must not become an unhandled process-level error.
+    upstreamRequest.on('error', error => finish(error));
     upstreamRequest.once('close', () => controller?.signal?.removeEventListener('abort', abort));
     upstreamRequest.end();
   });
