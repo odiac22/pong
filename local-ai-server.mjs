@@ -2692,7 +2692,13 @@ function registerVideoFileCacheReader(res) {
   let finished = false;
   const entry = {
     done: new Promise(resolve => { resolveDone = resolve; }),
-    abort: () => { if (!res.destroyed && !res.writableEnded) res.destroy(); },
+    abort: () => {
+      if (!res.destroyed && !res.writableEnded) res.destroy();
+      // A disconnected Android client does not always produce another close
+      // event after destroy(). Release its bookkeeping synchronously so one
+      // abandoned stream cannot leave every future cache reset unhealthy.
+      entry.finish();
+    },
     finish: () => {
       if (finished) return;
       finished = true;
@@ -3611,6 +3617,10 @@ async function streamCompletedVideoFileCacheRange(req, res, record, start, end) 
 
 async function serveVideoFileCacheMedia(req, res, id) {
   if (!videoFileCacheHealthy || videoFileCacheResetPromise) {
+    if (!videoFileCacheResetPromise) {
+      void resetVideoFileCache('automatic unhealthy-cache recovery')
+        .catch(error => console.error(`Video file cache recovery failed: ${error.message || error}`));
+    }
     json(res, 503, { ok: false, error: 'video cache is resetting' });
     return;
   }
@@ -7471,7 +7481,7 @@ server.listen(PORT, HOST, () => {
   const videoFileCacheMaintenanceTimer = setInterval(() => {
     periodicVideoFileCacheMaintenance()
       .catch(error => console.error(`Video file cache maintenance failed: ${error.message || error}`));
-  }, 30000);
+  }, 5000);
   videoFileCacheMaintenanceTimer.unref();
   const reservoirKeepWarmTimer = setInterval(() => {
     if (!RANDOM40_RESERVOIR_ENABLED || foregroundClassifyRequests > 0) return;
