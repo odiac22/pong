@@ -6405,11 +6405,11 @@ async function local2VerifyWorker(profile, context) {
   let nextPage = Math.max(2, Number(profile.scannedThroughPage || 1) + 1);
   while (!context.signal.aborted && nextPage <= maximumPages) {
     if (postUrls.length >= 15) {
-      const verified = await verifyVideoPostBatch({ postUrls, stopAt: 24, artistInfo: profile }, context.signal)
+      const verified = await verifyVideoPostBatch({ postUrls, stopAt: 15, artistInfo: profile }, context.signal)
         .catch(() => ({ entries: [] }));
       const entries = Array.isArray(verified?.entries) ? verified.entries : [];
       if (entries.length >= 15) {
-        return entries.slice(0, 24).map(entry => ({
+        return entries.slice(0, 15).map(entry => ({
           videoUrl: entry.videoUrl,
           postUrl: entry.postUrl,
           postIndex: Number(entry.postIndex || 0),
@@ -6419,6 +6419,9 @@ async function local2VerifyWorker(profile, context) {
         }));
       }
     }
+    // Small progressive page batches avoid fetching an entire large profile.
+    // As soon as enough post candidates exist, resolve them and cancel at the
+    // fifteenth distinct playable media URL.
     const batchPages = [nextPage, nextPage + 1].filter(page => page <= maximumPages);
     const results = await Promise.allSettled(batchPages.map(page => random40ReservoirFetchHtml(
       random40ReservoirProfilePageUrl(profile.artistUrl, page),
@@ -6441,9 +6444,9 @@ async function local2VerifyWorker(profile, context) {
     if (!foundPosts) break;
   }
   if (postUrls.length >= 15 && !context.signal.aborted) {
-    const verified = await verifyVideoPostBatch({ postUrls, stopAt: 24, artistInfo: profile }, context.signal)
+    const verified = await verifyVideoPostBatch({ postUrls, stopAt: 15, artistInfo: profile }, context.signal)
       .catch(() => ({ entries: [] }));
-    return (Array.isArray(verified?.entries) ? verified.entries : []).slice(0, 24).map(entry => ({
+    return (Array.isArray(verified?.entries) ? verified.entries : []).slice(0, 15).map(entry => ({
       videoUrl: entry.videoUrl,
       postUrl: entry.postUrl,
       postIndex: Number(entry.postIndex || 0),

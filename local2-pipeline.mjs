@@ -443,10 +443,10 @@ export class Local2ContinuousPipeline {
   profiled(state, profile) {
     if (!this.current(state)) return;
     state.profile = { ...profile, artistId: state.artistId };
-    // Image triage is cheaper than proving fifteen media URLs. Only candidates
-    // that survive screening are admitted to the verifier.
-    state.stage = 'triage';
-    this.stages.triage.push(state, state.priority);
+    // The fifteen-real-video contract is the first substantial gate. No image
+    // model work begins until the verifier proves the artist qualifies.
+    state.stage = 'verify';
+    this.stages.verify.push(state, state.priority);
   }
 
   triaged(state, triage = {}) {
@@ -463,8 +463,7 @@ export class Local2ContinuousPipeline {
       return;
     }
     state.triageDone = true;
-    state.stage = 'verify+classify';
-    this.stages.verify.push(state, state.priority);
+    state.stage = 'classify';
     this.queueClassification(state, state.priority + Number(triage.priorityBoost || 0));
   }
 
@@ -479,6 +478,11 @@ export class Local2ContinuousPipeline {
     }
     if (state.modelRejected) {
       this.reject(state, 'classify', state.modelRejectReason || 'Local2 hard-safe decision gate rejected');
+      return;
+    }
+    if (!state.triageDone) {
+      state.stage = 'triage';
+      this.stages.triage.push(state, state.priority);
       return;
     }
     this.maybeFinalize(state);

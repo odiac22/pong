@@ -138,7 +138,7 @@ test('feature cache survives learning revision while decision cache is invalidat
   assert.equal(cache.decisions.get(decisionKey), undefined);
 });
 
-test('continuous pipeline overlaps verification and classification without batch barriers', async () => {
+test('real-media verification completes before classification begins', async () => {
   const events = [];
   const pipeline = new Local2ContinuousPipeline({
     revision: 'local2-r1',
@@ -163,7 +163,7 @@ test('continuous pipeline overlaps verification and classification without batch
   });
   pipeline.submit({ artistUrl: 'https://coomerfans.com/u/onlyfans/123/example' });
   await waitFor(() => pipeline.stats().accepted === 1);
-  assert.ok(events.indexOf('classify-start:onlyfans:123') < events.indexOf('verify-end:onlyfans:123'));
+  assert.ok(events.indexOf('classify-start:onlyfans:123') > events.indexOf('verify-end:onlyfans:123'));
   assert.equal(pipeline.isReady(), true);
   const leased = pipeline.lease(1);
   assert.equal(leased.length, 1);
@@ -171,7 +171,7 @@ test('continuous pipeline overlaps verification and classification without batch
   pipeline.stop();
 });
 
-test('profile completion admits media verification only after visual triage passes', async () => {
+test('profile completion admits visual triage only after media verification passes', async () => {
   const events = [];
   const pipeline = new Local2ContinuousPipeline({
     revision: 'local2-r1',
@@ -196,7 +196,7 @@ test('profile completion admits media verification only after visual triage pass
   });
   pipeline.submit({ artistUrl: 'https://coomerfans.com/u/onlyfans/4/concurrent' });
   await waitFor(() => pipeline.stats().accepted === 1);
-  assert.ok(events.indexOf('verify-start') > events.indexOf('triage-end'));
+  assert.ok(events.indexOf('verify-end') < events.indexOf('triage-start'));
   pipeline.stop();
 });
 
