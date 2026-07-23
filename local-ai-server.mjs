@@ -30,6 +30,7 @@ const LOCAL2_CLEAN_MAX_IMAGES = Math.max(4, Math.min(12, Number(process.env.PONG
 const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD || 40);
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const PONG_INDEX_PATH = path.join(process.cwd(), 'index.html');
+const PONG_SYNC_PATH = path.join(process.cwd(), 'pong-sync.js');
 const VIDEO_FILE_CACHE_DIR = path.join(LOCAL_AI_DIR, '.ephemeral-video-cache');
 const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_BYTES || 12 * 1024 * 1024 * 1024));
 const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 2 * 1024 * 1024 * 1024));
@@ -6531,6 +6532,22 @@ const server = http.createServer(async (req, res) => {
       });
       if (req.method === 'HEAD') res.end();
       else res.end(html);
+    } catch (error) {
+      json(res, 500, { error: error.message || String(error) });
+    }
+    return;
+  }
+  if ((req.method === 'GET' || req.method === 'HEAD') && requestUrl.pathname === '/pong-sync.js') {
+    try {
+      const script = await fs.readFile(PONG_SYNC_PATH);
+      res.writeHead(200, {
+        'Content-Type': 'text/javascript; charset=utf-8',
+        'Content-Length': script.length,
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'X-Content-Type-Options': 'nosniff'
+      });
+      if (req.method === 'HEAD') res.end();
+      else res.end(script);
     } catch (error) {
       json(res, 500, { error: error.message || String(error) });
     }

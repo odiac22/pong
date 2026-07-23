@@ -13,6 +13,10 @@
 (function () {
   'use strict';
 
+  // The hidden GitHub-origin bridge only mirrors approved localStorage keys.
+  // It must not create controls, fetch saved media, or run playback work.
+  if (new URLSearchParams(location.search).get('pongStateBridge') === '1') return;
+
   const SAVED_VIDEOS_KEY = 'pong_saved_videos_v1';
   const SAVED_ARTISTS_KEY = 'pong_saved_artists_v1';
   const GITHUB_TOKEN_KEY = 'pong_github_token_v1';

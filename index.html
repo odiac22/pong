@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.81</div>
+    <div class="version-number">24.82</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2581,7 +2581,7 @@ function installPongSharedOriginBridge() {
   });
   if (bridgeMode || location.origin === PONG_GITHUB_ORIGIN) return;
   const iframe = document.createElement('iframe');
-  iframe.src = `${PONG_GITHUB_ORIGIN}/pong/?pongStateBridge=1&v=2481`;
+  iframe.src = `${PONG_GITHUB_ORIGIN}/pong/?pongStateBridge=1&v=2482`;
   iframe.title = 'Pong saved-state bridge';
   iframe.hidden = true;
   iframe.setAttribute('aria-hidden', 'true');
@@ -16780,6 +16780,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=107"></script>
+<script src="pong-sync.js?v=108"></script>
 </body>
 </html>
