@@ -84,6 +84,10 @@ const FINETUNE_RUN_SCRIPT = path.join(process.cwd(), 'scripts', 'run-lora-train.
 const LORA_INFERENCE_RUN_SCRIPT = path.join(process.cwd(), 'scripts', 'run-lora-infer.ps1');
 const LORA_INFERENCE_URL = (process.env.PONG_LORA_INFERENCE_URL || 'http://127.0.0.1:8790').replace(/\/+$/, '');
 const PREFERENCE_AI_URL = (process.env.PONG_PREFERENCE_AI_URL || 'http://127.0.0.1:8791').replace(/\/+$/, '');
+const SOURCE_EDGE_PROXY_BASE = String(
+  process.env.PONG_SOURCE_EDGE_PROXY_BASE ||
+  'https://pong-erome-proxy.arianslade-pong.workers.dev/source'
+).replace(/\/+$/, '');
 const LORA_ADAPTER_DIR = path.join(LOCAL_AI_DIR, 'qwen-lora', 'latest');
 const FINETUNE_AUTO_RUN = process.env.PONG_LORA_AUTOTRAIN !== '0';
 const FINETUNE_MAX_IMAGE_BYTES = Number(process.env.PONG_LORA_MAX_IMAGE_BYTES || 12 * 1024 * 1024);
@@ -633,7 +637,25 @@ async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = nu
   signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await gatewayH2Fetch(rawUrl, { signal: controller.signal, timeoutMs });
+    let response;
+    try {
+      response = await gatewayH2Fetch(rawUrl, { signal: controller.signal, timeoutMs });
+      const directStatus = Number(response.status || 0);
+      if (directStatus < 200 || directStatus >= 300) {
+        throw new Error(`direct source HTTP ${directStatus}`);
+      }
+    } catch (directError) {
+      if (controller.signal.aborted) throw directError;
+      const edgeUrl = `${SOURCE_EDGE_PROXY_BASE}?u=${encodeURIComponent(rawUrl)}`;
+      const edgeResponse = await fetch(edgeUrl, {
+        cache: 'no-store',
+        signal: controller.signal
+      });
+      response = {
+        status: edgeResponse.status,
+        body: Buffer.from(await edgeResponse.arrayBuffer())
+      };
+    }
     const status = Number(response.status || 0);
     if (status < 200 || status >= 300) {
       throw new Error(`reservoir HTTP ${status}`);

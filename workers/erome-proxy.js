@@ -36,6 +36,11 @@ function isEromeHost(hostname) {
   return /(^|\.)erome\.com$/i.test(hostname);
 }
 
+function isPongSourceHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^www\./, '');
+  return host === 'coomerfans.com' || host === 'onlyfaphouse.com';
+}
+
 function corsHeaders(extra) {
   return {
     'Access-Control-Allow-Origin': '*',
@@ -342,6 +347,24 @@ async function handleVideo(request, target) {
   return new Response(upstream.body, { status: upstream.status, headers: out });
 }
 
+async function handlePongSource(target) {
+  if (!isPongSourceHost(target.hostname)) {
+    return json({ error: 'source host is not allowed' }, 403);
+  }
+  const upstream = await fetch(target.href, {
+    headers: {
+      'User-Agent': BROWSER_UA,
+      Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+    },
+    redirect: 'follow',
+  });
+  const headers = new Headers(corsHeaders({
+    'content-type': upstream.headers.get('content-type') || 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+  }));
+  return new Response(upstream.body, { status: upstream.status, headers });
+}
+
 function json(obj, status) {
   return new Response(JSON.stringify(obj), {
     status: status || 200,
@@ -366,6 +389,13 @@ export default {
       target = new URL(targetRaw);
     } catch (_) {
       return json({ error: "bad 'u' URL" }, 400);
+    }
+
+    if (url.pathname.startsWith('/source')) {
+      if (target.protocol !== 'https:' || !isPongSourceHost(target.hostname)) {
+        return json({ error: 'only approved Pong source hosts are allowed' }, 403);
+      }
+      return handlePongSource(target);
     }
 
     if (target.protocol !== 'https:' || !isEromeHost(target.hostname)) {
