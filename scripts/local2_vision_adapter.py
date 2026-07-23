@@ -33,7 +33,7 @@ from local2_clean import (
 
 DEFAULT_FEATURE_SCHEMA = "facebook-dinov2-small/local2-clean-full-body-face-v2"
 MAX_LOCAL2_IMAGES = 12
-TASTE_PREFILTER_REJECT = 0.45
+TASTE_PREFILTER_REJECT = 0.43
 HARD_ONLY_REASON = re.compile(
     r"\b(?:male|man|men|trans|transgender|feet|foot|logo|placeholder|anime|"
     r"illustration|advertisement|age|over\s*60|too\s*old|penis|testicles|"
@@ -717,7 +717,7 @@ class Local2VisionAdapter:
                 "decision": "reject",
                 "confidence": float(max(0.5, min(0.999, 1.0 - prefilter_probability))),
                 "reason_code": "personal_preference_mismatch",
-                "reason": "Local2 taste prefilter is clearly below 45%",
+                "reason": "Local2 taste prefilter is clearly below 43%",
                 "source": ENGINE_SCHEMA,
                 "vision_source": ENGINE_SCHEMA,
                 "variant": "local2",

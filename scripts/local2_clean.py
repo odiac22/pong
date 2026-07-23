@@ -211,7 +211,7 @@ class Local2Thresholds:
     required_clear_body_images: int = 2
     # Broaden discovery on personalized taste only. Every hard veto above is
     # evaluated independently before this score can produce an acceptance.
-    preference_accept: float = 0.50
+    preference_accept: float = 0.48
 
 
 @dataclass(frozen=True, slots=True)
