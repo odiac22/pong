@@ -6672,6 +6672,8 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'POST' && url.pathname === '/train-ai/candidates') {
+      random40ReservoirRefillPausedUntil = 0;
+      random40AcceptedRefillPausedUntil = 0;
       const payload = JSON.parse(await readBody(req));
       const count = Math.max(1, Math.min(20, Number(payload?.count || 10)));
       const excluded = new Set((Array.isArray(payload?.excludeArtistUrls) ? payload.excludeArtistUrls : [])
@@ -6694,6 +6696,9 @@ const server = http.createServer(async (req, res) => {
         if (card) byIdentity.set(identity, card);
       }
       const candidates = [...byIdentity.values()];
+      // Train AI owns this work on demand; an idle server does not maintain a
+      // permanent approved-artist pool merely to keep this endpoint warm.
+      if (!candidates.length) scheduleRandom40AcceptedReservoir(25);
       for (let index = candidates.length - 1; index > 0; index--) {
         const swapIndex = crypto.randomInt(0, index + 1);
         [candidates[index], candidates[swapIndex]] = [candidates[swapIndex], candidates[index]];
@@ -7257,16 +7262,25 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/workload/reset') {
       workloadGeneration++;
+      const leasedBeforeReset = random40AcceptedLeases.size;
       await local2Adapter.stop().catch(() => {});
       await resetVideoFileCache('workload reset').catch(() => {});
       random40ReservoirAbortController?.abort();
       random40AcceptedAbortController?.abort();
+      random40Reservoir.splice(0);
+      random40AcceptedReservoir.splice(0);
+      random40EvaluatedReservoir.splice(0);
+      random40TrainAiEvidenceCards.clear();
+      random40AcceptedLeases.clear();
+      random40ReservoirPending.clear();
       random40AcceptedPending.clear();
       const releaseCandidateLeases = url.searchParams.get('releaseCandidateLeases') === '1';
-      const leasedBeforeReset = random40AcceptedLeases.size;
       if (releaseCandidateLeases) random40ReleaseExpiredAcceptedLeases(Date.now(), true);
-      random40ReservoirRefillPausedUntil = 0;
-      random40AcceptedRefillPausedUntil = 0;
+      // Stay idle after Refresh. Local modes and Train AI explicitly resume
+      // their own work when the user presses a button.
+      const idleUntilExplicitUse = Date.now() + 365 * 24 * 60 * 60 * 1000;
+      random40ReservoirRefillPausedUntil = idleUntilExplicitUse;
+      random40AcceptedRefillPausedUntil = idleUntilExplicitUse;
       const queued = ollamaVisionQueue.splice(0);
       queued.forEach(item => {
         item.signal?.removeEventListener('abort', item.abort);
@@ -7274,7 +7288,6 @@ const server = http.createServer(async (req, res) => {
       });
       const controllers = [...activeWorkloadControllers];
       controllers.forEach(controller => controller.abort());
-      scheduleRandom40AcceptedReservoir(250);
       json(res, 200, {
         ok: true,
         generation: workloadGeneration,

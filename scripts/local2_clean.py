@@ -209,7 +209,9 @@ class Local2Thresholds:
     hard_consensus: int = 2
     required_usable_images: int = 2
     required_clear_body_images: int = 2
-    preference_accept: float = 0.65
+    # Broaden discovery on personalized taste only. Every hard veto above is
+    # evaluated independently before this score can produce an acceptance.
+    preference_accept: float = 0.58
 
 
 @dataclass(frozen=True, slots=True)

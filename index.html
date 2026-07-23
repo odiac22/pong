@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.86</div>
+    <div class="version-number">24.87</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7113,11 +7113,11 @@ function createGearButton(){
     clearSession();
     if(videoUrlsInput)videoUrlsInput.value='';
     const url = new URL(window.location.href);
-    if (random40State?.playbackProfile === 'local22' || url.searchParams.get('pongAutoStart') === 'local22') {
-      url.searchParams.set('pongAutoStart', 'local22');
-      url.searchParams.set('pongPlaybackProfile', 'local22');
-      url.searchParams.set('pongStartedAt', String(Date.now()));
-    }
+    // Refresh stops the current workload and returns Pong to idle. A mode only
+    // starts again after the user explicitly presses Local2 or Local2.2.
+    url.searchParams.delete('pongAutoStart');
+    url.searchParams.delete('pongPlaybackProfile');
+    url.searchParams.delete('pongStartedAt');
     url.searchParams.set('pongRefresh', String(Date.now()));
     window.location.replace(url.href);
   });
@@ -9146,11 +9146,15 @@ async function random40PingLocalEndpoint(endpoint, timeoutMs = 2200) {
   return health;
 }
 
-async function getRandom40LocalEndpoint() {
+async function getRandom40LocalEndpoint(acceptReachableWarming = false) {
   random40ReachableWarmingEndpoint = null;
   const available = await random40TryKnownLocalEndpoint();
   if (available) return available;
   if (random40ReachableWarmingEndpoint) {
+    if (acceptReachableWarming) {
+      random40GatewayEndpoint = random40ReachableWarmingEndpoint.endpoint;
+      return random40ReachableWarmingEndpoint.endpoint;
+    }
     showSortingIndicator(random40ReachableWarmingEndpoint.message);
     return '';
   }
@@ -13211,7 +13215,9 @@ async function openTrainAiPanel() {
   trainAiRenderStats();
   document.getElementById('train-ai-panel').hidden = false;
   trainAiSetStatus('Connecting to Local AI…');
-  trainAiState.endpoint = await getRandom40LocalEndpoint();
+  // Candidate/model warming is not an offline server. Train AI's queue can
+  // connect immediately and wait for the first prepared card.
+  trainAiState.endpoint = await getRandom40LocalEndpoint(true);
   if (!trainAiState.endpoint) {
     trainAiSetStatus('Start Local AI, then reopen this panel.');
     trainAiState.open = false;
