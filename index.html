@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.10</div>
+    <div class="version-number">25.11</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7118,8 +7118,20 @@ async function resetLocalAiWorkloadForRefresh() {
 }
 
 async function cleanRefreshPongWorkload() {
+  const needsLocalAiReset = Boolean(
+    (random40State && !random40State.done) ||
+    trainAiState?.open ||
+    window.PongLoadedSavedMode === 'random40'
+  );
   showSortingIndicator('Stopping Pong workload…');
   stopBrowserWorkloadForRefresh();
+  // Erome/Bunkr refreshes have no AI workload to cancel. Avoid resetting the
+  // PC cache and aborting every active media socket; clear the browser session
+  // and reload while leaving the long-running server healthy.
+  if (!needsLocalAiReset) {
+    showSortingIndicator('Browser cleared - refreshing...');
+    return true;
+  }
   const localReset = await Promise.race([
     resetLocalAiWorkloadForRefresh(),
     sleep(6500).then(() => false)
