@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.99</div>
+    <div class="version-number">25.00</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -6458,7 +6458,7 @@ function runRandom40PreloadPool() {
     const artistKey = getPasteEventPaperclipKey(candidate.event, candidate.index) ||
       String(candidate.event.artistKey || candidate.event.artistUrl || '');
     const candidateEnd = (PONG_ADAPTIVE_PLAYBACK || pongLocal22PlaybackActive())
-      ? Math.min(bounds.end, bounds.start + (current ? 3 : 2))
+      ? Math.min(bounds.end, bounds.start + (current ? RANDOM40_PRELOAD_CURRENT_RESERVE : 2))
       : bounds.end;
     for (let globalIndex = bounds.start; globalIndex < candidateEnd; globalIndex++) {
       const url = String(allVideoUrls[globalIndex] || '');
