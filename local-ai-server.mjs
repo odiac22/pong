@@ -56,6 +56,7 @@ const VIDEO_FILE_CACHE_IO_SETTLE_MS = 8000;
 const VIDEO_FILE_CACHE_WIPE_RETRIES = 12;
 const VIDEO_FILE_CACHE_TAIL_RANGE_ENABLED = process.env.PONG_VIDEO_TAIL_RANGE_ENABLED !== '0';
 const VIDEO_FILE_CACHE_TAIL_RANGE_BYTES = 8 * 1024 * 1024;
+const VIDEO_FILE_CACHE_LOCAL22_TAIL_RANGE_BYTES = 1024 * 1024;
 const VIDEO_FILE_CACHE_TAIL_RANGE_MIN_GAP_BYTES = 1024 * 1024;
 const VIDEO_FILE_CACHE_TAIL_RANGE_HEADER_TIMEOUT_MS = Math.max(
   1500,
@@ -3187,6 +3188,7 @@ function queueVideoFileCacheUrl(rawUrl, priority = 2, metadata = {}) {
   record.sourceUrl = canonical.targetUrl;
   record.deferWhenIdle = false;
   if (metadata?.artistKey) record.artistKey = String(metadata.artistKey).slice(0, 300);
+  if (metadata?.playbackProfile === 'local22') record.playbackProfile = 'local22';
   record.updatedAt = Date.now();
   record.priorityEpoch = videoFileCachePriorityEpoch;
   if (Number(priority) === 0) {
@@ -3298,7 +3300,10 @@ function videoFileCacheTailRangeEligible(record, selectedRange, size, availableB
   const start = Number(selectedRange.start);
   const end = Number(selectedRange.end);
   const prefixBytes = Math.max(0, Number(availableBytes || 0));
-  const tailStart = Math.max(0, size - VIDEO_FILE_CACHE_TAIL_RANGE_BYTES);
+  const tailWindowBytes = record.playbackProfile === 'local22'
+    ? VIDEO_FILE_CACHE_LOCAL22_TAIL_RANGE_BYTES
+    : VIDEO_FILE_CACHE_TAIL_RANGE_BYTES;
+  const tailStart = Math.max(0, size - tailWindowBytes);
   return (
     Number.isSafeInteger(start) &&
     Number.isSafeInteger(end) &&
@@ -6648,7 +6653,9 @@ const server = http.createServer(async (req, res) => {
       const target = url.searchParams.get('url') || '';
       let record;
       try {
-        record = queueVideoFileCacheUrl(target, 0);
+        record = queueVideoFileCacheUrl(target, 0, {
+          playbackProfile: url.searchParams.get('profile') || ''
+        });
       } catch (error) {
         json(res, 400, { ok: false, error: error.message || 'bad video cache stream request' });
         return;
@@ -6669,6 +6676,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/video-cache/warm') {
       const payload = JSON.parse(await readBody(req) || '{}');
+      const playbackProfile = String(payload?.playbackProfile || 'current');
       touchVideoFileCacheHeartbeat();
       videoFileCacheGlobalPlaybackConstrainedUntil = Date.now() + 60000;
       const runningBackground = [...videoFileCacheRecords.values()]
@@ -6722,7 +6730,10 @@ const server = http.createServer(async (req, res) => {
       for (const rawUrl of urls) {
         try {
           const priority = rawUrl === activeUrl ? 0 : currentUrls.has(rawUrl) ? 1 : 2;
-          const record = queueVideoFileCacheUrl(rawUrl, priority, metadataByUrl.get(rawUrl));
+          const record = queueVideoFileCacheUrl(rawUrl, priority, {
+            ...(metadataByUrl.get(rawUrl) || {}),
+            playbackProfile
+          });
           if (record) records.push(videoFileCacheRecordJson(record, videoFileCacheEndpointFromRequest(req)));
         } catch (_) {}
       }
