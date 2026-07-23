@@ -6478,6 +6478,9 @@ const server = http.createServer(async (req, res) => {
     (req.method === 'GET' || req.method === 'HEAD') &&
     isPrivateLanAddress(req.socket.remoteAddress) &&
     (
+      requestUrl.pathname === '/health' ||
+      requestUrl.pathname === '/random40/candidates' ||
+      requestUrl.pathname === '/video-cache/status' ||
       requestUrl.pathname === '/proxy' ||
       requestUrl.pathname === '/video-cache/stream' ||
       requestUrl.pathname.startsWith('/video-cache/media/')
