@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.70</div>
+    <div class="version-number">24.71</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2177,7 +2177,6 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   delete wrapper.dataset.readyOverlayDismissed;
   delete wrapper.dataset.gatewayFallbackTried;
   delete wrapper.dataset.directFallbackRestored;
-  delete wrapper.dataset.deadCardEscaped;
   wrapper.dataset.originalVideoUrl = nextUrl;
   wrapper.dataset.suspendedVideoSrc = random40PlaybackUrl(nextUrl);
   wrapper.dataset.readyPlayable = 'false';
@@ -3721,24 +3720,6 @@ function retryVisibleBatchVideoLoads(token) {
       console.warn('[Video retry] Could not reload video', error);
     }
 
-    if (wrapper === activeWrapper && video.readyState === 0 && attempts + 1 >= 2) {
-      const readyEscape = wrappers.find(candidate =>
-        candidate !== wrapper && isWrapperReady(candidate) && !isWrapperViewed(candidate)
-      );
-      const deadCardCount = wrappers.filter(candidate => candidate.dataset.deadCardEscaped === 'true').length;
-      if (readyEscape) {
-        maybePromoteReadyDeckVideo(readyEscape);
-      } else if (deadCardCount >= 3 && canNavigateToNextPasteEvent()) {
-        setTimeout(() => navigateToNextPasteEvent(), 100);
-      } else if (wrapper.dataset.deadCardEscaped !== 'true') {
-        wrapper.dataset.deadCardEscaped = 'true';
-        setTimeout(() => {
-          if (getDeckWrapper(deckCurrentIndex) === wrapper && video.readyState === 0) {
-            goToNextDeckVideo();
-          }
-        }, 100);
-      }
-    }
   });
 
   if (stillPending > 0 && token === visibleBatchRetryToken) {
@@ -3907,10 +3888,7 @@ function isDeckCurrentBusy() {
 
   if (!wrapper) return false;
   if (isWrapperViewed(wrapper)) return true;
-  if (
-    wrapper.dataset.playIntent === 'true' &&
-    !(video?.readyState === 0 && Number(wrapper.dataset.autoRetryCount || 0) >= 2)
-  ) return true;
+  if (wrapper.dataset.playIntent === 'true') return true;
   if (video && !video.paused) return true;
 
   return false;
