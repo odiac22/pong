@@ -1,4 +1,3 @@
 name = "pong-erome-proxy"
 main = "workers/erome-proxy.js"
-compatibility_date = "2026-07-23"
-compatibility_flags = ["global_fetch_strictly_public"]
+compatibility_date = "2026-06-02"
