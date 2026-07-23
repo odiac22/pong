@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.07</div>
+    <div class="version-number">25.08</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -941,6 +941,7 @@ function pongLocal22PlaybackActive() {
   return new URLSearchParams(location.search).get('pongPlaybackProfile') === 'local22';
 }
 function pongDeckPreloadRadius() {
+  if (isBunkrPasteEvent(pasteEvents[currentPasteIndex])) return 5;
   return pongLocal22PlaybackActive() ? 2 : DECK_PRELOAD_RADIUS;
 }
 function pongForegroundBufferTargetSeconds() {
@@ -1850,7 +1851,12 @@ function migrateBunkrSessionPlaybackUrl(rawUrl) {
     try {
       const parsed = new URL(candidate, window.location.href);
       if (/(^|\.)cdn\.cr$/i.test(parsed.hostname)) {
-        return `${EROME_PROXY_BASE.replace(/\/+$/, '')}/bunkr.mp4?u=${encodeURIComponent(parsed.href)}`;
+        const playbackBase = location.protocol === 'http:' && location.port === '8787'
+          ? location.origin
+          : EROME_PROXY_BASE.replace(/\/+$/, '');
+        return playbackBase === location.origin
+          ? `${playbackBase}/video-cache/stream?url=${encodeURIComponent(parsed.href)}&profile=local22`
+          : `${playbackBase}/bunkr.mp4?u=${encodeURIComponent(parsed.href)}`;
       }
       const nested = parsed.searchParams.get('url') || parsed.searchParams.get('u');
       if (!nested || nested === candidate) break;
@@ -6922,6 +6928,17 @@ function shouldNextBatchAdvanceSavedArtist() {
 }
 
 function displayPasteEventAtIndex(index, { recordHistory = true } = {}) {
+  const targetEvent = pasteEvents[index];
+  const currentEvent = pasteEvents[currentPasteIndex];
+  if (isBunkrPasteEvent(targetEvent) || isBunkrPasteEvent(currentEvent)) {
+    document.querySelectorAll('.video-wrapper video').forEach(video => {
+      try {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      } catch (_) {}
+    });
+  }
   setActivePlaybackRangeForPasteEvent(index, { recordHistory });
   random40PumpPostFetchQueue();
   scheduleRandom40PreloadPool(50);
@@ -8815,7 +8832,9 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
     group.videos.forEach((rawUrl, videoIndex) => {
       const isBunkr = group.source === 'bunkr';
       const proxiedUrl = isBunkr
-        ? `${proxyBase}/bunkr.mp4?u=${encodeURIComponent(rawUrl)}`
+        ? proxyBase === EROME_PROXY_BASE.replace(/\/+$/, '')
+          ? `${proxyBase}/bunkr.mp4?u=${encodeURIComponent(rawUrl)}`
+          : `${proxyBase}/video-cache/stream?url=${encodeURIComponent(rawUrl)}&profile=local22`
         : proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
       const mediaKey = eromeMediaKey(rawUrl);
 
@@ -16114,7 +16133,10 @@ async function loadBunkrAsCards(targets) {
     return;
   }
 
-  const imported = cacheEromeCardImport(groups, EROME_PROXY_BASE.replace(/\/+$/, ''));
+  const bunkrPlaybackBase = location.protocol === 'https:'
+    ? EROME_PROXY_BASE.replace(/\/+$/, '')
+    : endpoint.replace(/\/+$/, '');
+  const imported = cacheEromeCardImport(groups, bunkrPlaybackBase);
   closeEromeHelper();
   setEromeTwentyCardMode(true, { respectRange: true });
   window.PongEromeAutoAdvanceOnce = true;
