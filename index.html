@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.01</div>
+    <div class="version-number">25.02</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -15244,15 +15244,30 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
             pageUrl: random40PageUrl(page, sourceBase)
           })));
           const pageResults = await Promise.all(sourcePages.map(({ page, pageUrl }) => {
-            return random40FetchDoc(pageUrl, { timeoutMs: 22000, priority: 0 })
+            return random40FetchDoc(pageUrl, { timeoutMs: 9000, priority: 0 })
               .then(doc => ({ page, pageUrl, doc }))
               .catch(error => ({ page, pageUrl, error }));
           }));
           random40RecordStageTiming('listing-pages', performance.now() - pageStageStarted);
+          random40State.pages += pageResults.length;
+          const successfulPageResults = pageResults.filter(result => !result.error && result.doc);
+          if (!successfulPageResults.length) {
+            runState.sourceFailureBatches = Number(runState.sourceFailureBatches || 0) + 1;
+            updateRandom40Progress({
+              detail: `Sources unavailable; automatically retrying new pages (${runState.sourceFailureBatches})...`,
+              accepted: random40State.accepted,
+              videos: random40State.videos,
+              pages: random40State.pages,
+              api: random40State.api,
+              force: true
+            });
+            await sleep(Math.min(2500, 500 + runState.sourceFailureBatches * 250));
+            continue;
+          }
+          runState.sourceFailureBatches = 0;
           const byArtist = new Map();
 
           pageResults.forEach(result => {
-            random40State.pages++;
             if (result.error || !result.doc) return;
             random40FindArtistsOnListing(result.doc, result.pageUrl).forEach(artist => {
               if (!artist.imageUrl) return;
