@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.92</div>
+    <div class="version-number">24.93</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4111,19 +4111,49 @@ function getNextDeckIndex() {
   ensureDeckOrder();
 
   const candidates = deckOrder.filter(index => index !== deckCurrentIndex && getDeckWrapper(index));
-  const readyUnseen = candidates.find(index => {
+  const unseen = candidates.filter(index => {
     const wrapper = getDeckWrapper(index);
-    return isWrapperReady(wrapper) && !isWrapperViewed(wrapper);
+    return wrapper && !isWrapperViewed(wrapper);
   });
-  if (readyUnseen != null) return readyUnseen;
-
-  const unreadyUnseen = candidates.find(index => {
-    const wrapper = getDeckWrapper(index);
-    return !isWrapperReady(wrapper) && !isWrapperViewed(wrapper);
+  unseen.sort((left, right) => {
+    const leftWrapper = getDeckWrapper(left);
+    const rightWrapper = getDeckWrapper(right);
+    const leftVideo = leftWrapper?.querySelector('video');
+    const rightVideo = rightWrapper?.querySelector('video');
+    const leftReady = isWrapperReady(leftWrapper) ? 1 : 0;
+    const rightReady = isWrapperReady(rightWrapper) ? 1 : 0;
+    if (leftReady !== rightReady) return rightReady - leftReady;
+    const readinessDifference = getVideoReadyPercent(rightVideo) - getVideoReadyPercent(leftVideo);
+    if (Math.abs(readinessDifference) > 0.01) return readinessDifference;
+    const bufferDifference = getVideoBufferedAheadSeconds(rightVideo) - getVideoBufferedAheadSeconds(leftVideo);
+    if (Math.abs(bufferDifference) > 0.01) return bufferDifference;
+    return deckOrder.indexOf(left) - deckOrder.indexOf(right);
   });
-  if (unreadyUnseen != null) return unreadyUnseen;
+  return unseen[0] ?? null;
+}
 
-  return null;
+function moveDeckIndexImmediatelyAfterCurrent(index) {
+  ensureDeckOrder();
+  const target = Number(index);
+  if (!Number.isInteger(target) || target === deckCurrentIndex) return;
+  deckOrder = deckOrder.filter(item => item !== target);
+  const currentPosition = deckOrder.indexOf(deckCurrentIndex);
+  if (currentPosition < 0) {
+    deckOrder.unshift(target);
+    return;
+  }
+  deckOrder.splice(currentPosition + 1, 0, target);
+}
+
+function getDeckLogicalCounterText(localIndex) {
+  ensureDeckOrder();
+  const logicalPosition = deckOrder.indexOf(Number(localIndex));
+  if (logicalPosition < 0) return getVideoCounterText(localIndex);
+  const hasRange = hasActivePlaybackRange();
+  const rangeStart = hasRange ? activePlaybackRange.start : 0;
+  const rangeEnd = hasRange ? getPlaybackRangeEnd(true) : allVideoUrls.length;
+  const total = Math.max(0, rangeEnd - rangeStart) || videoUrls.length;
+  return `${logicalPosition + 1}/${Math.max(1, total)} (${getCounterBatchText()})`;
 }
 
 function getForwardDeckIndex() {
@@ -4239,7 +4269,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   deckCurrentIndex = targetIndex;
   currentVideoIndex = targetIndex;
   if (eromeBatchAutoAdvance) syncCurrentPasteIndexFromVisibleVideo();
-  ensureVideoCounter().textContent = getVideoCounterText(currentVideoIndex);
+  ensureVideoCounter().textContent = getDeckLogicalCounterText(currentVideoIndex);
   const video = target.querySelector('video');
   transferForegroundVideoPriority(video);
   if (DECK_MODE_ENABLED && !visibleBatchRetryTimer) startVisibleBatchAutoRetry();
@@ -4327,10 +4357,6 @@ function goToNextDeckVideo() {
     return true;
   }
 
-  if (currentWrapper && !isWrapperViewed(currentWrapper)) {
-    moveDeckIndexToBack(currentIndex);
-  }
-
   const nextIndex = getNextDeckIndex();
   if (nextIndex == null) {
     if (loadNextEromeBatchIfAvailable()) return true;
@@ -4339,6 +4365,10 @@ function goToNextDeckVideo() {
     return true;
   }
 
+  // The most playable unseen card becomes the next logical slot. Original
+  // unready cards shift later instead of making a downward swipe jump from
+  // video 1 to the old video 4 position.
+  moveDeckIndexImmediatelyAfterCurrent(nextIndex);
   setDeckActiveIndex(nextIndex, 'up', { pushHistory: true });
   return true;
 }
