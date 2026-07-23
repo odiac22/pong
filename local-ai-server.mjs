@@ -6433,7 +6433,13 @@ async function createPongLocal2Workers() {
 async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates }) {
   while (!signal.aborted && needsCandidates()) {
     const state = snapshot();
-    if (Number(state.states || 0) >= Math.max(48, Number(state.target || 48) * 3)) {
+    const pendingWork = Object.values(state.stages || {}).reduce((total, stage) => (
+      total + Number(stage?.queued || 0) + Number(stage?.active || 0)
+    ), 0);
+    // Retained completed/rejected states are diagnostic history, not backlog.
+    // Throttling on state.states permanently stopped discovery after enough
+    // rejects even when there were zero accepted artists.
+    if (pendingWork >= Math.max(48, Number(state.target || 48) * 3)) {
       await local2AbortableDelay(300, signal);
       continue;
     }

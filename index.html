@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.83</div>
+    <div class="version-number">24.84</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7076,6 +7076,11 @@ function createGearButton(){
     clearSession();
     if(videoUrlsInput)videoUrlsInput.value='';
     const url = new URL(window.location.href);
+    if (random40State?.playbackProfile === 'local22' || url.searchParams.get('pongAutoStart') === 'local22') {
+      url.searchParams.set('pongAutoStart', 'local22');
+      url.searchParams.set('pongPlaybackProfile', 'local22');
+      url.searchParams.set('pongStartedAt', String(Date.now()));
+    }
     url.searchParams.set('pongRefresh', String(Date.now()));
     window.location.replace(url.href);
   });
@@ -13807,8 +13812,8 @@ async function random40RunCleanLocal2(runState, localEndpoint) {
         detail: batch.error
           ? `Clean Local2 waiting: ${batch.error}`
           : batch.ready
-            ? 'Clean Local2 is preparing the next accepted artists...'
-            : `Clean Local2 reservoir filling (${batch.remaining}/${batch.target})...`,
+            ? 'Local2.2 is preparing the next accepted artists...'
+            : `Local2.2 preparing accepted artists (${batch.remaining}/${batch.target})...`,
         accepted: runState.accepted,
         videos: runState.videos,
         pages: runState.pages,
@@ -14991,7 +14996,7 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
       return;
     }
     random40State.localEndpoint = localEndpoint;
-    if (runMode === 'local2') {
+    if (runMode === 'local2' && random40State.playbackProfile !== 'local22') {
       // Local2 now scans the selected random pages immediately. Retire the old
       // background producer so it cannot compete with foreground source/model work.
       await fetch(`${localEndpoint}/local2/stop`, { method: 'POST', cache: 'no-store' }).catch(() => null);
@@ -15021,6 +15026,23 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
   }
 
   try {
+    if (runState.playbackProfile === 'local22') {
+      await random40RunCleanLocal2(runState, localEndpoint);
+      if (random40State !== runState) return;
+      runState.done = true;
+      updateRandom40Progress({
+        detail: `${runState.stop ? 'Stopped' : 'Done'}: ${runState.accepted} accepted, ${runState.videos} verified videos`,
+        accepted: runState.accepted,
+        videos: runState.videos,
+        pages: runState.pages,
+        api: runState.api,
+        force: true
+      });
+      random40PersistStageTimings();
+      await random40ReleasePlaybackProtection(runState);
+      hideRandom40Progress(2500);
+      return;
+    }
     while (!random40State.stop && random40State.accepted < RANDOM40_TARGET_ACCEPTED) {
       const pages = [];
       let artists = [];
