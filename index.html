@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.03</div>
+    <div class="version-number">25.04</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -15235,7 +15235,16 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
           continue;
         }
 
-        updateRandom40Progress({ detail: `Loading pages ${pages.join(', ')}`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
+        if (!Number(runState.sourceFailureBatches || 0)) {
+          updateRandom40Progress({
+            detail: `Loading pages ${pages.join(', ')}`,
+            accepted: random40State.accepted,
+            videos: random40State.videos,
+            pages: random40State.pages,
+            api: random40State.api,
+            force: true
+          });
+        }
 
         try {
           const pageStageStarted = performance.now();
@@ -15261,10 +15270,22 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
               api: random40State.api,
               force: true
             });
-            await sleep(Math.min(2500, 500 + runState.sourceFailureBatches * 250));
+            const retryDelayMs = Math.min(
+              30000,
+              3000 * (2 ** Math.min(3, Math.max(0, runState.sourceFailureBatches - 1)))
+            );
+            await sleep(retryDelayMs);
             continue;
           }
           runState.sourceFailureBatches = 0;
+          updateRandom40Progress({
+            detail: `Source recovered; checking ${successfulPageResults.length} pages...`,
+            accepted: random40State.accepted,
+            videos: random40State.videos,
+            pages: random40State.pages,
+            api: random40State.api,
+            force: true
+          });
           const byArtist = new Map();
 
           pageResults.forEach(result => {

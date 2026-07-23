@@ -104,19 +104,19 @@ const GATEWAY_KEEP_WARM_MS = Math.max(10000, Number(process.env.PONG_GATEWAY_KEE
 const GATEWAY_AGENT = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 15000,
-  maxSockets: Math.max(24, Number(process.env.PONG_GATEWAY_MAX_SOCKETS || 72)),
-  maxFreeSockets: Math.max(16, Number(process.env.PONG_GATEWAY_MAX_FREE_SOCKETS || 48)),
+  maxSockets: Math.max(16, Number(process.env.PONG_GATEWAY_MAX_SOCKETS || 32)),
+  maxFreeSockets: Math.max(8, Number(process.env.PONG_GATEWAY_MAX_FREE_SOCKETS || 16)),
   scheduling: 'lifo'
 });
 const VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST = Math.max(4, Math.min(96, Number(
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST ||
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY ||
-  36
+  12
 )));
-const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(32, Number(process.env.PONG_VIDEO_VERIFY_PER_ARTIST_CONCURRENCY || 6)));
+const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(32, Number(process.env.PONG_VIDEO_VERIFY_PER_ARTIST_CONCURRENCY || 4)));
 const VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST = Math.max(1, Math.min(
   VIDEO_VERIFY_PER_ARTIST_CONCURRENCY,
-  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 6)
+  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 4)
 ));
 const VIDEO_VERIFY_CACHE_MAX = Math.max(200, Number(process.env.PONG_VIDEO_VERIFY_CACHE_MAX || 6000));
 const VIDEO_VERIFY_CACHE_TTL_MS = Math.max(30000, Number(process.env.PONG_VIDEO_VERIFY_CACHE_TTL_MS || 900000));
@@ -131,7 +131,7 @@ const RANDOM40_RESERVOIR_READY_MIN = Math.min(
   RANDOM40_RESERVOIR_VERIFIED_TARGET,
   Math.max(3, Math.min(64, Number(process.env.PONG_RANDOM40_RESERVOIR_READY_MIN || 48)))
 );
-const RANDOM40_RESERVOIR_PROFILE_CONCURRENCY = Math.max(2, Math.min(32, Number(process.env.PONG_RANDOM40_RESERVOIR_CONCURRENCY || 24)));
+const RANDOM40_RESERVOIR_PROFILE_CONCURRENCY = Math.max(2, Math.min(32, Number(process.env.PONG_RANDOM40_RESERVOIR_CONCURRENCY || 12)));
 const RANDOM40_RESERVOIR_PROFILE_PAGE_BATCH = Math.max(2, Math.min(12, Number(process.env.PONG_RANDOM40_PROFILE_PAGE_BATCH || 2)));
 const RANDOM40_RESERVOIR_ENABLED = process.env.PONG_RANDOM40_RESERVOIR_ENABLED !== '0';
 const RANDOM40_ACCEPTED_TARGET = Math.max(8, Math.min(32, Number(process.env.PONG_RANDOM40_ACCEPTED_TARGET || 24)));
@@ -6530,6 +6530,7 @@ async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates })
   const maximumPendingWork = 36;
   const maximumSubmitBatch = 16;
   const listingPageConcurrency = 4;
+  let emptySourceBatches = 0;
   while (!signal.aborted && needsCandidates()) {
     const state = snapshot();
     const pendingWork = Object.values(state.stages || {}).reduce((total, stage) => (
@@ -6580,7 +6581,11 @@ async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates })
     while (local2ProducerRecentArtists.size > 5000) {
       local2ProducerRecentArtists.delete(local2ProducerRecentArtists.values().next().value);
     }
-    await local2AbortableDelay(submitted ? 25 : 250, signal);
+    emptySourceBatches = submitted ? 0 : emptySourceBatches + 1;
+    const retryDelay = submitted
+      ? 25
+      : Math.min(15000, 1000 * (2 ** Math.min(4, Math.max(0, emptySourceBatches - 1))));
+    await local2AbortableDelay(retryDelay, signal);
   }
 }
 
@@ -6613,7 +6618,7 @@ const local2Adapter = createLocal2NodeAdapter({
     triageHardRejectConfidence: 0.96,
     // Several independent artist image batches may occupy the model queue at
     // once; the Python service still returns one isolated decision per artist.
-    concurrency: { profile: 12, triage: 4, verify: 12, classify: 4, finalize: 6 }
+    concurrency: { profile: 8, triage: 4, verify: 8, classify: 4, finalize: 6 }
   }
 });
 
