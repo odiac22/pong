@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.73</div>
+    <div class="version-number">24.74</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -16295,6 +16295,10 @@ document.getElementById('auth-close').addEventListener('click',()=>{
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
+  if (PONG_PLAYBACK_BENCHMARK) {
+    isControlsVisible = true;
+    document.body.classList.remove('controls-hidden');
+  }
   (function() {
     const overlay = document.getElementById('pong-overlay');
     const hotspot = document.getElementById('pong-hotspot');
