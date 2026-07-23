@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.65</div>
+    <div class="version-number">24.66</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3617,7 +3617,7 @@ function rotateVideoRetrySource(wrapper, video) {
   if (!originalUrl || !video) return false;
 
   if (random40IsPcGrowingCachePlaybackUrl(currentUrl)) {
-    const gatewayUrl = random40PcGatewayUrl(originalUrl);
+    const gatewayUrl = random40PcPlaybackGatewayUrl(originalUrl);
     if (!gatewayUrl) return false;
     void random40WarmServerVideoCache([], { deferredUrl: originalUrl, urgent: true });
     wrapper.dataset.gatewayFallbackTried = 'true';
@@ -3637,7 +3637,7 @@ function rotateVideoRetrySource(wrapper, video) {
     return true;
   }
 
-  const gatewayUrl = random40PcGatewayUrl(originalUrl);
+  const gatewayUrl = random40PcPlaybackGatewayUrl(originalUrl);
   if (
     gatewayUrl &&
     !random40PlaybackUrlsMatch(currentUrl, gatewayUrl) &&
@@ -4844,7 +4844,7 @@ function createVideoElements() {
         delete video.dataset.lastNetworkProgressAt;
         video.dataset.lastNetworkAttemptAt = String(Date.now());
         const gatewayFallback = random40IsPcGrowingCachePlaybackUrl(failedUrl)
-          ? random40PcGatewayUrl(originalUrl)
+          ? random40PcPlaybackGatewayUrl(originalUrl)
           : '';
         const restoredUrl = gatewayFallback || originalUrl;
         if (gatewayFallback) {
@@ -4863,7 +4863,7 @@ function createVideoElements() {
         try { video.load(); } catch (_) {}
         return;
       }
-      const gatewayUrl = originalUrl ? random40PcGatewayUrl(originalUrl) : '';
+      const gatewayUrl = originalUrl ? random40PcPlaybackGatewayUrl(originalUrl) : '';
       const gatewayEndpoint = random40GatewayEndpoint || random40State?.localEndpoint || '';
       if (
         gatewayUrl &&
@@ -4882,7 +4882,7 @@ function createVideoElements() {
         wrapper.dataset.directFallbackRestored !== 'true'
       ) {
         if (isRandom40PlaybackActive()) {
-          const pcRetryUrl = random40PcFileCacheStreamUrl(originalUrl) || random40PcGatewayUrl(originalUrl);
+          const pcRetryUrl = random40PcFileCacheStreamUrl(originalUrl) || random40PcPlaybackGatewayUrl(originalUrl);
           if (!pcRetryUrl) return;
           delete wrapper.dataset.directFallbackRestored;
           delete video.dataset.lastNetworkProgressAt;
@@ -5646,7 +5646,7 @@ function random40PlaybackUrl(rawUrl) {
 
 function random40InstallPlaybackFallback(record) {
   if (!record || record.restoredDirectAfterGateway) return false;
-  record.fallbackUrl = random40PcGatewayUrl(record.activeUrl || record.url);
+  record.fallbackUrl = random40PcPlaybackGatewayUrl(record.activeUrl || record.url);
   if (!record.fallbackUrl) return false;
   record.usingGateway = true;
   record.activeUrl = record.fallbackUrl;
@@ -5929,7 +5929,7 @@ function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order
       .filter(value => value && value !== url))],
     alternateIndex: 0,
     activeUrl: borrowedVideo ? (borrowedVideo.currentSrc || borrowedVideo.src || url) : url,
-    fallbackUrl: random40PcGatewayUrl(url),
+    fallbackUrl: random40PcPlaybackGatewayUrl(url),
     usingGateway: Boolean(borrowedVideo && (borrowedVideo.currentSrc || borrowedVideo.src) &&
       String(borrowedVideo.currentSrc || borrowedVideo.src) !== String(url)),
     restoredDirectAfterGateway: false,
@@ -8983,6 +8983,12 @@ function random40PcGatewayUrl(rawUrl) {
   return `${endpoint}/proxy?url=${encodeURIComponent(rawUrl)}`;
 }
 
+function random40PcPlaybackGatewayUrl(rawUrl) {
+  const gatewayUrl = random40PcGatewayUrl(rawUrl);
+  if (location.protocol === 'https:' && /^http:\/\//i.test(gatewayUrl)) return '';
+  return gatewayUrl;
+}
+
 function random40PcFileCacheStreamUrl(rawUrl) {
   const endpoint = random40ServerVideoCacheEndpoint();
   if (!endpoint || !rawUrl) return '';
@@ -9129,7 +9135,7 @@ function random40ForegroundPlaybackUrl(rawUrl) {
   if (!random40ServerVideoCacheEndpoint()) return key;
   const serverRecord = random40ServerVideoCacheTracked.get(key);
   if (serverRecord?.ready === true && serverRecord.playbackUrl) return serverRecord.playbackUrl;
-  return random40PcGatewayUrl(key) || key;
+  return random40PcPlaybackGatewayUrl(key) || key;
 }
 
 function random40KeepReadyCacheCardAttached(wrapper) {
