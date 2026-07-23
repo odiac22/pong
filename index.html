@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.63</div>
+    <div class="version-number">24.64</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -948,7 +948,13 @@ let pongAutoScrollEnabled = false;
 let pongAutoScrollSeconds = 10;
 let pongAutoScrollTimer = null;
 const PONG_PLAYBACK_BENCHMARK = new URLSearchParams(location.search).get('pongPlaybackBenchmark') === '1';
-const PONG_PLAYBACK_BENCHMARK_TARGETS = [10, 5];
+const PONG_PLAYBACK_BENCHMARK_TARGETS = (() => {
+  const requested = new URLSearchParams(location.search).get('pongPlaybackTargets');
+  const parsed = String(requested || '').split(',')
+    .map(value => Math.max(1, Math.min(20, Number.parseInt(value, 10) || 0)))
+    .filter(Boolean);
+  return parsed.length ? parsed.slice(0, 8) : [10, 5];
+})();
 const PONG_PLAYBACK_BENCHMARK_SAMPLE_SECONDS = 10;
 let pongPlaybackBenchmarkState = {
   startedAt: 0,
@@ -2168,6 +2174,7 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   delete wrapper.dataset.playIntent;
   delete wrapper.dataset.userPaused;
   delete wrapper.dataset.userAudioIntent;
+  delete wrapper.dataset.readyOverlayDismissed;
   delete wrapper.dataset.gatewayFallbackTried;
   delete wrapper.dataset.directFallbackRestored;
   wrapper.dataset.originalVideoUrl = nextUrl;
@@ -3509,6 +3516,11 @@ function updateVideoReadyLoader(video, forceReady = false) {
   updateVideoBufferedProgressBar(video);
   wrapper.style.setProperty('--ready-pct', rounded);
 
+  if (wrapper.dataset.readyOverlayDismissed === 'true') {
+    if (loader) loader.style.display = 'none';
+    return;
+  }
+
   if (percentText) {
     percentText.textContent = `${rounded}%`;
     percentText.classList.toggle('not-ready', percent < 100);
@@ -4423,7 +4435,7 @@ function pongPlaybackBenchmarkCompleteVideo(video, wrapper) {
   }
   const artistIndex = pongPlaybackBenchmarkState.artists.indexOf(artist);
   const target = PONG_PLAYBACK_BENCHMARK_TARGETS[Math.min(artistIndex, PONG_PLAYBACK_BENCHMARK_TARGETS.length - 1)];
-  if (artistIndex >= 1 && artist.completed >= target) {
+  if (artistIndex >= PONG_PLAYBACK_BENCHMARK_TARGETS.length - 1 && artist.completed >= target) {
     pongPlaybackBenchmarkState.done = true;
     pongPlaybackBenchmarkState.completedAt = Date.now();
     updatePongPlaybackBenchmarkOutput();
@@ -4770,6 +4782,8 @@ function createVideoElements() {
     });
     video.addEventListener('playing', () => {
       video.dataset.hasPlayedFrame = 'true';
+      wrapper.dataset.readyOverlayDismissed = 'true';
+      readyLoader.style.display = 'none';
       pongPlaybackBenchmarkOnPlaying(video, wrapper);
       if (isVideoReadyForInitialPlayback(video)) markVideoAutoRetryDone(video, 'playing');
       else updateVideoReadyLoader(video);
