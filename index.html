@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.08</div>
+    <div class="version-number">25.09</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -16048,7 +16048,10 @@ async function waitForEromeBackgroundScrapeSlot() {
   }
 }
 
+let bunkrLoadGeneration = 0;
+
 async function loadBunkrAsCards(targets) {
+  const loadGeneration = ++bunkrLoadGeneration;
   const endpoint = await getRandom40LocalEndpoint(true);
   if (!endpoint) {
     alert('Bunkr imports need the Pong PC server to be running and reachable.');
@@ -16097,14 +16100,85 @@ async function loadBunkrAsCards(targets) {
     return;
   }
 
-  const groups = [];
+  const BUNKR_READY_ALBUM_TARGET = 5;
+  const BUNKR_BACKGROUND_ALBUM_CONCURRENCY = 4;
+  let reservedAlbumSlots = 0;
+  let cardsStarted = false;
+  let loadedAlbums = 0;
   let completed = 0;
   let videoCount = 0;
-  await eromePool(discovered, Math.min(4, discovered.length), async album => {
+
+  const bunkrPlaybackBase = location.protocol === 'https:'
+    ? EROME_PROXY_BASE.replace(/\/+$/, '')
+    : endpoint.replace(/\/+$/, '');
+
+  const unviewedAlbumCount = () => pasteEvents.reduce((count, event, index) => {
+    if (
+      event?.source === 'bunkr' &&
+      isPasteEventViewableForPaperclip(event) &&
+      !isPasteEventRetiredForPaperclip(event, index) &&
+      !isPasteEventPreviouslyVisitedForPaperclip(event, index)
+    ) return count + 1;
+    return count;
+  }, 0);
+
+  const acquireAlbumSlot = async () => {
+    while (
+      loadGeneration === bunkrLoadGeneration &&
+      cardsStarted &&
+      unviewedAlbumCount() + reservedAlbumSlots >= BUNKR_READY_ALBUM_TARGET
+    ) {
+      await sleep(350);
+    }
+    if (loadGeneration !== bunkrLoadGeneration) return false;
+    reservedAlbumSlots++;
+    return true;
+  };
+
+  const publishGroup = group => {
+    let imported;
+    if (!cardsStarted) {
+      imported = cacheEromeCardImport([group], bunkrPlaybackBase);
+      closeEromeHelper();
+      setEromeTwentyCardMode(true, { respectRange: true });
+      window.PongEromeAutoAdvanceOnce = true;
+      window.PongLoadAllVideosOnce = false;
+      loadVideosButton.click();
+      activateFirstEromeBatch();
+      cardsStarted = true;
+    } else {
+      imported = appendEromeGroupsToCurrentCards([group], bunkrPlaybackBase);
+      updatePasteNavigationButton();
+    }
+    loadedAlbums++;
+    videoCount += imported.urls.length;
+    // On the LAN build, quietly stage the first two files of each newly
+    // available album.  They remain background priority until Paperclip makes
+    // that album active, so the current video keeps the foreground connection.
+    if (location.protocol !== 'https:' && Array.isArray(group.videos)) {
+      postJson('/video-cache/warm', {
+        playbackProfile: 'local22',
+        items: group.videos.slice(0, 2).map(url => ({
+          url,
+          artistKey: group.sourceUrl || group.url || ''
+        })),
+        urgent: false,
+        authoritative: false
+      }).catch(() => {});
+    }
+    showSortingIndicator(
+      `Bunkr ready: ${loadedAlbums} albums, ${videoCount} videos`
+    );
+  };
+
+  const scrapeAlbum = async album => {
+    const acquiredSlot = await acquireAlbumSlot();
+    if (!acquiredSlot) return;
     try {
       const data = await postJson('/bunkr/album', album);
+      if (loadGeneration !== bunkrLoadGeneration) return;
       if (Array.isArray(data.videos) && data.videos.length) {
-        groups.push({
+        publishGroup({
           url: album.url,
           title: album.title || data.title || 'Bunkr album',
           sourceUrl: album.url,
@@ -16112,44 +16186,50 @@ async function loadBunkrAsCards(targets) {
           source: 'bunkr',
           videos: data.videos
         });
-        videoCount += data.videos.length;
       }
     } catch (error) {
       console.warn('Bunkr album import failed:', album.url, error);
     } finally {
+      reservedAlbumSlots = Math.max(0, reservedAlbumSlots - 1);
       completed++;
       updateEromeProgress({
-        title: 'Scraping Bunkr albums',
-        detail: `${completed}/${discovered.length} albums`,
+        title: cardsStarted ? 'Bunkr playing while more load' : 'Opening first Bunkr album',
+        detail: `${loadedAlbums} ready · ${completed}/${discovered.length} checked`,
         completed,
         total: discovered.length,
         videos: videoCount
       });
     }
-  });
+  };
 
-  if (!groups.length) {
+  // Resolve one successful album first so playback starts immediately.  Only
+  // then use four background workers to rapidly maintain five unviewed albums.
+  let backgroundStartIndex = discovered.length;
+  for (let index = 0; index < discovered.length; index++) {
+    await scrapeAlbum(discovered[index]);
+    if (cardsStarted) {
+      backgroundStartIndex = index + 1;
+      break;
+    }
+  }
+
+  if (!cardsStarted) {
     alert('No browser-playable videos were found in those Bunkr albums.');
     return;
   }
 
-  const bunkrPlaybackBase = location.protocol === 'https:'
-    ? EROME_PROXY_BASE.replace(/\/+$/, '')
-    : endpoint.replace(/\/+$/, '');
-  const imported = cacheEromeCardImport(groups, bunkrPlaybackBase);
-  closeEromeHelper();
-  setEromeTwentyCardMode(true, { respectRange: true });
-  window.PongEromeAutoAdvanceOnce = true;
-  window.PongLoadAllVideosOnce = false;
-  loadVideosButton.click();
-  activateFirstEromeBatch();
-  showSortingIndicator(`Loaded ${imported.urls.length} Bunkr videos from ${groups.length} albums.`);
+  await eromePool(
+    discovered.slice(backgroundStartIndex),
+    BUNKR_BACKGROUND_ALBUM_CONCURRENCY,
+    scrapeAlbum
+  );
+
   updateEromeProgress({
     title: 'Bunkr ready',
-    detail: `${groups.length} albums from the pasted page`,
-    completed: groups.length,
-    total: groups.length,
-    videos: imported.urls.length
+    detail: `${loadedAlbums} albums from the pasted page`,
+    completed,
+    total: discovered.length,
+    videos: videoCount
   });
 }
 
