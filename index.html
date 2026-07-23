@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.05</div>
+    <div class="version-number">25.06</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7525,7 +7525,7 @@ function getEromeTargetLabel(rawUrl) {
 // the request with that header and streams the bytes back. Deploy it, then set
 // EROME_PROXY_BASE to its URL to unlock the "Cards" button. The in-app iframe
 // browser ("Open") works WITHOUT the proxy — Erome runs in its own context.
-const EROME_PROXY_BASE = 'https://pong-erome-proxy.odiac22-pong-repair.workers.dev';
+const EROME_PROXY_BASE = 'https://pong-erome-proxy.arianslade-pong.workers.dev';
 
 const eromeHelper = document.getElementById('erome-helper');
 const eromeIframeContainer = document.getElementById('erome-iframe-container');
@@ -8789,7 +8789,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
     group.videos.forEach((rawUrl, videoIndex) => {
       const isBunkr = group.source === 'bunkr';
       const proxiedUrl = isBunkr
-        ? `${proxyBase}/video-cache/stream?url=${encodeURIComponent(rawUrl)}&profile=local22`
+        ? `${proxyBase}/bunkr.mp4?u=${encodeURIComponent(rawUrl)}`
         : proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
       const mediaKey = eromeMediaKey(rawUrl);
 
@@ -9340,6 +9340,7 @@ function random40PcGatewayUrl(rawUrl) {
 
 function random40PcPlaybackGatewayUrl(rawUrl) {
   if (random40IsPcFileCachePlaybackUrl(rawUrl)) return '';
+  if (EROME_PROXY_BASE && String(rawUrl || '').startsWith(`${EROME_PROXY_BASE.replace(/\/+$/, '')}/`)) return '';
   const gatewayUrl = random40PcGatewayUrl(rawUrl);
   if (location.protocol === 'https:' && /^http:\/\//i.test(gatewayUrl)) return '';
   return gatewayUrl;
@@ -16087,7 +16088,7 @@ async function loadBunkrAsCards(targets) {
     return;
   }
 
-  const imported = cacheEromeCardImport(groups, endpoint.replace(/\/+$/, ''));
+  const imported = cacheEromeCardImport(groups, EROME_PROXY_BASE.replace(/\/+$/, ''));
   closeEromeHelper();
   setEromeTwentyCardMode(true, { respectRange: true });
   window.PongEromeAutoAdvanceOnce = true;

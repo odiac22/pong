@@ -36,6 +36,10 @@ function isEromeHost(hostname) {
   return /(^|\.)erome\.com$/i.test(hostname);
 }
 
+function isBunkrMediaHost(hostname) {
+  return /(^|\.)cdn\.cr$/i.test(hostname);
+}
+
 function corsHeaders(extra) {
   return {
     'Access-Control-Allow-Origin': '*',
@@ -317,7 +321,12 @@ async function handleScrape(target, options = {}) {
 
 async function handleVideo(request, target) {
   const range = request.headers.get('Range');
-  const headers = { ...EROME_HEADERS };
+  const headers = isBunkrMediaHost(target.hostname)
+    ? {
+        Referer: 'https://dl.bunkr.cr/',
+        'User-Agent': BROWSER_UA,
+      }
+    : { ...EROME_HEADERS };
   if (range) headers.Range = range;
 
   const upstream = await fetch(target.href, { headers, redirect: 'follow' });
@@ -336,7 +345,10 @@ async function handleVideo(request, target) {
     const v = upstream.headers.get(name);
     if (v) out.set(name, v);
   }
-  if (!out.has('content-type')) out.set('content-type', 'video/mp4');
+  if (
+    !out.has('content-type') ||
+    out.get('content-type') === 'application/octet-stream'
+  ) out.set('content-type', 'video/mp4');
   if (!out.has('accept-ranges')) out.set('accept-ranges', 'bytes');
 
   return new Response(upstream.body, { status: upstream.status, headers: out });
@@ -368,9 +380,15 @@ export default {
       return json({ error: "bad 'u' URL" }, 400);
     }
 
-    if (target.protocol !== 'https:' || !isEromeHost(target.hostname)) {
-      return json({ error: 'only https://*.erome.com targets are allowed' }, 403);
+    const bunkrVideoRequest = url.pathname.startsWith('/bunkr.mp4');
+    const targetAllowed = bunkrVideoRequest
+      ? isBunkrMediaHost(target.hostname)
+      : isEromeHost(target.hostname);
+    if (target.protocol !== 'https:' || !targetAllowed) {
+      return json({ error: 'target host is not allowed' }, 403);
     }
+
+    if (bunkrVideoRequest) return handleVideo(request, target);
 
     const scrapeOptions = url.searchParams.get('fast') === '1'
       ? {
