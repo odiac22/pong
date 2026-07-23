@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.85</div>
+    <div class="version-number">24.86</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -13829,8 +13829,14 @@ async function random40TakeLocal2Candidates(localEndpoint, count, runState) {
   }
 }
 
-async function random40RunCleanLocal2(runState, localEndpoint) {
-  while (random40State === runState && !runState.stop && runState.accepted < RANDOM40_TARGET_ACCEPTED) {
+async function random40RunCleanLocal2(runState, localEndpoint, { deadlineMs = 0 } = {}) {
+  const deadlineAt = deadlineMs > 0 ? Date.now() + deadlineMs : 0;
+  while (
+    random40State === runState &&
+    !runState.stop &&
+    runState.accepted < RANDOM40_TARGET_ACCEPTED &&
+    (!deadlineAt || Date.now() < deadlineAt)
+  ) {
     const remainingNeeded = RANDOM40_TARGET_ACCEPTED - runState.accepted;
     const stageStarted = performance.now();
     const batch = await random40TakeLocal2Candidates(localEndpoint, remainingNeeded, runState);
@@ -15064,21 +15070,32 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
 
   try {
     if (runState.playbackProfile === 'local22') {
-      await random40RunCleanLocal2(runState, localEndpoint);
+      await random40RunCleanLocal2(runState, localEndpoint, { deadlineMs: 30000 });
       if (random40State !== runState) return;
-      runState.done = true;
+      if (runState.stop || runState.accepted >= RANDOM40_TARGET_ACCEPTED) {
+        runState.done = true;
+        updateRandom40Progress({
+          detail: `${runState.stop ? 'Stopped' : 'Done'}: ${runState.accepted} accepted, ${runState.videos} verified videos`,
+          accepted: runState.accepted,
+          videos: runState.videos,
+          pages: runState.pages,
+          api: runState.api,
+          force: true
+        });
+        random40PersistStageTimings();
+        await random40ReleasePlaybackProtection(runState);
+        hideRandom40Progress(2500);
+        return;
+      }
+      await fetch(`${localEndpoint}/local2/stop`, { method: 'POST', cache: 'no-store' }).catch(() => null);
       updateRandom40Progress({
-        detail: `${runState.stop ? 'Stopped' : 'Done'}: ${runState.accepted} accepted, ${runState.videos} verified videos`,
+        detail: 'Local2.2 fast lane was empty; switching to live scan...',
         accepted: runState.accepted,
         videos: runState.videos,
         pages: runState.pages,
         api: runState.api,
         force: true
       });
-      random40PersistStageTimings();
-      await random40ReleasePlaybackProtection(runState);
-      hideRandom40Progress(2500);
-      return;
     }
     while (!random40State.stop && random40State.accepted < RANDOM40_TARGET_ACCEPTED) {
       const pages = [];

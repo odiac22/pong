@@ -6482,6 +6482,8 @@ async function createPongLocal2Workers() {
 }
 
 async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates }) {
+  const maximumPendingWork = 72;
+  const maximumSubmitBatch = 24;
   while (!signal.aborted && needsCandidates()) {
     const state = snapshot();
     const pendingWork = Object.values(state.stages || {}).reduce((total, stage) => (
@@ -6490,7 +6492,7 @@ async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates })
     // Retained completed/rejected states are diagnostic history, not backlog.
     // Throttling on state.states permanently stopped discovery after enough
     // rejects even when there were zero accepted artists.
-    if (pendingWork >= Math.max(48, Number(state.target || 48) * 3)) {
+    if (pendingWork >= maximumPendingWork) {
       await local2AbortableDelay(300, signal);
       continue;
     }
@@ -6519,11 +6521,13 @@ async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates })
       if (listing.status !== 'fulfilled') continue;
       const pageUrl = `https://${listing.value.host}/?page=${page}`;
       for (const artistUrl of random40ReservoirArtistUrls(listing.value.html, pageUrl)) {
+        if (submitted >= maximumSubmitBatch) break;
         const identity = random40ReservoirIdentity(artistUrl);
         if (!identity || local2ProducerRecentArtists.has(identity)) continue;
         local2ProducerRecentArtists.add(identity);
         if (submit({ artistUrl, sourcePage: page }, { priority: 0 })) submitted++;
       }
+      if (submitted >= maximumSubmitBatch) break;
     }
     while (local2ProducerRecentArtists.size > 5000) {
       local2ProducerRecentArtists.delete(local2ProducerRecentArtists.values().next().value);
@@ -6559,7 +6563,7 @@ const local2Adapter = createLocal2NodeAdapter({
     deliveryBatch: 12,
     minimumVerifiedMedia: 15,
     triageHardRejectConfidence: 0.96,
-    concurrency: { profile: 12, triage: 2, verify: 12, classify: 2, finalize: 4 }
+    concurrency: { profile: 12, triage: 3, verify: 12, classify: 2, finalize: 4 }
   }
 });
 
