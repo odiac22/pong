@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.06</div>
+    <div class="version-number">25.07</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1842,6 +1842,27 @@ function compactSessionVideoMetadata(meta) {
   };
 }
 
+function migrateBunkrSessionPlaybackUrl(rawUrl) {
+  const original = String(rawUrl || '');
+  let candidate = original;
+
+  for (let depth = 0; depth < 5; depth++) {
+    try {
+      const parsed = new URL(candidate, window.location.href);
+      if (/(^|\.)cdn\.cr$/i.test(parsed.hostname)) {
+        return `${EROME_PROXY_BASE.replace(/\/+$/, '')}/bunkr.mp4?u=${encodeURIComponent(parsed.href)}`;
+      }
+      const nested = parsed.searchParams.get('url') || parsed.searchParams.get('u');
+      if (!nested || nested === candidate) break;
+      candidate = nested;
+    } catch (_) {
+      break;
+    }
+  }
+
+  return original;
+}
+
 function saveSession() {
   if (window.PongSuppressSessionSaveUntil && Date.now() < window.PongSuppressSessionSaveUntil) return;
 
@@ -1882,6 +1903,11 @@ function loadSession() {
     allVideoMetadata = Array.isArray(s.allVideoMetadata)
       ? s.allVideoMetadata.map(compactSessionVideoMetadata)
       : [];
+    allVideoUrls = allVideoUrls.map((url, index) => (
+      allVideoMetadata[index]?.source === 'bunkr'
+        ? migrateBunkrSessionPlaybackUrl(url)
+        : url
+    ));
     currentBatch = s.currentBatch || 0;
     currentVideoIndex = s.currentVideoIndex || 0;
     currentPasteIndex = Number.isInteger(s.currentPasteIndex) ? s.currentPasteIndex : -1;
