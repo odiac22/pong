@@ -134,6 +134,7 @@ export function createLocal2NodeAdapter({
   let lastRevisionCheckAt = 0;
   let lastProducerError = '';
   let stoppedAt = 0;
+  let stoppedRejectionAudit = [];
 
   const configuredInitialRevision = revisionFrom(initialRevision) || 'local2-untrained';
 
@@ -278,8 +279,10 @@ export function createLocal2NodeAdapter({
     }
   }
 
-  async function stop() {
+  async function stop({ clearAudit = false } = {}) {
     generation++;
+    if (clearAudit) stoppedRejectionAudit = [];
+    else if (pipeline) stoppedRejectionAudit = pipeline.rejectionAudit(15);
     producerController?.abort(new Error('Local2 adapter stopped'));
     pipeline?.stop();
     if (typeof producerCleanup === 'function') {
@@ -313,6 +316,25 @@ export function createLocal2NodeAdapter({
     if (normalizedMethod === 'POST' && normalizedPath === '/local2/stop') {
       const state = await stop();
       return { handled: true, status: 200, body: { ok: true, ...state } };
+    }
+
+    if (normalizedMethod === 'GET' && normalizedPath === '/local2/rejections') {
+      const minimumVerifiedMedia = integer(query.minimumVerifiedMedia, 15, 0, 100);
+      const rejections = pipeline
+        ? pipeline.rejectionAudit(minimumVerifiedMedia)
+        : stoppedRejectionAudit.filter(item => Number(item.verifiedMediaCount || 0) >= minimumVerifiedMedia);
+      return {
+        handled: true,
+        status: 200,
+        body: {
+          ok: true,
+          schema: ADAPTER_SCHEMA,
+          storage: 'memory-only',
+          minimumVerifiedMedia,
+          count: rejections.length,
+          rejections
+        }
+      };
     }
 
     if (normalizedMethod === 'GET' && normalizedPath === '/local2/candidates') {

@@ -7268,7 +7268,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/workload/reset') {
       workloadGeneration++;
       const leasedBeforeReset = random40AcceptedLeases.size;
-      await local2Adapter.stop().catch(() => {});
+      await local2Adapter.stop({ clearAudit: true }).catch(() => {});
       await resetVideoFileCache('workload reset').catch(() => {});
       random40ReservoirAbortController?.abort();
       random40AcceptedAbortController?.abort();

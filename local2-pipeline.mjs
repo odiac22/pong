@@ -475,6 +475,10 @@ export class Local2ContinuousPipeline {
       this.reject(state, 'verify', `only ${state.media.length}/${this.minimumVerifiedMedia} verified media URLs`);
       return;
     }
+    if (state.modelRejected) {
+      this.reject(state, 'classify', state.modelRejectReason || 'Local2 hard-safe decision gate rejected');
+      return;
+    }
     this.maybeFinalize(state);
   }
 
@@ -498,7 +502,12 @@ export class Local2ContinuousPipeline {
     state.classifyDone = true;
     if (!local2DecisionIsHardSafe(decision)) {
       this.statsCounters.modelRejects++;
-      this.reject(state, 'classify', decision.reason || 'Local2 hard-safe decision gate rejected');
+      state.modelRejected = true;
+      state.modelRejectReason = decision.reason || 'Local2 hard-safe decision gate rejected';
+      // Finish the verification already in flight so the RAM audit can
+      // distinguish 15+ video artists from profiles that never qualified.
+      if (state.verifyDone) this.reject(state, 'classify', state.modelRejectReason);
+      else state.stage = 'verify-for-rejection-audit';
       return;
     }
     this.maybeFinalize(state);
@@ -553,8 +562,20 @@ export class Local2ContinuousPipeline {
     state.abortController?.abort(new Error(state.reason || `Local2 ${stage} rejected`));
     this.rejected.set(state.artistId, {
       artistId: state.artistId,
+      artistUrl: normalizedString(state.profile?.artistUrl || state.candidate?.artistUrl, 2048),
+      artistName: normalizedString(state.profile?.artistName || state.candidate?.artistName, 256),
       stage,
       reason: state.reason,
+      verifiedMediaCount: Array.isArray(state.media) ? state.media.length : 0,
+      preferenceProbability: Number.isFinite(Number(state.decision?.rawDecision?.preference_probability))
+        ? Number(state.decision.rawDecision.preference_probability)
+        : null,
+      decisionImageUrls: uniqueStrings(
+        state.decision?.evidence?.decisionImageUrls ||
+        state.profile?.candidateImageUrls ||
+        [],
+        12
+      ),
       revision: state.revision,
       at: this.now()
     });
@@ -661,6 +682,13 @@ export class Local2ContinuousPipeline {
       counters: { ...this.statsCounters },
       stages: Object.fromEntries(Object.entries(this.stages).map(([name, stage]) => [name, stage.stats()]))
     };
+  }
+
+  rejectionAudit(minimumVerifiedMedia = 15) {
+    const minimum = boundedInteger(minimumVerifiedMedia, 15, 0, 100);
+    return [...this.rejected.values()]
+      .filter(item => Number(item.verifiedMediaCount || 0) >= minimum)
+      .map(item => ({ ...item, decisionImageUrls: [...(item.decisionImageUrls || [])] }));
   }
 
   stop() {
