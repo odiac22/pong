@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.12</div>
+    <div class="version-number">25.13</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4388,9 +4388,11 @@ function goToNextDeckVideo() {
 
   const currentWrapper = getDeckWrapper(deckCurrentIndex);
   const currentIndex = deckCurrentIndex;
+  const currentVideo = currentWrapper?.querySelector('video');
   const recycleSkippedCurrent = !!currentWrapper &&
     currentWrapper.dataset.everPlayed !== 'true' &&
-    !isWrapperViewed(currentWrapper);
+    !isWrapperViewed(currentWrapper) &&
+    !hasVideoDuration(currentVideo);
   clearDeckReadyPromotion();
   deckAutoPromotionLockedUntil = Date.now() + 1000;
 
@@ -4415,7 +4417,12 @@ function goToNextDeckVideo() {
   // unready cards shift later instead of making a downward swipe jump from
   // video 1 to the old video 4 position.
   moveDeckIndexImmediatelyAfterCurrent(nextIndex);
-  setDeckActiveIndex(nextIndex, 'up', { pushHistory: true });
+  setDeckActiveIndex(nextIndex, 'up', {
+    // A zero-duration card that was never played is deferred, not visited.
+    // Excluding it from history makes an upward swipe return to the last
+    // genuinely viewed card instead of the skipped loading placeholder.
+    pushHistory: !recycleSkippedCurrent
+  });
   if (recycleSkippedCurrent) {
     moveDeckIndexToBack(currentIndex);
     ensureVideoCounter().textContent = getDeckLogicalCounterText(deckCurrentIndex);
@@ -5763,6 +5770,26 @@ function setActivePlaybackRangeForPasteEvent(index, { recordHistory = true } = {
   return target;
 }
 
+function rememberCurrentPasteEventVideoPosition() {
+  const event = pasteEvents[currentPasteIndex];
+  const bounds = getPasteEventVideoBounds(event);
+  if (!event || !bounds) return;
+
+  let globalIndex = getCurrentLoadedGlobalVideoIndex();
+  if (globalIndex < bounds.start || globalIndex >= bounds.end) {
+    const localIndex = Number(deckCurrentIndex);
+    if (Number.isInteger(localIndex) && localIndex >= 0) {
+      globalIndex = Number(currentLoadedRangeStart || bounds.start) + localIndex;
+    }
+  }
+  if (globalIndex < bounds.start || globalIndex >= bounds.end) return;
+
+  event.resumeVideoOffset = Math.max(
+    0,
+    Math.min(bounds.end - bounds.start - 1, globalIndex - bounds.start)
+  );
+}
+
 function getNextPasteEventPreviewCount() {
   if (!pasteEvents.length) return 0;
 
@@ -6933,6 +6960,7 @@ function shouldNextBatchAdvanceSavedArtist() {
 function displayPasteEventAtIndex(index, { recordHistory = true } = {}) {
   const targetEvent = pasteEvents[index];
   const currentEvent = pasteEvents[currentPasteIndex];
+  rememberCurrentPasteEventVideoPosition();
   if (isBunkrPasteEvent(targetEvent) || isBunkrPasteEvent(currentEvent)) {
     document.querySelectorAll('.video-wrapper video').forEach(video => {
       try {
@@ -6943,17 +6971,29 @@ function displayPasteEventAtIndex(index, { recordHistory = true } = {}) {
     });
   }
   setActivePlaybackRangeForPasteEvent(index, { recordHistory });
+  const targetCount = Math.max(1, Number(targetEvent?.count || BATCH_SIZE));
+  const resumeOffset = Math.max(
+    0,
+    Math.min(targetCount - 1, Number(targetEvent?.resumeVideoOffset || 0))
+  );
+  const batchSize = Math.max(1, getCurrentBatchSize());
+  const resumeBatchOffset = Math.floor(resumeOffset / batchSize) * batchSize;
+  const resumeLocalIndex = resumeOffset - resumeBatchOffset;
+  if (activePlaybackRange) activePlaybackRange.offset = resumeBatchOffset;
+  deckOrder = [];
+  deckHistory = [];
+  deckForwardHistory = [];
   random40PumpPostFetchQueue();
   scheduleRandom40PreloadPool(50);
   updatePasteNavigationButton();
   scheduleSessionSave(700);
 
   window.PongFastNextBatchOnce = true;
-  deckCurrentIndex = 0;
-  deckRestoreIndex = 0;
+  deckCurrentIndex = resumeLocalIndex;
+  deckRestoreIndex = resumeLocalIndex;
   videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
   setTimeout(()=>{
-    loadNextBatch(0);
+    loadNextBatch(resumeLocalIndex);
     updatePasteNavigationButton();
   },0);
 }
