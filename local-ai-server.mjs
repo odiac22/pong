@@ -6401,7 +6401,7 @@ async function local2TriageWorker(profile, context) {
 async function local2VerifyWorker(profile, context) {
   const postUrls = [...profile.videoPostUrls];
   const seen = new Set(postUrls.map(canonicalVideoPostKey).filter(Boolean));
-  const maximumPages = Math.max(6, Math.min(100, Number(process.env.PONG_LOCAL2_MAX_PROFILE_PAGES || 20)));
+  const maximumPages = Math.max(6, Math.min(100, Number(process.env.PONG_LOCAL2_MAX_PROFILE_PAGES || 12)));
   let nextPage = Math.max(2, Number(profile.scannedThroughPage || 1) + 1);
   while (!context.signal.aborted && nextPage <= maximumPages) {
     if (postUrls.length >= 15) {
@@ -6442,6 +6442,11 @@ async function local2VerifyWorker(profile, context) {
     }
     nextPage = batchPages.at(-1) + 1;
     if (!foundPosts) break;
+    // Random profiles with no video cards after six pages, or fewer than five
+    // after ten pages, have extremely little chance of reaching fifteen. Stop
+    // spending source requests on them so qualified artists reach the verifier.
+    if (nextPage > 6 && postUrls.length === 0) break;
+    if (nextPage > 10 && postUrls.length < 5) break;
   }
   if (postUrls.length >= 15 && !context.signal.aborted) {
     const verified = await verifyVideoPostBatch({ postUrls, stopAt: 15, artistInfo: profile }, context.signal)
@@ -6477,22 +6482,21 @@ async function createPongLocal2Workers() {
     triage: local2TriageWorker,
     verify: local2VerifyWorker,
     classify: local2ClassifyWorker,
-    // Source extraction supplies candidates; this bounded range probe proves
-    // that at least 15 are real supported media containers without playback.
-    finalize: async (_profile, media, _decision, context) => {
-      const playable = await verifyPlayableMediaEntries(media, context.signal);
-      return playable.map(entry => ({
-        ...entry,
-        verified: true,
-        fastStart: videoPlaybackProbeCache.get(entry.videoUrl)?.fastStart === true
-      }));
-    }
+    // local2VerifyWorker already resolved and playback-probed fifteen distinct
+    // real media URLs. A second verification pass dropped valid artists when a
+    // transient retry removed one of exactly fifteen entries.
+    finalize: async (_profile, media) => media.map(entry => ({
+      ...entry,
+      verified: true,
+      fastStart: entry.fastStart === true ||
+        videoPlaybackProbeCache.get(entry.videoUrl)?.fastStart === true
+    }))
   };
 }
 
 async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates }) {
-  const maximumPendingWork = 72;
-  const maximumSubmitBatch = 32;
+  const maximumPendingWork = 36;
+  const maximumSubmitBatch = 16;
   const listingPageConcurrency = 4;
   while (!signal.aborted && needsCandidates()) {
     const state = snapshot();
