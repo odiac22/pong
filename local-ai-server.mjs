@@ -2751,6 +2751,17 @@ function currentVideoFileCachePriority(record, now = Date.now()) {
   return 2;
 }
 
+function isSameOriginLanBrowserRequest(req, requestUrl) {
+  if (req.headers.origin || !isPrivateLanAddress(req.socket.remoteAddress)) return false;
+  if (String(req.headers['sec-fetch-site'] || '').toLowerCase() !== 'same-origin') return false;
+  try {
+    const requestHost = new URL(`http://${req.headers.host || ''}`).hostname;
+    return isPrivateLanAddress(requestHost) && requestUrl.hostname === requestHost;
+  } catch (_) {
+    return false;
+  }
+}
+
 function promoteVideoFileCachePlaybackRecord(activeRecord) {
   for (const record of videoFileCacheRecords.values()) {
     if (record === activeRecord) continue;
@@ -6490,7 +6501,8 @@ const server = http.createServer(async (req, res) => {
       requestUrl.pathname === '/video-cache/stream' ||
       requestUrl.pathname.startsWith('/video-cache/media/')
     );
-  if (!anonymousLanMediaRead && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
+  const sameOriginLanBrowser = isSameOriginLanBrowserRequest(req, requestUrl);
+  if (!anonymousLanMediaRead && !sameOriginLanBrowser && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
     json(res, 403, { ok: false, error: 'browser origin is not allowed' });
     return;
   }
