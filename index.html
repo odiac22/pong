@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.88</div>
+    <div class="version-number">24.89</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -912,7 +912,9 @@ let eromeSlidingRenderPending = false;
 const VIDEO_LOAD_RETRY_DELAYS_MS = [3000, 5000, 7000, 10000, 15000, 20000];
 const VIDEO_LOAD_RETRY_POLL_MS = 1000;
 const VIDEO_NETWORK_PROGRESS_TIMEOUT_MS = 20000;
-const VIDEO_ACTIVE_NETWORK_PROGRESS_TIMEOUT_MS = 8000;
+const VIDEO_ACTIVE_NETWORK_PROGRESS_TIMEOUT_MS = 5000;
+const VIDEO_FOREGROUND_NO_LOAD_RETRY_MS = 5000;
+const VIDEO_FOREGROUND_NO_LOAD_MAX_RETRIES = 3;
 const PONG_PLAYER_AUDIO_PREF_KEY = 'pong_player_audio_pref_v2';
 const PONG_AUTO_SCROLL_KEY = 'pong_auto_scroll_v1';
 let visibleBatchRetryTimer = null;
@@ -3431,6 +3433,46 @@ function refreshForegroundVideoPriority(video, force = false) {
   random40PumpPreloadQueue(needsPriority ? 450 : 50);
 }
 
+function scheduleForegroundNoLoadRetry(video) {
+  if (!video || !document.body.contains(video)) return;
+  const wrapper = video.closest('.video-wrapper');
+  if (!wrapper) return;
+  const token = `${Date.now()}-${Math.random()}`;
+  video.dataset.foregroundLoadWatch = token;
+
+  setTimeout(() => {
+    if (
+      video.dataset.foregroundLoadWatch !== token ||
+      foregroundPriorityVideo !== video ||
+      !wrapper.classList.contains('deck-active') ||
+      !document.body.contains(video)
+    ) return;
+
+    // Do not restart a slow but usable request. This watchdog is only for a
+    // completely empty active card: no metadata and no buffered media at all.
+    if (video.readyState >= 1 || getVideoBufferedAheadSeconds(video) > 0) return;
+    const retries = Number(video.dataset.foregroundNoLoadRetries || 0);
+    if (retries >= VIDEO_FOREGROUND_NO_LOAD_MAX_RETRIES) return;
+
+    video.dataset.foregroundNoLoadRetries = String(retries + 1);
+    video.dataset.lastNetworkAttemptAt = String(Date.now());
+    delete video.dataset.lastNetworkProgressAt;
+    wrapper.dataset.autoRetryCount = String(Number(wrapper.dataset.autoRetryCount || 0) + 1);
+    wrapper.dataset.autoRetryNextAt = String(Date.now() + VIDEO_FOREGROUND_NO_LOAD_RETRY_MS);
+    showVideoRefreshPercentPulse(wrapper);
+
+    // Reassert priority zero in both the browser and PC cache, then rotate
+    // growing-cache -> gateway -> direct source when another route exists.
+    random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
+    random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
+    rotateVideoRetrySource(wrapper, video);
+    video.preload = 'auto';
+    try { video.load(); } catch (_) {}
+    refreshForegroundVideoPriority(video, true);
+    scheduleForegroundNoLoadRetry(video);
+  }, VIDEO_FOREGROUND_NO_LOAD_RETRY_MS);
+}
+
 function transferForegroundVideoPriority(video) {
   const nextVideo = video && document.body.contains(video) ? video : null;
   if (foregroundPriorityVideo && foregroundPriorityVideo !== nextVideo) {
@@ -3447,6 +3489,7 @@ function transferForegroundVideoPriority(video) {
   }
 
   nextVideo.dataset.foregroundPriority = 'true';
+  nextVideo.dataset.foregroundNoLoadRetries = '0';
   const nextWrapper = nextVideo.closest('.video-wrapper');
   if (nextWrapper) {
     random40PromoteWrapperToServerCache(nextWrapper, { forceActive: false });
@@ -3463,6 +3506,7 @@ function transferForegroundVideoPriority(video) {
   }
 
   refreshForegroundVideoPriority(nextVideo, true);
+  scheduleForegroundNoLoadRetry(nextVideo);
 }
 
 function suspendDeckVideoNetwork(wrapper, video) {
