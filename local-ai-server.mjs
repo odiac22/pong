@@ -68,6 +68,7 @@ const VIDEO_FILE_CACHE_TAIL_RANGE_MAX_ACTIVE = Math.max(
   Math.min(8, Number(process.env.PONG_VIDEO_FILE_CACHE_TAIL_RANGE_MAX_ACTIVE || 4) || 4)
 );
 const LEARNED_STORE_PATH = path.join(LOCAL_AI_DIR, 'learned-examples.json');
+const BROWSER_SECRETS_PATH = path.join(LOCAL_AI_DIR, 'browser-secrets.json');
 const FINETUNE_DATASET_PATH = path.join(LOCAL_AI_DIR, 'finetune-dataset.json');
 const FINETUNE_JSONL_PATH = path.join(LOCAL_AI_DIR, 'qwen-lora-dataset.jsonl');
 const FINETUNE_STATUS_PATH = path.join(LOCAL_AI_DIR, 'finetune-status.json');
@@ -449,6 +450,23 @@ function gatewayRequest(current, req, controller, method = req.method === 'HEAD'
     upstreamRequest.on('error', error => finish(error));
     upstreamRequest.once('close', () => controller?.signal?.removeEventListener('abort', abort));
     upstreamRequest.end();
+  });
+}
+
+async function readBrowserSecrets() {
+  try {
+    const parsed = JSON.parse(await fs.readFile(BROWSER_SECRETS_PATH, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+async function writeBrowserSecrets(secrets) {
+  await fs.mkdir(LOCAL_AI_DIR, { recursive: true });
+  await fs.writeFile(BROWSER_SECRETS_PATH, JSON.stringify(secrets), {
+    encoding: 'utf8',
+    mode: 0o600
   });
 }
 
@@ -6229,6 +6247,33 @@ function local2VideoPostUrls(html, artistUrl) {
   return [...urls, ...fallbackUrls];
 }
 
+function local2ProfileTextEvidence(html = '', artistInfo = {}) {
+  const source = String(html || '');
+  const evidence = [
+    artistInfo.artistName,
+    artistInfo.artistUrl
+  ];
+  const patterns = [
+    /<title[^>]*>([\s\S]*?)<\/title>/gi,
+    /<meta[^>]+(?:name|property)=["'](?:description|og:title|og:description|twitter:title|twitter:description)["'][^>]+content=["']([^"']*)["'][^>]*>/gi,
+    /<meta[^>]+content=["']([^"']*)["'][^>]+(?:name|property)=["'](?:description|og:title|og:description|twitter:title|twitter:description)["'][^>]*>/gi,
+    /<h1[^>]*>([\s\S]*?)<\/h1>/gi
+  ];
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(source)) && evidence.length < 24) {
+      evidence.push(match[1]);
+    }
+  }
+  return evidence
+    .join(' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&(?:amp|quot|#39|lt|gt);/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 12000);
+}
+
 function local2PipelineDecision(result = {}, fallbackImageUrls = []) {
   const checks = result?.checks || {};
   const anatomy = result?.anatomy_assessment || {};
@@ -6277,10 +6322,13 @@ async function local2ProfileWorker(candidate, context) {
     const secondHtml = await random40ReservoirFetchHtml(secondUrl, 9000, context.signal);
     if (random40ReservoirProfileScore(secondHtml).posts > 0) pages.push({ page: 2, html: secondHtml });
   } catch (_) {}
+  // Whole-page text includes navigation and unrelated promoted profiles. It
+  // caused a single sidebar word (especially "femboy") to reject hundreds of
+  // unrelated creators. Restrict hard text evidence to profile metadata.
   const pageText = pages
-    .map(item => item.html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<[^>]+>/gi, ' ').replace(/\s+/g, ' '))
+    .map(item => local2ProfileTextEvidence(item.html, artistInfo))
     .join(' ')
-    .slice(0, 60000);
+    .slice(0, 12000);
   artistInfo.pageText = pageText;
   const hardTextReason = textHardFilter(artistInfo, { localVariant: 'local2' });
   if (hardTextReason) throw new Error(hardTextReason);
@@ -6335,7 +6383,10 @@ async function local2TriageWorker(profile, context) {
     confidence: mapped.confidence,
     reason: mapped.reason,
     hardReject: mapped.verdict === 'reject' && hardReason,
-    terminalReject: mapped.verdict === 'reject',
+    // Triage may immediately stop a true hard-filter failure. A preliminary
+    // taste score is not terminal; let the full Local2 stage review it so the
+    // accepted queue does not dry up behind a single fast prefilter score.
+    terminalReject: mapped.verdict === 'reject' && hardReason,
     priorityBoost: Math.max(-1, Math.min(1, Number(result?.preference_probability || 0.5) - 0.5)),
     personalDecision: result
   };
@@ -6585,6 +6636,24 @@ const server = http.createServer(async (req, res) => {
 
   try {
     const url = requestUrl;
+    if (req.method === 'GET' && url.pathname === '/browser-state/github-token') {
+      const secrets = await readBrowserSecrets();
+      json(res, 200, {
+        ok: true,
+        token: String(secrets.githubToken || '')
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/browser-state/github-token') {
+      const payload = JSON.parse(await readBody(req));
+      const token = String(payload?.token || '').trim().slice(0, 512);
+      const secrets = await readBrowserSecrets();
+      if (token) secrets.githubToken = token;
+      else delete secrets.githubToken;
+      await writeBrowserSecrets(secrets);
+      json(res, 200, { ok: true, stored: Boolean(token) });
+      return;
+    }
     if (url.pathname.startsWith('/local2/')) {
       const body = ['POST', 'PUT', 'PATCH'].includes(String(req.method || '').toUpperCase())
         ? JSON.parse(await readBody(req))

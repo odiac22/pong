@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.84</div>
+    <div class="version-number">24.85</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2617,6 +2617,43 @@ function pongApplyLanHandoffState() {
 }
 
 pongApplyLanHandoffState();
+
+async function pongPersistGitHubTokenOnPc(token) {
+  if (location.origin === PONG_GITHUB_ORIGIN) return false;
+  try {
+    const response = await fetch('/browser-state/github-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({ token: String(token || '').trim() })
+    });
+    return response.ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function pongRestoreGitHubTokenFromPc() {
+  if (location.origin === PONG_GITHUB_ORIGIN) return false;
+  try {
+    const localToken = String(localStorage.getItem('pong_github_token_v1') || '').trim();
+    if (localToken) {
+      await pongPersistGitHubTokenOnPc(localToken);
+      return true;
+    }
+    const response = await fetch('/browser-state/github-token', { cache: 'no-store' });
+    if (!response.ok) return false;
+    const payload = await response.json();
+    const token = String(payload?.token || '').trim();
+    if (!token) return false;
+    localStorage.setItem('pong_github_token_v1', token);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+window.PongPersistGitHubToken = pongPersistGitHubTokenOnPc;
 const RANDOM40_REJECT_REASONS = [
   { code: 'male', label: 'Male' },
   { code: 'trans', label: 'Trans' },
@@ -16520,6 +16557,7 @@ document.getElementById('auth-close').addEventListener('click',()=>{
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
   installPongSharedOriginBridge();
+  void pongRestoreGitHubTokenFromPc();
   if (new URLSearchParams(location.search).get('pongStateBridge') === '1') {
     document.body.replaceChildren();
     document.documentElement.style.background = 'transparent';

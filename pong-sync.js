@@ -494,6 +494,7 @@
     try {
       const normalized = normalizeGitHubToken(token);
       localStorage.setItem(GITHUB_TOKEN_KEY, normalized);
+      window.PongPersistGitHubToken?.(normalized);
       showMsg(normalized ? 'GitHub token saved' : 'GitHub token cleared');
       return normalized;
     } catch (e) {
