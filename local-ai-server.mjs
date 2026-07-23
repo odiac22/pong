@@ -195,6 +195,8 @@ const gatewayWarmState = {
   error: ''
 };
 const gatewayH2Sessions = new Map();
+const lanBrowserSessions = new Map();
+const LAN_BROWSER_SESSION_MS = 4 * 60 * 60 * 1000;
 const videoVerifyCache = new Map();
 const videoPlaybackProbeCache = new Map();
 const videoVerifyHostStates = new Map(GATEWAY_ALLOWED_HOSTS.map(host => [host, {
@@ -2772,6 +2774,32 @@ function isSameOriginLanBrowserRequest(req, requestUrl) {
   } catch (_) {
     return false;
   }
+}
+
+function issueLanBrowserSession(req) {
+  const now = Date.now();
+  for (const [existingToken, session] of lanBrowserSessions) {
+    if (session.expiresAt <= now) lanBrowserSessions.delete(existingToken);
+  }
+  const token = crypto.randomBytes(24).toString('base64url');
+  lanBrowserSessions.set(token, {
+    remoteAddress: normalizeIpv4Address(req.socket.remoteAddress),
+    expiresAt: now + LAN_BROWSER_SESSION_MS
+  });
+  return token;
+}
+
+function hasValidLanBrowserSession(req) {
+  if (!isPrivateLanAddress(req.socket.remoteAddress)) return false;
+  const cookie = String(req.headers.cookie || '');
+  const match = cookie.match(/(?:^|;\s*)pong_lan_session=([^;]+)/);
+  if (!match) return false;
+  const session = lanBrowserSessions.get(match[1]);
+  if (!session || session.expiresAt <= Date.now()) {
+    if (session) lanBrowserSessions.delete(match[1]);
+    return false;
+  }
+  return session.remoteAddress === normalizeIpv4Address(req.socket.remoteAddress);
 }
 
 function promoteVideoFileCachePlaybackRecord(activeRecord) {
@@ -6488,11 +6516,18 @@ const server = http.createServer(async (req, res) => {
   if ((req.method === 'GET' || req.method === 'HEAD') && /^\/pong\/?$/.test(requestUrl.pathname)) {
     try {
       const html = await fs.readFile(PONG_INDEX_PATH);
-      res.writeHead(200, {
+      const headers = {
         'Content-Type': 'text/html; charset=utf-8',
         'Content-Length': html.length,
         'Cache-Control': 'no-store, no-cache, must-revalidate',
         'X-Content-Type-Options': 'nosniff'
+      };
+      if (isPrivateLanAddress(req.socket.remoteAddress)) {
+        const token = issueLanBrowserSession(req);
+        headers['Set-Cookie'] = `pong_lan_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(LAN_BROWSER_SESSION_MS / 1000)}`;
+      }
+      res.writeHead(200, {
+        ...headers
       });
       if (req.method === 'HEAD') res.end();
       else res.end(html);
@@ -6514,7 +6549,8 @@ const server = http.createServer(async (req, res) => {
       requestUrl.pathname.startsWith('/video-cache/media/')
     );
   const sameOriginLanBrowser = isSameOriginLanBrowserRequest(req, requestUrl);
-  if (!anonymousLanMediaRead && !sameOriginLanBrowser && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
+  const authenticatedLanBrowser = hasValidLanBrowserSession(req);
+  if (!anonymousLanMediaRead && !sameOriginLanBrowser && !authenticatedLanBrowser && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
     json(res, 403, { ok: false, error: 'browser origin is not allowed' });
     return;
   }
