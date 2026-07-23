@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.04</div>
+    <div class="version-number">25.05</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2347,7 +2347,13 @@ function getVideoCounterText(localIndex) {
     ? globalIndex - rangeStart + 1
     : Math.max(0, localIndex) + 1;
 
-  return `${Math.max(1, position)}/${Math.max(1, total)} (${getCounterBatchText()})`;
+  const eventIndex = getPasteEventIndexForGlobalVideo(globalIndex);
+  const activeEvent = pasteEvents[eventIndex >= 0 ? eventIndex : currentPasteIndex];
+  const activeMetadata = allVideoMetadata[globalIndex] || videoMetadata[localIndex] || {};
+  const baseText = `${Math.max(1, position)}/${Math.max(1, total)}`;
+  return isBunkrPasteEvent(activeEvent) || activeMetadata.source === 'bunkr'
+    ? baseText
+    : `${baseText} (${getCounterBatchText()})`;
 }
 
 function isRandom40PlaybackActive() {
@@ -4147,6 +4153,7 @@ function moveDeckIndexImmediatelyAfterCurrent(index) {
 }
 
 function getDeckLogicalCounterText(localIndex) {
+  if (slidingPlaybackRespectsRange) return getVideoCounterText(localIndex);
   ensureDeckOrder();
   const logicalPosition = deckOrder.indexOf(Number(localIndex));
   if (logicalPosition < 0) return getVideoCounterText(localIndex);
@@ -5796,7 +5803,11 @@ function isRandom40PasteEvent(event) {
 }
 
 function isEromePasteEvent(event) {
-  return String(event?.source || '').toLowerCase() === 'erome';
+  return ['erome', 'bunkr'].includes(String(event?.source || '').toLowerCase());
+}
+
+function isBunkrPasteEvent(event) {
+  return String(event?.source || '').toLowerCase() === 'bunkr';
 }
 
 function ensureRandom40PreloadContainer() {
@@ -7305,6 +7316,7 @@ loadVideosButton.addEventListener('click', async ()=>{
   const shouldUseRandom40AutoAdvanceMode =
     window.PongRandom40AutoAdvanceOnce === true ||
     window.PongLoadedSavedMode === 'random40';
+  const shouldRespectBunkrAlbumRange = shuffledLoad.pasteEvents.some(isBunkrPasteEvent);
   const shouldUseRegularSlidingMode = !shouldUseEromeTwentyCardMode &&
     (newUrls.length > BATCH_SIZE || shuffledLoad.pasteEvents.length > 0);
   const shouldUseSlidingMode = shouldUseEromeTwentyCardMode || shouldUseRegularSlidingMode;
@@ -7313,7 +7325,10 @@ loadVideosButton.addEventListener('click', async ()=>{
   window.PongSavedArtistsAutoAdvanceOnce = false;
   window.PongRandom40AutoAdvanceOnce = false;
   setEromeTwentyCardMode(shouldUseSlidingMode, {
-    respectRange: shouldUseRegularSlidingMode || shouldUseRandom40AutoAdvanceMode || shouldUseSavedArtistsMode
+    respectRange: shouldUseRegularSlidingMode ||
+      shouldUseRandom40AutoAdvanceMode ||
+      shouldUseSavedArtistsMode ||
+      shouldRespectBunkrAlbumRange
   });
   if (!shouldUseSlidingMode) {
     setCurrentRenderBatchSize(BATCH_SIZE);
@@ -9324,6 +9339,7 @@ function random40PcGatewayUrl(rawUrl) {
 }
 
 function random40PcPlaybackGatewayUrl(rawUrl) {
+  if (random40IsPcFileCachePlaybackUrl(rawUrl)) return '';
   const gatewayUrl = random40PcGatewayUrl(rawUrl);
   if (location.protocol === 'https:' && /^http:\/\//i.test(gatewayUrl)) return '';
   return gatewayUrl;
@@ -16073,10 +16089,11 @@ async function loadBunkrAsCards(targets) {
 
   const imported = cacheEromeCardImport(groups, endpoint.replace(/\/+$/, ''));
   closeEromeHelper();
-  setEromeTwentyCardMode(true);
+  setEromeTwentyCardMode(true, { respectRange: true });
   window.PongEromeAutoAdvanceOnce = true;
   window.PongLoadAllVideosOnce = false;
   loadVideosButton.click();
+  activateFirstEromeBatch();
   showSortingIndicator(`Loaded ${imported.urls.length} Bunkr videos from ${groups.length} albums.`);
   updateEromeProgress({
     title: 'Bunkr ready',
