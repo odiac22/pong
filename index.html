@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.82</div>
+    <div class="version-number">24.83</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2579,19 +2579,44 @@ function installPongSharedOriginBridge() {
       if (message.action === 'snapshot') pongSendSharedOriginState(true);
     }
   });
-  if (bridgeMode || location.origin === PONG_GITHUB_ORIGIN) return;
-  const iframe = document.createElement('iframe');
-  iframe.src = `${PONG_GITHUB_ORIGIN}/pong/?pongStateBridge=1&v=2482`;
-  iframe.title = 'Pong saved-state bridge';
-  iframe.hidden = true;
-  iframe.setAttribute('aria-hidden', 'true');
-  iframe.addEventListener('load', () => {
-    iframe.contentWindow?.postMessage({ channel: PONG_SHARED_BRIDGE_CHANNEL, action: 'get' }, PONG_GITHUB_ORIGIN);
-  });
-  document.body.appendChild(iframe);
-  pongSharedStateBridge = iframe;
-  setInterval(() => pongSendSharedOriginState(), 5000);
+  // Modern Chrome partitions third-party iframe storage, so cross-origin state
+  // enters the LAN page through the private URL fragment handoff below. Saved
+  // items continue to synchronize through pong-sync.js and GitHub itself.
 }
+
+function pongEncodeLanHandoffState() {
+  const state = pongReadSharedOriginState();
+  delete state[SAVED_VIDEOS_KEY];
+  delete state[SAVED_ARTISTS_KEY];
+  delete state['pong_saved_erome_artists_v1'];
+  try {
+    const bytes = new TextEncoder().encode(JSON.stringify(state));
+    let binary = '';
+    bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  } catch (_) {
+    return '';
+  }
+}
+
+function pongApplyLanHandoffState() {
+  const match = String(location.hash || '').match(/(?:^#|&)pongState=([^&]+)/);
+  if (!match) return false;
+  try {
+    const encoded = decodeURIComponent(match[1]).replace(/-/g, '+').replace(/_/g, '/');
+    const padded = encoded + '='.repeat((4 - encoded.length % 4) % 4);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+    const state = JSON.parse(new TextDecoder().decode(bytes));
+    pongApplySharedOriginState(state, { preferIncoming: true });
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+pongApplyLanHandoffState();
 const RANDOM40_REJECT_REASONS = [
   { code: 'male', label: 'Male' },
   { code: 'trans', label: 'Trans' },
@@ -16350,6 +16375,8 @@ async function startRandom40Local22(buttonStartedAt = Date.now()) {
     target.searchParams.set('pongAutoStart', 'local22');
     target.searchParams.set('pongPlaybackProfile', 'local22');
     target.searchParams.set('pongStartedAt', String(buttonStartedAt));
+    const handoffState = pongEncodeLanHandoffState();
+    if (handoffState) target.hash = `pongState=${encodeURIComponent(handoffState)}`;
     location.assign(target.href);
     return;
   }
