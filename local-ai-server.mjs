@@ -95,6 +95,7 @@ const MAX_LEARNED_RECORDS = 2000;
 const GATEWAY_TIMEOUT_MS = Math.max(5000, Number(process.env.PONG_GATEWAY_TIMEOUT_MS || 30000));
 const GATEWAY_MAX_REDIRECTS = 5;
 const GATEWAY_ALLOWED_HOSTS = ['coomerfans.com', 'onlyfaphouse.com'];
+const GATEWAY_MEDIA_ALLOWED_HOSTS = ['cdn.cr'];
 const GATEWAY_WARM_CONNECTIONS = Math.max(1, Math.min(4, Number(process.env.PONG_GATEWAY_WARM_CONNECTIONS || 2)));
 const GATEWAY_KEEP_WARM_MS = Math.max(10000, Number(process.env.PONG_GATEWAY_KEEP_WARM_MS || 20000));
 const GATEWAY_AGENT = new https.Agent({
@@ -308,7 +309,7 @@ function gatewayTargetUrl(raw) {
     throw new Error('invalid gateway URL');
   }
   const hostname = target.hostname.toLowerCase();
-  const allowed = target.protocol === 'https:' && GATEWAY_ALLOWED_HOSTS.some(host => (
+  const allowed = target.protocol === 'https:' && [...GATEWAY_ALLOWED_HOSTS, ...GATEWAY_MEDIA_ALLOWED_HOSTS].some(host => (
     hostname === host || hostname.endsWith(`.${host}`)
   ));
   if (!allowed || target.username || target.password) throw new Error('gateway host not allowed');
@@ -3235,6 +3236,9 @@ async function downloadVideoFileCacheRecord(record, generation) {
         record.totalBytes = Number.isFinite(contentLength) && contentLength > 0 ? contentLength : 0;
       }
       record.contentType = String(response.headers['content-type'] || record.contentType || 'video/mp4').split(';')[0] || 'video/mp4';
+      if (record.contentType === 'application/octet-stream' && /\.(?:mp4|m4v|mov)(?:$|\?)/i.test(record.sourceUrl)) {
+        record.contentType = 'video/mp4';
+      }
       record.etag = String(response.headers.etag || record.etag || '');
       record.lastModified = String(response.headers['last-modified'] || record.lastModified || '');
       if (Number(record.totalBytes || 0) > VIDEO_FILE_CACHE_MAX_FILE_BYTES) {

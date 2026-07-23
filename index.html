@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.02</div>
+    <div class="version-number">25.03</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8772,7 +8772,9 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
 
     group.videos.forEach((rawUrl, videoIndex) => {
       const isBunkr = group.source === 'bunkr';
-      const proxiedUrl = isBunkr ? rawUrl : proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
+      const proxiedUrl = isBunkr
+        ? `${proxyBase}/video-cache/stream?url=${encodeURIComponent(rawUrl)}&profile=local22`
+        : proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
       const mediaKey = eromeMediaKey(rawUrl);
 
       urls.push(proxiedUrl);
@@ -16068,7 +16070,7 @@ async function loadBunkrAsCards(targets) {
     return;
   }
 
-  const imported = cacheEromeCardImport(groups, '');
+  const imported = cacheEromeCardImport(groups, endpoint.replace(/\/+$/, ''));
   closeEromeHelper();
   setEromeTwentyCardMode(true);
   window.PongEromeAutoAdvanceOnce = true;
