@@ -6482,8 +6482,9 @@ async function createPongLocal2Workers() {
 }
 
 async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates }) {
-  const maximumPendingWork = 72;
-  const maximumSubmitBatch = 24;
+  const maximumPendingWork = 112;
+  const maximumSubmitBatch = 64;
+  const listingPageConcurrency = 8;
   while (!signal.aborted && needsCandidates()) {
     const state = snapshot();
     const pendingWork = Object.values(state.stages || {}).reduce((total, stage) => (
@@ -6496,36 +6497,38 @@ async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates })
       await local2AbortableDelay(300, signal);
       continue;
     }
-    let page = 0;
-    for (let attempts = 0; attempts < 30; attempts++) {
+    const pages = [];
+    for (let attempts = 0; attempts < 120 && pages.length < listingPageConcurrency; attempts++) {
       const candidatePage = crypto.randomInt(1, 3501);
-      if (local2ProducerRecentPages.has(candidatePage)) continue;
-      page = candidatePage;
-      break;
+      if (local2ProducerRecentPages.has(candidatePage) || pages.includes(candidatePage)) continue;
+      pages.push(candidatePage);
     }
-    if (!page) {
+    if (!pages.length) {
       local2ProducerRecentPages.clear();
       continue;
     }
-    local2ProducerRecentPages.add(page);
+    pages.forEach(page => local2ProducerRecentPages.add(page));
     while (local2ProducerRecentPages.size > 500) {
       local2ProducerRecentPages.delete(local2ProducerRecentPages.values().next().value);
     }
     const hosts = availableGatewayHosts().length ? availableGatewayHosts() : GATEWAY_ALLOWED_HOSTS;
-    const listings = await Promise.allSettled(hosts.map(host =>
+    // Fetch eight distinct listing pages concurrently. Both source mirrors are
+    // tried for each page, while every discovered artist remains an independent
+    // pipeline state and receives an independent verdict.
+    const listings = await Promise.allSettled(pages.flatMap(page => hosts.map(host =>
       random40ReservoirFetchHtml(`https://${host}/?page=${page}`, 14000, signal)
-        .then(html => ({ host, html }))
-    ));
+        .then(html => ({ host, page, html }))
+    )));
     let submitted = 0;
     for (const listing of listings) {
       if (listing.status !== 'fulfilled') continue;
-      const pageUrl = `https://${listing.value.host}/?page=${page}`;
+      const pageUrl = `https://${listing.value.host}/?page=${listing.value.page}`;
       for (const artistUrl of random40ReservoirArtistUrls(listing.value.html, pageUrl)) {
         if (submitted >= maximumSubmitBatch) break;
         const identity = random40ReservoirIdentity(artistUrl);
         if (!identity || local2ProducerRecentArtists.has(identity)) continue;
         local2ProducerRecentArtists.add(identity);
-        if (submit({ artistUrl, sourcePage: page }, { priority: 0 })) submitted++;
+        if (submit({ artistUrl, sourcePage: listing.value.page }, { priority: 0 })) submitted++;
       }
       if (submitted >= maximumSubmitBatch) break;
     }
@@ -6563,7 +6566,9 @@ const local2Adapter = createLocal2NodeAdapter({
     deliveryBatch: 12,
     minimumVerifiedMedia: 15,
     triageHardRejectConfidence: 0.96,
-    concurrency: { profile: 12, triage: 3, verify: 12, classify: 2, finalize: 4 }
+    // Several independent artist image batches may occupy the model queue at
+    // once; the Python service still returns one isolated decision per artist.
+    concurrency: { profile: 16, triage: 4, verify: 16, classify: 4, finalize: 6 }
   }
 });
 
