@@ -347,6 +347,7 @@ export class Local2ContinuousPipeline {
     deliveryBatch = 12,
     minimumVerifiedMedia = 15,
     triageHardRejectConfidence = 0.98,
+    qualifiedRejectionAudit = false,
     concurrency = {},
     leaseTtlMs = 180000,
     now = () => Date.now()
@@ -361,6 +362,7 @@ export class Local2ContinuousPipeline {
     this.deliveryBatch = boundedInteger(deliveryBatch, 12, 1, 64);
     this.minimumVerifiedMedia = boundedInteger(minimumVerifiedMedia, 15, 15, 100);
     this.triageHardRejectConfidence = Math.max(0.5, Math.min(1, Number(triageHardRejectConfidence || 0.98)));
+    this.qualifiedRejectionAudit = qualifiedRejectionAudit === true;
     this.leaseTtlMs = Math.max(1000, Number(leaseTtlMs || 180000));
     this.now = now;
     this.states = new Map();
@@ -441,11 +443,10 @@ export class Local2ContinuousPipeline {
   profiled(state, profile) {
     if (!this.current(state)) return;
     state.profile = { ...profile, artistId: state.artistId };
-    // Start the cheapest visual screen and exact media verification together.
-    // Either lane can cancel the other as soon as it reaches a terminal result.
-    state.stage = 'triage+verify';
+    // Image triage is cheaper than proving fifteen media URLs. Only candidates
+    // that survive screening are admitted to the verifier.
+    state.stage = 'triage';
     this.stages.triage.push(state, state.priority);
-    this.stages.verify.push(state, state.priority);
   }
 
   triaged(state, triage = {}) {
@@ -463,6 +464,7 @@ export class Local2ContinuousPipeline {
     }
     state.triageDone = true;
     state.stage = 'verify+classify';
+    this.stages.verify.push(state, state.priority);
     this.queueClassification(state, state.priority + Number(triage.priorityBoost || 0));
   }
 
@@ -504,10 +506,13 @@ export class Local2ContinuousPipeline {
       this.statsCounters.modelRejects++;
       state.modelRejected = true;
       state.modelRejectReason = decision.reason || 'Local2 hard-safe decision gate rejected';
-      // Finish the verification already in flight so the RAM audit can
-      // distinguish 15+ video artists from profiles that never qualified.
-      if (state.verifyDone) this.reject(state, 'classify', state.modelRejectReason);
-      else state.stage = 'verify-for-rejection-audit';
+      if (!this.qualifiedRejectionAudit || state.verifyDone) {
+        this.reject(state, 'classify', state.modelRejectReason);
+      } else {
+        // Explicit diagnostic runs may finish the already-running verifier so
+        // the RAM audit can list rejected artists proven to have 15+ videos.
+        state.stage = 'verify-for-rejection-audit';
+      }
       return;
     }
     this.maybeFinalize(state);
@@ -689,6 +694,11 @@ export class Local2ContinuousPipeline {
     return [...this.rejected.values()]
       .filter(item => Number(item.verifiedMediaCount || 0) >= minimum)
       .map(item => ({ ...item, decisionImageUrls: [...(item.decisionImageUrls || [])] }));
+  }
+
+  setQualifiedRejectionAudit(enabled) {
+    this.qualifiedRejectionAudit = enabled === true;
+    return this.qualifiedRejectionAudit;
   }
 
   stop() {

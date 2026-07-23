@@ -308,7 +308,8 @@ export function createLocal2NodeAdapter({
     }
 
     if (normalizedMethod === 'POST' && normalizedPath === '/local2/start') {
-      await ensureStarted();
+      const activePipeline = await ensureStarted();
+      activePipeline.setQualifiedRejectionAudit(body?.diagnosticAudit === true);
       await syncRevision();
       return { handled: true, status: 200, body: { ok: true, ...snapshot() } };
     }

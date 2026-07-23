@@ -6488,9 +6488,9 @@ async function createPongLocal2Workers() {
 }
 
 async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates }) {
-  const maximumPendingWork = 112;
-  const maximumSubmitBatch = 64;
-  const listingPageConcurrency = 8;
+  const maximumPendingWork = 72;
+  const maximumSubmitBatch = 32;
+  const listingPageConcurrency = 4;
   while (!signal.aborted && needsCandidates()) {
     const state = snapshot();
     const pendingWork = Object.values(state.stages || {}).reduce((total, stage) => (
@@ -6518,7 +6518,7 @@ async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates })
       local2ProducerRecentPages.delete(local2ProducerRecentPages.values().next().value);
     }
     const hosts = availableGatewayHosts().length ? availableGatewayHosts() : GATEWAY_ALLOWED_HOSTS;
-    // Fetch eight distinct listing pages concurrently. Both source mirrors are
+    // Fetch four distinct listing pages concurrently. Both source mirrors are
     // tried for each page, while every discovered artist remains an independent
     // pipeline state and receives an independent verdict.
     const listings = await Promise.allSettled(pages.flatMap(page => hosts.map(host =>
@@ -6574,7 +6574,7 @@ const local2Adapter = createLocal2NodeAdapter({
     triageHardRejectConfidence: 0.96,
     // Several independent artist image batches may occupy the model queue at
     // once; the Python service still returns one isolated decision per artist.
-    concurrency: { profile: 16, triage: 4, verify: 16, classify: 4, finalize: 6 }
+    concurrency: { profile: 12, triage: 4, verify: 12, classify: 4, finalize: 6 }
   }
 });
 

@@ -171,7 +171,7 @@ test('continuous pipeline overlaps verification and classification without batch
   pipeline.stop();
 });
 
-test('profile completion starts visual triage and media verification concurrently', async () => {
+test('profile completion admits media verification only after visual triage passes', async () => {
   const events = [];
   const pipeline = new Local2ContinuousPipeline({
     revision: 'local2-r1',
@@ -196,7 +196,7 @@ test('profile completion starts visual triage and media verification concurrentl
   });
   pipeline.submit({ artistUrl: 'https://coomerfans.com/u/onlyfans/4/concurrent' });
   await waitFor(() => pipeline.stats().accepted === 1);
-  assert.ok(events.indexOf('verify-start') < events.indexOf('triage-end'));
+  assert.ok(events.indexOf('verify-start') > events.indexOf('triage-end'));
   pipeline.stop();
 });
 
