@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.72</div>
+    <div class="version-number">24.73</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8962,15 +8962,16 @@ async function getRandom40LocalEndpoint() {
 
 async function random40TryKnownLocalEndpoint(timeoutMs = 2200) {
   const stored = random40StoredLocalEndpoint();
+  const forcedEndpoint = new URLSearchParams(location.search).get('pongLocalEndpoint') || '';
   const sameOriginEndpoint = /^\/(?:pong)?\/?$/i.test(location.pathname) && location.hostname !== 'odiac22.github.io'
     ? location.origin
     : '';
-  const candidates = [
+  const candidates = (forcedEndpoint ? [forcedEndpoint] : [
     sameOriginEndpoint,
     stored,
     ...RANDOM40_LOCAL_ENDPOINTS,
     location.hostname && /^\d+\.\d+\.\d+\.\d+$/.test(location.hostname) ? `http://${location.hostname}:8787` : ''
-  ]
+  ])
     .map(random40NormalizeLocalEndpoint)
     .filter(Boolean);
 
