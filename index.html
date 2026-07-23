@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">24.80</div>
+    <div class="version-number">24.81</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -2455,6 +2455,143 @@ function showSortingIndicator(msg) {
 // ─── Saved videos / saved artists ────────────────────────────────────────────
 const SAVED_VIDEOS_KEY = 'pong_saved_videos_v1';
 const SAVED_ARTISTS_KEY = 'pong_saved_artists_v1';
+const PONG_SHARED_ORIGIN_KEYS = [
+  SAVED_VIDEOS_KEY,
+  SAVED_ARTISTS_KEY,
+  'pong_saved_erome_artists_v1',
+  'pong_github_token_v1',
+  'pong_coomerfans_proxy_url_v1',
+  'pong_random40_openai_key_v1',
+  'pong_save_counts_v1',
+  PONG_PLAYER_AUDIO_PREF_KEY,
+  PONG_AUTO_SCROLL_KEY,
+  'pong_autoplay',
+  'pong_repair_item_concurrency_v1',
+  'pong_random40_model_accuracy_v2',
+  'pong_random40_panel_pos_v1',
+  'pong_train_ai_accuracy_v1'
+];
+const PONG_SHARED_BRIDGE_CHANNEL = 'pong-shared-origin-state-v1';
+const PONG_GITHUB_ORIGIN = 'https://odiac22.github.io';
+let pongSharedStateBridge = null;
+let pongSharedStateSyncTimer = null;
+let pongSharedStateLastSignature = '';
+
+function pongSharedStateOriginAllowed(rawOrigin) {
+  try {
+    const origin = new URL(rawOrigin);
+    if (origin.origin === PONG_GITHUB_ORIGIN) return true;
+    if (!['http:', 'https:'].includes(origin.protocol)) return false;
+    if (['127.0.0.1', 'localhost'].includes(origin.hostname)) return true;
+    const parts = origin.hostname.split('.').map(Number);
+    return parts.length === 4 && (
+      parts[0] === 10 ||
+      (parts[0] === 192 && parts[1] === 168) ||
+      (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+function pongReadSharedOriginState() {
+  const state = {};
+  for (const key of PONG_SHARED_ORIGIN_KEYS) {
+    try {
+      const value = localStorage.getItem(key);
+      if (value != null) state[key] = value;
+    } catch (_) {}
+  }
+  return state;
+}
+
+function pongMergeSavedMapValues(leftRaw, rightRaw, artistMap = false) {
+  let left = {};
+  let right = {};
+  try { left = JSON.parse(leftRaw || '{}') || {}; } catch (_) {}
+  try { right = JSON.parse(rightRaw || '{}') || {}; } catch (_) {}
+  const merged = { ...left };
+  for (const [key, value] of Object.entries(right)) {
+    if (!artistMap || !merged[key]) {
+      merged[key] = value;
+      continue;
+    }
+    merged[key] = {
+      ...value,
+      ...merged[key],
+      videos: [...new Set([...(value?.videos || []), ...(merged[key]?.videos || [])])],
+      updatedAt: [value?.updatedAt, merged[key]?.updatedAt].filter(Boolean).sort().pop() || ''
+    };
+  }
+  return JSON.stringify(merged);
+}
+
+function pongApplySharedOriginState(incoming = {}, { preferIncoming = false } = {}) {
+  for (const key of PONG_SHARED_ORIGIN_KEYS) {
+    const incomingValue = incoming[key];
+    if (incomingValue == null) continue;
+    try {
+      const currentValue = localStorage.getItem(key);
+      if (key === SAVED_VIDEOS_KEY) {
+        localStorage.setItem(key, pongMergeSavedMapValues(currentValue, incomingValue, false));
+      } else if (key === SAVED_ARTISTS_KEY) {
+        localStorage.setItem(key, pongMergeSavedMapValues(currentValue, incomingValue, true));
+      } else if (preferIncoming || currentValue == null || currentValue === '') {
+        localStorage.setItem(key, incomingValue);
+      }
+    } catch (_) {}
+  }
+  updateSaveCounters();
+}
+
+function pongSendSharedOriginState(force = false) {
+  const target = pongSharedStateBridge?.contentWindow;
+  if (!target) return;
+  const state = pongReadSharedOriginState();
+  const signature = JSON.stringify(state);
+  if (!force && signature === pongSharedStateLastSignature) return;
+  pongSharedStateLastSignature = signature;
+  target.postMessage({ channel: PONG_SHARED_BRIDGE_CHANNEL, action: 'merge', state }, PONG_GITHUB_ORIGIN);
+}
+
+function schedulePongSharedOriginSync(delay = 50) {
+  clearTimeout(pongSharedStateSyncTimer);
+  pongSharedStateSyncTimer = setTimeout(() => pongSendSharedOriginState(), delay);
+}
+
+function installPongSharedOriginBridge() {
+  const params = new URLSearchParams(location.search);
+  const bridgeMode = params.get('pongStateBridge') === '1';
+  window.addEventListener('message', event => {
+    const message = event.data || {};
+    if (message.channel !== PONG_SHARED_BRIDGE_CHANNEL || !pongSharedStateOriginAllowed(event.origin)) return;
+    if (bridgeMode) {
+      if (message.action === 'get') {
+        event.source?.postMessage({ channel: PONG_SHARED_BRIDGE_CHANNEL, action: 'snapshot', state: pongReadSharedOriginState() }, event.origin);
+      } else if (message.action === 'merge') {
+        pongApplySharedOriginState(message.state || {}, { preferIncoming: true });
+        event.source?.postMessage({ channel: PONG_SHARED_BRIDGE_CHANNEL, action: 'merged', state: pongReadSharedOriginState() }, event.origin);
+      }
+      return;
+    }
+    if (event.origin === PONG_GITHUB_ORIGIN && (message.action === 'snapshot' || message.action === 'merged')) {
+      pongApplySharedOriginState(message.state || {});
+      if (message.action === 'snapshot') pongSendSharedOriginState(true);
+    }
+  });
+  if (bridgeMode || location.origin === PONG_GITHUB_ORIGIN) return;
+  const iframe = document.createElement('iframe');
+  iframe.src = `${PONG_GITHUB_ORIGIN}/pong/?pongStateBridge=1&v=2481`;
+  iframe.title = 'Pong saved-state bridge';
+  iframe.hidden = true;
+  iframe.setAttribute('aria-hidden', 'true');
+  iframe.addEventListener('load', () => {
+    iframe.contentWindow?.postMessage({ channel: PONG_SHARED_BRIDGE_CHANNEL, action: 'get' }, PONG_GITHUB_ORIGIN);
+  });
+  document.body.appendChild(iframe);
+  pongSharedStateBridge = iframe;
+  setInterval(() => pongSendSharedOriginState(), 5000);
+}
 const RANDOM40_REJECT_REASONS = [
   { code: 'male', label: 'Male' },
   { code: 'trans', label: 'Trans' },
@@ -2475,6 +2612,7 @@ function loadSavedMap(key) {
 function saveSavedMap(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
+    schedulePongSharedOriginSync();
   } catch(e) {}
 }
 
@@ -16332,6 +16470,12 @@ document.getElementById('auth-close').addEventListener('click',()=>{
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
+  installPongSharedOriginBridge();
+  if (new URLSearchParams(location.search).get('pongStateBridge') === '1') {
+    document.body.replaceChildren();
+    document.documentElement.style.background = 'transparent';
+    return;
+  }
   if (PONG_PLAYBACK_BENCHMARK) {
     isControlsVisible = true;
     document.body.classList.remove('controls-hidden');
