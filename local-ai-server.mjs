@@ -3460,7 +3460,9 @@ function queueVideoFileCacheUrl(rawUrl, priority = 2, metadata = {}) {
   record.sourceUrl = canonical.targetUrl;
   record.deferWhenIdle = false;
   if (metadata?.artistKey) record.artistKey = String(metadata.artistKey).slice(0, 300);
-  if (metadata?.playbackProfile === 'local22') record.playbackProfile = 'local22';
+  if (['local22', 'bunkr'].includes(String(metadata?.playbackProfile || ''))) {
+    record.playbackProfile = String(metadata.playbackProfile);
+  }
   record.updatedAt = Date.now();
   record.priorityEpoch = videoFileCachePriorityEpoch;
   if (Number(priority) === 0) {
@@ -6668,7 +6670,10 @@ async function local2ClassifyWorker(profile, triage, context) {
     app: 'pong-random40-local2-clean',
     localVariant: 'local2',
     stage: 'full',
-    deferQwenReview: false,
+    // Local2.2 is the fast lane. Unresolved hard-filter ambiguity is rejected
+    // by the explicit hard-safe gate instead of occupying the shared Ollama
+    // queue. Local1 keeps its existing narrow Qwen review behavior.
+    deferQwenReview: true,
     visionModel: LOCAL2_QWEN_MODEL,
     artist: profile,
     candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL2_CLEAN_MAX_IMAGES)
@@ -6781,7 +6786,7 @@ const local2Adapter = createLocal2NodeAdapter({
     triageHardRejectConfidence: 0.96,
     // Several independent artist image batches may occupy the model queue at
     // once; the Python service still returns one isolated decision per artist.
-    concurrency: { profile: 12, triage: 4, verify: 12, classify: 4, finalize: 6 }
+    concurrency: { profile: 12, triage: 4, verify: 18, classify: 8, finalize: 6 }
   }
 });
 
@@ -7502,7 +7507,12 @@ const server = http.createServer(async (req, res) => {
       workloadGeneration++;
       const leasedBeforeReset = random40AcceptedLeases.size;
       await local2Adapter.stop({ clearAudit: true }).catch(() => {});
-      await resetVideoFileCache('workload reset').catch(() => {});
+      // The PC cache is shared by independent Pong tabs/devices. Resetting one
+      // Local workflow must not abort Bunkr/Erome playback in another app.
+      // A deliberate diagnostic reset can still request resetMedia=1.
+      if (url.searchParams.get('resetMedia') === '1') {
+        await resetVideoFileCache('explicit workload media reset').catch(() => {});
+      }
       random40ReservoirAbortController?.abort();
       random40AcceptedAbortController?.abort();
       random40Reservoir.splice(0);

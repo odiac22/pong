@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.13</div>
+    <div class="version-number">25.14</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1858,7 +1858,7 @@ function migrateBunkrSessionPlaybackUrl(rawUrl) {
           ? location.origin
           : EROME_PROXY_BASE.replace(/\/+$/, '');
         return playbackBase === location.origin
-          ? `${playbackBase}/video-cache/stream?url=${encodeURIComponent(parsed.href)}&profile=local22`
+          ? `${playbackBase}/video-cache/stream?url=${encodeURIComponent(parsed.href)}&profile=bunkr`
           : `${playbackBase}/bunkr.mp4?u=${encodeURIComponent(parsed.href)}`;
       }
       const nested = parsed.searchParams.get('url') || parsed.searchParams.get('u');
@@ -8889,7 +8889,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
       const proxiedUrl = isBunkr
         ? proxyBase === EROME_PROXY_BASE.replace(/\/+$/, '')
           ? `${proxyBase}/bunkr.mp4?u=${encodeURIComponent(rawUrl)}`
-          : `${proxyBase}/video-cache/stream?url=${encodeURIComponent(rawUrl)}&profile=local22`
+          : `${proxyBase}/video-cache/stream?url=${encodeURIComponent(rawUrl)}&profile=bunkr`
         : proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
       const mediaKey = eromeMediaKey(rawUrl);
 
@@ -16212,7 +16212,7 @@ async function loadBunkrAsCards(targets) {
     // priority until Paperclip makes that album active.
     if (location.protocol !== 'https:' && Array.isArray(group.videos)) {
       postJson('/video-cache/warm', {
-        playbackProfile: 'local22',
+        playbackProfile: 'bunkr',
         items: group.videos.slice(0, 1).map(url => ({
           url,
           artistKey: group.sourceUrl || group.url || ''
