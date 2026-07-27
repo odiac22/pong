@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.14</div>
+    <div class="version-number">25.15</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -837,6 +837,7 @@
         <button id="load-videos">Load Videos</button>
         <button id="open-erome">Open Albums</button>
         <button id="saved-erome">Saved Erome</button>
+        <button id="erome-checkpoint" type="button">Save</button>
         <button id="auth-button">Auth URL</button>
         <button id="random-40-local">R40 Local 2.2</button>
         <button id="random-40-local2">R40 Local 2</button>
@@ -7633,8 +7634,13 @@ let eromeProgressLastPaintAt = 0;
 const SAVED_EROME_ARTISTS_KEY = 'pong_saved_erome_artists_v1';
 const SAVED_EROME_DB_NAME = 'pong_erome_local_cache_v1';
 const SAVED_EROME_DB_STORE = 'artists';
+const SAVED_EROME_DB_VERSION = 2;
+const EROME_CHECKPOINT_DB_STORE = 'checkpoints';
+const EROME_CHECKPOINT_ID = 'current-erome-bunkr-playback';
 let lastEromeArtistRecords = {};
 let savedEromeMenuEl = null;
+let eromeCheckpointAvailable = false;
+let eromeCheckpointActiveThisPage = false;
 const savedEromeRefreshJobs = new Set();
 const SAVED_EROME_FULL_RECORD_WRITE_DELAY_MS = 7000;
 const SAVED_EROME_MENU_RENDER_DELAY_MS = 1200;
@@ -7822,7 +7828,7 @@ function openSavedEromeDb() {
       return;
     }
 
-    const request = indexedDB.open(SAVED_EROME_DB_NAME, 1);
+    const request = indexedDB.open(SAVED_EROME_DB_NAME, SAVED_EROME_DB_VERSION);
 
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -7830,11 +7836,138 @@ function openSavedEromeDb() {
       if (!db.objectStoreNames.contains(SAVED_EROME_DB_STORE)) {
         db.createObjectStore(SAVED_EROME_DB_STORE, { keyPath: 'url' });
       }
+      if (!db.objectStoreNames.contains(EROME_CHECKPOINT_DB_STORE)) {
+        db.createObjectStore(EROME_CHECKPOINT_DB_STORE, { keyPath: 'id' });
+      }
     };
 
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error('IndexedDB open failed'));
   });
+}
+
+async function readEromeCheckpoint() {
+  try {
+    const db = await openSavedEromeDb();
+    const tx = db.transaction(EROME_CHECKPOINT_DB_STORE, 'readonly');
+    const record = await idbRequestToPromise(
+      tx.objectStore(EROME_CHECKPOINT_DB_STORE).get(EROME_CHECKPOINT_ID)
+    );
+    db.close();
+    return record || null;
+  } catch (error) {
+    console.warn('Erome checkpoint read failed:', error);
+    return null;
+  }
+}
+
+async function writeEromeCheckpoint(record) {
+  try {
+    const db = await openSavedEromeDb();
+    const tx = db.transaction(EROME_CHECKPOINT_DB_STORE, 'readwrite');
+    await idbRequestToPromise(tx.objectStore(EROME_CHECKPOINT_DB_STORE).put(record));
+    db.close();
+    return true;
+  } catch (error) {
+    console.warn('Erome checkpoint write failed:', error);
+    return false;
+  }
+}
+
+function updateEromeCheckpointButton() {
+  const button = document.getElementById('erome-checkpoint');
+  if (!button) return;
+  const shouldLoad = eromeCheckpointAvailable && !eromeCheckpointActiveThisPage;
+  button.textContent = shouldLoad ? 'Load' : 'Save';
+  button.title = shouldLoad
+    ? 'Load the Erome/Balbums/Bunkr place saved in this app'
+    : 'Save the current Erome/Balbums/Bunkr profile and video position';
+}
+
+async function saveCurrentEromeCheckpoint() {
+  if (!pasteEvents.some(isEromePasteEvent) || !allVideoUrls.length) {
+    showSortingIndicator('Load Erome, Balbums, or Bunkr videos first');
+    return false;
+  }
+  rememberCurrentPasteEventVideoPosition();
+  const checkpoint = {
+    id: EROME_CHECKPOINT_ID,
+    schema: 1,
+    savedAt: new Date().toISOString(),
+    allVideoUrls: allVideoUrls.slice(),
+    allVideoMetadata: allVideoMetadata.map(compactSessionVideoMetadata),
+    pasteEvents: pasteEvents.map(event => ({ ...event })),
+    currentPasteIndex,
+    viewedVideoKeys: [...viewedVideoKeys],
+    paperclipRetiredBundleKeys: [...paperclipRetiredBundleKeys],
+    paperclipVisitedArtistTokens: [...paperclipVisitedArtistTokens],
+    paperclipHistory: paperclipHistory.slice(),
+    paperclipHistoryPosition,
+    paperclipStepCount
+  };
+  const saved = await writeEromeCheckpoint(checkpoint);
+  if (!saved) {
+    showSortingIndicator('Could not save Erome/Balbums place');
+    return false;
+  }
+  eromeCheckpointAvailable = true;
+  eromeCheckpointActiveThisPage = true;
+  updateEromeCheckpointButton();
+  showSortingIndicator('Erome/Balbums place saved in this app');
+  return true;
+}
+
+async function loadCurrentEromeCheckpoint() {
+  const checkpoint = await readEromeCheckpoint();
+  if (!checkpoint?.allVideoUrls?.length || !checkpoint?.pasteEvents?.length) {
+    eromeCheckpointAvailable = false;
+    updateEromeCheckpointButton();
+    showSortingIndicator('No saved Erome/Balbums place in this app');
+    return false;
+  }
+
+  allVideoUrls = checkpoint.allVideoUrls.map((url, index) => (
+    checkpoint.allVideoMetadata?.[index]?.source === 'bunkr'
+      ? migrateBunkrSessionPlaybackUrl(url)
+      : url
+  ));
+  allVideoMetadata = (checkpoint.allVideoMetadata || []).map(compactSessionVideoMetadata);
+  pasteEvents = checkpoint.pasteEvents.map(event => ({ ...event }));
+  viewedVideoKeys = new Set((checkpoint.viewedVideoKeys || []).map(String));
+  paperclipRetiredBundleKeys = new Set((checkpoint.paperclipRetiredBundleKeys || []).map(String));
+  paperclipVisitedArtistTokens = new Set((checkpoint.paperclipVisitedArtistTokens || []).map(String));
+  paperclipHistory = (checkpoint.paperclipHistory || []).map(Number).filter(Number.isInteger);
+  paperclipHistoryPosition = Math.max(
+    -1,
+    Math.min(paperclipHistory.length - 1, Number(checkpoint.paperclipHistoryPosition ?? -1))
+  );
+  paperclipStepCount = Math.max(1, Number(checkpoint.paperclipStepCount || 1));
+  parsedVideoUrlsCache = allVideoUrls.slice();
+  parsedVideoMetadataCache = allVideoMetadata.slice();
+  pendingPastes = pasteEvents.map(event => ({ ...event }));
+  _prevUrlCount = allVideoUrls.length;
+  parseCacheDirty = false;
+  syncPendingPasteCacheState();
+  window.PongLoadedSavedMode = 'erome';
+  setEromeTwentyCardMode(true, { respectRange: true });
+  const targetIndex = Math.max(
+    0,
+    Math.min(pasteEvents.length - 1, Number(checkpoint.currentPasteIndex || 0))
+  );
+  currentPasteIndex = -1;
+  eromeCheckpointAvailable = true;
+  eromeCheckpointActiveThisPage = true;
+  updateEromeCheckpointButton();
+  displayPasteEventAtIndex(targetIndex, { recordHistory: false });
+  scheduleSessionSave(250);
+  showSortingIndicator(`Loaded saved Erome/Balbums place from ${new Date(checkpoint.savedAt).toLocaleString()}`);
+  return true;
+}
+
+async function initializeEromeCheckpointButton() {
+  eromeCheckpointAvailable = Boolean(await readEromeCheckpoint());
+  eromeCheckpointActiveThisPage = false;
+  updateEromeCheckpointButton();
 }
 
 async function putSavedEromeFullRecord(record) {
@@ -8935,6 +9068,8 @@ function cacheEromeCardImport(groups, proxyBase) {
   const payload = buildEromeCardImportPayload(shuffleEromeGroupsForPlayback(groups), proxyBase, 0);
   const { urls, metadata, events } = payload;
 
+  eromeCheckpointActiveThisPage = true;
+  updateEromeCheckpointButton();
   parsedVideoUrlsCache = urls;
   parsedVideoMetadataCache = metadata;
   pendingPastes = events;
@@ -16898,8 +17033,24 @@ document.getElementById('open-erome').addEventListener('click',()=>{
 });
 
 const savedEromeButton = document.getElementById('saved-erome');
+const eromeCheckpointButton = document.getElementById('erome-checkpoint');
 let savedEromeHoldTimer = null;
 let savedEromeLongPress = false;
+
+eromeCheckpointButton?.addEventListener('click', async () => {
+  eromeCheckpointButton.disabled = true;
+  try {
+    if (eromeCheckpointAvailable && !eromeCheckpointActiveThisPage) {
+      await loadCurrentEromeCheckpoint();
+    } else {
+      await saveCurrentEromeCheckpoint();
+    }
+  } finally {
+    eromeCheckpointButton.disabled = false;
+  }
+});
+
+void initializeEromeCheckpointButton();
 
 function startSavedEromeHold(e) {
   savedEromeLongPress = false;
