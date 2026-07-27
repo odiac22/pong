@@ -298,7 +298,8 @@
     .update-app-button { left: 162px; font-size: 8px; font-weight: 850; letter-spacing: 0; }
     .auto-scroll-button { left: 192px; font-size: 7px; font-weight: 900; letter-spacing: 0; }
     .auto-scroll-button.on { background: rgba(34,197,94,0.30) !important; opacity: 0.78 !important; }
-    .reset-ai-stats-button { left: 222px; font-size: 9px; font-weight: 900; letter-spacing: 0; background: rgba(127,29,29,0.32) !important; }
+    .erome-checkpoint-button { left: 222px; font-size: 6px; font-weight: 900; letter-spacing: 0; background: rgba(37,99,235,0.34) !important; opacity: 0.68; }
+    .reset-ai-stats-button { left: 252px; font-size: 9px; font-weight: 900; letter-spacing: 0; background: rgba(127,29,29,0.32) !important; }
     .next-batch-button {
       position: fixed; left: 46px; top: 50%; transform: translateY(-50%);
       width: 30px; height: 30px; background: var(--ui-bg); opacity: 0.44;
@@ -826,7 +827,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.16</div>
+    <div class="version-number">25.17</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -837,7 +838,6 @@
         <button id="load-videos">Load Videos</button>
         <button id="open-erome">Open Albums</button>
         <button id="saved-erome">Saved Erome</button>
-        <button id="erome-checkpoint" type="button">Save</button>
         <button id="auth-button">Auth URL</button>
         <button id="random-40-local">R40 Local 2.2</button>
         <button id="random-40-local2">R40 Local 2</button>
@@ -1202,14 +1202,12 @@ function updatePendingPasteButton() {
 
   const pendingCount = getPendingPasteBundleCount();
 
-  if (pendingCount) {
+  if (pendingCount && !pasteEvents.length) {
     btn.style.opacity = '0.74';
     btn.style.background = 'rgba(103,232,249,0.22)';
     btn.setAttribute('data-count', pendingCount + 'p');
   } else {
-    btn.setAttribute('data-count', '0/0');
-    btn.style.opacity = '0.2';
-    btn.style.background = '';
+    updatePasteNavigationButton();
   }
 }
 
@@ -7241,7 +7239,7 @@ function updatePasteNavigationButton(){
 
   const pendingCount = getPendingPasteBundleCount();
 
-  if(pendingCount){
+  if(pendingCount && !pasteEvents.length){
     btn.setAttribute('data-count', pendingCount + 'p');
     const canAdvance = canNavigateToNextPasteEvent();
     btn.setAttribute('aria-disabled', canAdvance ? 'false' : 'true');
@@ -7361,6 +7359,30 @@ function createGearButton(){
     configurePongAutoScroll(autoScrollBtn);
   });
   document.body.appendChild(autoScrollBtn);
+
+  const eromeCheckpointBtn = document.createElement('div');
+  eromeCheckpointBtn.id = 'erome-checkpoint';
+  eromeCheckpointBtn.className = 'control-button erome-checkpoint-button';
+  eromeCheckpointBtn.setAttribute('aria-label', 'Save or load Erome/Balbums place');
+  eromeCheckpointBtn.addEventListener('click', async e => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (eromeCheckpointBtn.dataset.busy === 'true') return;
+    eromeCheckpointBtn.dataset.busy = 'true';
+    eromeCheckpointBtn.style.pointerEvents = 'none';
+    try {
+      if (eromeCheckpointAvailable && !eromeCheckpointActiveThisPage) {
+        await loadCurrentEromeCheckpoint();
+      } else {
+        await saveCurrentEromeCheckpoint();
+      }
+    } finally {
+      eromeCheckpointBtn.dataset.busy = 'false';
+      eromeCheckpointBtn.style.pointerEvents = 'auto';
+    }
+  });
+  document.body.appendChild(eromeCheckpointBtn);
+  updateEromeCheckpointButton();
 
   const resetAiStatsBtn = document.createElement('div');
   resetAiStatsBtn.className = 'control-button reset-ai-stats-button';
@@ -17032,24 +17054,8 @@ document.getElementById('open-erome').addEventListener('click',()=>{
 });
 
 const savedEromeButton = document.getElementById('saved-erome');
-const eromeCheckpointButton = document.getElementById('erome-checkpoint');
 let savedEromeHoldTimer = null;
 let savedEromeLongPress = false;
-
-eromeCheckpointButton?.addEventListener('click', async () => {
-  eromeCheckpointButton.disabled = true;
-  try {
-    if (eromeCheckpointAvailable && !eromeCheckpointActiveThisPage) {
-      await loadCurrentEromeCheckpoint();
-    } else {
-      await saveCurrentEromeCheckpoint();
-    }
-  } finally {
-    eromeCheckpointButton.disabled = false;
-  }
-});
-
-void initializeEromeCheckpointButton();
 
 function startSavedEromeHold(e) {
   savedEromeLongPress = false;
@@ -17320,6 +17326,7 @@ document.addEventListener('DOMContentLoaded',()=>{
 
   loadPongAutoScroll();
   createGearButton();
+  void initializeEromeCheckpointButton();
   createUnwatchedVideosButton();
   updatePasteNavigationButton();
   createSaveButtons();
