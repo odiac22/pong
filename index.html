@@ -258,7 +258,7 @@
     .url-input textarea:focus,
     .url-input input[type="url"]:focus { border-color: rgba(103,232,249,0.65); background: rgba(255,255,255,0.08); }
     .button-container {
-      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px;
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px;
     }
     .url-input button {
       flex: 1; padding: 7px 8px; border-radius: 7px; color: var(--ui-text);
@@ -291,14 +291,14 @@
     .show-controls-button { left: 12px; }
     .random-sort-button { left: 42px; font-size: 7px; font-weight: 850; letter-spacing: 0; }
     .duration-sort-button { left: 72px; font-size: 17px; }
-    .refresh-button { left: 12px; bottom: 78px; }
-    .autoplay-button { left: 42px; bottom: 78px; font-size: 8px; font-weight: 850; letter-spacing: 0; }
+    .refresh-button { left: 102px; }
+    .autoplay-button { left: 132px; font-size: 8px; font-weight: 850; letter-spacing: 0; }
     .autoplay-button.on { background: rgba(103,232,249,0.28) !important; opacity: 0.74 !important; }
-    .update-app-button { left: 72px; bottom: 78px; font-size: 8px; font-weight: 850; letter-spacing: 0; }
-    .auto-scroll-button { left: 12px; bottom: 108px; font-size: 7px; font-weight: 900; letter-spacing: 0; }
+    .update-app-button { left: 162px; font-size: 8px; font-weight: 850; letter-spacing: 0; }
+    .auto-scroll-button { left: 192px; font-size: 7px; font-weight: 900; letter-spacing: 0; }
     .auto-scroll-button.on { background: rgba(34,197,94,0.30) !important; opacity: 0.78 !important; }
-    .erome-checkpoint-button { left: 42px; bottom: 108px; font-size: 6px; font-weight: 900; letter-spacing: 0; background: rgba(37,99,235,0.34) !important; opacity: 0.68; }
-    .reset-ai-stats-button { left: 72px; bottom: 108px; font-size: 9px; font-weight: 900; letter-spacing: 0; background: rgba(127,29,29,0.32) !important; }
+    .erome-checkpoint-button { left: 222px; font-size: 6px; font-weight: 900; letter-spacing: 0; background: rgba(37,99,235,0.34) !important; opacity: 0.68; }
+    .reset-ai-stats-button { left: 252px; font-size: 9px; font-weight: 900; letter-spacing: 0; background: rgba(127,29,29,0.32) !important; }
     .next-batch-button {
       position: fixed; left: 46px; top: 50%; transform: translateY(-50%);
       width: 30px; height: 30px; background: var(--ui-bg); opacity: 0.44;
@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.21</div>
+    <div class="version-number">25.22</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -837,8 +837,8 @@
         <button id="load-videos">Load Videos</button>
         <button id="open-erome">Open Albums</button>
         <button id="saved-erome">Saved Erome</button>
-        <button id="random-40-local">R40 Local 2.2</button>
         <button id="random-40-local2">R40 Local 2</button>
+        <button id="random-40-local">R40 Local 2.2</button>
         <button id="train-ai">Train AI</button>
       </div>
     </div>
