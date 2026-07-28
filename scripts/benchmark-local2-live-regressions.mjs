@@ -589,6 +589,7 @@ async function runRegressionCaseInMainWorld(fixture, timeoutMs) {
       {
         visionModel: random40LocalVisionModel('local2'),
         mode: 'local2',
+        preferencePolicy: 'broad-hard-safe',
         signal: controller.signal,
         deferQwenReview: false,
         maxImages: random40ReviewImageLimit('local2')

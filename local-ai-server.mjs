@@ -9,6 +9,7 @@ import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { pipeline, RawImage, env } from '@xenova/transformers';
 import { createLocal2NodeAdapter } from './local2-node-adapter.mjs';
+import { Local2FlashEngine } from './local2-flash-engine.mjs';
 import {
   local2CleanResultIsExplicitlyHardSafe,
   local2ImageGradeSummary
@@ -27,6 +28,7 @@ const QWEN_ACCEPT_EXAMPLES = Number(process.env.PONG_QWEN_ACCEPT_EXAMPLE_IMAGES 
 const QWEN_REJECT_EXAMPLES = Number(process.env.PONG_QWEN_REJECT_EXAMPLE_IMAGES || 0);
 const QWEN_CANDIDATE_IMAGES = Number(process.env.PONG_QWEN_CANDIDATE_IMAGES || 2);
 const LOCAL2_CLEAN_MAX_IMAGES = Math.max(4, Math.min(12, Number(process.env.PONG_LOCAL2_CLEAN_MAX_IMAGES || 8)));
+const LOCAL2_FLASH_DECISION_IMAGES = 4;
 const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD || 40);
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const PONG_INDEX_PATH = path.join(process.cwd(), 'index.html');
@@ -4257,15 +4259,36 @@ function textHardFilter(artist = {}, { localVariant = '' } = {}) {
   if (nameTokens.includes('ts')) return 'blocked exact name token: ts';
   if (nameTokens.some(token => ['tsemmaswan', 'tsbellafrost'].includes(token))) return 'blocked confirmed creator profile';
   if (nameTokens.some(token => token.includes('bbw'))) return 'blocked name contains: bbw';
-  if (nameTokens.some(token => /^trans(?:girl|woman|female|latina|babe|beauty|queen|princess|doll|model)/.test(token))) {
+  if (nameTokens.some(token => token.includes('sissy') || /tsg$/.test(token))) {
+    return 'blocked high-confidence trans/TS creator name';
+  }
+  if (nameTokens.some(token =>
+    ['boy', 'boi', 'male', 'man', 'guy', 'dude'].includes(token) ||
+    /(?:were|the|only|all)(?:guys?|dudes?|males?)$/.test(token)
+  )) {
+    return 'blocked high-confidence male creator name';
+  }
+  if (nameTokens.some(token =>
+    /(?:cock|dick|dicc|penis)(?:$|lover|girl|boy|xxx|free|vip)/.test(token)
+  )) {
+    return 'blocked explicit attached-anatomy creator name';
+  }
+  if (nameTokens.some(token =>
+    /^trans(?:gender|sexual|sensual|girl|woman|female|latina|babe|beauty|queen|princess|doll|model|xxx|onlyfans|free)/.test(token)
+  )) {
     return 'blocked explicit trans creator name';
+  }
+  if (nameTokens.some(token =>
+    /(?:girl|lady|babe|barbie|nasty|queen|princess|doll|goddess|mistress|blonde|brunette|latina|asian|ebony|sissy|model|xxx)ts$/.test(token)
+  )) {
+    return 'blocked high-confidence TS creator suffix';
   }
 
   const combined = `${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`
     .toLowerCase()
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '');
-  const fragments = ['transgender', 'transsexual', 'transgirl', 'trans girl', 'tgirl', 't-girl', 'shemale', 'femboy', 'ladyboy', 'crossdresser', 'crossdress', 'mtf'];
+  const fragments = ['transgender', 'transsexual', 'transexual', 'transgirl', 'trans girl', 'tgirl', 't-girl', 'shemale', 'femboy', 'ladyboy', 'sissy', 'sissification', 'crossdresser', 'crossdress', 'mtf'];
   for (const fragment of fragments) {
     if (combined.includes(fragment)) return `blocked text contains: ${fragment}`;
   }
@@ -6411,6 +6434,7 @@ async function classify(payload, signal = null, control = {}) {
 // Local1 never creates or schedules Local2 work.
 const local2ProducerRecentArtists = new Set();
 const local2ProducerRecentPages = new Set();
+let local2ForcedProducerPages = [];
 
 function local2AbortableDelay(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -6780,8 +6804,10 @@ async function createPongLocal2Workers() {
 
 async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates }) {
   const maximumPendingWork = 36;
-  const maximumSubmitBatch = 16;
   const listingPageConcurrency = 4;
+  const forcedPlan = local2ForcedProducerPages.length > 0;
+  const maximumSubmitBatch = forcedPlan ? 512 : 16;
+  let forcedPageCursor = 0;
   while (!signal.aborted && needsCandidates()) {
     const state = snapshot();
     const pendingWork = Object.values(state.stages || {}).reduce((total, stage) => (
@@ -6794,13 +6820,17 @@ async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates })
       await local2AbortableDelay(300, signal);
       continue;
     }
-    const pages = [];
-    for (let attempts = 0; attempts < 120 && pages.length < listingPageConcurrency; attempts++) {
+    const pages = local2ForcedProducerPages.length
+      ? local2ForcedProducerPages.slice(forcedPageCursor, forcedPageCursor + listingPageConcurrency)
+      : [];
+    forcedPageCursor += pages.length;
+    for (let attempts = 0; !local2ForcedProducerPages.length && attempts < 120 && pages.length < listingPageConcurrency; attempts++) {
       const candidatePage = crypto.randomInt(1, 3501);
       if (local2ProducerRecentPages.has(candidatePage) || pages.includes(candidatePage)) continue;
       pages.push(candidatePage);
     }
     if (!pages.length) {
+      if (local2ForcedProducerPages.length) break;
       local2ProducerRecentPages.clear();
       continue;
     }
@@ -6834,6 +6864,7 @@ async function pongLocal2Producer({ submit, signal, snapshot, needsCandidates })
     }
     await local2AbortableDelay(submitted ? 25 : 250, signal);
   }
+  if (forcedPlan && !signal.aborted) return { exhausted: true };
 }
 
 async function local2CleanHealth() {
@@ -6841,6 +6872,557 @@ async function local2CleanHealth() {
 }
 
 let local2LastKnownRevision = 'pong-local2-clean-v3:uninitialized';
+
+function local2FlashListingCandidates(html, pageUrl, sourcePage) {
+  const candidates = [];
+  const seen = new Set();
+  const blocks = String(html || '').split(/<div[^>]+class=["'][^"']*\bthumb\b[^>]*>/i).slice(1);
+  for (const rawBlock of blocks) {
+    const block = rawBlock.slice(0, 12000);
+    const artistMatch = block.match(/<a[^>]+href=["']([^"']*(?:\/u\/|\/c\/)[^"']+)["'][^>]*>/i);
+    if (!artistMatch?.[1]) continue;
+    try {
+      const artistUrl = gatewayTargetUrl(new URL(decodeHtmlUrl(artistMatch[1]), pageUrl).toString()).toString();
+      const artistId = random40ReservoirIdentity(artistUrl);
+      if (!artistId || seen.has(artistId)) continue;
+      const artistInfo = random40ReservoirArtistInfo(artistUrl);
+      const listingNameTokens = String(artistInfo.artistName || '')
+        .toLowerCase()
+        .split(/[^a-z0-9]+/g)
+        .filter(Boolean);
+      if (
+        textHardFilter(artistInfo, { localVariant: 'local2' }) ||
+        listingNameTokens.some(token => ['boy', 'boi', 'male', 'man', 'guy', 'dude'].includes(token))
+      ) continue;
+      seen.add(artistId);
+      const imageMatch = block.match(/<img[^>]+(?:src|data-src)=["']([^"']+)["']/i);
+      candidates.push({
+        artistId,
+        artistUrl,
+        sourcePage,
+        profileImageUrl: imageMatch?.[1]
+          ? normalizeUrl(decodeHtmlUrl(imageMatch[1]), pageUrl)
+          : ''
+      });
+    } catch (_) {}
+  }
+  return candidates;
+}
+
+async function local2FlashDiscoverPages(pages, context) {
+  const hosts = availableGatewayHosts().length ? availableGatewayHosts() : GATEWAY_ALLOWED_HOSTS;
+  const requests = pages.flatMap(page => hosts.map(host => ({
+    page,
+    host,
+    pageUrl: `https://${host}/?page=${page}`
+  })));
+  const results = await Promise.allSettled(requests.map(async request => ({
+    ...request,
+    html: await random40ReservoirFetchHtml(request.pageUrl, 12000, context.signal)
+  })));
+  const groups = [];
+  const seen = new Set();
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue;
+    const parsed = local2FlashListingCandidates(
+      result.value.html,
+      result.value.pageUrl,
+      result.value.page
+    );
+    const fallback = parsed.length
+      ? parsed
+      : random40ReservoirArtistUrls(result.value.html, result.value.pageUrl).map(artistUrl => ({
+          artistId: random40ReservoirIdentity(artistUrl),
+          artistUrl,
+          sourcePage: result.value.page,
+          profileImageUrl: ''
+        }));
+    groups.push(fallback);
+  }
+  const maximumPerWave = Math.max(
+    32,
+    Math.min(192, Number(process.env.PONG_LOCAL2_FLASH_CANDIDATES_PER_WAVE || 96))
+  );
+  const candidates = [];
+  const maximumGroupLength = Math.max(0, ...groups.map(group => group.length));
+  // Sample every selected page/source before taking a second row from any one
+  // listing. Concatenation made an otherwise good creator on the fourth page
+  // wait behind hundreds of profiles from the first three pages.
+  for (let offset = 0; offset < maximumGroupLength && candidates.length < maximumPerWave; offset++) {
+    for (const group of groups) {
+      const candidate = group[offset];
+      if (!candidate) continue;
+      if (!candidate.artistId || seen.has(candidate.artistId)) continue;
+      seen.add(candidate.artistId);
+      candidates.push(candidate);
+      if (candidates.length >= maximumPerWave) break;
+    }
+  }
+  return candidates;
+}
+
+function local2FlashDecisionIsSafe(decision = {}) {
+  const hard = decision.hardFilters || {};
+  return decision.verdict === 'accept' &&
+    hard.photograph === true &&
+    hard.femalePresentingAdult === true &&
+    hard.malePresent === false &&
+    hard.attachedAnatomy === false &&
+    hard.feetDominant === false &&
+    hard.bodyMismatch === false &&
+    hard.over60 === false &&
+    hard.adultSafetyRisk === false &&
+    hard.ambiguous === false;
+}
+
+function local2FlashAcceptedDto(profile, media, decision, revision) {
+  const artistId = random40ReservoirIdentity(profile.artistUrl);
+  const orderedMedia = [...media].sort((left, right) =>
+    Number(right?.fastStart === true) - Number(left?.fastStart === true)
+  );
+  return {
+    schema: 'pong.local2.accepted.v1',
+    storage: 'memory-only',
+    revision,
+    artist: {
+      id: artistId,
+      url: profile.artistUrl,
+      name: profile.artistName,
+      sourcePage: Number(profile.sourcePage || 0)
+    },
+    decision,
+    media: orderedMedia.slice(0, 20).map(entry => ({
+      videoUrl: entry.videoUrl,
+      postUrl: entry.postUrl,
+      postIndex: Number(entry.postIndex || 0),
+      alternateVideoUrls: Array.isArray(entry.alternateVideoUrls) ? entry.alternateVideoUrls : [],
+      verified: true,
+      fastStart: entry.fastStart === true
+    }))
+  };
+}
+
+let local2FlashQualificationActive = 0;
+const local2FlashQualificationWaiters = [];
+
+function local2FlashAcquireQualificationSlot(signal) {
+  if (local2FlashQualificationActive < 10) {
+    local2FlashQualificationActive++;
+    return Promise.resolve(() => {
+      local2FlashQualificationActive = Math.max(0, local2FlashQualificationActive - 1);
+      local2FlashQualificationWaiters.shift()?.();
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const enter = () => {
+      signal?.removeEventListener('abort', abort);
+      local2FlashQualificationActive++;
+      resolve(() => {
+        local2FlashQualificationActive = Math.max(0, local2FlashQualificationActive - 1);
+        local2FlashQualificationWaiters.shift()?.();
+      });
+    };
+    const abort = () => {
+      const index = local2FlashQualificationWaiters.indexOf(enter);
+      if (index >= 0) local2FlashQualificationWaiters.splice(index, 1);
+      reject(signal.reason || new Error('Local2 Flash stopped'));
+    };
+    if (signal?.aborted) return abort();
+    local2FlashQualificationWaiters.push(enter);
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+async function local2FlashPrepareProfile(candidate, context) {
+  const artistUrl = gatewayTargetUrl(candidate.artistUrl).toString();
+  const artistInfo = random40ReservoirArtistInfo(artistUrl);
+  const pages = [];
+  const likelyVideoPostUrls = [];
+  const likelyKeys = new Set();
+  const allVideoPostUrls = [];
+  const allKeys = new Set();
+  const maximumPages = Math.max(4, Math.min(24, Number(process.env.PONG_LOCAL2_FLASH_GATE_PAGES || 12)));
+
+  const addPage = (page, html) => {
+    if (random40ReservoirProfileScore(html).posts <= 0) return false;
+    pages.push({ page, html });
+    for (const postUrl of local2LikelyVideoPostUrls(html, artistUrl)) {
+      const key = canonicalVideoPostKey(postUrl);
+      if (!key || likelyKeys.has(key)) continue;
+      likelyKeys.add(key);
+      likelyVideoPostUrls.push(postUrl);
+    }
+    for (const postUrl of [...likelyVideoPostUrls, ...local2VideoPostUrls(html, artistUrl)]) {
+      const key = canonicalVideoPostKey(postUrl);
+      if (!key || allKeys.has(key)) continue;
+      allKeys.add(key);
+      allVideoPostUrls.push(postUrl);
+    }
+    return true;
+  };
+
+  const firstHtml = await random40ReservoirFetchHtml(artistUrl, 10000, context.signal);
+  if (!addPage(1, firstHtml)) throw new Error('Local2 Flash profile listing unavailable');
+  // Most video-rich creators prove the cheap 15-post requirement on page one.
+  // Only sparse profiles spend requests on additional listing pages.
+  for (let batchStart = 2; batchStart <= maximumPages && likelyVideoPostUrls.length < 15; batchStart += 3) {
+    const pageNumbers = [batchStart, batchStart + 1, batchStart + 2].filter(page => page <= maximumPages);
+    const results = await Promise.allSettled(pageNumbers.map(page => random40ReservoirFetchHtml(
+      random40ReservoirProfilePageUrl(artistUrl, page),
+      8000,
+      context.signal
+    )));
+    let foundAny = false;
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled' && addPage(pageNumbers[index], result.value)) foundAny = true;
+    });
+    if (!foundAny) break;
+  }
+  if (likelyVideoPostUrls.length < 15) {
+    throw new Error(`Local2 Flash video gate found ${likelyVideoPostUrls.length}/15`);
+  }
+  const pageText = local2ProfileTextEvidence(firstHtml, artistInfo);
+  artistInfo.pageText = pageText;
+  const hardTextReason = textHardFilter(artistInfo, { localVariant: 'local2' });
+  if (hardTextReason) throw new Error(hardTextReason);
+  const flashNameToken = String(artistInfo.artistName || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .find(Boolean) || '';
+  if (/^ts[a-z0-9]/.test(flashNameToken)) {
+    throw new Error('Local2 Flash blocked high-confidence TS creator prefix');
+  }
+  const profileImageUrl = random40ReservoirProfileImageUrl(firstHtml, artistUrl);
+  const postImageEntries = random40ReservoirBestImageEntries(pages.flatMap(item =>
+    random40ReservoirPostImageEntries(
+      item.html,
+      random40ReservoirProfilePageUrl(artistUrl, item.page),
+      artistInfo
+    )
+  ), 32);
+  const candidateImageUrls = [...new Set([
+    profileImageUrl,
+    ...postImageEntries.map(entry => entry.imageUrl)
+  ].map(url => normalizeUrl(url)).filter(Boolean))].slice(0, LOCAL2_FLASH_DECISION_IMAGES);
+  if (candidateImageUrls.length < 2) throw new Error('Local2 Flash found fewer than two review images');
+  return {
+    ...artistInfo,
+    sourcePage: Number(candidate.sourcePage || 0),
+    profileImageUrl,
+    candidateImageUrls,
+    postImageEntries,
+    videoPostUrls: allVideoPostUrls,
+    likelyVideoPostCount: likelyVideoPostUrls.length,
+    scannedThroughPage: pages.at(-1)?.page || 1
+  };
+}
+
+async function local2FlashVerifyProfile(profile, context) {
+  const result = await verifyVideoPostBatch({
+    postUrls: profile.videoPostUrls,
+    // Fifteen distinct source-post media URLs is the delivery contract. Do
+    // not spend five extra post requests before publishing; the player needs
+    // only five foreground-proven entries for its immediate swipe window.
+    stopAt: 15,
+    perArtistConcurrency: 14,
+    artistInfo: profile
+  }, context.signal).catch(() => ({ entries: [] }));
+  const verified = Array.isArray(result?.entries) ? result.entries : [];
+  // A successful source-post fetch plus an explicit, distinct <video>/<source>
+  // media URL is the fast verification contract. Probing every URL again caused
+  // a second 15-request burst, media-host throttling, false negatives, and
+  // 30-50 second delivery delays. Pong's hidden playback benchmark remains the
+  // authoritative decode/time-advance proof.
+  return verified
+    .sort((left, right) =>
+      Number(right?.playbackFastStart === true) - Number(left?.playbackFastStart === true)
+    )
+    .slice(0, 20)
+    .map(entry => ({
+    videoUrl: entry.videoUrl,
+    postUrl: entry.postUrl,
+    postIndex: Number(entry.postIndex || 0),
+    alternateVideoUrls: Array.isArray(entry.alternateVideoUrls) ? entry.alternateVideoUrls : [],
+    verified: entry.playbackProbeVerified === true,
+      fastStart: entry.playbackFastStart === true
+    }));
+}
+
+let local2FlashMediaProbeActive = 0;
+const local2FlashMediaProbeWaiters = [];
+let local2FlashPlaybackPriorityUntil = 0;
+let local2FlashPlaybackPriorityTimer = null;
+
+function local2FlashMediaProbeLimit() {
+  // Foreground playback gets most of the connection budget, but never reduce
+  // qualification to zero: a repeatedly buffering first card would otherwise
+  // keep extending protection and permanently starve every later artist.
+  return Date.now() < local2FlashPlaybackPriorityUntil ? 1 : 4;
+}
+
+function local2FlashDrainMediaProbeWaiters() {
+  while (
+    local2FlashMediaProbeActive < local2FlashMediaProbeLimit() &&
+    local2FlashMediaProbeWaiters.length
+  ) {
+    local2FlashMediaProbeWaiters.shift()?.();
+  }
+}
+
+function local2FlashProtectForegroundPlayback(durationMs = 8000) {
+  local2FlashPlaybackPriorityUntil = Math.max(
+    local2FlashPlaybackPriorityUntil,
+    Date.now() + Math.max(1500, Number(durationMs || 8000))
+  );
+  clearTimeout(local2FlashPlaybackPriorityTimer);
+  local2FlashPlaybackPriorityTimer = setTimeout(() => {
+    local2FlashPlaybackPriorityUntil = 0;
+    local2FlashDrainMediaProbeWaiters();
+  }, Math.max(25, local2FlashPlaybackPriorityUntil - Date.now() + 25));
+  local2FlashPlaybackPriorityTimer.unref?.();
+}
+
+function local2FlashClearForegroundPlaybackProtection() {
+  clearTimeout(local2FlashPlaybackPriorityTimer);
+  local2FlashPlaybackPriorityTimer = null;
+  local2FlashPlaybackPriorityUntil = 0;
+  local2FlashDrainMediaProbeWaiters();
+}
+
+function local2FlashAcquireMediaProbeSlot(signal) {
+  // The byte probes are tiny 64 KiB range reads, not full downloads. Four
+  // artist lanes keep the first safe result from waiting behind two unlucky
+  // slow media hosts while remaining far below the normal playback workload.
+  if (local2FlashMediaProbeActive < local2FlashMediaProbeLimit()) {
+    local2FlashMediaProbeActive++;
+    return Promise.resolve(() => {
+      local2FlashMediaProbeActive = Math.max(0, local2FlashMediaProbeActive - 1);
+      local2FlashDrainMediaProbeWaiters();
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const enter = () => {
+      signal?.removeEventListener('abort', abort);
+      local2FlashMediaProbeActive++;
+      resolve(() => {
+        local2FlashMediaProbeActive = Math.max(0, local2FlashMediaProbeActive - 1);
+        local2FlashDrainMediaProbeWaiters();
+      });
+    };
+    const abort = () => {
+      const index = local2FlashMediaProbeWaiters.indexOf(enter);
+      if (index >= 0) local2FlashMediaProbeWaiters.splice(index, 1);
+      reject(signal.reason || new Error('Local2 Flash stopped'));
+    };
+    if (signal?.aborted) return abort();
+    local2FlashMediaProbeWaiters.push(enter);
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+async function local2FlashPrioritizePlayableMedia(media, context) {
+  const release = await local2FlashAcquireMediaProbeSlot(context.signal);
+  try {
+    const probeEntries = media.slice(0, 20);
+    const rows = [];
+    let cursor = 0;
+    let fastStartProven = 0;
+    while (cursor < probeEntries.length && fastStartProven < 5) {
+      const batch = probeEntries.slice(cursor, cursor + 10);
+      const batchRows = new Array(batch.length);
+      const controllers = batch.map(() => new AbortController());
+      let settled = 0;
+      let batchFastStart = 0;
+      let finished = false;
+      let finishBatch;
+      const batchFinished = new Promise(resolve => { finishBatch = resolve; });
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        controllers.forEach(controller => controller.abort());
+        finishBatch();
+      };
+      const onParentAbort = () => finish();
+      if (context.signal?.aborted) finish();
+      else context.signal?.addEventListener('abort', onParentAbort, { once: true });
+      const tasks = batch.map(async (entry, index) => {
+        const playable = await probePlayableMediaUrl(entry.videoUrl, controllers[index].signal, 4000);
+        batchRows[index] = { entry, playable };
+        settled++;
+        if (
+          playable &&
+          videoPlaybackProbeCache.get(entry.videoUrl)?.fastStart === true
+        ) batchFastStart++;
+        if (
+          fastStartProven + batchFastStart >= 5 ||
+          settled >= batch.length
+        ) finish();
+      });
+      await batchFinished;
+      await Promise.allSettled(tasks);
+      context.signal?.removeEventListener('abort', onParentAbort);
+      rows.push(...batchRows.filter(Boolean));
+      fastStartProven = rows.filter(row =>
+        row.playable &&
+        videoPlaybackProbeCache.get(row.entry.videoUrl)?.fastStart === true
+      ).length;
+      cursor += batch.length;
+    }
+    const proven = rows
+      .filter(row => row.playable)
+      .map(row => {
+        const fastStart = videoPlaybackProbeCache.get(row.entry.videoUrl)?.fastStart === true;
+        return {
+          ...row.entry,
+          local2FlashByteProven: true,
+          playbackProbeVerified: true,
+          playbackFastStart: fastStart,
+          fastStart
+        };
+      })
+      .sort((left, right) => Number(right.fastStart === true) - Number(left.fastStart === true));
+    const provenUrls = new Set(proven.map(entry => entry.videoUrl));
+    return {
+      proven: proven.length,
+      fastStartProven: proven.filter(entry => entry.fastStart === true).length,
+      media: [
+        ...proven,
+        ...media.filter(entry => !provenUrls.has(entry.videoUrl))
+      ]
+    };
+  } finally {
+    release();
+  }
+}
+
+async function local2FlashQualifyCandidate(candidate, context) {
+  const flashStartedAt = Date.now();
+  const profile = await local2FlashPrepareProfile(candidate, context);
+  const flashTimings = {
+    profileMs: Date.now() - flashStartedAt,
+    mediaMs: 0,
+    decisionMs: 0,
+    totalMs: 0
+  };
+  const releaseQualificationSlot = await local2FlashAcquireQualificationSlot(context.signal);
+  const branchController = new AbortController();
+  const abortBranch = () => branchController.abort(context.signal?.reason || new Error('Local2 Flash stopped'));
+  if (context.signal?.aborted) abortBranch();
+  else context.signal?.addEventListener('abort', abortBranch, { once: true });
+  const branchContext = { ...context, signal: branchController.signal };
+  const verifyPromise = local2FlashVerifyProfile(profile, branchContext)
+    .then(async media => {
+      if (media.length < 15) return { branch: 'media', media, fastStartProven: 0 };
+      const prioritized = await local2FlashPrioritizePlayableMedia(media, branchContext);
+      return {
+        branch: 'media',
+        media: prioritized.media,
+        fastStartProven: prioritized.fastStartProven
+      };
+    })
+    .then(result => {
+      flashTimings.mediaMs = Date.now() - flashStartedAt;
+      return result;
+    })
+    .catch(error => ({ branch: 'media', error }));
+  const decisionPromise = classifyInner({
+    app: 'pong-random40-local2-flash',
+    localVariant: 'local2',
+    preferencePolicy: 'broad-hard-safe',
+    stage: 'full',
+    deferQwenReview: true,
+    visionModel: LOCAL2_QWEN_MODEL,
+    artist: profile,
+    candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL2_FLASH_DECISION_IMAGES)
+  }, workloadGeneration, branchController.signal)
+    .then(result => ({
+      branch: 'decision',
+      decision: local2PipelineDecision(result, profile.candidateImageUrls)
+    }))
+    .then(result => {
+      flashTimings.decisionMs = Date.now() - flashStartedAt;
+      return result;
+    })
+    .catch(error => ({ branch: 'decision', error }));
+  try {
+    const first = await Promise.race([verifyPromise, decisionPromise]);
+    if (first.error) {
+      branchController.abort();
+      return { accepted: false, reason: String(first.error?.message || first.error) };
+    }
+    if (first.branch === 'media' && first.media.length < 15) {
+      branchController.abort();
+      return { accepted: false, reason: `only ${first.media.length}/15 verified media URLs` };
+    }
+    if (first.branch === 'media' && first.fastStartProven < 5) {
+      branchController.abort();
+      return {
+        accepted: false,
+        reason: `only ${first.fastStartProven}/5 foreground media URLs passed the fast-start byte probe`
+      };
+    }
+    if (first.branch === 'decision' && !local2FlashDecisionIsSafe(first.decision)) {
+      branchController.abort();
+      return {
+        accepted: false,
+        reason: first.decision.reason || 'hard-filter or preference rejection',
+        diagnostic: first.decision
+      };
+    }
+    const second = first.branch === 'media' ? await decisionPromise : await verifyPromise;
+    if (second.error) return { accepted: false, reason: String(second.error?.message || second.error) };
+    const mediaResult = first.branch === 'media' ? first : second;
+    const media = mediaResult.media;
+    const decision = first.branch === 'decision' ? first.decision : second.decision;
+    if (media.length < 15) return { accepted: false, reason: `only ${media.length}/15 verified media URLs` };
+    if (mediaResult.fastStartProven < 5) {
+      return {
+        accepted: false,
+        reason: `only ${mediaResult.fastStartProven}/5 foreground media URLs passed the fast-start byte probe`,
+        diagnostic: decision
+      };
+    }
+    if (!local2FlashDecisionIsSafe(decision)) {
+      return {
+        accepted: false,
+        reason: decision.reason || 'hard-filter or preference rejection',
+        diagnostic: decision
+      };
+    }
+    flashTimings.totalMs = Date.now() - flashStartedAt;
+    return {
+      accepted: true,
+      dto: local2FlashAcceptedDto(profile, media, decision, context.revision),
+      diagnostic: {
+        ...decision,
+        flashTimings
+      }
+    };
+  } finally {
+    context.signal?.removeEventListener('abort', abortBranch);
+    if (!branchController.signal.aborted) branchController.abort();
+    releaseQualificationSlot();
+  }
+}
+
+const local2FlashEngine = new Local2FlashEngine({
+  discoverPages: local2FlashDiscoverPages,
+  qualifyCandidate: local2FlashQualifyCandidate,
+  getRevision: async () => {
+    const health = await local2CleanHealth().catch(() => null);
+    return String(health?.local2_revision || local2LastKnownRevision || 'local2-flash-uninitialized');
+  },
+  targetAccepted: 48,
+  readyMinimum: 1,
+  // Submit the first random page as soon as its two source listings return.
+  // Candidate qualification then overlaps the next page instead of waiting
+  // for an eight-request four-page discovery barrier.
+  pageConcurrency: 1,
+  candidateConcurrency: 32,
+  maximumPendingCandidates: 64,
+  maximumPages: 120
+});
+
 const local2Adapter = createLocal2NodeAdapter({
   createWorkers: createPongLocal2Workers,
   producer: pongLocal2Producer,
@@ -6980,10 +7562,83 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { ok: true, stored: Boolean(token) });
       return;
     }
+    if (url.pathname.startsWith('/local2-fast/')) {
+      const body = ['POST', 'PUT', 'PATCH'].includes(String(req.method || '').toUpperCase())
+        ? JSON.parse(await readBody(req) || '{}')
+        : {};
+      if (req.method === 'GET' && url.pathname === '/local2-fast/health') {
+        json(res, 200, local2FlashEngine.snapshot());
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/local2-fast/start') {
+        await local2Adapter.stop({ clearAudit: true }).catch(() => {});
+        local2FlashClearForegroundPlaybackProtection();
+        const state = await local2FlashEngine.start({
+          pages: Array.isArray(body.pages) ? body.pages : [],
+          seed: Number(body.seed || 0),
+          diagnostics: body.diagnostics === true
+        });
+        json(res, 200, state);
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/local2-fast/stop') {
+        local2FlashClearForegroundPlaybackProtection();
+        await local2FlashEngine.stop();
+        json(res, 200, local2FlashEngine.snapshot());
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/local2-fast/playback-priority') {
+        local2FlashProtectForegroundPlayback(Math.max(3000, Math.min(15000, Number(body.durationMs || 12000))));
+        json(res, 200, {
+          ok: true,
+          protected: true,
+          until: new Date(local2FlashPlaybackPriorityUntil).toISOString()
+        });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/local2-fast/candidates') {
+        if (!local2FlashEngine.snapshot().active && !local2FlashEngine.snapshot().done) {
+          await local2FlashEngine.start();
+        }
+        const count = Math.max(1, Math.min(64, Number(url.searchParams.get('count') || 12)));
+        const candidates = local2FlashEngine.lease(count);
+        if (candidates.length) local2FlashProtectForegroundPlayback();
+        const state = local2FlashEngine.snapshot();
+        json(res, 200, {
+          ...state,
+          candidates,
+          remaining: state.accepted,
+          leased: state.leased
+        });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/local2-fast/candidates/ack') {
+        const values = [
+          ...(Array.isArray(body.artistIds) ? body.artistIds : []),
+          ...(Array.isArray(body.artistUrls) ? body.artistUrls.map(random40ReservoirIdentity) : [])
+        ].filter(Boolean);
+        const consumed = local2FlashEngine.acknowledge(values);
+        json(res, 200, { ...local2FlashEngine.snapshot(), consumed });
+        return;
+      }
+      json(res, 404, { ok: false, error: 'Local2 Flash route not found' });
+      return;
+    }
     if (url.pathname.startsWith('/local2/')) {
       const body = ['POST', 'PUT', 'PATCH'].includes(String(req.method || '').toUpperCase())
         ? JSON.parse(await readBody(req))
         : {};
+      if (req.method === 'POST' && url.pathname === '/local2/start' && Array.isArray(body.pages)) {
+        await local2Adapter.stop({ clearAudit: true }).catch(() => {});
+        local2ProducerRecentArtists.clear();
+        local2ProducerRecentPages.clear();
+        local2ForcedProducerPages = [...new Set(body.pages
+          .map(Number)
+          .filter(page => Number.isInteger(page) && page >= 1 && page <= 3500))];
+      }
+      if (req.method === 'POST' && url.pathname === '/local2/stop') {
+        local2ForcedProducerPages = [];
+      }
       const result = await local2Adapter.dispatch({
         method: req.method,
         pathname: url.pathname,
@@ -7586,6 +8241,10 @@ const server = http.createServer(async (req, res) => {
       workloadGeneration++;
       const leasedBeforeReset = random40AcceptedLeases.size;
       await local2Adapter.stop({ clearAudit: true }).catch(() => {});
+      await local2FlashEngine.stop().catch(() => {});
+      local2ForcedProducerPages = [];
+      local2ProducerRecentArtists.clear();
+      local2ProducerRecentPages.clear();
       // The PC cache is shared by independent Pong tabs/devices. Resetting one
       // Local workflow must not abort Bunkr/Erome playback in another app.
       // A deliberate diagnostic reset can still request resetMedia=1.

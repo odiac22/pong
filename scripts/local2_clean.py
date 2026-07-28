@@ -264,6 +264,7 @@ class Local2Policy:
         images: Sequence[Local2ImageEvidence],
         *,
         taste_probability: float | None,
+        conservative_ambiguity: bool = True,
     ) -> Local2Decision:
         t = self.thresholds
         rows = self._unique(images)
@@ -435,15 +436,29 @@ class Local2Policy:
         # short-circuits. Exact Save memory may override personalized taste,
         # but it must never erase anatomy, presentation, feet, or 60+ review.
         review_codes: list[str] = []
-        if anatomy_uncertain:
-            review_codes.append("anatomy")
-        if male_uncertain or (not female_votes and usable):
-            review_codes.append("presentation")
-        if len(feet_votes) == 1 or feet_uncertain:
-            review_codes.append("feet")
+        if conservative_ambiguity:
+            if anatomy_uncertain:
+                review_codes.append("anatomy")
+            if male_uncertain or (not female_votes and usable):
+                review_codes.append("presentation")
+            if len(feet_votes) == 1 or feet_uncertain:
+                review_codes.append("feet")
+        else:
+            # Flash Local2 examines a wider independent image set. A lone weak
+            # SigLIP vote among many safe views is noise, not profile-level hard
+            # evidence. Preserve review for one *strong* anatomy vote and for a
+            # set that still has no affirmative female-presentation evidence.
+            # Every two-view hard veto above remains unchanged.
+            if len(attached) == 1:
+                review_codes.append("anatomy")
+            if not female_votes and usable:
+                review_codes.append("presentation")
         if len(over_60) == 1 or age_uncertain:
             review_codes.append("age-60")
-        if len(body_mismatch) == 1 or (taste_probability is None and body_uncertain):
+        if (
+            (conservative_ambiguity and len(body_mismatch) == 1)
+            or (taste_probability is None and body_uncertain)
+        ):
             review_codes.append("body-shape")
         if len(clear_body) < t.required_clear_body_images or (
             taste_probability is None and not body_preferred

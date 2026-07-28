@@ -12,7 +12,7 @@ import json
 import re
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse
 
@@ -590,14 +590,28 @@ class Local2VisionAdapter:
         analysis: Local2AnalysisBundle,
         *,
         hard_only: bool = False,
+        preference_accept: float | None = None,
+        conservative_ambiguity: bool = True,
     ) -> dict[str, Any]:
         head = None if hard_only else self._taste_head(len(analysis.artist_feature))
         taste_probability = 1.0 if hard_only else (
             head.predict_probability(analysis.artist_feature) if head is not None else None
         )
-        decision = self.policy.decide(
+        effective_preference_accept = (
+            self.policy.thresholds.preference_accept
+            if preference_accept is None
+            else float(max(0.0, min(1.0, preference_accept)))
+        )
+        decision_policy = self.policy if preference_accept is None else Local2Policy(
+            replace(
+                self.policy.thresholds,
+                preference_accept=effective_preference_accept,
+            )
+        )
+        decision = decision_policy.decide(
             analysis.descriptors,
             taste_probability=taste_probability,
+            conservative_ambiguity=conservative_ambiguity,
         )
         result = decision.as_dict()
         aggregate_anatomy_conflict = decision.checks.get("attached_male_anatomy") is True
@@ -616,7 +630,7 @@ class Local2VisionAdapter:
             "local2_schema": ENGINE_SCHEMA,
             "feature_schema": analysis.feature_schema,
             "preference_probability": None if hard_only else taste_probability,
-            "preference_threshold": self.policy.thresholds.preference_accept,
+            "preference_threshold": effective_preference_accept,
             "image_grades": [
                 {
                     "image_index": item.image_index,
@@ -666,6 +680,9 @@ class Local2VisionAdapter:
         *,
         image_urls: Sequence[str] | None = None,
         known_accept: bool = False,
+        preference_accept: float | None = None,
+        prefilter_reject: float | None = None,
+        conservative_ambiguity: bool = True,
     ) -> dict[str, Any]:
         """Reject clear taste misses before SigLIP, then run the full hard path.
 
@@ -709,15 +726,23 @@ class Local2VisionAdapter:
         prefilter_probability = max(plausible_probabilities) if plausible_probabilities else (
             head.predict_probability(prepared.prefilter_feature) if head is not None else None
         )
+        effective_prefilter_reject = (
+            TASTE_PREFILTER_REJECT
+            if prefilter_reject is None
+            else float(max(0.0, min(1.0, prefilter_reject)))
+        )
         if (
             prefilter_is_safe and not known_accept and prefilter_probability is not None and
-            prefilter_probability < TASTE_PREFILTER_REJECT
+            prefilter_probability < effective_prefilter_reject
         ):
             return {
                 "decision": "reject",
                 "confidence": float(max(0.5, min(0.999, 1.0 - prefilter_probability))),
                 "reason_code": "personal_preference_mismatch",
-                "reason": "Local2 taste prefilter is clearly below 43%",
+                "reason": (
+                    "Local2 taste prefilter is clearly below "
+                    f"{effective_prefilter_reject:.0%}"
+                ),
                 "source": ENGINE_SCHEMA,
                 "vision_source": ENGINE_SCHEMA,
                 "variant": "local2",
@@ -755,9 +780,13 @@ class Local2VisionAdapter:
                 "local2_schema": ENGINE_SCHEMA,
                 "feature_schema": prepared.feature_schema,
                 "preference_probability": float(prefilter_probability),
-                "preference_threshold": self.policy.thresholds.preference_accept,
+                "preference_threshold": (
+                    self.policy.thresholds.preference_accept
+                    if preference_accept is None
+                    else float(max(0.0, min(1.0, preference_accept)))
+                ),
                 "taste_prefilter": {
-                    "threshold": TASTE_PREFILTER_REJECT,
+                    "threshold": effective_prefilter_reject,
                     "probability": float(prefilter_probability),
                     "plausible_feature_count": len(plausible_probabilities),
                     "passed": False,
@@ -771,12 +800,16 @@ class Local2VisionAdapter:
             }
 
         analysis = self.analyze_prepared(prepared, include_taste=True)
-        result = self.classify_analysis(analysis)
+        result = self.classify_analysis(
+            analysis,
+            preference_accept=preference_accept,
+            conservative_ambiguity=conservative_ambiguity,
+        )
         result["taste_prefilter"] = {
-            "threshold": TASTE_PREFILTER_REJECT,
+            "threshold": effective_prefilter_reject,
             "probability": None if prefilter_probability is None else float(prefilter_probability),
             "plausible_feature_count": len(plausible_probabilities),
-            "passed": prefilter_probability is None or prefilter_probability >= TASTE_PREFILTER_REJECT,
+            "passed": prefilter_probability is None or prefilter_probability >= effective_prefilter_reject,
             "bypassed_for_exact_save": bool(known_accept),
             "siglip_ran": True,
         }

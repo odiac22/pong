@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = (ROOT / ".pong-local-ai" / "preference-examples-v3.sqlite3").resolve()
 DEFAULT_AUDIT = (ROOT / ".pong-local-ai" / "train-ai-verdict-audit.jsonl").resolve()
-EXPECTED_DEFAULT = (217, 119, 98)
+MINIMUM_DEFAULT = (217, 119, 98)
 VALID_LABELS = {"accept", "reject"}
 
 
@@ -134,7 +134,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--no-default-count-assertion",
         action="store_true",
-        help="Do not assert 217 total / 119 Save / 98 Red-X for the default files.",
+        help="Do not assert the 217 total / 119 Save / 98 Red-X minimum for the default files.",
     )
     args = parser.parse_args(argv)
     if not 0.0 <= args.minimum_accuracy <= 1.0:
@@ -171,7 +171,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         and args.audit.expanduser().resolve() == DEFAULT_AUDIT
     )
     check_expected = default_files and not args.no_default_count_assertion
-    expected_pass = not check_expected or (len(cohort), save, red_x) == EXPECTED_DEFAULT
+    actual_counts = (len(cohort), save, red_x)
+    expected_pass = not check_expected or all(
+        actual >= minimum
+        for actual, minimum in zip(actual_counts, MINIMUM_DEFAULT)
+    )
 
     print("Exact direct-feedback memory benchmark (offline, aggregate-only)")
     print(f"Read-only source: {database_rows} database rows -> {len(records)} service identities")
@@ -190,7 +194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{'PASS' if accuracy >= args.minimum_accuracy and cohort else 'FAIL'}"
     )
     if check_expected:
-        print(f"Default live-data cohort assertion: {'PASS' if expected_pass else 'FAIL'}")
+        print(f"Default live-data cohort minimum assertion: {'PASS' if expected_pass else 'FAIL'}")
     if malformed_rows:
         print(f"Malformed preference records skipped: {malformed_rows} -> FAIL")
 

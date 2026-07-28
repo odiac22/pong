@@ -2466,6 +2466,9 @@ def local2_clean_classify(payload: dict[str, Any]) -> dict[str, Any]:
 
 def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
     stage = str(payload.get("stage", "full")).strip().lower()
+    broad_hard_safe = (
+        str(payload.get("preferencePolicy", "")).strip().lower() == "broad-hard-safe"
+    )
     artist = payload.get("artist") or {}
     known_feedback = local2_known_feedback(normalize_url(artist.get("artistUrl", "")))
     if known_feedback and known_feedback["label"] == "reject":
@@ -2520,6 +2523,12 @@ def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
                 known_accept=bool(
                     known_feedback and known_feedback["label"] == "accept"
                 ),
+                # Flash Local2 uses the complete learned reference head as a
+                # broad ranking/admission signal while preserving every hard
+                # semantic threshold. Local2.2 keeps its calibrated defaults.
+                preference_accept=0.34 if broad_hard_safe else None,
+                prefilter_reject=0.30 if broad_hard_safe else None,
+                conservative_ambiguity=not broad_hard_safe,
             )
 
     if known_feedback and known_feedback["label"] == "accept" and stage != "triage":

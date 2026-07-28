@@ -130,6 +130,7 @@ export function createLocal2NodeAdapter({
   let producerController = null;
   let producerPromise = null;
   let producerCleanup = null;
+  let producerExhausted = false;
   let generation = 0;
   let lastRevisionCheckAt = 0;
   let lastProducerError = '';
@@ -202,7 +203,14 @@ export function createLocal2NodeAdapter({
   }
 
   function startProducer(currentGeneration) {
-    if (typeof producer !== 'function' || !pipeline || !producerController || producerPromise || producerCleanup) return;
+    if (
+      typeof producer !== 'function' ||
+      !pipeline ||
+      !producerController ||
+      producerPromise ||
+      producerCleanup ||
+      producerExhausted
+    ) return;
     const context = {
       schema: ADAPTER_SCHEMA,
       mode: 'local2',
@@ -220,8 +228,9 @@ export function createLocal2NodeAdapter({
     };
     producerPromise = Promise.resolve()
       .then(() => producer(context))
-      .then(cleanup => {
-        if (typeof cleanup === 'function') producerCleanup = cleanup;
+      .then(result => {
+        if (typeof result === 'function') producerCleanup = result;
+        else if (result?.exhausted === true) producerExhausted = true;
       })
       .catch(error => {
         if (producerController?.signal.aborted || currentGeneration !== generation) return;
@@ -269,6 +278,7 @@ export function createLocal2NodeAdapter({
       });
       stoppedAt = 0;
       lastProducerError = '';
+      producerExhausted = false;
       startProducer(currentGeneration);
       return pipeline;
     })();
@@ -293,6 +303,7 @@ export function createLocal2NodeAdapter({
     producerController = null;
     producerPromise = null;
     producerCleanup = null;
+    producerExhausted = false;
     starting = null;
     stoppedAt = now();
     return inactiveSnapshot();
@@ -346,6 +357,10 @@ export function createLocal2NodeAdapter({
       const candidates = activePipeline.lease(count);
       const after = activePipeline.stats();
       kickProducer();
+      const liveSnapshot = snapshot();
+      const stagesIdle = Object.values(liveSnapshot.stages || {}).every(stage =>
+        Number(stage?.queued || 0) === 0 && Number(stage?.active || 0) === 0
+      );
       return {
         handled: true,
         status: 200,
@@ -357,6 +372,7 @@ export function createLocal2NodeAdapter({
           active: true,
           revision: activePipeline.revision,
           ready: before.ready,
+          done: liveSnapshot.producer?.running === false && stagesIdle,
           candidates,
           remaining: after.accepted,
           leased: after.leased,
