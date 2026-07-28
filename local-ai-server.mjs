@@ -2364,6 +2364,10 @@ async function verifyVideoPostBatch(payload, requestSignal) {
     })
     .slice(0, 500);
   const stopAt = Math.max(1, Math.min(100, Number(payload?.stopAt || 15)));
+  const perArtistConcurrency = Math.max(
+    2,
+    Math.min(16, Number(payload?.perArtistConcurrency || VIDEO_VERIFY_PER_ARTIST_CONCURRENCY))
+  );
   const artistInfo = payload?.artistInfo && typeof payload.artistInfo === 'object' ? payload.artistInfo : {};
   const postGroups = balanceVideoPostGroups(originalPostUrls, artistInfo).slice(0, 500);
   const controller = new AbortController();
@@ -2427,7 +2431,7 @@ async function verifyVideoPostBatch(payload, requestSignal) {
 
   try {
     await Promise.all(Array.from(
-      { length: Math.min(VIDEO_VERIFY_PER_ARTIST_CONCURRENCY, postGroups.length) },
+      { length: Math.min(perArtistConcurrency, postGroups.length) },
       () => worker()
     ));
   } finally {
@@ -6455,6 +6459,27 @@ function local2VideoPostUrls(html, artistUrl) {
   return [...urls, ...fallbackUrls];
 }
 
+function local2LikelyVideoPostUrls(html, artistUrl) {
+  const urls = [...random40ReservoirVideoPostUrls(html, artistUrl)];
+  const seen = new Set(urls.map(canonicalVideoPostKey).filter(Boolean));
+  const posts = String(html || '').split(/<div[^>]+class=["'][^"']*\bpost\b[^>]*>/i).slice(1);
+  for (const post of posts) {
+    const card = post.slice(0, 50000);
+    if (!/<video\b|<source\b[^>]+(?:video\/|\.(?:mp4|m4v|webm)(?:[?"']))|href=["'][^"']+\.(?:mp4|m4v|webm)(?:[?"'])/i.test(card)) continue;
+    const match = card.match(/class=["']view-post["'][^>]+href=["']([^"']+)/i) ||
+      card.match(/href=["']([^"']+)["'][^>]+class=["']view-post["']/i);
+    if (!match?.[1]) continue;
+    try {
+      const postUrl = gatewayTargetUrl(new URL(decodeHtmlUrl(match[1]), artistUrl).toString()).toString();
+      const key = canonicalVideoPostKey(postUrl);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      urls.push(postUrl);
+    } catch (_) {}
+  }
+  return urls;
+}
+
 function local2ProfileTextEvidence(html = '', artistInfo = {}) {
   const source = String(html || '');
   const evidence = [
@@ -6522,14 +6547,50 @@ function local2PipelineDecision(result = {}, fallbackImageUrls = []) {
 
 async function local2ProfileWorker(candidate, context) {
   const artistUrl = gatewayTargetUrl(candidate.artistUrl).toString();
-  const firstHtml = await random40ReservoirFetchHtml(artistUrl, 12000, context.signal);
   const artistInfo = random40ReservoirArtistInfo(artistUrl);
-  const pages = [{ page: 1, html: firstHtml }];
-  try {
-    const secondUrl = random40ReservoirProfilePageUrl(artistUrl, 2);
-    const secondHtml = await random40ReservoirFetchHtml(secondUrl, 9000, context.signal);
-    if (random40ReservoirProfileScore(secondHtml).posts > 0) pages.push({ page: 2, html: secondHtml });
-  } catch (_) {}
+  const pages = [];
+  const likelyVideoPostUrls = [];
+  const likelyVideoPostKeys = new Set();
+  const maximumGatePages = Math.max(4, Math.min(24, Number(process.env.PONG_LOCAL2_VIDEO_GATE_PAGES || 12)));
+  const gatePageConcurrency = Math.max(2, Math.min(6, Number(process.env.PONG_LOCAL2_VIDEO_GATE_CONCURRENCY || 4)));
+  let reachedProfileEnd = false;
+  for (let batchStart = 1; batchStart <= maximumGatePages && likelyVideoPostUrls.length < 15; batchStart += gatePageConcurrency) {
+    const pageNumbers = Array.from(
+      { length: Math.min(gatePageConcurrency, maximumGatePages - batchStart + 1) },
+      (_, index) => batchStart + index
+    );
+    const results = await Promise.allSettled(pageNumbers.map(page => random40ReservoirFetchHtml(
+      random40ReservoirProfilePageUrl(artistUrl, page),
+      page === 1 ? 12000 : 9000,
+      context.signal
+    )));
+    let batchHasPosts = false;
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index];
+      if (result.status !== 'fulfilled') continue;
+      const page = pageNumbers[index];
+      const posts = random40ReservoirProfileScore(result.value).posts;
+      if (posts > 0) batchHasPosts = true;
+      if (posts <= 0) continue;
+      pages.push({ page, html: result.value });
+      for (const postUrl of local2LikelyVideoPostUrls(result.value, artistUrl)) {
+        const key = canonicalVideoPostKey(postUrl);
+        if (!key || likelyVideoPostKeys.has(key)) continue;
+        likelyVideoPostKeys.add(key);
+        likelyVideoPostUrls.push(postUrl);
+      }
+    }
+    if (!batchHasPosts) {
+      reachedProfileEnd = true;
+      break;
+    }
+  }
+  pages.sort((a, b) => a.page - b.page);
+  const firstHtml = pages.find(item => item.page === 1)?.html || pages[0]?.html;
+  if (!firstHtml) throw new Error('Local2 profile listing unavailable');
+  if (likelyVideoPostUrls.length < 15) {
+    throw new Error(`Local2 fast video gate found only ${likelyVideoPostUrls.length}/15 likely video posts${reachedProfileEnd ? '' : ` through page ${maximumGatePages}`}`);
+  }
   // Whole-page text includes navigation and unrelated promoted profiles. It
   // caused a single sidebar word (especially "femboy") to reject hundreds of
   // unrelated creators. Restrict hard text evidence to profile metadata.
@@ -6555,6 +6616,12 @@ async function local2ProfileWorker(candidate, context) {
   if (candidateImageUrls.length < 2) throw new Error('Local2 found fewer than two usable review images');
   const videoPostUrls = [];
   const seenPosts = new Set();
+  for (const postUrl of likelyVideoPostUrls) {
+    const key = canonicalVideoPostKey(postUrl);
+    if (!key || seenPosts.has(key)) continue;
+    seenPosts.add(key);
+    videoPostUrls.push(postUrl);
+  }
   for (const item of pages) {
     for (const postUrl of local2VideoPostUrls(item.html, artistUrl)) {
       const key = canonicalVideoPostKey(postUrl);
@@ -6570,6 +6637,8 @@ async function local2ProfileWorker(candidate, context) {
     candidateImageUrls,
     postImageEntries,
     videoPostUrls,
+    likelyVideoPostCount: likelyVideoPostUrls.length,
+    priorityBoost: Math.min(2, likelyVideoPostUrls.length / 30),
     scannedThroughPage: pages.at(-1)?.page || 1
   };
 }
@@ -6607,7 +6676,12 @@ async function local2VerifyWorker(profile, context) {
   let nextPage = Math.max(2, Number(profile.scannedThroughPage || 1) + 1);
   while (!context.signal.aborted && nextPage <= maximumPages) {
     if (postUrls.length >= 15) {
-      const verified = await verifyVideoPostBatch({ postUrls, stopAt: 15, artistInfo: profile }, context.signal)
+      const verified = await verifyVideoPostBatch({
+        postUrls,
+        stopAt: 15,
+        perArtistConcurrency: 14,
+        artistInfo: profile
+      }, context.signal)
         .catch(() => ({ entries: [] }));
       const entries = Array.isArray(verified?.entries) ? verified.entries : [];
       if (entries.length >= 15) {
@@ -6651,7 +6725,12 @@ async function local2VerifyWorker(profile, context) {
     if (nextPage > 10 && postUrls.length < 5) break;
   }
   if (postUrls.length >= 15 && !context.signal.aborted) {
-    const verified = await verifyVideoPostBatch({ postUrls, stopAt: 15, artistInfo: profile }, context.signal)
+    const verified = await verifyVideoPostBatch({
+      postUrls,
+      stopAt: 15,
+      perArtistConcurrency: 14,
+      artistInfo: profile
+    }, context.signal)
       .catch(() => ({ entries: [] }));
     return (Array.isArray(verified?.entries) ? verified.entries : []).slice(0, 15).map(entry => ({
       videoUrl: entry.videoUrl,
@@ -6786,7 +6865,7 @@ const local2Adapter = createLocal2NodeAdapter({
     triageHardRejectConfidence: 0.96,
     // Several independent artist image batches may occupy the model queue at
     // once; the Python service still returns one isolated decision per artist.
-    concurrency: { profile: 12, triage: 4, verify: 18, classify: 8, finalize: 6 }
+    concurrency: { profile: 12, triage: 4, verify: 8, classify: 8, finalize: 6 }
   }
 });
 

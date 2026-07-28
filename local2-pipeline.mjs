@@ -443,6 +443,7 @@ export class Local2ContinuousPipeline {
   profiled(state, profile) {
     if (!this.current(state)) return;
     state.profile = { ...profile, artistId: state.artistId };
+    state.priority += Number(profile?.priorityBoost || 0);
     // The fifteen-real-video contract is the first substantial gate. No image
     // model work begins until the verifier proves the artist qualifies.
     state.stage = 'verify';
