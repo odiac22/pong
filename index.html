@@ -270,7 +270,6 @@
     #load-videos { background: rgba(103,232,249,0.22); }
     #open-erome { background: rgba(34,197,94,0.20); }
     #saved-erome { background: rgba(251,191,36,0.18); }
-    #auth-button { background: rgba(167,139,250,0.20); }
     #random-40-local { background: rgba(244,114,182,0.20); }
     #random-40-local2 { background: rgba(168,85,247,0.20); }
     #random-40-nano { background: rgba(14,165,233,0.20); }
@@ -827,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.17</div>
+    <div class="version-number">25.18</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -838,7 +837,6 @@
         <button id="load-videos">Load Videos</button>
         <button id="open-erome">Open Albums</button>
         <button id="saved-erome">Saved Erome</button>
-        <button id="auth-button">Auth URL</button>
         <button id="random-40-local">R40 Local 2.2</button>
         <button id="random-40-local2">R40 Local 2</button>
         <button id="train-ai">Train AI</button>
@@ -7662,6 +7660,8 @@ let lastEromeArtistRecords = {};
 let savedEromeMenuEl = null;
 let eromeCheckpointAvailable = false;
 let eromeCheckpointActiveThisPage = false;
+let activeEromeScrapeTargets = [];
+let eromeCheckpointAutosaveTimer = null;
 const savedEromeRefreshJobs = new Set();
 const SAVED_EROME_FULL_RECORD_WRITE_DELAY_MS = 7000;
 const SAVED_EROME_MENU_RENDER_DELAY_MS = 1200;
@@ -7924,7 +7924,11 @@ async function saveCurrentEromeCheckpoint() {
     paperclipVisitedArtistTokens: [...paperclipVisitedArtistTokens],
     paperclipHistory: paperclipHistory.slice(),
     paperclipHistoryPosition,
-    paperclipStepCount
+    paperclipStepCount,
+    scrapeTargets: activeEromeScrapeTargets.slice(),
+    completedAlbumUrls: pasteEvents
+      .map(event => normalizeEromeLaunchUrl(event?.postUrl || ''))
+      .filter(Boolean)
   };
   const saved = await writeEromeCheckpoint(checkpoint);
   if (!saved) {
@@ -7981,8 +7985,34 @@ async function loadCurrentEromeCheckpoint() {
   updateEromeCheckpointButton();
   displayPasteEventAtIndex(targetIndex, { recordHistory: false });
   scheduleSessionSave(250);
+  const resumeTargets = (checkpoint.scrapeTargets || [])
+    .map(normalizeEromeLaunchUrl)
+    .filter(Boolean);
+  activeEromeScrapeTargets = resumeTargets.slice();
   showSortingIndicator(`Loaded saved Erome/Balbums place from ${new Date(checkpoint.savedAt).toLocaleString()}`);
+  if (resumeTargets.length) {
+    window.PongEromeResumeState = {
+      completedAlbumUrls: (checkpoint.completedAlbumUrls || pasteEvents.map(event => event?.postUrl))
+        .map(normalizeEromeLaunchUrl)
+        .filter(Boolean)
+    };
+    if (document.getElementById('erome-url')) {
+      document.getElementById('erome-url').value = resumeTargets.join('\n');
+    }
+    setTimeout(() => {
+      showSortingIndicator('Loaded saved place. Continuing the remaining scrape...');
+      loadEromeAsCards();
+    }, 120);
+  }
   return true;
+}
+
+function scheduleEromeCheckpointAutosave() {
+  if (!eromeCheckpointActiveThisPage || !eromeCheckpointAvailable) return;
+  clearTimeout(eromeCheckpointAutosaveTimer);
+  eromeCheckpointAutosaveTimer = setTimeout(() => {
+    saveCurrentEromeCheckpoint();
+  }, 1200);
 }
 
 async function initializeEromeCheckpointButton() {
@@ -9120,6 +9150,7 @@ function appendEromeGroupsToCurrentCards(groups, proxyBase) {
   window.PongLoadedSavedMode = 'erome';
   updatePasteNavigationButton();
   scheduleSessionSave(700);
+  scheduleEromeCheckpointAutosave();
 
   return payload;
 }
@@ -16263,6 +16294,11 @@ let bunkrLoadGeneration = 0;
 
 async function loadBunkrAsCards(targets) {
   const loadGeneration = ++bunkrLoadGeneration;
+  const resumeState = window.PongEromeResumeState || null;
+  window.PongEromeResumeState = null;
+  const completedAlbumUrls = new Set(
+    (resumeState?.completedAlbumUrls || []).map(normalizeEromeLaunchUrl).filter(Boolean)
+  );
   const endpoint = await getRandom40LocalEndpoint(true);
   if (!endpoint) {
     alert('Bunkr imports need the Pong PC server to be running and reachable.');
@@ -16314,8 +16350,8 @@ async function loadBunkrAsCards(targets) {
   const BUNKR_READY_ALBUM_TARGET = 5;
   const BUNKR_BACKGROUND_ALBUM_CONCURRENCY = 4;
   let reservedAlbumSlots = 0;
-  let cardsStarted = false;
-  let loadedAlbums = 0;
+  let cardsStarted = Boolean(resumeState && pasteEvents.length && allVideoUrls.length);
+  let loadedAlbums = completedAlbumUrls.size;
   let completed = 0;
   let videoCount = 0;
 
@@ -16417,7 +16453,7 @@ async function loadBunkrAsCards(targets) {
   // slow single-video album first; serially waiting for it made discovery show
   // 100% while no other profile could enter Pong.
   await eromePool(
-    discovered,
+    discovered.filter(album => !completedAlbumUrls.has(normalizeEromeLaunchUrl(album?.url || ''))),
     BUNKR_BACKGROUND_ALBUM_CONCURRENCY,
     scrapeAlbum
   );
@@ -16445,6 +16481,7 @@ async function loadEromeAsCards() {
     alert('Paste one or more Erome, Bunkr album, or Balbums page URLs first.');
     return;
   }
+  activeEromeScrapeTargets = targets.slice();
 
   const bunkrTargets = targets.filter(isBunkrImportLaunchUrl);
   if (bunkrTargets.length) {
@@ -16465,6 +16502,11 @@ async function loadEromeAsCards() {
   }
 
   const base = EROME_PROXY_BASE.replace(/\/+$/, '');
+  const resumeState = window.PongEromeResumeState || null;
+  window.PongEromeResumeState = null;
+  const resumeCompletedAlbumUrls = new Set(
+    (resumeState?.completedAlbumUrls || []).map(normalizeEromeLaunchUrl).filter(Boolean)
+  );
   const allGroups = [];
   const failures = [];
   const firstPageRetryQueue = [];
@@ -16476,9 +16518,9 @@ async function loadEromeAsCards() {
   const seenVideoUrls = new Set();
   let completedPages = 0;
   let totalPages = targets.length;
-  let completedAlbums = 0;
-  let totalVideos = 0;
-  let eromeCardsStarted = false;
+  let completedAlbums = resumeCompletedAlbumUrls.size;
+  let totalVideos = resumeState ? allVideoUrls.length : 0;
+  let eromeCardsStarted = Boolean(resumeState && pasteEvents.length && allVideoUrls.length);
   let importedGroupCount = 0;
 
   function addAlbumToQueue(rawAlbum, sourceUrl, sourceTitle) {
@@ -16704,7 +16746,7 @@ async function loadEromeAsCards() {
     }
   }
 
-  const completedAlbumUrls = new Set();
+  const completedAlbumUrls = new Set(resumeCompletedAlbumUrls);
   const failedAlbums = [];
 
   async function scrapeEromeAlbumOnce(album, note) {
@@ -16760,7 +16802,9 @@ async function loadEromeAsCards() {
       });
     }
 
-    const backgroundAlbums = albumQueue.slice(nextAlbumIndex);
+    const backgroundAlbums = albumQueue
+      .slice(nextAlbumIndex)
+      .filter(album => !resumeCompletedAlbumUrls.has(normalizeEromeLaunchUrl(album?.url || '')));
 
     if (backgroundAlbums.length) {
       updateEromeProgress({
@@ -17003,10 +17047,6 @@ function openAuthBrowser(rawUrl) {
   ifr.style.height='100%';
   ct.appendChild(ifr);
 }
-
-document.getElementById('auth-button').addEventListener('click',()=>{
-  openAuthBrowser(document.getElementById('auth-url-input')?.value || DEFAULT_AUTH_URL);
-});
 
 async function startRandom40Local22(buttonStartedAt = Date.now()) {
   const endpoint = random40NormalizeLocalEndpoint(
