@@ -36,20 +36,20 @@ const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.en
 const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 2 * 1024 * 1024 * 1024));
 const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_TTL_MS || 60 * 60 * 1000));
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
-const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 12)));
-const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(10, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
+const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 16)));
+const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(12, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
 // While the visible card is below its healthy buffer, keep only one background
 // cache download alive. The active stream remains priority zero, and normal
 // background concurrency resumes after its buffer recovers.
 const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(
   VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY,
-  Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY ?? 3)
+  Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY ?? 8)
 ));
 const VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE = Math.max(20, Math.min(500, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE || 120)));
 // Random40 artist bundles commonly place every verified video on one CDN host.
 // Two slots leaves thirteen videos queued behind the current card; four keeps
 // the active stream responsive while materially warming the rest of that artist.
-const VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.PONG_VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY || 4)));
+const VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY = Math.max(1, Math.min(12, Number(process.env.PONG_VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY || 8)));
 const VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS = Math.max(1, Math.min(60, Number(process.env.PONG_VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS || 10)));
 const VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS = Math.max(
   VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS + 1,
