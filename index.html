@@ -826,7 +826,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.22</div>
+    <div class="version-number">25.23</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7722,6 +7722,7 @@ let savedEromeMenuEl = null;
 let eromeCheckpointAvailable = false;
 let eromeCheckpointActiveThisPage = false;
 let activeEromeScrapeTargets = [];
+let activeEromeScrapeProgress = null;
 let eromeCheckpointAutosaveTimer = null;
 const savedEromeRefreshJobs = new Set();
 const SAVED_EROME_FULL_RECORD_WRITE_DELAY_MS = 7000;
@@ -7729,6 +7730,148 @@ const SAVED_EROME_MENU_RENDER_DELAY_MS = 1200;
 const SAVED_EROME_REFRESH_PERSIST_INTERVAL_MS = 9000;
 const savedEromeFullRecordWriteTimers = new Map();
 let savedEromeMenuRenderTimer = null;
+
+function compactEromeScrapeAlbum(rawAlbum) {
+  const url = normalizeEromeLaunchUrl(
+    typeof rawAlbum === 'string' ? rawAlbum : rawAlbum?.url
+  );
+
+  if (!url || !isEromeAlbumLaunchUrl(url)) return null;
+
+  return {
+    url,
+    title: String(rawAlbum?.title || getEromeTargetLabel(url)),
+    sourceUrl: normalizeEromeLaunchUrl(rawAlbum?.sourceUrl || '') || url,
+    sourceTitle: String(rawAlbum?.sourceTitle || getEromeTargetLabel(rawAlbum?.sourceUrl || url)),
+    source: rawAlbum?.source === 'bunkr' ? 'bunkr' : 'erome'
+  };
+}
+
+function normalizeEromeScrapeProgress(rawProgress) {
+  if (!rawProgress || typeof rawProgress !== 'object') return null;
+
+  const albums = [];
+  const seenAlbums = new Set();
+
+  (rawProgress.discoveredAlbums || []).forEach(rawAlbum => {
+    const album = compactEromeScrapeAlbum(rawAlbum);
+
+    if (!album || seenAlbums.has(album.url)) return;
+
+    seenAlbums.add(album.url);
+    albums.push(album);
+  });
+
+  const normalizeUniqueUrls = values => [...new Set(
+    (values || []).map(normalizeEromeLaunchUrl).filter(Boolean)
+  )];
+  const targets = normalizeUniqueUrls(rawProgress.targets);
+  const targetPageCounts = {};
+
+  Object.entries(rawProgress.targetPageCounts || {}).forEach(([rawTarget, rawCount]) => {
+    const target = normalizeEromeLaunchUrl(rawTarget);
+    const count = Math.max(1, Number(rawCount || 1));
+
+    if (target) targetPageCounts[target] = count;
+  });
+
+  return {
+    schema: 1,
+    kind: rawProgress.kind === 'bunkr' ? 'bunkr' : 'erome',
+    targets,
+    discoveredAlbums: albums,
+    completedAlbumUrls: normalizeUniqueUrls(rawProgress.completedAlbumUrls),
+    completedDiscoveryPageKeys: [...new Set(
+      (rawProgress.completedDiscoveryPageKeys || []).map(String).filter(Boolean)
+    )],
+    completedTargetUrls: normalizeUniqueUrls(rawProgress.completedTargetUrls),
+    targetPageCounts,
+    finished: Boolean(rawProgress.finished),
+    updatedAt: rawProgress.updatedAt || new Date().toISOString()
+  };
+}
+
+function beginEromeScrapeProgress(kind, targets, resumeProgress = null) {
+  const normalizedTargets = [...new Set(
+    (targets || []).map(normalizeEromeLaunchUrl).filter(Boolean)
+  )];
+  const resumed = normalizeEromeScrapeProgress(resumeProgress);
+  const progress = resumed && resumed.kind === kind
+    ? resumed
+    : normalizeEromeScrapeProgress({ kind, targets: normalizedTargets });
+
+  progress.kind = kind;
+  progress.targets = normalizedTargets;
+  progress.finished = false;
+  progress.updatedAt = new Date().toISOString();
+  progress._albumUrls = new Set(progress.discoveredAlbums.map(album => album.url));
+  progress._completedAlbumUrls = new Set(progress.completedAlbumUrls);
+  progress._completedDiscoveryPageKeys = new Set(progress.completedDiscoveryPageKeys);
+  progress._completedTargetUrls = new Set(progress.completedTargetUrls);
+  activeEromeScrapeProgress = progress;
+  return progress;
+}
+
+function snapshotEromeScrapeProgress(progress = activeEromeScrapeProgress) {
+  return normalizeEromeScrapeProgress(progress);
+}
+
+function touchEromeScrapeProgress(progress) {
+  if (!progress) return;
+  progress.updatedAt = new Date().toISOString();
+  if (activeEromeScrapeProgress === progress) {
+    scheduleEromeCheckpointAutosave();
+  }
+}
+
+function rememberEromeScrapeAlbum(progress, rawAlbum) {
+  if (!progress) return;
+  const album = compactEromeScrapeAlbum(rawAlbum);
+
+  if (!album || progress._albumUrls.has(album.url)) return;
+
+  progress._albumUrls.add(album.url);
+  progress.discoveredAlbums.push(album);
+  touchEromeScrapeProgress(progress);
+}
+
+function markEromeScrapeAlbumCompleted(progress, rawUrl) {
+  if (!progress) return;
+  const url = normalizeEromeLaunchUrl(rawUrl);
+
+  if (!url || progress._completedAlbumUrls.has(url)) return;
+
+  progress._completedAlbumUrls.add(url);
+  progress.completedAlbumUrls.push(url);
+  touchEromeScrapeProgress(progress);
+}
+
+function markEromeDiscoveryPageCompleted(progress, key) {
+  const normalizedKey = String(key || '');
+
+  if (!progress || !normalizedKey || progress._completedDiscoveryPageKeys.has(normalizedKey)) return;
+
+  progress._completedDiscoveryPageKeys.add(normalizedKey);
+  progress.completedDiscoveryPageKeys.push(normalizedKey);
+  touchEromeScrapeProgress(progress);
+}
+
+function markEromeTargetDiscoveryCompleted(progress, rawUrl) {
+  if (!progress) return;
+  const url = normalizeEromeLaunchUrl(rawUrl);
+
+  if (!url || progress._completedTargetUrls.has(url)) return;
+
+  progress._completedTargetUrls.add(url);
+  progress.completedTargetUrls.push(url);
+  touchEromeScrapeProgress(progress);
+}
+
+function finishEromeScrapeProgress(progress, finished = true) {
+  if (!progress) return;
+  progress.finished = Boolean(finished);
+  touchEromeScrapeProgress(progress);
+}
 
 function runWhenUiIdle(callback, timeout = 2500) {
   if (typeof requestIdleCallback === 'function') {
@@ -7962,8 +8105,8 @@ function updateEromeCheckpointButton() {
   const shouldLoad = eromeCheckpointAvailable && !eromeCheckpointActiveThisPage;
   button.textContent = shouldLoad ? 'Load' : 'Save';
   button.title = shouldLoad
-    ? 'Load the Erome/Balbums/Bunkr place saved in this app'
-    : 'Save the current Erome/Balbums/Bunkr profile and video position';
+    ? 'Load the saved place and continue its unfinished scrape'
+    : 'Save the current place, video position, and remaining scrape queue';
 }
 
 async function saveCurrentEromeCheckpoint() {
@@ -7972,9 +8115,16 @@ async function saveCurrentEromeCheckpoint() {
     return false;
   }
   rememberCurrentPasteEventVideoPosition();
+  const scrapeProgress = snapshotEromeScrapeProgress();
+  const completedAlbumUrls = [...new Set([
+    ...(scrapeProgress?.completedAlbumUrls || []),
+    ...pasteEvents
+      .map(event => normalizeEromeLaunchUrl(event?.postUrl || ''))
+      .filter(Boolean)
+  ])];
   const checkpoint = {
     id: EROME_CHECKPOINT_ID,
-    schema: 1,
+    schema: 2,
     savedAt: new Date().toISOString(),
     allVideoUrls: allVideoUrls.slice(),
     allVideoMetadata: allVideoMetadata.map(compactSessionVideoMetadata),
@@ -7987,9 +8137,8 @@ async function saveCurrentEromeCheckpoint() {
     paperclipHistoryPosition,
     paperclipStepCount,
     scrapeTargets: activeEromeScrapeTargets.slice(),
-    completedAlbumUrls: pasteEvents
-      .map(event => normalizeEromeLaunchUrl(event?.postUrl || ''))
-      .filter(Boolean)
+    completedAlbumUrls,
+    scrapeProgress
   };
   const saved = await writeEromeCheckpoint(checkpoint);
   if (!saved) {
@@ -8046,16 +8195,21 @@ async function loadCurrentEromeCheckpoint() {
   updateEromeCheckpointButton();
   displayPasteEventAtIndex(targetIndex, { recordHistory: false });
   scheduleSessionSave(250);
-  const resumeTargets = (checkpoint.scrapeTargets || [])
+  const savedScrapeProgress = normalizeEromeScrapeProgress(checkpoint.scrapeProgress);
+  const resumeTargets = (checkpoint.scrapeTargets?.length
+    ? checkpoint.scrapeTargets
+    : savedScrapeProgress?.targets || [])
     .map(normalizeEromeLaunchUrl)
     .filter(Boolean);
   activeEromeScrapeTargets = resumeTargets.slice();
+  activeEromeScrapeProgress = savedScrapeProgress;
   showSortingIndicator(`Loaded saved Erome/Balbums place from ${new Date(checkpoint.savedAt).toLocaleString()}`);
-  if (resumeTargets.length) {
+  if (resumeTargets.length && !savedScrapeProgress?.finished) {
     window.PongEromeResumeState = {
-      completedAlbumUrls: (checkpoint.completedAlbumUrls || pasteEvents.map(event => event?.postUrl))
+      completedAlbumUrls: (savedScrapeProgress?.completedAlbumUrls || checkpoint.completedAlbumUrls || pasteEvents.map(event => event?.postUrl))
         .map(normalizeEromeLaunchUrl)
-        .filter(Boolean)
+        .filter(Boolean),
+      scrapeProgress: savedScrapeProgress
     };
     if (document.getElementById('erome-url')) {
       document.getElementById('erome-url').value = resumeTargets.join('\n');
@@ -8064,6 +8218,8 @@ async function loadCurrentEromeCheckpoint() {
       showSortingIndicator('Loaded saved place. Continuing the remaining scrape...');
       loadEromeAsCards();
     }, 120);
+  } else if (savedScrapeProgress?.finished) {
+    showSortingIndicator('Loaded saved place. Its scrape was already complete.');
   }
   return true;
 }
@@ -16460,9 +16616,15 @@ async function loadBunkrAsCards(targets) {
   const loadGeneration = ++bunkrLoadGeneration;
   const resumeState = window.PongEromeResumeState || null;
   window.PongEromeResumeState = null;
+  const resumeProgress = normalizeEromeScrapeProgress(resumeState?.scrapeProgress);
+  const scrapeProgress = beginEromeScrapeProgress('bunkr', targets, resumeProgress);
   const completedAlbumUrls = new Set(
-    (resumeState?.completedAlbumUrls || []).map(normalizeEromeLaunchUrl).filter(Boolean)
+    [
+      ...(resumeState?.completedAlbumUrls || []),
+      ...(scrapeProgress.completedAlbumUrls || [])
+    ].map(normalizeEromeLaunchUrl).filter(Boolean)
   );
+  completedAlbumUrls.forEach(url => markEromeScrapeAlbumCompleted(scrapeProgress, url));
   const endpoint = await getRandom40LocalEndpoint(true);
   if (!endpoint) {
     alert('Bunkr imports need the Pong PC server to be running and reachable.');
@@ -16490,13 +16652,46 @@ async function loadBunkrAsCards(targets) {
 
   const discovered = [];
   const seenAlbums = new Set();
+  const completedTargetUrls = new Set(scrapeProgress.completedTargetUrls);
+
+  (scrapeProgress.discoveredAlbums || []).forEach(rawAlbum => {
+    const album = compactEromeScrapeAlbum(rawAlbum);
+
+    if (!album || seenAlbums.has(album.url)) return;
+
+    seenAlbums.add(album.url);
+    discovered.push(album);
+  });
+
   for (let index = 0; index < targets.length; index++) {
-    const data = await postJson('/bunkr/discover', { url: targets[index] });
+    const target = normalizeEromeLaunchUrl(targets[index]);
+
+    if (target && completedTargetUrls.has(target)) {
+      updateEromeProgress({
+        title: 'Finding Bunkr albums',
+        detail: `${discovered.length} saved albums restored`,
+        completed: index + 1,
+        total: targets.length,
+        videos: allVideoUrls.length
+      });
+      continue;
+    }
+
+    const data = await postJson('/bunkr/discover', { url: target || targets[index] });
     (data.albums || []).forEach(album => {
       if (!album?.url || seenAlbums.has(album.url)) return;
       seenAlbums.add(album.url);
-      discovered.push(album);
+      const savedAlbum = {
+        ...album,
+        sourceUrl: target || targets[index],
+        sourceTitle: album.title || getEromeTargetLabel(target || targets[index]),
+        source: 'bunkr'
+      };
+      discovered.push(savedAlbum);
+      rememberEromeScrapeAlbum(scrapeProgress, savedAlbum);
     });
+    markEromeTargetDiscoveryCompleted(scrapeProgress, target || targets[index]);
+    completedTargetUrls.add(target || targets[index]);
     updateEromeProgress({
       title: 'Finding Bunkr albums',
       detail: `${discovered.length} albums on the pasted page`,
@@ -16516,8 +16711,8 @@ async function loadBunkrAsCards(targets) {
   let reservedAlbumSlots = 0;
   let cardsStarted = Boolean(resumeState && pasteEvents.length && allVideoUrls.length);
   let loadedAlbums = completedAlbumUrls.size;
-  let completed = 0;
-  let videoCount = 0;
+  let completed = completedAlbumUrls.size;
+  let videoCount = resumeState ? allVideoUrls.length : 0;
 
   const bunkrPlaybackBase = location.protocol === 'https:'
     ? EROME_PROXY_BASE.replace(/\/+$/, '')
@@ -16598,6 +16793,8 @@ async function loadBunkrAsCards(targets) {
           videos: data.videos
         });
       }
+      completedAlbumUrls.add(normalizeEromeLaunchUrl(album.url));
+      markEromeScrapeAlbumCompleted(scrapeProgress, album.url);
     } catch (error) {
       console.warn('Bunkr album import failed:', album.url, error);
     } finally {
@@ -16621,6 +16818,11 @@ async function loadBunkrAsCards(targets) {
     BUNKR_BACKGROUND_ALBUM_CONCURRENCY,
     scrapeAlbum
   );
+
+  const unfinishedAlbums = discovered.filter(
+    album => !completedAlbumUrls.has(normalizeEromeLaunchUrl(album?.url || ''))
+  );
+  finishEromeScrapeProgress(scrapeProgress, unfinishedAlbums.length === 0);
 
   if (!cardsStarted) {
     alert('No browser-playable videos were found in those Bunkr albums.');
@@ -16668,20 +16870,28 @@ async function loadEromeAsCards() {
   const base = EROME_PROXY_BASE.replace(/\/+$/, '');
   const resumeState = window.PongEromeResumeState || null;
   window.PongEromeResumeState = null;
+  const resumeProgress = normalizeEromeScrapeProgress(resumeState?.scrapeProgress);
+  const scrapeProgress = beginEromeScrapeProgress('erome', targets, resumeProgress);
   const resumeCompletedAlbumUrls = new Set(
-    (resumeState?.completedAlbumUrls || []).map(normalizeEromeLaunchUrl).filter(Boolean)
+    [
+      ...(resumeState?.completedAlbumUrls || []),
+      ...(scrapeProgress.completedAlbumUrls || [])
+    ].map(normalizeEromeLaunchUrl).filter(Boolean)
   );
+  resumeCompletedAlbumUrls.forEach(url => markEromeScrapeAlbumCompleted(scrapeProgress, url));
   const allGroups = [];
   const failures = [];
   const firstPageRetryQueue = [];
   const discoveryRetryQueue = [];
-  const completedDiscoveryPageKeys = new Set();
+  const completedDiscoveryPageKeys = new Set(scrapeProgress.completedDiscoveryPageKeys);
   const albumQueue = [];
   const seenAlbumUrls = new Set();
   const seenGroupUrls = new Set();
   const seenVideoUrls = new Set();
-  let completedPages = 0;
-  let totalPages = targets.length;
+  let completedPages = completedDiscoveryPageKeys.size;
+  let totalPages = targets.reduce((sum, target) => (
+    sum + Math.max(1, Number(scrapeProgress.targetPageCounts[normalizeEromeLaunchUrl(target)] || 1))
+  ), 0);
   let completedAlbums = resumeCompletedAlbumUrls.size;
   let totalVideos = resumeState ? allVideoUrls.length : 0;
   let eromeCardsStarted = Boolean(resumeState && pasteEvents.length && allVideoUrls.length);
@@ -16694,13 +16904,19 @@ async function loadEromeAsCards() {
     if (!albumUrl || !isEromeAlbumLaunchUrl(albumUrl) || seenAlbumUrls.has(albumUrl)) return;
 
     seenAlbumUrls.add(albumUrl);
-    albumQueue.push({
+    const album = {
       url: albumUrl,
       title: (typeof rawAlbum === 'object' && rawAlbum?.title) || getEromeTargetLabel(albumUrl),
       sourceUrl,
       sourceTitle: sourceTitle || getEromeTargetLabel(sourceUrl)
-    });
+    };
+    albumQueue.push(album);
+    rememberEromeScrapeAlbum(scrapeProgress, album);
   }
+
+  (scrapeProgress.discoveredAlbums || []).forEach(album => {
+    addAlbumToQueue(album, album.sourceUrl || album.url, album.sourceTitle);
+  });
 
   function addScrapedGroups(groups) {
     (groups || []).forEach(group => {
@@ -16808,8 +17024,21 @@ async function loadEromeAsCards() {
     if (completedDiscoveryPageKeys.has(key)) return false;
 
     completedDiscoveryPageKeys.add(key);
+    markEromeDiscoveryPageCompleted(scrapeProgress, key);
     completedPages++;
     return true;
+  }
+
+  function rememberTargetPageCount(target, pageCount) {
+    const normalizedTarget = normalizeEromeLaunchUrl(target);
+    const count = Math.max(1, Number(pageCount || 1));
+
+    if (!normalizedTarget) return;
+
+    const previousCount = Math.max(1, Number(scrapeProgress.targetPageCounts[normalizedTarget] || 1));
+    scrapeProgress.targetPageCounts[normalizedTarget] = count;
+    if (count > previousCount) totalPages += count - previousCount;
+    touchEromeScrapeProgress(scrapeProgress);
   }
 
   updateEromeProgress({
@@ -16830,7 +17059,10 @@ async function loadEromeAsCards() {
       normalizeEromeProfileSaveUrl(savedOverride.targetUrl || '') === targetSaveUrl &&
       Array.isArray(savedOverride.albums) &&
       savedOverride.albums.length;
-    let pageCount = 1;
+    let pageCount = Math.max(
+      1,
+      Number(scrapeProgress.targetPageCounts[normalizeEromeLaunchUrl(target)] || 1)
+    );
     const albumsBeforeTarget = albumQueue.length;
 
     updateDiscoveryProgress(i, target, 1, pageCount, 'starting');
@@ -16840,33 +17072,45 @@ async function loadEromeAsCards() {
         savedOverride.albums.forEach(album => {
           addAlbumToQueue(album, targetSaveUrl, savedOverride.label || getEromeTargetLabel(targetSaveUrl));
         });
-        completedPages++;
+        rememberTargetPageCount(target, 1);
+        markDiscoveryPageCompleted(target, 1);
         updateDiscoveryProgress(i, target, 1, pageCount, 'saved list');
         continue;
       }
 
       if (albumTarget) {
         addAlbumToQueue(target, target, getEromeTargetLabel(target));
-        completedPages++;
+        rememberTargetPageCount(target, 1);
+        markDiscoveryPageCompleted(target, 1);
         updateDiscoveryProgress(i, target, 1, pageCount, 'queued');
         continue;
       }
 
-      const firstUrl = eromeProfilePageUrl(target, 1);
-      const firstData = await fetchEromeAlbumListData(base, firstUrl, {
-        attempts: 2,
-        timeoutMs: EROME_FETCH_TIMEOUT_MS,
-        fast: true
-      });
-      const sourceTitle = firstData?.title || getEromeTargetLabel(target);
+      const firstPageKey = discoveryPageKey(target, 1);
+      let sourceTitle = getEromeTargetLabel(target);
 
-      pageCount = Math.max(1, Number(firstData.profilePageCount || 1));
-      totalPages += Math.max(0, pageCount - 1);
-      (firstData.albums || []).forEach(album => addAlbumToQueue(album, target, sourceTitle));
-      completedPages++;
-      updateDiscoveryProgress(i, target, 1, pageCount);
+      if (completedDiscoveryPageKeys.has(firstPageKey)) {
+        updateDiscoveryProgress(i, target, 1, pageCount, 'restored');
+      } else {
+        const firstUrl = eromeProfilePageUrl(target, 1);
+        const firstData = await fetchEromeAlbumListData(base, firstUrl, {
+          attempts: 2,
+          timeoutMs: EROME_FETCH_TIMEOUT_MS,
+          fast: true
+        });
 
-      const remainingPages = Array.from({ length: Math.max(0, pageCount - 1) }, (_, pageIndex) => pageIndex + 2);
+        sourceTitle = firstData?.title || sourceTitle;
+        pageCount = Math.max(1, Number(firstData.profilePageCount || 1));
+        rememberTargetPageCount(target, pageCount);
+        (firstData.albums || []).forEach(album => addAlbumToQueue(album, target, sourceTitle));
+        markDiscoveryPageCompleted(target, 1);
+        updateDiscoveryProgress(i, target, 1, pageCount);
+      }
+
+      const remainingPages = Array.from(
+        { length: Math.max(0, pageCount - 1) },
+        (_, pageIndex) => pageIndex + 2
+      ).filter(page => !completedDiscoveryPageKeys.has(discoveryPageKey(target, page)));
 
       await eromePool(remainingPages, EROME_PROFILE_PAGE_CONCURRENCY, async page => {
         const pageUrl = eromeProfilePageUrl(target, page);
@@ -16897,7 +17141,10 @@ async function loadEromeAsCards() {
         }
       });
 
-      if (albumQueue.length === albumsBeforeTarget && pageCount <= 1) {
+      const targetHasSavedAlbums = albumQueue.some(album => (
+        normalizeEromeLaunchUrl(album?.sourceUrl || '') === normalizeEromeLaunchUrl(target)
+      ));
+      if (albumQueue.length === albumsBeforeTarget && !targetHasSavedAlbums && pageCount <= 1) {
         failures.push(target);
       }
     } catch (err) {
@@ -16934,6 +17181,7 @@ async function loadEromeAsCards() {
 
       if (!completedAlbumUrls.has(album.url)) {
         completedAlbumUrls.add(album.url);
+        markEromeScrapeAlbumCompleted(scrapeProgress, album.url);
         completedAlbums++;
       }
 
@@ -17021,12 +17269,13 @@ async function loadEromeAsCards() {
           const sourceTitle = firstData?.title || getEromeTargetLabel(item.target);
           const pageCount = Math.max(1, Number(firstData.profilePageCount || 1));
 
-          totalPages += Math.max(0, pageCount - 1);
+          rememberTargetPageCount(item.target, pageCount);
           (firstData.albums || []).forEach(album => addAlbumToQueue(album, item.target, sourceTitle));
           markDiscoveryPageCompleted(item.target, 1);
           updateDiscoveryProgress(item.targetIndex, item.target, 1, pageCount, 'final retry ok');
 
           Array.from({ length: Math.max(0, pageCount - 1) }, (_, pageIndex) => pageIndex + 2)
+            .filter(page => !completedDiscoveryPageKeys.has(discoveryPageKey(item.target, page)))
             .forEach(page => {
               discoveryRetryQueue.push({
                 targetIndex: item.targetIndex,
@@ -17139,6 +17388,7 @@ async function loadEromeAsCards() {
     failedFinalAlbums.forEach(album => {
       if (!completedAlbumUrls.has(album.url)) {
         completedAlbumUrls.add(album.url);
+        markEromeScrapeAlbumCompleted(scrapeProgress, album.url);
         completedAlbums++;
         updateAlbumProgress(album, 'failed final retry');
       }
@@ -17167,6 +17417,7 @@ async function loadEromeAsCards() {
     const imported = publishScrapedGroups('complete', true);
     const loadedVideoCount = allVideoUrls.length || imported.urls.length || totalVideos;
     const loadedBatchCount = pasteEvents.length || imported.events.length || allGroups.length;
+    finishEromeScrapeProgress(scrapeProgress, true);
 
     showSortingIndicator(
       'Loaded ' + loadedVideoCount + ' Erome videos in ' + loadedBatchCount + ' batches'
