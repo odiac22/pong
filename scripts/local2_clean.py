@@ -207,6 +207,7 @@ class Local2Thresholds:
     adult_evidence_strong: float = 0.90
     adult_evidence_margin: float = 0.10
     hard_consensus: int = 2
+    anatomy_consensus: int = 2
     required_usable_images: int = 2
     required_clear_body_images: int = 2
     # Broaden discovery on personalized taste only. Every hard veto above is
@@ -291,7 +292,7 @@ class Local2Policy:
         # one view, even a strong one, is sent to the narrow Qwen anatomy review.
         # Review is fail-closed when Qwen is unavailable, so unresolved anatomy
         # still cannot pass.
-        anatomy_reject = len(attached) >= t.hard_consensus
+        anatomy_reject = len(attached) >= t.anatomy_consensus
         anatomy_uncertain = [
             row for row in clear_anatomy
             if row.attached_anatomy >= t.anatomy_review

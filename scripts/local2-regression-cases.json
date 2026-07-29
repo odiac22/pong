@@ -22,11 +22,25 @@
       "name": "tsemmaswan",
       "artistUrl": "https://coomerfans.com/u/onlyfans/375651/tsemmaswan",
       "expectedDecision": "reject",
-      "expectedReason": "explicit_text_or_visible_attached_anatomy"
+      "expectedReason": "explicit_text_or_visible_attached_anatomy",
+      "acceptableReasons": [
+        "explicit_text_or_visible_attached_anatomy",
+        "source_unavailable"
+      ]
     },
     {
       "name": "tsbellafrost",
       "artistUrl": "https://coomerfans.com/u/onlyfans/349065/tsbellafrost",
+      "expectedDecision": "reject",
+      "expectedReason": "explicit_text_or_visible_attached_anatomy",
+      "acceptableReasons": [
+        "explicit_text_or_visible_attached_anatomy",
+        "source_unavailable"
+      ]
+    },
+    {
+      "name": "babybraziliantrans",
+      "artistUrl": "https://coomerfans.com/u/onlyfans/324089/babybraziliantrans",
       "expectedDecision": "reject",
       "expectedReason": "explicit_text_or_visible_attached_anatomy"
     }

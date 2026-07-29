@@ -592,6 +592,7 @@ class Local2VisionAdapter:
         hard_only: bool = False,
         preference_accept: float | None = None,
         conservative_ambiguity: bool = True,
+        hard_confirmation: bool = False,
     ) -> dict[str, Any]:
         head = None if hard_only else self._taste_head(len(analysis.artist_feature))
         taste_probability = 1.0 if hard_only else (
@@ -602,11 +603,30 @@ class Local2VisionAdapter:
             if preference_accept is None
             else float(max(0.0, min(1.0, preference_accept)))
         )
-        decision_policy = self.policy if preference_accept is None else Local2Policy(
-            replace(
-                self.policy.thresholds,
+        effective_thresholds = self.policy.thresholds
+        if hard_confirmation:
+            effective_thresholds = replace(
+                effective_thresholds,
+                # The normal fast pass preserves a conservative two-view veto.
+                # Accept-side confirmation treats the existing moderate boundary
+                # as a vote, while still requiring two independent views.
+                body_mismatch_vote=effective_thresholds.body_mismatch_review,
+                # Zero-shot anatomy votes are intentionally provisional in this
+                # accept-only stage. Fitbryceadams produced three correlated false
+                # votes among eight views, so every material vote is resolved by
+                # the narrow verifier instead of becoming a direct rejection.
+                anatomy_consensus=MAX_LOCAL2_IMAGES + 1,
+                required_clear_body_images=3,
+            )
+        if preference_accept is not None:
+            effective_thresholds = replace(
+                effective_thresholds,
                 preference_accept=effective_preference_accept,
             )
+        decision_policy = (
+            self.policy
+            if effective_thresholds == self.policy.thresholds
+            else Local2Policy(effective_thresholds)
         )
         decision = decision_policy.decide(
             analysis.descriptors,
@@ -615,13 +635,14 @@ class Local2VisionAdapter:
         )
         result = decision.as_dict()
         aggregate_anatomy_conflict = decision.checks.get("attached_male_anatomy") is True
+        thresholds = decision_policy.thresholds
 
         def anatomy_vote(item: Local2ImageEvidence) -> bool:
             return bool(
                 item.anatomy_clear
-                and item.attached_anatomy >= self.policy.thresholds.anatomy_reject
+                and item.attached_anatomy >= thresholds.anatomy_reject
                 and item.attached_anatomy >=
-                    item.toy_or_prosthetic + self.policy.thresholds.anatomy_margin
+                    item.toy_or_prosthetic + thresholds.anatomy_margin
             )
 
         result.update({
@@ -629,7 +650,9 @@ class Local2VisionAdapter:
                 "shared SigLIP grouped semantics + facebook/dinov2-small weighted-ridge taste head",
             "local2_schema": ENGINE_SCHEMA,
             "feature_schema": analysis.feature_schema,
-            "preference_probability": None if hard_only else taste_probability,
+            "preference_probability": (
+                1.0 if hard_confirmation else None if hard_only else taste_probability
+            ),
             "preference_threshold": effective_preference_accept,
             "image_grades": [
                 {
@@ -637,7 +660,7 @@ class Local2VisionAdapter:
                     "decision": "unsure",
                     "checks": {
                         "body_evidence_clear": item.body_clear,
-                        "body_preference_match": item.body_preferred >= self.policy.thresholds.body_preferred_vote,
+                        "body_preference_match": item.body_preferred >= thresholds.body_preferred_vote,
                         # A single SigLIP vote is ambiguity evidence, not a veto.
                         # Otherwise Node's legacy per-image anatomy scan would
                         # undo the clean policy's independent-view consensus.
@@ -646,9 +669,9 @@ class Local2VisionAdapter:
                             else None if anatomy_vote(item)
                             else False
                         ),
-                        "toy_or_dildo": item.toy_or_prosthetic >= self.policy.thresholds.anatomy_reject,
+                        "toy_or_dildo": item.toy_or_prosthetic >= thresholds.anatomy_reject,
                         "anatomy_ambiguous": anatomy_vote(item) and not aggregate_anatomy_conflict,
-                        "feet_dominant": item.feet_dominant >= self.policy.thresholds.feet_vote,
+                        "feet_dominant": item.feet_dominant >= thresholds.feet_vote,
                     },
                     "scores": {
                         "photo": item.photo,
@@ -670,6 +693,7 @@ class Local2VisionAdapter:
             "training": {
                 "head_available": head is not None,
                 "hard_only": hard_only,
+                "hard_confirmation": hard_confirmation,
             },
         })
         return result

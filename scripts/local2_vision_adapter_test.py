@@ -66,6 +66,19 @@ class FakeGroupedScorer:
         return {name: np.asarray(value, dtype=np.float32) for name, value in result.items()}
 
 
+class ModerateBodyMismatchScorer(FakeGroupedScorer):
+    def __call__(self, images: list[np.ndarray]) -> dict[str, np.ndarray]:
+        result = super().__call__(images)
+        for row, image in enumerate(images):
+            values = np.asarray(image).reshape(-1)
+            if (
+                len(values) > 1 and float(values[1]) == 1.0 and
+                float(values[0]) in {77.0, 78.0}
+            ):
+                result["body_shape"][row] = [0.16, 0.60, 0.24]
+        return result
+
+
 class FixedTasteHead:
     def __init__(self, probability: float) -> None:
         self.probability = float(probability)
@@ -259,6 +272,77 @@ class Local2VisionAdapterTests(unittest.TestCase):
         result = adapter.classify_analysis(analysis, hard_only=True)
         self.assertEqual("accept", result["decision"])
         self.assertTrue(result["training"]["hard_only"])
+
+    def test_hard_confirmation_requires_three_clear_body_views(self) -> None:
+        adapter = self.make_adapter()
+        two = adapter.analyze(
+            [np.asarray([1.0, 0.0]), np.asarray([2.0, 0.0])],
+            include_taste=False,
+        )
+        three = adapter.analyze(
+            [
+                np.asarray([1.0, 0.0]),
+                np.asarray([2.0, 0.0]),
+                np.asarray([3.0, 0.0]),
+            ],
+            include_taste=False,
+        )
+        two_result = adapter.classify_analysis(
+            two, hard_only=True, hard_confirmation=True
+        )
+        three_result = adapter.classify_analysis(
+            three, hard_only=True, hard_confirmation=True
+        )
+        self.assertEqual("review", two_result["decision"])
+        self.assertIn("body-evidence", two_result["review_codes"])
+        self.assertEqual("accept", three_result["decision"])
+
+    def test_hard_confirmation_rejects_two_moderate_body_mismatch_views(self) -> None:
+        adapter = self.make_adapter(group_scorer=ModerateBodyMismatchScorer())
+        analysis = adapter.analyze(
+            [
+                np.asarray([77.0, 0.0]),
+                np.asarray([78.0, 0.0]),
+                np.asarray([3.0, 0.0]),
+            ],
+            include_taste=False,
+        )
+        result = adapter.classify_analysis(
+            analysis, hard_only=True, hard_confirmation=True
+        )
+        self.assertEqual(("reject", "body_shape_mismatch"), (
+            result["decision"], result["reason_code"]
+        ))
+        self.assertTrue(result["training"]["hard_confirmation"])
+
+    def test_hard_confirmation_routes_all_anatomy_consensus_to_narrow_review(self) -> None:
+        adapter = self.make_adapter()
+        two_vote_analysis = adapter.analyze(
+            [
+                np.asarray([99.0, 0.0]),
+                np.asarray([99.0, 0.0]),
+                np.asarray([3.0, 0.0]),
+            ],
+            include_taste=False,
+        )
+        three_vote_analysis = adapter.analyze(
+            [
+                np.asarray([99.0, 0.0]),
+                np.asarray([99.0, 0.0]),
+                np.asarray([99.0, 0.0]),
+            ],
+            include_taste=False,
+        )
+        two_vote_result = adapter.classify_analysis(
+            two_vote_analysis, hard_only=True, hard_confirmation=True
+        )
+        three_vote_result = adapter.classify_analysis(
+            three_vote_analysis, hard_only=True, hard_confirmation=True
+        )
+        self.assertEqual("review", two_vote_result["decision"])
+        self.assertIn("anatomy", two_vote_result["review_codes"])
+        self.assertEqual("review", three_vote_result["decision"])
+        self.assertIn("anatomy", three_vote_result["review_codes"])
 
     def test_unchanged_revision_reuses_taste_head_without_reloading_records(self) -> None:
         calls = 0

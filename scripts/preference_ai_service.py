@@ -2466,8 +2466,10 @@ def local2_clean_classify(payload: dict[str, Any]) -> dict[str, Any]:
 
 def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
     stage = str(payload.get("stage", "full")).strip().lower()
-    broad_hard_safe = (
-        str(payload.get("preferencePolicy", "")).strip().lower() == "broad-hard-safe"
+    preference_policy = str(payload.get("preferencePolicy", "")).strip().lower()
+    broad_hard_safe = preference_policy == "broad-hard-safe"
+    hard_confirmation = (
+        preference_policy == "hard-confirmation" or stage == "hard-confirmation"
     )
     artist = payload.get("artist") or {}
     known_feedback = local2_known_feedback(normalize_url(artist.get("artistUrl", "")))
@@ -2513,6 +2515,21 @@ def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
                 include_taste=False,
             )
             result = adapter.classify_analysis(analysis, hard_only=True)
+        elif hard_confirmation:
+            # Local2's first four-image pass already established personalized
+            # taste. This accept-only pass spends compute solely on strict hard
+            # evidence, avoiding a second DINO-small encoding.
+            analysis = adapter.analyze(
+                images,
+                image_urls=used_urls,
+                include_taste=False,
+            )
+            result = adapter.classify_analysis(
+                analysis,
+                hard_only=True,
+                conservative_ambiguity=True,
+                hard_confirmation=True,
+            )
         else:
             # Clean Local2 runs YOLO + DINO-small first. Clear non-saved taste
             # misses stop before SigLIP; candidates near the boundary and exact

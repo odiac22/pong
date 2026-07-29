@@ -20,7 +20,7 @@ const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
 const MODEL = process.env.PONG_LOCAL_IMAGE_MODEL || 'Xenova/siglip-base-patch16-224';
 const OLLAMA_URL = (process.env.PONG_OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
 const OLLAMA_VISION_MODEL = process.env.PONG_OLLAMA_VISION_MODEL || 'qwen3-vl:4b';
-const LOCAL2_QWEN_MODEL = process.env.PONG_LOCAL2_QWEN_MODEL || 'qwen3-vl:2b';
+const LOCAL2_QWEN_MODEL = process.env.PONG_LOCAL2_QWEN_MODEL || 'qwen2.5vl:latest';
 const OLLAMA_KEEP_ALIVE = process.env.PONG_OLLAMA_KEEP_ALIVE || -1;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
@@ -29,6 +29,15 @@ const QWEN_REJECT_EXAMPLES = Number(process.env.PONG_QWEN_REJECT_EXAMPLE_IMAGES 
 const QWEN_CANDIDATE_IMAGES = Number(process.env.PONG_QWEN_CANDIDATE_IMAGES || 2);
 const LOCAL2_CLEAN_MAX_IMAGES = Math.max(4, Math.min(12, Number(process.env.PONG_LOCAL2_CLEAN_MAX_IMAGES || 8)));
 const LOCAL2_FLASH_DECISION_IMAGES = 4;
+const LOCAL2_FLASH_CONFIRMATION_IMAGES = Math.max(
+  6,
+  Math.min(12, Number(process.env.PONG_LOCAL2_FLASH_CONFIRMATION_IMAGES || 8))
+);
+const LOCAL2_FLASH_CONFIRMATION_TRIAGE_IMAGES = Math.max(
+  12,
+  Math.min(32, Number(process.env.PONG_LOCAL2_FLASH_CONFIRMATION_TRIAGE_IMAGES || 16))
+);
+const LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES = 3;
 const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD || 40);
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const PONG_INDEX_PATH = path.join(process.cwd(), 'index.html');
@@ -1276,12 +1285,13 @@ function random40ReservoirDecisionNeedsBodySearch(decision = {}) {
     decision?.body_consensus?.positive_preference?.needs_more_body_evidence === true;
 }
 
-async function random40ReservoirTriageBodyImages(item, signal) {
+async function random40ReservoirTriageBodyImages(item, signal, candidateLimit = 32) {
   const examined = new Set(item?.bodyTriageExaminedUrls || []);
+  const maximumCandidates = Math.max(1, Math.min(32, Number(candidateLimit || 32)));
   const candidates = [item?.profileImageUrl, ...(item?.postImageEntries || []).map(entry => entry?.imageUrl)]
     .map(url => normalizeUrl(url, item?.artistUrl || undefined))
     .filter((url, index, values) => url && values.indexOf(url) === index && !examined.has(url))
-    .slice(0, 32);
+    .slice(0, maximumCandidates);
   if (!candidates.length) {
     item.bodyTriageAvailable = item.bodyTriageAvailable === true;
     return item;
@@ -1305,6 +1315,8 @@ async function random40ReservoirTriageBodyImages(item, signal) {
     entry.poseBodyVisible = result.body_visible === true;
     entry.poseFaceVisible = result.face_visible === true;
     entry.poseBodyScore = Number(result.body_score || 0);
+    entry.poseBodyArea = Number(result.body_area || 0);
+    entry.poseBodyHeight = Number(result.body_height || 0);
   }
   return item;
 }
@@ -1392,7 +1404,13 @@ function random40ReservoirHighQualityPostImage(html, postUrl) {
   return [...ranked.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
 }
 
-async function random40ResolveDecisionImages(item, selectedUrls, signal) {
+async function random40ResolveDecisionImages(
+  item,
+  selectedUrls,
+  signal,
+  maximumImages = RANDOM40_LOCAL_DECISION_IMAGES
+) {
+  const imageLimit = Math.max(1, Math.min(12, Number(maximumImages || RANDOM40_LOCAL_DECISION_IMAGES)));
   const entryByUrl = new Map((item?.postImageEntries || []).map(entry => [normalizeUrl(entry?.imageUrl), entry]));
   const resolved = new Array(selectedUrls.length);
   await random40ReservoirPool(selectedUrls.map((url, index) => ({ url, index })), 2, async ({ url, index }) => {
@@ -1422,7 +1440,7 @@ async function random40ResolveDecisionImages(item, selectedUrls, signal) {
   // otherwise make one physical body photo look like two independent votes.
   resolved.forEach(raw => {
     const value = normalizeUrl(raw, item?.artistUrl || undefined);
-    if (!value || seen.has(value) || exact.length >= RANDOM40_LOCAL_DECISION_IMAGES) return;
+    if (!value || seen.has(value) || exact.length >= imageLimit) return;
     seen.add(value);
     exact.push(value);
   });
@@ -5852,7 +5870,8 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
   const artist = payload.artist || {};
   const visionModel = requestedVisionModel(payload.visionModel);
   const localVariant = String(payload.localVariant || '').toLowerCase();
-  const hard = textHardFilter(artist, { localVariant });
+  const hard = textHardFilter(artist, { localVariant }) ||
+    (localVariant === 'local2' ? local2ExplicitCreatorTextHardReason(artist) : '');
   if (hard) {
     return {
       decision: 'reject',
@@ -6531,6 +6550,23 @@ function local2ProfileTextEvidence(html = '', artistInfo = {}) {
     .slice(0, 12000);
 }
 
+function local2ExplicitCreatorTextHardReason(artistInfo = {}) {
+  const compactName = String(artistInfo?.artistName || '')
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+  if (!compactName) return '';
+  // These are explicit creator self-descriptions in the account slug, not an
+  // appearance inference. Keep the patterns narrow so words such as
+  // "transformation" do not become false positives.
+  if (
+    /^ts[a-z0-9]/.test(compactName) ||
+    /(?:transgender|transgirl|transwoman|transfem|shemale|ladyboy)/.test(compactName) ||
+    /(?:mtf|trans)$/.test(compactName)
+  ) return 'blocked explicit creator self-description';
+  return '';
+}
+
 function local2PipelineDecision(result = {}, fallbackImageUrls = []) {
   const checks = result?.checks || {};
   const anatomy = result?.anatomy_assessment || {};
@@ -6892,6 +6928,7 @@ function local2FlashListingCandidates(html, pageUrl, sourcePage) {
         .filter(Boolean);
       if (
         textHardFilter(artistInfo, { localVariant: 'local2' }) ||
+        local2ExplicitCreatorTextHardReason(artistInfo) ||
         listingNameTokens.some(token => ['boy', 'boi', 'male', 'man', 'guy', 'dude'].includes(token))
       ) continue;
       seen.add(artistId);
@@ -6973,6 +7010,20 @@ function local2FlashDecisionIsSafe(decision = {}) {
     hard.over60 === false &&
     hard.adultSafetyRisk === false &&
     hard.ambiguous === false;
+}
+
+function local2FlashDecisionCanConfirm(decision = {}) {
+  if (local2FlashDecisionIsSafe(decision)) return true;
+  if (decision?.verdict !== 'uncertain') return false;
+  const raw = decision?.rawDecision || {};
+  const preference = Number(raw?.preference_probability);
+  const threshold = Number(raw?.preference_threshold);
+  return (
+    String(decision?.reasonCode || raw?.reason_code || '').toLowerCase() === 'ambiguous_hard_evidence' &&
+    Number.isFinite(preference) &&
+    Number.isFinite(threshold) &&
+    preference >= threshold
+  );
 }
 
 function local2FlashAcceptedDto(profile, media, decision, revision) {
@@ -7085,13 +7136,8 @@ async function local2FlashPrepareProfile(candidate, context) {
   artistInfo.pageText = pageText;
   const hardTextReason = textHardFilter(artistInfo, { localVariant: 'local2' });
   if (hardTextReason) throw new Error(hardTextReason);
-  const flashNameToken = String(artistInfo.artistName || '')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/g)
-    .find(Boolean) || '';
-  if (/^ts[a-z0-9]/.test(flashNameToken)) {
-    throw new Error('Local2 Flash blocked high-confidence TS creator prefix');
-  }
+  const explicitCreatorReason = local2ExplicitCreatorTextHardReason(artistInfo);
+  if (explicitCreatorReason) throw new Error(explicitCreatorReason);
   const profileImageUrl = random40ReservoirProfileImageUrl(firstHtml, artistUrl);
   const postImageEntries = random40ReservoirBestImageEntries(pages.flatMap(item =>
     random40ReservoirPostImageEntries(
@@ -7114,6 +7160,140 @@ async function local2FlashPrepareProfile(candidate, context) {
     videoPostUrls: allVideoPostUrls,
     likelyVideoPostCount: likelyVideoPostUrls.length,
     scannedThroughPage: pages.at(-1)?.page || 1
+  };
+}
+
+function local2FlashSelectConfirmationImages(profile) {
+  const selected = [];
+  const seenUrls = new Set();
+  const seenPosts = new Set();
+  const add = (rawUrl, rawPostKey = '') => {
+    const url = normalizeUrl(rawUrl, profile?.artistUrl || undefined);
+    const postKey = String(rawPostKey || '').trim();
+    if (
+      !url ||
+      seenUrls.has(url) ||
+      (postKey && seenPosts.has(postKey)) ||
+      selected.length >= LOCAL2_FLASH_CONFIRMATION_IMAGES
+    ) return;
+    seenUrls.add(url);
+    if (postKey) seenPosts.add(postKey);
+    selected.push(url);
+  };
+
+  // Preserve one identity view, then spend the remaining slots on distinct
+  // post images that YOLO found most useful for body and lower-torso crops.
+  add(profile?.profileImageUrl, 'profile');
+  const bestByPost = new Map();
+  for (const entry of profile?.postImageEntries || []) {
+    const url = normalizeUrl(entry?.imageUrl, profile?.artistUrl || undefined);
+    if (!url) continue;
+    const postKey = normalizeUrl(entry?.postUrl, profile?.artistUrl || undefined) || url;
+    const prior = bestByPost.get(postKey);
+    const score = (
+      Number(entry?.poseBodyVisible === true) * 1000 +
+      Number(entry?.poseBodyScore || 0) * 4 +
+      Number(entry?.poseBodyArea || 0) * 100 +
+      Number(entry?.poseBodyHeight || 0) * 60 +
+      Number(entry?.evidenceScore ?? entry?.bodyHintScore ?? 0) +
+      Number(entry?.qualityScore || 0) * 0.25
+    );
+    if (!prior || score > prior.score) bestByPost.set(postKey, { entry, postKey, score });
+  }
+  const ranked = [...bestByPost.values()].sort((left, right) =>
+    Number(right.entry?.poseBodyVisible === true) - Number(left.entry?.poseBodyVisible === true) ||
+    right.score - left.score
+  );
+  ranked.filter(item => item.entry?.poseBodyVisible === true)
+    .forEach(item => add(item.entry.imageUrl, item.postKey));
+  ranked.filter(item => item.entry?.poseBodyVisible !== true)
+    .forEach(item => add(item.entry.imageUrl, item.postKey));
+  return selected;
+}
+
+function local2FlashMergeConfirmedDecision(initialDecision, confirmationDecision) {
+  return {
+    ...initialDecision,
+    verdict: 'accept',
+    reason: 'Local2 personalized preference and hard-filter confirmation passed',
+    hardFilters: { ...(confirmationDecision?.hardFilters || {}) },
+    evidence: { ...(confirmationDecision?.evidence || {}) },
+    model: [
+      String(initialDecision?.model || '').trim(),
+      String(confirmationDecision?.model || '').trim()
+    ].filter(Boolean).join(' + ').slice(0, 256),
+    rawDecision: {
+      initial: initialDecision?.rawDecision || null,
+      hardConfirmation: confirmationDecision?.rawDecision || null
+    }
+  };
+}
+
+async function local2FlashConfirmHardFilters(profile, initialDecision, context) {
+  await random40ReservoirTriageBodyImages(
+    profile,
+    context.signal,
+    LOCAL2_FLASH_CONFIRMATION_TRIAGE_IMAGES
+  ).catch(() => {
+    profile.bodyTriageAvailable = false;
+  });
+  const selected = local2FlashSelectConfirmationImages(profile);
+  if (selected.length < 6) {
+    return {
+      accepted: false,
+      reason: `only ${selected.length}/6 distinct hard-confirmation images`
+    };
+  }
+  const images = await random40ResolveDecisionImages(
+    profile,
+    selected,
+    context.signal,
+    LOCAL2_FLASH_CONFIRMATION_IMAGES
+  );
+  if (images.length < 6) {
+    return {
+      accepted: false,
+      reason: `only ${images.length}/6 full-resolution hard-confirmation images`
+    };
+  }
+  const raw = await classifyInner({
+    app: 'pong-random40-local2-flash-hard-confirmation',
+    localVariant: 'local2',
+    preferencePolicy: 'hard-confirmation',
+    stage: 'hard-confirmation',
+    deferQwenReview: false,
+    visionModel: LOCAL2_QWEN_MODEL,
+    artist: profile,
+    candidateImageUrls: images
+  }, workloadGeneration, context.signal);
+  const confirmation = local2PipelineDecision(raw, images);
+  const examined = Number(confirmation?.evidence?.examinedImages || 0);
+  const clearBody = Number(confirmation?.evidence?.clearBodyViews || 0);
+  if (!local2FlashDecisionIsSafe(confirmation)) {
+    return {
+      accepted: false,
+      reason: confirmation.reason || 'Local2 hard-filter confirmation rejected',
+      diagnostic: confirmation
+    };
+  }
+  if (examined < 6) {
+    return {
+      accepted: false,
+      reason: `only ${examined}/6 perceptually distinct hard-confirmation images`,
+      diagnostic: confirmation
+    };
+  }
+  if (clearBody < LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES) {
+    return {
+      accepted: false,
+      reason: `only ${clearBody}/${LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES} clear body views`,
+      diagnostic: confirmation
+    };
+  }
+  return {
+    accepted: true,
+    decision: local2FlashMergeConfirmedDecision(initialDecision, confirmation),
+    diagnostic: confirmation
   };
 }
 
@@ -7302,6 +7482,7 @@ async function local2FlashQualifyCandidate(candidate, context) {
     profileMs: Date.now() - flashStartedAt,
     mediaMs: 0,
     decisionMs: 0,
+    confirmationMs: 0,
     totalMs: 0
   };
   const releaseQualificationSlot = await local2FlashAcquireQualificationSlot(context.signal);
@@ -7361,7 +7542,7 @@ async function local2FlashQualifyCandidate(candidate, context) {
         reason: `only ${first.fastStartProven}/5 foreground media URLs passed the fast-start byte probe`
       };
     }
-    if (first.branch === 'decision' && !local2FlashDecisionIsSafe(first.decision)) {
+    if (first.branch === 'decision' && !local2FlashDecisionCanConfirm(first.decision)) {
       branchController.abort();
       return {
         accepted: false,
@@ -7382,19 +7563,36 @@ async function local2FlashQualifyCandidate(candidate, context) {
         diagnostic: decision
       };
     }
-    if (!local2FlashDecisionIsSafe(decision)) {
+    if (!local2FlashDecisionCanConfirm(decision)) {
       return {
         accepted: false,
         reason: decision.reason || 'hard-filter or preference rejection',
         diagnostic: decision
       };
     }
+    const confirmationStartedAt = Date.now();
+    const confirmation = await local2FlashConfirmHardFilters(profile, decision, branchContext);
+    flashTimings.confirmationMs = Date.now() - confirmationStartedAt;
+    if (!confirmation.accepted || !confirmation.decision) {
+      return {
+        accepted: false,
+        reason: confirmation.reason || 'Local2 hard-filter confirmation rejected',
+        diagnostic: {
+          initialDecision: decision,
+          hardConfirmation: confirmation.diagnostic || null,
+          flashTimings
+        }
+      };
+    }
+    const confirmedDecision = confirmation.decision;
     flashTimings.totalMs = Date.now() - flashStartedAt;
     return {
       accepted: true,
-      dto: local2FlashAcceptedDto(profile, media, decision, context.revision),
+      dto: local2FlashAcceptedDto(profile, media, confirmedDecision, context.revision),
       diagnostic: {
-        ...decision,
+        ...confirmedDecision,
+        initialDecision: decision,
+        hardConfirmation: confirmation.diagnostic,
         flashTimings
       }
     };

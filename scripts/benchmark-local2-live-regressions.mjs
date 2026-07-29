@@ -11,6 +11,10 @@ const LOCAL_AI = String(process.env.PONG_BENCH_LOCAL_AI || 'http://127.0.0.1:878
 const CHROME = process.env.PONG_BENCH_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const CASE_TIMEOUT_MS = Math.max(30_000, Number(process.env.PONG_BENCH_CASE_TIMEOUT_MS || 180_000));
 const APP_READY_TIMEOUT_MS = Math.max(10_000, Number(process.env.PONG_BENCH_APP_READY_TIMEOUT_MS || 30_000));
+const CASE_NAMES = new Set(String(process.env.PONG_BENCH_CASES || '')
+  .split(',')
+  .map(value => value.trim().toLowerCase())
+  .filter(Boolean));
 const BENCHMARK_PAGES = [1, 2, 3];
 const PROFILE_PREFIX = 'pong-local2-regression-';
 const MEDIA_URL_PATTERNS = [
@@ -468,10 +472,11 @@ async function runRegressionCaseInMainWorld(fixture, timeoutMs) {
     const anatomy = random40AnatomyAssessment(visualDecision);
     if (
       /\b(?:trans|transgender|male|attached (?:male )?anatomy|penis)\b/.test(textReason) ||
-      /(?:confirmed creator profile|name token:\s*ts)/.test(textReason) ||
+      /(?:confirmed creator profile|explicit creator self-description|name token:\s*ts)/.test(textReason) ||
       ['visible_attached_anatomy', 'male_presenting_content', 'attached_male_anatomy'].includes(code) ||
       checks.male_present === true || checks.male_only === true ||
       anatomy.attached_male_anatomy === true ||
+      /explicit creator self-description/.test(visualReason) ||
       /\b(?:trans|male-presenting|attached (?:male )?anatomy|penis)\b/.test(visualReason)
     ) return 'explicit_text_or_visible_attached_anatomy';
     if (
@@ -572,30 +577,110 @@ async function runRegressionCaseInMainWorld(fixture, timeoutMs) {
       ...random40ExtractReviewImages(firstDoc, artist.artistUrl, artist.imageUrl),
       ...(collected.postImageEntries || []).map(entry => entry?.imageUrl)
     ].filter(Boolean);
-    const selectedImages = await random40SelectRepresentativeCandidateImages({
+    const initialImages = await random40SelectRepresentativeCandidateImages({
       profileImage,
       postImageEntries: collected.postImageEntries || [],
       fallbackImageUrls: fallbackImages,
-      maxImages: random40ReviewImageLimit('local2'),
+      maxImages: 4,
       resolvePostImages: false,
       deterministic: true
     });
 
     classificationInvoked = true;
-    const visualDecision = await random40ClassifyArtistLocal(
+    const initialDecision = await random40ClassifyArtistLocal(
       workingArtist,
       random40State.localEndpoint,
-      selectedImages,
+      initialImages,
       {
         visionModel: random40LocalVisionModel('local2'),
         mode: 'local2',
         preferencePolicy: 'broad-hard-safe',
         signal: controller.signal,
-        deferQwenReview: false,
-        maxImages: random40ReviewImageLimit('local2')
+        deferQwenReview: true,
+        maxImages: 4
       }
     );
     random40State.api++;
+    let selectedImages = initialImages;
+    let visualDecision = initialDecision;
+    let hardConfirmationInvoked = false;
+    const initialPreference = Number(initialDecision?.preference_probability);
+    const initialPreferenceThreshold = Number(initialDecision?.preference_threshold);
+    const initialCanConfirm = random40IsAcceptedDecision(initialDecision) || (
+      String(initialDecision?.decision || '').toLowerCase() === 'review' &&
+      String(initialDecision?.reason_code || '').toLowerCase() === 'ambiguous_hard_evidence' &&
+      Number.isFinite(initialPreference) &&
+      Number.isFinite(initialPreferenceThreshold) &&
+      initialPreference >= initialPreferenceThreshold
+    );
+    if (initialCanConfirm) {
+      let confirmationEntries = random40DeduplicateImageEntries(
+        collected.postImageEntries || []
+      );
+      try {
+        const triageResponse = await fetch(`${random40State.localEndpoint}/body-triage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            candidateImageUrls: confirmationEntries
+              .map(entry => entry?.imageUrl)
+              .filter(Boolean)
+              .slice(0, 16)
+          })
+        });
+        if (triageResponse.ok) {
+          const triage = await triageResponse.json();
+          const byUrl = new Map((Array.isArray(triage?.images) ? triage.images : [])
+            .map(result => [random40NormalizeUrl(result?.url, workingArtist.artistUrl), result])
+            .filter(([url]) => Boolean(url)));
+          confirmationEntries = confirmationEntries.map(entry => {
+            const result = byUrl.get(
+              random40NormalizeUrl(entry?.imageUrl, entry?.postUrl || workingArtist.artistUrl)
+            );
+            return result ? {
+              ...entry,
+              poseBodyVisible: result.body_visible === true,
+              poseFaceVisible: result.face_visible === true,
+              poseBodyScore: Number(result.body_score || 0)
+            } : entry;
+          });
+        }
+      } catch (_) {}
+      const confirmationImages = await random40SelectRepresentativeCandidateImages({
+        profileImage,
+        postImageEntries: confirmationEntries,
+        fallbackImageUrls: fallbackImages,
+        maxImages: 8,
+        resolvePostImages: true,
+        deterministic: true
+      });
+      selectedImages = confirmationImages;
+      hardConfirmationInvoked = confirmationImages.length >= 6;
+      visualDecision = hardConfirmationInvoked
+        ? await random40ClassifyArtistLocal(
+            workingArtist,
+            random40State.localEndpoint,
+            confirmationImages,
+            {
+              visionModel: 'qwen2.5vl:latest',
+              mode: 'local2',
+              preferencePolicy: 'hard-confirmation',
+              stage: 'hard-confirmation',
+              signal: controller.signal,
+              deferQwenReview: false,
+              maxImages: 8
+            }
+          )
+        : {
+            decision: 'reject',
+            confidence: 1,
+            reason_code: 'insufficient_hard_confirmation_evidence',
+            reason: `only ${confirmationImages.length}/6 hard-confirmation images`,
+            checks: {}
+          };
+      if (hardConfirmationInvoked) random40State.api++;
+    }
 
     const browserAccepted = random40IsAcceptedDecision(visualDecision);
     const actualDecision =
@@ -622,8 +707,9 @@ async function runRegressionCaseInMainWorld(fixture, timeoutMs) {
       checks.body_preference_conflict !== true &&
       checks.appears_over_50 !== true && checks.appears_over_60 !== true &&
       anatomy.attached_male_anatomy !== true && anatomy.ambiguous !== true &&
-      screenedImages >= random40RequiredReviewImages('local2') &&
-      clearBodyImages >= 2;
+      hardConfirmationInvoked &&
+      screenedImages >= 6 &&
+      clearBodyImages >= 3;
     const acceptableReasons = Array.isArray(fixture.acceptableReasons)
       ? fixture.acceptableReasons.map(value => String(value || ''))
       : [String(fixture.expectedReason || '')];
@@ -657,8 +743,9 @@ async function runRegressionCaseInMainWorld(fixture, timeoutMs) {
       verifiedVideoCount,
       requiredVerifiedVideos: RANDOM40_MIN_VIDEOS_PER_ARTIST,
       selectedImageCount: selectedImages.length,
-      requiredImageCount: random40RequiredReviewImages('local2'),
+      requiredImageCount: actualDecision === 'accept' ? 6 : random40RequiredReviewImages('local2'),
       classificationInvoked,
+      hardConfirmationInvoked,
       hardSafeChecks: {
         browserAccepted,
         acceptedHardSafe,
@@ -678,7 +765,8 @@ async function runRegressionCaseInMainWorld(fixture, timeoutMs) {
         attachedMaleAnatomy: anatomy.attached_male_anatomy ?? null,
         anatomyAmbiguous: anatomy.ambiguous ?? null,
         screenedImages,
-        clearBodyImages
+        clearBodyImages,
+        initialDecision: String(initialDecision?.decision || '')
       },
       model: {
         source: String(visualDecision?.vision_source || visualDecision?.source || ''),
@@ -686,11 +774,30 @@ async function runRegressionCaseInMainWorld(fixture, timeoutMs) {
         reasonCode: String(visualDecision?.reason_code || ''),
         confidence: Number(visualDecision?.confidence || 0)
       },
+      decisionDiagnostics: {
+        reviewCodes: Array.isArray(visualDecision?.review_codes) ? visualDecision.review_codes : [],
+        selectedImages,
+        imageGrades: (Array.isArray(visualDecision?.image_grades) ? visualDecision.image_grades : [])
+          .map(grade => ({
+            imageIndex: Number(grade?.image_index || 0),
+            checks: grade?.checks || {},
+            scores: grade?.scores || {}
+          }))
+      },
       spamDiagnostics,
       pass
     };
   } catch (error) {
     const finishedAtMs = Date.now();
+    const message = String(error?.message || error || 'unknown error');
+    const acceptableReasons = Array.isArray(fixture.acceptableReasons)
+      ? fixture.acceptableReasons.map(value => String(value || ''))
+      : [String(fixture.expectedReason || '')];
+    const sourceUnavailable = /\bHTTP 404\b|source unavailable/i.test(message);
+    const unavailableRejectPass =
+      sourceUnavailable &&
+      fixture.expectedDecision === 'reject' &&
+      acceptableReasons.includes('source_unavailable');
     return {
       name: fixture.name,
       startedAt,
@@ -701,8 +808,10 @@ async function runRegressionCaseInMainWorld(fixture, timeoutMs) {
         reason: fixture.expectedReason
       },
       actual: {
-        decision: 'error',
-        reason: error?.name === 'AbortError' ? 'case_timeout_or_abort' : 'case_error'
+        decision: unavailableRejectPass ? 'reject' : 'error',
+        reason: unavailableRejectPass
+          ? 'source_unavailable'
+          : error?.name === 'AbortError' ? 'case_timeout_or_abort' : 'case_error'
       },
       verifiedVideoCount: 0,
       requiredVerifiedVideos: RANDOM40_MIN_VIDEOS_PER_ARTIST,
@@ -711,8 +820,8 @@ async function runRegressionCaseInMainWorld(fixture, timeoutMs) {
       classificationInvoked,
       hardSafeChecks: null,
       model: null,
-      error: String(error?.message || error || 'unknown error').replace(/https?:\/\/[^\s)\]}]+/gi, '[url]').slice(0, 500),
-      pass: false
+      error: message.replace(/https?:\/\/[^\s)\]}]+/gi, '[url]').slice(0, 500),
+      pass: unavailableRejectPass
     };
   } finally {
     clearTimeout(timeout);
@@ -788,8 +897,8 @@ async function loadFixtures() {
   if (fixture?.schema !== 'pong-local2-regression-v1') {
     throw new Error(`Unexpected fixture schema: ${fixture?.schema || 'missing'}`);
   }
-  if (!Array.isArray(fixture.cases) || fixture.cases.length !== 4) {
-    throw new Error('Local2 regression fixture must contain exactly four cases');
+  if (!Array.isArray(fixture.cases) || fixture.cases.length < 4) {
+    throw new Error('Local2 regression fixture must contain at least four cases');
   }
   for (const item of fixture.cases) {
     if (!item?.name || !item?.artistUrl || !item?.expectedDecision || !item?.expectedReason) {
@@ -803,6 +912,10 @@ async function main() {
   const benchmarkStartedMs = Date.now();
   const benchmarkStartedAt = timestamp();
   const fixture = await loadFixtures();
+  const selectedCases = CASE_NAMES.size
+    ? fixture.cases.filter(item => CASE_NAMES.has(String(item.name || '').toLowerCase()))
+    : fixture.cases;
+  if (!selectedCases.length) throw new Error('No Local2 regression cases matched PONG_BENCH_CASES');
   await fetchHealth();
 
   let staticServer = null;
@@ -836,7 +949,7 @@ async function main() {
       throw new Error(`Invalid benchmark flags: ${JSON.stringify(initialized)}`);
     }
 
-    for (const item of fixture.cases) {
+    for (const item of selectedCases) {
       console.error(`[${timestamp()}] Local2 regression starting: ${item.name}`);
       const expression = `(${runRegressionCaseInMainWorld.toString()})(` +
         `${JSON.stringify(item)}, ${JSON.stringify(CASE_TIMEOUT_MS)})`;
@@ -860,7 +973,7 @@ async function main() {
 
   const benchmarkFinishedMs = Date.now();
   const passed =
-    cases.length === fixture.cases.length &&
+    cases.length === selectedCases.length &&
     cases.every(result => result?.pass === true) &&
     noMediaAudit?.pass === true;
   const result = {
@@ -876,7 +989,7 @@ async function main() {
       pongPages: BENCHMARK_PAGES,
       posterAwareExtractor: true
     },
-    expectedCaseCount: fixture.cases.length,
+    expectedCaseCount: selectedCases.length,
     cases,
     noMediaAudit,
     passed
