@@ -26,6 +26,13 @@
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/^(?:by|from|credit|credits?)\s*[:\-]\s*/i, '');
+  const commonFirstNames = new Set([
+    'abby','alice','alyssa','amanda','amber','amy','ana','anna','ashley','bella',
+    'brianna','brooke','chloe','claire','danielle','ella','emily','emma','grace',
+    'hailey','hannah','isabella','jasmine','jessica','julia','katie','kayla',
+    'lauren','lily','madison','maya','mia','molly','natalie','nicole','olivia',
+    'paige','rachel','rebecca','samantha','sarah','sophia','taylor','victoria','zoe'
+  ]);
   button.onclick = async () => {
     button.disabled = true;
     try {
@@ -51,25 +58,48 @@
       const names = new Map();
       const add = raw => {
         const name = clean(raw);
+        const words = name.split(/\s+/).filter(Boolean);
+        const lower = name.toLowerCase().replace(/^@/, '');
+        const distinctSingle = words.length === 1 &&
+          !commonFirstNames.has(lower) &&
+          (lower.replace(/[^a-z0-9]+/g, '').length >= 7 || /[0-9_.]/.test(lower));
         if (
           name.length < 2 ||
-          name.length > 100 ||
+          name.length > 45 ||
+          words.length > 4 ||
+          (words.length === 1 && !distinctSingle) ||
           /^(?:reply|report|quote|simpcity|forums?|members?|login|register)$/i.test(name)
         ) return;
         const key = name.toLowerCase().replace(/[^a-z0-9]+/g, '');
-        if (key.length > 1 && !names.has(key)) names.set(key, name);
+        if (key.length >= 4 && !names.has(key)) names.set(key, name);
+      };
+      const addAliases = raw => {
+        const cleaned = clean(raw).replace(/\s*(?:\||-)\s*SimpCity.*$/i, '');
+        const aliases = cleaned.split(
+          /\s+(?:a\.?k\.?a\.?|aka|also\s+known\s+as)\s+|\s*[|/]\s*/i
+        );
+        aliases.forEach(add);
       };
       for (const html of htmls) {
         const doc = new DOMParser().parseFromString(html, 'text/html');
         doc.querySelectorAll('blockquote,.bbCodeBlock--quote').forEach(node => node.remove());
         doc.querySelectorAll('a[href*="/threads/"]').forEach(anchor => {
-          if (!/page-\d+|#post-/i.test(anchor.href)) add(anchor.title || anchor.textContent);
+          if (/page-\d+|#post-/i.test(anchor.href)) return;
+          let slug = '';
+          try {
+            slug = decodeURIComponent(new URL(anchor.href).pathname.match(
+              /^\/threads\/(.+?)(?:\.\d+)?\/?$/i
+            )?.[1] || '').replace(/[-_]+/g, ' ');
+          } catch (_) {}
+          addAliases(anchor.title);
+          addAliases(anchor.textContent);
+          addAliases(slug);
         });
         doc.querySelectorAll('.message-body,.bbWrapper').forEach(body => {
           const text = body.innerText || '';
           for (const match of text.matchAll(
             /(?:aka|also known as|model|creator)\s*[:\-]?\s*([@A-Za-z0-9_. -]{2,60})/gi
-          )) add(match[1]);
+          )) addAliases(match[1]);
           body.querySelectorAll(
             'a[href*="instagram.com/"],a[href*="twitter.com/"],a[href*="x.com/"],a[href*="onlyfans.com/"]'
           ).forEach(anchor => {

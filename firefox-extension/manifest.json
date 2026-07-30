@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Pong SimpCity Scraper",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Adds a private Scrape button to authenticated SimpCity threads and returns creator names to Pong.",
   "permissions": [
     "https://simpcity.cr/*",

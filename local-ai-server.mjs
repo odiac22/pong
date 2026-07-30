@@ -20,6 +20,8 @@ import {
   simpCityThreadPageUrl,
   simpCityThreadPageCount,
   extractSimpCityCreatorCandidates,
+  simpCityCreatorAliases,
+  isDistinctSimpCityCreatorName,
   buildBAlbumsCreatorSearchUrl,
   bunkrAlbumsMatchingCreator
 } from './simpcity-import.mjs';
@@ -3083,8 +3085,8 @@ function startSimpCityImportJob(rawThreadUrl) {
 
 function startSimpCityNamesJob(rawNames, rawSourceUrl = '') {
   const names = [...new Set((Array.isArray(rawNames) ? rawNames : [])
-    .map(name => String(name || '').trim())
-    .filter(name => name.length >= 2 && name.length <= 100))].slice(0, 1000);
+    .flatMap(name => simpCityCreatorAliases(String(name || '').trim()))
+    .filter(isDistinctSimpCityCreatorName))].slice(0, 1000);
   if (!names.length) throw new Error('No SimpCity creator names were supplied');
   const id = crypto.randomUUID();
   const timestamp = new Date().toISOString();

@@ -16,6 +16,14 @@ const SOCIAL_HOSTS = new Set([
   'twitter.com', 'www.twitter.com',
   'x.com', 'www.x.com'
 ]);
+const COMMON_SINGLE_FIRST_NAMES = new Set([
+  'abby', 'alice', 'alyssa', 'amanda', 'amber', 'amy', 'ana', 'anna', 'ashley',
+  'bella', 'brianna', 'brooke', 'chloe', 'claire', 'danielle', 'ella', 'emily',
+  'emma', 'grace', 'hailey', 'hannah', 'isabella', 'jasmine', 'jessica',
+  'julia', 'katie', 'kayla', 'lauren', 'lily', 'madison', 'maya', 'mia',
+  'molly', 'natalie', 'nicole', 'olivia', 'paige', 'rachel', 'rebecca',
+  'samantha', 'sarah', 'sophia', 'taylor', 'victoria', 'zoe'
+]);
 
 export function decodeSimpCityHtmlText(value) {
   return String(value || '')
@@ -111,6 +119,17 @@ function isPlausibleCreatorName(value) {
   return true;
 }
 
+export function isDistinctSimpCityCreatorName(value) {
+  const name = cleanCreatorName(value);
+  if (!isPlausibleCreatorName(name)) return false;
+  const words = name.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return words.length <= 4;
+  const lower = name.toLowerCase().replace(/^@/, '');
+  const key = simpCityCreatorKey(lower);
+  if (COMMON_SINGLE_FIRST_NAMES.has(lower)) return false;
+  return key.length >= 7 || /[0-9_.]/.test(lower);
+}
+
 function creatorAliasesFromTitle(rawTitle) {
   const cleaned = cleanCreatorName(rawTitle)
     .replace(/\s*(?:\||-)\s*SimpCity.*$/i, '')
@@ -132,6 +151,14 @@ function threadTitleFromUrl(rawUrl) {
   } catch (_) {
     return '';
   }
+}
+
+export function simpCityCreatorAliases(rawValue) {
+  const source = String(rawValue || '');
+  const title = /simpcity\.cr\/threads\//i.test(source)
+    ? threadTitleFromUrl(source)
+    : source;
+  return creatorAliasesFromTitle(title).filter(isDistinctSimpCityCreatorName);
 }
 
 function anchorParts(anchorHtml) {
@@ -164,7 +191,7 @@ export function extractSimpCityCreatorCandidates(html, currentThreadUrl = '') {
   const add = (rawName, origin, confidence = 0.7) => {
     const name = cleanCreatorName(rawName);
     const key = simpCityCreatorKey(name);
-    if (!isPlausibleCreatorName(name) || excludedMemberKeys.has(key)) return;
+    if (!isDistinctSimpCityCreatorName(name) || excludedMemberKeys.has(key)) return;
     const prior = candidates.get(key);
     if (!prior || confidence > prior.confidence) {
       candidates.set(key, { name, query: name, key, origin, confidence });
@@ -198,7 +225,7 @@ export function extractSimpCityCreatorCandidates(html, currentThreadUrl = '') {
     const normalized = normalizeSimpCityThreadUrl(resolved.toString());
     if (!normalized || normalized === current) continue;
     const title = anchor.text || anchor.title || threadTitleFromUrl(normalized);
-    creatorAliasesFromTitle(title).forEach(alias => add(alias, 'linked-thread', 1));
+    simpCityCreatorAliases(title).forEach(alias => add(alias, 'linked-thread', 1));
   }
 
   for (const bodySource of extractMessageBodies(source)) {
@@ -260,7 +287,7 @@ export function buildBAlbumsCreatorSearchUrl(rawName) {
   const url = new URL('https://balbums.st/');
   url.searchParams.set('search', name);
   url.searchParams.set('mode', 'fuzzy');
-  url.searchParams.set('per', '60');
+  url.searchParams.set('per', '20');
   url.searchParams.set('sort', 'latest');
   return url.toString();
 }

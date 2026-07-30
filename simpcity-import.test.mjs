@@ -5,6 +5,8 @@ import {
   simpCityThreadPageUrl,
   simpCityThreadPageCount,
   extractSimpCityCreatorCandidates,
+  simpCityCreatorAliases,
+  isDistinctSimpCityCreatorName,
   buildBAlbumsCreatorSearchUrl,
   bunkrAlbumsMatchingCreator
 } from './simpcity-import.mjs';
@@ -59,10 +61,21 @@ test('builds one-page Balbums searches and keeps only strong creator matches', (
   const search = new URL(buildBAlbumsCreatorSearchUrl('Ash Kaashh'));
   assert.equal(search.hostname, 'balbums.st');
   assert.equal(search.searchParams.get('search'), 'Ash Kaashh');
-  assert.equal(search.searchParams.get('per'), '60');
+  assert.equal(search.searchParams.get('per'), '20');
   const matches = bunkrAlbumsMatchingCreator([
     { title: 'Ash Kaashh - collection', url: 'https://bunkr.cr/a/one' },
     { title: 'Unrelated creator', url: 'https://bunkr.cr/a/two' }
   ], { name: 'Ash Kaashh' });
   assert.deepEqual(matches.map(item => item.url), ['https://bunkr.cr/a/one']);
+});
+
+test('splits linked-thread aliases and rejects vague first names', () => {
+  assert.deepEqual(
+    simpCityCreatorAliases('https://simpcity.cr/threads/cozyzozie-aka-fairyz222.61225/'),
+    ['cozyzozie', 'fairyz222']
+  );
+  assert.equal(isDistinctSimpCityCreatorName('Ana'), false);
+  assert.equal(isDistinctSimpCityCreatorName('Sarah'), false);
+  assert.equal(isDistinctSimpCityCreatorName('Ash Kaashh'), true);
+  assert.equal(isDistinctSimpCityCreatorName('emmmyxo'), true);
 });
