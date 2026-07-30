@@ -2709,17 +2709,32 @@ async function sendSimpCityLoginInput(payload = {}) {
       deltaY: Math.max(-1200, Math.min(1200, Number(payload.deltaY) || 0))
     });
   } else if (type === 'verify') {
-    const point = await cdp.evaluate(`(() => {
-      const target = document.querySelector(
-        '[data-captcha-widget] iframe, [data-captcha-widget], input[name="captchaToken"]'
+    const found = await cdp.evaluate(`(() => {
+      const direct = document.querySelector(
+        '[data-captcha-widget] iframe, [data-captcha-widget], [data-xf-init*="captcha"], [data-token-name="captchaToken"]'
       );
-      if (!target) return null;
+      const textMatches = [...document.querySelectorAll('div, label, span')]
+        .filter(element => /verify you are human/i.test(element.innerText || ''))
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return (ar.width * ar.height) - (br.width * br.height);
+        });
+      const target = direct || textMatches[0] || null;
+      if (!target) return false;
       target.scrollIntoView({ block: 'center', inline: 'nearest' });
+      target.dataset.pongCaptchaTarget = '1';
+      return true;
+    })()`);
+    if (!found) throw new Error('SimpCity verification control was not found');
+    await simpCityDelay(300);
+    const point = await cdp.evaluate(`(() => {
+      const target = document.querySelector('[data-pong-captcha-target="1"]');
+      if (!target) return null;
       const rect = target.getBoundingClientRect();
-      return { x: rect.left + Math.min(34, rect.width / 2), y: rect.top + Math.min(34, rect.height / 2) };
+      return { x: rect.left + Math.min(30, rect.width / 2), y: rect.top + Math.min(30, rect.height / 2) };
     })()`);
     if (!point) throw new Error('SimpCity verification control was not found');
-    await simpCityDelay(250);
     await cdp.send('Input.dispatchMouseEvent', {
       type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1
     });
@@ -2735,6 +2750,26 @@ async function sendSimpCityLoginInput(payload = {}) {
       return true;
     })()`);
     if (!clicked) throw new Error('SimpCity login button was not found');
+    await simpCityDelay(900);
+    if (simpCityLoginState?.browser === login.browser) {
+      await autofillSimpCityLogin(login.browser).catch(() => {});
+      await sendSimpCityLoginInput({ type: 'verify' }).catch(() => {});
+      (async () => {
+        const deadline = Date.now() + 120_000;
+        while (Date.now() < deadline && simpCityLoginState?.browser === login.browser) {
+          const ready = await cdp.evaluate(`(() => {
+            const token = document.querySelector('input[name="captchaToken"]')?.value || '';
+            if (!token) return false;
+            const button = document.querySelector('form[action*="/login/login"] button[type="submit"]');
+            if (!button) return false;
+            button.click();
+            return true;
+          })()`).catch(() => false);
+          if (ready) return;
+          await simpCityDelay(700);
+        }
+      })().catch(() => {});
+    }
   } else {
     throw new Error('Unsupported SimpCity login input');
   }

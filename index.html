@@ -831,7 +831,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.29</div>
+    <div class="version-number">25.30</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -16695,9 +16695,9 @@ function openSimpCityLoginOverlay(endpoint) {
         <button data-sc-close type="button" style="padding:10px 15px;font-size:16px">Cancel</button>
       </div>
       <img data-sc-frame alt="SimpCity login" draggable="false" style="display:block;width:100%;aspect-ratio:11/8;object-fit:fill;background:#000;touch-action:none;user-select:none;border-radius:7px">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:7px">
-        <button data-sc-verify type="button" style="padding:12px;font-size:16px;background:#287fda;color:#fff">1. Verify</button>
-        <button data-sc-login type="button" style="padding:12px;font-size:16px;background:#2b9b62;color:#fff">2. Log in</button>
+      <div style="display:grid;grid-template-columns:1fr auto;gap:7px;margin-top:7px">
+        <button data-sc-login type="button" style="padding:13px;font-size:17px;background:#2b9b62;color:#fff">Continue login</button>
+        <button data-sc-verify type="button" style="padding:12px;font-size:15px;background:#287fda;color:#fff">Verify again</button>
       </div>
       <details style="margin-top:6px">
        <summary style="color:#aeb9cc">Keyboard controls</summary>
@@ -16709,7 +16709,7 @@ function openSimpCityLoginOverlay(endpoint) {
         <button data-sc-enter type="button" style="padding:9px">Enter</button>
        </div>
       </details>
-      <small style="display:block;margin-top:6px;color:#aeb9cc">Login is filled automatically. Tap “Verify you are human,” then “Log in.” Swipe to scroll.</small>
+      <small style="display:block;margin-top:6px;color:#aeb9cc">Tap Continue once. Pong fills your login, opens verification, and submits automatically after you verify.</small>
     </div>`;
   document.body.appendChild(overlay);
   simpCityLoginOverlay = overlay;
