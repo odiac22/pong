@@ -831,7 +831,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.30</div>
+    <div class="version-number">25.31</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -16709,7 +16709,7 @@ function openSimpCityLoginOverlay(endpoint) {
         <button data-sc-enter type="button" style="padding:9px">Enter</button>
        </div>
       </details>
-      <small style="display:block;margin-top:6px;color:#aeb9cc">Tap Continue once. Pong fills your login, opens verification, and submits automatically after you verify.</small>
+      <small style="display:block;margin-top:6px;color:#aeb9cc">Tap Continue, complete CAPTCHA, then tap Continue again. Pong will not submit early.</small>
     </div>`;
   document.body.appendChild(overlay);
   simpCityLoginOverlay = overlay;
@@ -16756,7 +16756,13 @@ function openSimpCityLoginOverlay(endpoint) {
   overlay.querySelector('[data-sc-back]').onclick = () => postInput({ type: 'key', key: 'Backspace' }).catch(() => {});
   overlay.querySelector('[data-sc-enter]').onclick = () => postInput({ type: 'key', key: 'Enter' }).catch(() => {});
   overlay.querySelector('[data-sc-verify]').onclick = () => postInput({ type: 'verify' }).catch(error => alert(error?.message || error));
-  overlay.querySelector('[data-sc-login]').onclick = () => postInput({ type: 'submit' }).catch(error => alert(error?.message || error));
+  overlay.querySelector('[data-sc-login]').onclick = async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    await postInput({ type: 'submit' }).catch(error => alert(error?.message || error));
+    button.textContent = 'Submit after CAPTCHA';
+    button.disabled = false;
+  };
   const refreshFrame = async () => {
     if (simpCityLoginOverlay !== overlay) return;
     try {

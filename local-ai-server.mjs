@@ -2750,25 +2750,22 @@ async function sendSimpCityLoginInput(payload = {}) {
       return true;
     })()`);
     if (!clicked) throw new Error('SimpCity login button was not found');
+    if (login.verificationShown) {
+      await simpCityDelay(1200);
+      const auth = await simpCityBrowserAuthState(login.browser).catch(() => null);
+      if (!auth?.authenticated && simpCityLoginState?.browser === login.browser) {
+        login.verificationShown = false;
+        await autofillSimpCityLogin(login.browser).catch(() => {});
+        login.verificationShown = true;
+        await sendSimpCityLoginInput({ type: 'verify' }).catch(() => {});
+      }
+      return { ok: true, submitted: true };
+    }
     await simpCityDelay(900);
     if (simpCityLoginState?.browser === login.browser) {
       await autofillSimpCityLogin(login.browser).catch(() => {});
+      login.verificationShown = true;
       await sendSimpCityLoginInput({ type: 'verify' }).catch(() => {});
-      (async () => {
-        const deadline = Date.now() + 120_000;
-        while (Date.now() < deadline && simpCityLoginState?.browser === login.browser) {
-          const ready = await cdp.evaluate(`(() => {
-            const token = document.querySelector('input[name="captchaToken"]')?.value || '';
-            if (!token) return false;
-            const button = document.querySelector('form[action*="/login/login"] button[type="submit"]');
-            if (!button) return false;
-            button.click();
-            return true;
-          })()`).catch(() => false);
-          if (ready) return;
-          await simpCityDelay(700);
-        }
-      })().catch(() => {});
     }
   } else {
     throw new Error('Unsupported SimpCity login input');
