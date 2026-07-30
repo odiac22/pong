@@ -2420,7 +2420,7 @@ async function stopSimpCityBrowser(browser) {
   await removeSimpCityTempProfile(browser.profile).catch(() => {});
 }
 
-async function startSimpCityBrowser({ headless, targetUrl, cookies = [], userAgent = '' }) {
+async function startSimpCityBrowser({ headless, hidden = false, targetUrl, cookies = [], userAgent = '' }) {
   try {
     await fs.access(SIMPCITY_CHROME_PATH);
   } catch (_) {
@@ -2443,12 +2443,13 @@ async function startSimpCityBrowser({ headless, targetUrl, cookies = [], userAge
     '--media-cache-size=1',
     '--window-size=1100,800'
   ];
+  if (hidden) args.push('--window-position=-32000,-32000');
   if (userAgent) args.push(`--user-agent=${userAgent}`);
   if (headless) args.push('--headless=new');
   args.push('about:blank');
   const child = spawn(SIMPCITY_CHROME_PATH, args, {
     stdio: 'ignore',
-    windowsHide: headless === true
+    windowsHide: headless === true || hidden === true
   });
   let spawnError = null;
   child.once('error', error => { spawnError = error; });
@@ -2623,7 +2624,8 @@ async function startSimpCityInteractiveLogin(rawThreadUrl) {
   (async () => {
     try {
       state.browser = await startSimpCityBrowser({
-        headless: true,
+        headless: false,
+        hidden: true,
         targetUrl,
         cookies: []
       });
