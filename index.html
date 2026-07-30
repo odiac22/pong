@@ -549,6 +549,11 @@
       display: flex; justify-content: space-between; gap: 10px;
       font-size: 10px; font-weight: 750; margin-bottom: 3px;
     }
+    #simpcity-disconnect {
+      display: none; margin-left: auto; padding: 2px 6px; border-radius: 5px;
+      border: 1px solid rgba(248,113,113,0.42); background: rgba(127,29,29,0.34);
+      color: #fecaca; font-size: 8px; font-weight: 800; cursor: pointer;
+    }
     .erome-progress-detail {
       font-size: 9px; color: rgba(226,232,240,0.72); margin-bottom: 4px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -812,7 +817,7 @@
       <h3>Erome</h3>
       <p>Watch in-app, or tap Cards to rip the album into the Pong player (needs proxy).</p>
       <div class="auth-url-row">
-        <input id="erome-helper-url" type="url" placeholder="Erome, Bunkr album, or Balbums page URL" spellcheck="false" autocomplete="off">
+        <input id="erome-helper-url" type="url" placeholder="Erome, Bunkr, Balbums, or SimpCity thread URL" spellcheck="false" autocomplete="off">
         <button id="erome-helper-open" type="button">Open</button>
         <button id="erome-helper-cards" type="button">Cards</button>
       </div>
@@ -826,13 +831,13 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.24</div>
+    <div class="version-number">25.25</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
     <div class="url-input">
       <textarea id="video-urls" placeholder="Paste video links here (one per line)" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="done"></textarea>
-      <textarea id="erome-url" placeholder="Erome, Bunkr album, or Balbums page URLs" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="go"></textarea>
+      <textarea id="erome-url" placeholder="Erome, Bunkr, Balbums, or SimpCity thread URLs" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="go"></textarea>
       <div class="button-container">
         <button id="load-videos">Load Videos</button>
         <button id="open-erome">Open Albums</button>
@@ -7564,7 +7569,7 @@ function normalizeEromeLaunchUrl(rawValue) {
 
   if (!raw) return '';
 
-  const embedded = raw.match(/(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*)/i);
+  const embedded = raw.match(/(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*|(?:www\.)?simpcity\.cr\/threads\/[^\s"'<>]*)/i);
   const candidate = embedded ? embedded[0] : raw;
   const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)
     ? candidate
@@ -7578,6 +7583,12 @@ function normalizeEromeLaunchUrl(rawValue) {
 
     if (host === 'bunkr.cr' && /^\/a\/[\w-]+\/?$/i.test(url.pathname)) return url.href;
     if (host === 'balbums.st') return url.href;
+    if (host === 'simpcity.cr' && /^\/threads\/[^/?#]+(?:\/page-\d+)?\/?$/i.test(url.pathname)) {
+      url.protocol = 'https:';
+      url.hostname = 'simpcity.cr';
+      url.hash = '';
+      return url.href;
+    }
     if (host !== 'erome.com') return '';
 
     return url.href;
@@ -7604,7 +7615,7 @@ function collectEromeLaunchUrls(rawValue, allowBareNames = true) {
     found.push(url);
   }
 
-  const linkRe = /(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*)/gi;
+  const linkRe = /(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*|(?:www\.)?simpcity\.cr\/threads\/[^\s"'<>]*)/gi;
   let match;
 
   while ((match = linkRe.exec(raw)) !== null) {
@@ -7616,7 +7627,7 @@ function collectEromeLaunchUrls(rawValue, allowBareNames = true) {
 
     if (!cleaned) return;
 
-    if (/(?:erome\.com|bunkr\.cr|balbums\.st)/i.test(cleaned)) {
+    if (/(?:erome\.com|bunkr\.cr|balbums\.st|simpcity\.cr)/i.test(cleaned)) {
       add(cleaned);
     } else if (allowBareNames && /^(?:a\/)?[\w.-]+$/i.test(cleaned)) {
       add(cleaned.startsWith('a/') ? `https://www.erome.com/${cleaned}` : cleaned);
@@ -7672,6 +7683,17 @@ function isBunkrImportLaunchUrl(rawUrl) {
   }
 }
 
+function isSimpCityImportLaunchUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl, window.location.href);
+    const host = url.hostname.replace(/^www\./, '').toLowerCase();
+    return host === 'simpcity.cr' &&
+      /^\/threads\/[^/?#]+(?:\/page-\d+)?\/?$/i.test(url.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
 function eromeProfilePageUrl(rawUrl, page) {
   try {
     const url = new URL(rawUrl, window.location.href);
@@ -7692,6 +7714,15 @@ function getEromeTargetLabel(rawUrl) {
     const parts = url.pathname.split('/').filter(Boolean);
 
     if (parts[0] === 'a') return `album ${parts[1] || ''}`.trim();
+    if (
+      url.hostname.replace(/^www\./, '').toLowerCase() === 'simpcity.cr' &&
+      parts[0] === 'threads'
+    ) {
+      return decodeURIComponent(parts[1] || 'SimpCity')
+        .replace(/\.\d+$/, '')
+        .replace(/[-_]+/g, ' ')
+        .trim();
+    }
     return parts[0] || url.hostname;
   } catch (e) {
     return 'Erome';
@@ -7922,6 +7953,7 @@ function ensureEromeProgressEl() {
   el.innerHTML = `
     <div class="erome-progress-title">
       <span id="erome-progress-title">Scraping Erome</span>
+      <button id="simpcity-disconnect" type="button">Disconnect</button>
       <span id="erome-progress-percent">0%</span>
     </div>
     <div id="erome-progress-detail" class="erome-progress-detail">Preparing...</div>
@@ -7930,6 +7962,7 @@ function ensureEromeProgressEl() {
     </div>
   `;
   document.body.appendChild(el);
+  document.getElementById('simpcity-disconnect')?.addEventListener('click', disconnectSimpCity);
   return el;
 }
 
@@ -16612,6 +16645,289 @@ async function waitForEromeBackgroundScrapeSlot() {
 }
 
 let bunkrLoadGeneration = 0;
+const simpCityActiveJobIds = new Set();
+
+function setSimpCityDisconnectVisible(visible) {
+  ensureEromeProgressEl();
+  const button = document.getElementById('simpcity-disconnect');
+  if (button) button.style.display = visible ? 'inline-block' : 'none';
+}
+
+async function disconnectSimpCity() {
+  const endpoint = await getRandom40LocalEndpoint(true);
+  bunkrLoadGeneration++;
+  if (!endpoint) {
+    setSimpCityDisconnectVisible(false);
+    return;
+  }
+  try {
+    await fetch(`${endpoint}/simpcity/session/disconnect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}'
+    });
+    simpCityActiveJobIds.clear();
+    setSimpCityDisconnectVisible(false);
+    showSortingIndicator('SimpCity disconnected; its encrypted session was erased');
+  } catch (error) {
+    showSortingIndicator(`SimpCity disconnect failed: ${error?.message || error}`);
+  }
+}
+
+async function loadSimpCityAsCards(targets) {
+  const loadGeneration = ++bunkrLoadGeneration;
+  const endpoint = await getRandom40LocalEndpoint(true);
+  if (!endpoint) {
+    alert('SimpCity imports need the Pong PC server to be running and reachable.');
+    return;
+  }
+  const postJson = async (pathname, payload) => {
+    const response = await fetch(`${endpoint}${pathname}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {})
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || `Local HTTP ${response.status}`);
+    return data;
+  };
+  const getJson = async pathname => {
+    const response = await fetch(`${endpoint}${pathname}`, { cache: 'no-store' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || `Local HTTP ${response.status}`);
+    return data;
+  };
+
+  const READY_ALBUM_TARGET = 5;
+  const ALBUM_WORKERS = 4;
+  const albumQueue = [];
+  const albumWaiters = [];
+  const seenAlbumUrls = new Set();
+  let feedClosed = false;
+  let reservedAlbumSlots = 0;
+  let cardsStarted = false;
+  let loadedAlbums = 0;
+  let completedAlbums = 0;
+  let videoCount = 0;
+  let discoveredCreators = 0;
+  let discoveredAlbums = 0;
+  let discoveryError = null;
+
+  const bunkrPlaybackBase = location.protocol === 'https:'
+    ? EROME_PROXY_BASE.replace(/\/+$/, '')
+    : endpoint.replace(/\/+$/, '');
+
+  const wakeAlbumWorkers = () => {
+    while (albumWaiters.length) albumWaiters.shift()();
+  };
+  const enqueueAlbums = albums => {
+    (albums || []).forEach(rawAlbum => {
+      const albumUrl = normalizeEromeLaunchUrl(rawAlbum?.url || '');
+      if (!albumUrl || !isBunkrImportLaunchUrl(albumUrl) || seenAlbumUrls.has(albumUrl)) return;
+      seenAlbumUrls.add(albumUrl);
+      albumQueue.push({
+        ...rawAlbum,
+        url: albumUrl,
+        title: String(rawAlbum?.title || rawAlbum?.creatorName || 'Bunkr album'),
+        sourceUrl: normalizeEromeLaunchUrl(rawAlbum?.sourceUrl || '') || rawAlbum?.sourceUrl || targets[0],
+        sourceTitle: String(rawAlbum?.creatorName || rawAlbum?.sourceTitle || rawAlbum?.title || 'SimpCity creator'),
+        source: 'bunkr'
+      });
+    });
+    discoveredAlbums = seenAlbumUrls.size;
+    wakeAlbumWorkers();
+  };
+  const takeAlbum = async () => {
+    while (
+      loadGeneration === bunkrLoadGeneration &&
+      !albumQueue.length &&
+      !feedClosed
+    ) {
+      await new Promise(resolve => albumWaiters.push(resolve));
+    }
+    if (loadGeneration !== bunkrLoadGeneration || (!albumQueue.length && feedClosed)) return null;
+    return albumQueue.shift() || null;
+  };
+  const unviewedAlbumCount = () => pasteEvents.reduce((count, event, index) => {
+    if (
+      event?.source === 'bunkr' &&
+      isPasteEventViewableForPaperclip(event) &&
+      !isPasteEventRetiredForPaperclip(event, index) &&
+      !isPasteEventPreviouslyVisitedForPaperclip(event, index)
+    ) return count + 1;
+    return count;
+  }, 0);
+  const acquireAlbumSlot = async () => {
+    while (
+      loadGeneration === bunkrLoadGeneration &&
+      cardsStarted &&
+      unviewedAlbumCount() + reservedAlbumSlots >= READY_ALBUM_TARGET
+    ) {
+      await sleep(350);
+    }
+    if (loadGeneration !== bunkrLoadGeneration) return false;
+    reservedAlbumSlots++;
+    return true;
+  };
+  const publishGroup = group => {
+    let imported;
+    if (!cardsStarted) {
+      imported = cacheEromeCardImport([group], bunkrPlaybackBase);
+      closeEromeHelper();
+      setEromeTwentyCardMode(true, { respectRange: true });
+      window.PongEromeAutoAdvanceOnce = true;
+      window.PongLoadAllVideosOnce = false;
+      loadVideosButton.click();
+      activateFirstEromeBatch();
+      cardsStarted = true;
+    } else {
+      imported = appendEromeGroupsToCurrentCards([group], bunkrPlaybackBase);
+      updatePasteNavigationButton();
+    }
+    loadedAlbums++;
+    videoCount += imported.urls.length;
+    if (location.protocol !== 'https:' && Array.isArray(group.videos)) {
+      postJson('/video-cache/warm', {
+        playbackProfile: 'bunkr',
+        items: group.videos.slice(0, 1).map(url => ({
+          url,
+          artistKey: group.sourceUrl || group.url || ''
+        })),
+        urgent: false,
+        authoritative: false
+      }).catch(() => {});
+    }
+    showSortingIndicator(
+      `SimpCity ready: ${loadedAlbums} artists, ${videoCount} videos`
+    );
+  };
+  const scrapeAlbum = async album => {
+    const acquired = await acquireAlbumSlot();
+    if (!acquired) return;
+    try {
+      const data = await postJson('/bunkr/album', album);
+      if (loadGeneration !== bunkrLoadGeneration) return;
+      if (Array.isArray(data.videos) && data.videos.length) {
+        publishGroup({
+          url: album.url,
+          title: album.creatorName
+            ? `${album.creatorName} - ${album.title || data.title || 'Bunkr album'}`
+            : album.title || data.title || 'Bunkr album',
+          sourceUrl: album.sourceUrl || targets[0],
+          sourceTitle: album.creatorName || album.sourceTitle || album.title || 'SimpCity creator',
+          source: 'bunkr',
+          videos: data.videos
+        });
+      }
+    } catch (error) {
+      console.warn('SimpCity Bunkr album import failed:', album.url, error);
+    } finally {
+      reservedAlbumSlots = Math.max(0, reservedAlbumSlots - 1);
+      completedAlbums++;
+      updateEromeProgress({
+        title: cardsStarted ? 'SimpCity playing while more load' : 'Opening first SimpCity match',
+        detail: `${loadedAlbums} ready · ${completedAlbums}/${Math.max(discoveredAlbums, completedAlbums)} albums checked`,
+        completed: completedAlbums,
+        total: Math.max(1, discoveredAlbums),
+        videos: videoCount
+      });
+    }
+  };
+  const workers = Array.from({ length: ALBUM_WORKERS }, async () => {
+    while (loadGeneration === bunkrLoadGeneration) {
+      const album = await takeAlbum();
+      if (!album) return;
+      await scrapeAlbum(album);
+    }
+  });
+
+  updateEromeProgress({
+    title: 'Connecting SimpCity',
+    detail: 'Checking the encrypted PC browser session',
+    completed: 0,
+    total: 1,
+    videos: 0,
+    force: true
+  });
+
+  try {
+    for (const target of targets) {
+      if (loadGeneration !== bunkrLoadGeneration) break;
+      const started = await postJson('/simpcity/import/start', { url: target });
+      const jobId = String(started.jobId || '');
+      if (!jobId) throw new Error('The PC did not create a SimpCity import job');
+      simpCityActiveJobIds.add(jobId);
+      let knownAlbumCount = 0;
+      while (loadGeneration === bunkrLoadGeneration) {
+        const status = await getJson(
+          `/simpcity/import/status?jobId=${encodeURIComponent(jobId)}`
+        );
+        discoveredCreators = Math.max(discoveredCreators, Number(status.creatorsDiscovered || 0));
+        if (Array.isArray(status.albums) && status.albums.length > knownAlbumCount) {
+          enqueueAlbums(status.albums.slice(knownAlbumCount));
+          knownAlbumCount = status.albums.length;
+        }
+        const waitingForLogin = status.phase === 'waiting_for_login' ||
+          ['opening', 'awaiting_login'].includes(String(status.login?.status || ''));
+        if (waitingForLogin || status.login?.status === 'connected') {
+          setSimpCityDisconnectVisible(true);
+        }
+        updateEromeProgress({
+          title: waitingForLogin
+            ? 'Log in to SimpCity on the PC'
+            : status.phase === 'searching_balbums'
+              ? 'Searching Balbums'
+              : cardsStarted
+                ? 'SimpCity playing while more load'
+                : 'Scanning SimpCity names',
+          detail: waitingForLogin
+            ? 'Use the temporary Chrome window; Pong continues automatically after login'
+            : `${Number(status.completedPages || 0)}/${Math.max(1, Number(status.totalPages || 1))} pages · ${Number(status.creatorsDiscovered || 0)} names · ${Number(status.albumCount || 0)} matches`,
+          completed: status.phase === 'searching_balbums' || status.state === 'complete'
+            ? Number(status.creatorsSearched || 0)
+            : Number(status.completedPages || 0),
+          total: status.phase === 'searching_balbums' || status.state === 'complete'
+            ? Math.max(1, Number(status.creatorsDiscovered || 1))
+            : Math.max(1, Number(status.totalPages || 1)),
+          videos: videoCount,
+          force: waitingForLogin
+        });
+        if (status.state === 'error') throw new Error(status.error || 'SimpCity import failed');
+        if (['complete', 'cancelled'].includes(status.state)) {
+          simpCityActiveJobIds.delete(jobId);
+          break;
+        }
+        await sleep(700);
+      }
+    }
+  } catch (error) {
+    discoveryError = error;
+    console.warn('SimpCity import failed:', error);
+  } finally {
+    feedClosed = true;
+    wakeAlbumWorkers();
+  }
+
+  await Promise.allSettled(workers);
+  if (loadGeneration !== bunkrLoadGeneration) return;
+  if (!cardsStarted) {
+    alert(discoveryError
+      ? `SimpCity import failed: ${discoveryError?.message || discoveryError}`
+      : discoveredCreators
+        ? `SimpCity found ${discoveredCreators} creator names, but no matching playable Bunkr videos.`
+        : 'No creator names were found in that SimpCity thread.');
+    hideEromeProgress(1500);
+    return;
+  }
+  updateEromeProgress({
+    title: 'SimpCity ready',
+    detail: `${loadedAlbums} artists · ${discoveredCreators} names searched`,
+    completed: completedAlbums,
+    total: Math.max(1, discoveredAlbums),
+    videos: videoCount,
+    force: true
+  });
+}
 
 async function loadBunkrAsCards(targets) {
   const loadGeneration = ++bunkrLoadGeneration;
@@ -16845,10 +17161,20 @@ async function loadEromeAsCards() {
   const targets = getEromeScrapeTargets();
 
   if (!targets.length) {
-    alert('Paste one or more Erome, Bunkr album, or Balbums page URLs first.');
+    alert('Paste one or more Erome, Bunkr, Balbums, or SimpCity thread URLs first.');
     return;
   }
   activeEromeScrapeTargets = targets.slice();
+
+  const simpCityTargets = targets.filter(isSimpCityImportLaunchUrl);
+  if (simpCityTargets.length) {
+    if (simpCityTargets.length !== targets.length) {
+      alert('Load SimpCity threads separately from Erome and Bunkr/Balbums URLs.');
+      return;
+    }
+    await loadSimpCityAsCards(simpCityTargets);
+    return;
+  }
 
   const bunkrTargets = targets.filter(isBunkrImportLaunchUrl);
   if (bunkrTargets.length) {

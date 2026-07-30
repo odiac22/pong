@@ -1,0 +1,68 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  normalizeSimpCityThreadUrl,
+  simpCityThreadPageUrl,
+  simpCityThreadPageCount,
+  extractSimpCityCreatorCandidates,
+  buildBAlbumsCreatorSearchUrl,
+  bunkrAlbumsMatchingCreator
+} from './simpcity-import.mjs';
+
+const THREAD = 'https://simpcity.cr/threads/lightskin-light-skin-mixed-black-white-girl-thread.210197/?order=reaction_score';
+
+test('normalizes SimpCity threads and preserves only ordering', () => {
+  assert.equal(
+    normalizeSimpCityThreadUrl(`${THREAD}&utm_source=nope#post-4`),
+    THREAD
+  );
+  assert.equal(
+    simpCityThreadPageUrl(THREAD, 3),
+    'https://simpcity.cr/threads/lightskin-light-skin-mixed-black-white-girl-thread.210197/page-3?order=reaction_score'
+  );
+  assert.equal(normalizeSimpCityThreadUrl('https://simpcity.cr/members/not-a-thread.5/'), '');
+});
+
+test('finds the highest XenForo page number', () => {
+  assert.equal(simpCityThreadPageCount(`
+    <a href="/threads/example.1/page-2">2</a>
+    <a href="/threads/example.1/page-19">19</a>
+    <a data-page="7">7</a>
+  `), 19);
+});
+
+test('extracts creator aliases and names while excluding post authors', () => {
+  const html = `
+    <article class="message" data-author="6235829486295100">
+      <a class="username" href="/members/6235829486295100.4387205/">6235829486295100</a>
+      <div class="bbWrapper">
+        <a href="/threads/cozyzozie-aka-fairyz222.61225/">cozyzozie aka fairyz222</a><br>
+        Ash Kaashh<br>
+        emmmyxo<br>
+        <a href="https://instagram.com/another_creator/">Instagram</a>
+        <blockquote><a href="/members/quoted-user.88/">quoted-user</a> Thanks</blockquote>
+      </div>
+    </article>
+  `;
+  const names = extractSimpCityCreatorCandidates(html, THREAD).map(item => item.name.toLowerCase());
+  assert.ok(names.includes('cozyzozie'));
+  assert.ok(names.includes('fairyz222'));
+  assert.ok(names.includes('ash kaashh'));
+  assert.ok(names.includes('emmmyxo'));
+  assert.ok(names.includes('another_creator'));
+  assert.ok(!names.includes('6235829486295100'));
+  assert.ok(!names.includes('quoted-user'));
+  assert.ok(!names.includes('thanks'));
+});
+
+test('builds one-page Balbums searches and keeps only strong creator matches', () => {
+  const search = new URL(buildBAlbumsCreatorSearchUrl('Ash Kaashh'));
+  assert.equal(search.hostname, 'balbums.st');
+  assert.equal(search.searchParams.get('search'), 'Ash Kaashh');
+  assert.equal(search.searchParams.get('per'), '60');
+  const matches = bunkrAlbumsMatchingCreator([
+    { title: 'Ash Kaashh - collection', url: 'https://bunkr.cr/a/one' },
+    { title: 'Unrelated creator', url: 'https://bunkr.cr/a/two' }
+  ], { name: 'Ash Kaashh' });
+  assert.deepEqual(matches.map(item => item.url), ['https://bunkr.cr/a/one']);
+});

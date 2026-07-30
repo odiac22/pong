@@ -3,6 +3,7 @@ import https from 'node:https';
 import http2 from 'node:http2';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import { createReadStream, createWriteStream } from 'node:fs';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
@@ -14,6 +15,14 @@ import {
   local2CleanResultIsExplicitlyHardSafe,
   local2ImageGradeSummary
 } from './local2-pipeline.mjs';
+import {
+  normalizeSimpCityThreadUrl,
+  simpCityThreadPageUrl,
+  simpCityThreadPageCount,
+  extractSimpCityCreatorCandidates,
+  buildBAlbumsCreatorSearchUrl,
+  bunkrAlbumsMatchingCreator
+} from './simpcity-import.mjs';
 
 const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
 const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
@@ -42,6 +51,30 @@ const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD 
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const PONG_INDEX_PATH = path.join(process.cwd(), 'index.html');
 const PONG_SYNC_PATH = path.join(process.cwd(), 'pong-sync.js');
+const SIMPCITY_SESSION_PATH = path.join(LOCAL_AI_DIR, 'simpcity-session-v1.dpapi');
+const SIMPCITY_CHROME_PATH = process.env.PONG_SIMPCITY_CHROME || path.join(
+  process.env.PROGRAMFILES || 'C:\\Program Files',
+  'Google',
+  'Chrome',
+  'Application',
+  'chrome.exe'
+);
+const SIMPCITY_LOGIN_TIMEOUT_MS = Math.max(
+  60_000,
+  Math.min(30 * 60_000, Number(process.env.PONG_SIMPCITY_LOGIN_TIMEOUT_MS || 15 * 60_000))
+);
+const SIMPCITY_MAX_THREAD_PAGES = Math.max(
+  1,
+  Math.min(500, Number(process.env.PONG_SIMPCITY_MAX_THREAD_PAGES || 250))
+);
+const SIMPCITY_PAGE_CONCURRENCY = Math.max(
+  1,
+  Math.min(8, Number(process.env.PONG_SIMPCITY_PAGE_CONCURRENCY || 3))
+);
+const SIMPCITY_SEARCH_CONCURRENCY = Math.max(
+  1,
+  Math.min(8, Number(process.env.PONG_SIMPCITY_SEARCH_CONCURRENCY || 3))
+);
 const VIDEO_FILE_CACHE_DIR = path.join(LOCAL_AI_DIR, '.ephemeral-video-cache');
 const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_BYTES || 12 * 1024 * 1024 * 1024));
 const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 2 * 1024 * 1024 * 1024));
@@ -2094,6 +2127,787 @@ async function extractBunkrVideoUrls(albumUrl) {
   });
   return [...new Set(resolved.filter(Boolean))];
 }
+
+const SIMPCITY_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  'Chrome/150.0.0.0 Safari/537.36';
+const SIMPCITY_MEDIA_BLOCK_PATTERNS = [
+  '*.mp4*', '*.m4v*', '*.mov*', '*.webm*', '*.m3u8*', '*.mpd*',
+  '*.mp3*', '*.m4a*', '*.aac*', '*.wav*', '*.ogg*', '*.flac*'
+];
+const SIMPCITY_JOB_RETENTION_MS = 30 * 60 * 1000;
+let simpCitySessionCache;
+let simpCityLoginState = null;
+const simpCityImportJobs = new Map();
+
+function simpCityDelay(ms) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms || 0))));
+}
+
+async function simpCityWaitFor(predicate, timeoutMs, label, intervalMs = 125) {
+  const deadline = Date.now() + Math.max(1, Number(timeoutMs || 1));
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const value = await predicate();
+      if (value) return value;
+    } catch (error) {
+      lastError = error;
+    }
+    await simpCityDelay(intervalMs);
+  }
+  throw new Error(`${label} timed out${lastError?.message ? `: ${lastError.message}` : ''}`);
+}
+
+function runSimpCityDpapi(mode, input) {
+  return new Promise((resolve, reject) => {
+    const protect = mode === 'protect';
+    const script = protect
+      ? [
+          '$ErrorActionPreference = "Stop"',
+          'Add-Type -AssemblyName System.Security',
+          '$raw = [Console]::In.ReadToEnd().Trim()',
+          '$bytes = [Convert]::FromBase64String($raw)',
+          '$entropy = [Text.Encoding]::UTF8.GetBytes("Pong SimpCity session v1")',
+          '$scope = [System.Security.Cryptography.DataProtectionScope]::CurrentUser',
+          '$sealed = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $entropy, $scope)',
+          '[Console]::Out.Write([Convert]::ToBase64String($sealed))'
+        ].join(';')
+      : [
+          '$ErrorActionPreference = "Stop"',
+          'Add-Type -AssemblyName System.Security',
+          '$raw = [Console]::In.ReadToEnd().Trim()',
+          '$bytes = [Convert]::FromBase64String($raw)',
+          '$entropy = [Text.Encoding]::UTF8.GetBytes("Pong SimpCity session v1")',
+          '$scope = [System.Security.Cryptography.DataProtectionScope]::CurrentUser',
+          '$plain = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $entropy, $scope)',
+          '[Console]::Out.Write([Convert]::ToBase64String($plain))'
+        ].join(';');
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    const child = spawn('powershell.exe', [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-EncodedCommand',
+      encoded
+    ], {
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (error, value = '') => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(new Error('Windows session protection timed out'));
+    }, 10_000);
+    timer.unref?.();
+    child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+    child.stderr.on('data', chunk => { stderr += chunk.toString().slice(0, 4096); });
+    child.once('error', finish);
+    child.once('close', code => {
+      if (code !== 0) {
+        finish(new Error(stderr.trim() || `Windows session protection exited ${code}`));
+        return;
+      }
+      finish(null, stdout.trim());
+    });
+    child.stdin.end(String(input || ''));
+  });
+}
+
+function compactSimpCityCookie(rawCookie) {
+  const domain = String(rawCookie?.domain || '').toLowerCase();
+  if (!domain.endsWith('simpcity.cr')) return null;
+  const cookie = {
+    name: String(rawCookie?.name || ''),
+    value: String(rawCookie?.value || ''),
+    domain,
+    path: String(rawCookie?.path || '/'),
+    secure: rawCookie?.secure !== false,
+    httpOnly: rawCookie?.httpOnly === true
+  };
+  if (!cookie.name || !cookie.value) return null;
+  if (Number(rawCookie?.expires) > 0) cookie.expires = Number(rawCookie.expires);
+  if (['Strict', 'Lax', 'None'].includes(String(rawCookie?.sameSite || ''))) {
+    cookie.sameSite = String(rawCookie.sameSite);
+  }
+  return cookie;
+}
+
+async function saveSimpCitySession(cookies, userAgent = SIMPCITY_USER_AGENT) {
+  const compact = (Array.isArray(cookies) ? cookies : []).map(compactSimpCityCookie).filter(Boolean);
+  if (!compact.length) throw new Error('SimpCity did not expose an authenticated session');
+  const session = {
+    schema: 'pong-simpcity-session-v1',
+    savedAt: new Date().toISOString(),
+    userAgent: String(userAgent || SIMPCITY_USER_AGENT),
+    cookies: compact
+  };
+  const plaintext = Buffer.from(JSON.stringify(session), 'utf8').toString('base64');
+  const protectedValue = await runSimpCityDpapi('protect', plaintext);
+  await fs.mkdir(LOCAL_AI_DIR, { recursive: true });
+  await fs.writeFile(SIMPCITY_SESSION_PATH, `${protectedValue}\n`, 'utf8');
+  simpCitySessionCache = session;
+  return session;
+}
+
+async function loadSimpCitySession() {
+  if (simpCitySessionCache !== undefined) return simpCitySessionCache;
+  try {
+    const protectedValue = (await fs.readFile(SIMPCITY_SESSION_PATH, 'utf8')).trim();
+    const plaintext = await runSimpCityDpapi('unprotect', protectedValue);
+    const session = JSON.parse(Buffer.from(plaintext, 'base64').toString('utf8'));
+    if (
+      session?.schema !== 'pong-simpcity-session-v1' ||
+      !Array.isArray(session.cookies) ||
+      !session.cookies.length
+    ) throw new Error('invalid SimpCity session');
+    simpCitySessionCache = session;
+  } catch (_) {
+    simpCitySessionCache = null;
+  }
+  return simpCitySessionCache;
+}
+
+async function clearSimpCitySession() {
+  simpCitySessionCache = null;
+  await fs.rm(SIMPCITY_SESSION_PATH, { force: true }).catch(() => {});
+}
+
+class SimpCityCdpSession {
+  constructor(url) {
+    this.url = url;
+    this.nextId = 1;
+    this.pending = new Map();
+  }
+
+  async connect() {
+    this.socket = new WebSocket(this.url);
+    await new Promise((resolve, reject) => {
+      this.socket.addEventListener('open', resolve, { once: true });
+      this.socket.addEventListener('error', reject, { once: true });
+    });
+    this.socket.addEventListener('message', event => {
+      const message = JSON.parse(String(event.data || '{}'));
+      if (!message.id || !this.pending.has(message.id)) return;
+      const pending = this.pending.get(message.id);
+      this.pending.delete(message.id);
+      clearTimeout(pending.timer);
+      if (message.error) pending.reject(new Error(message.error.message || 'Chrome DevTools error'));
+      else pending.resolve(message.result || {});
+    });
+    this.socket.addEventListener('close', () => {
+      for (const pending of this.pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('SimpCity browser session closed'));
+      }
+      this.pending.clear();
+    });
+  }
+
+  send(method, params = {}, timeoutMs = 60_000) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${method} timed out`));
+      }, Math.max(1000, Number(timeoutMs || 60_000)));
+      timer.unref?.();
+      this.pending.set(id, { resolve, reject, timer });
+      this.socket.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  async evaluate(expression, timeoutMs = 60_000) {
+    const response = await this.send('Runtime.evaluate', {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+      includeCommandLineAPI: false,
+      userGesture: false
+    }, timeoutMs);
+    if (response.exceptionDetails) {
+      const detail = response.exceptionDetails.exception?.description || response.exceptionDetails.text;
+      throw new Error(detail || 'SimpCity browser evaluation failed');
+    }
+    return response.result?.value;
+  }
+
+  close() {
+    try { this.socket?.close(); } catch (_) {}
+  }
+}
+
+async function removeSimpCityTempProfile(profile) {
+  const resolved = path.resolve(String(profile || ''));
+  const tempRoot = path.resolve(os.tmpdir());
+  const relative = path.relative(tempRoot, resolved);
+  if (
+    !relative ||
+    relative.startsWith('..') ||
+    path.isAbsolute(relative) ||
+    !path.basename(resolved).startsWith('pong-simpcity-')
+  ) throw new Error(`Refusing to remove unexpected SimpCity profile path: ${resolved}`);
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await fs.rm(resolved, { recursive: true, force: true });
+      return;
+    } catch (_) {
+      await simpCityDelay(250 * (attempt + 1));
+    }
+  }
+}
+
+async function cleanupStaleSimpCityProfiles() {
+  const tempRoot = path.resolve(os.tmpdir());
+  const entries = await fs.readdir(tempRoot, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith('pong-simpcity-')) continue;
+    await removeSimpCityTempProfile(path.join(tempRoot, entry.name)).catch(() => {});
+  }
+}
+
+async function stopSimpCityBrowser(browser) {
+  if (!browser) return;
+  try { await browser.cdp?.send('Browser.close', {}, 3000); } catch (_) {}
+  browser.cdp?.close();
+  if (browser.child?.pid && browser.child.exitCode === null) {
+    try { browser.child.kill(); } catch (_) {}
+    await Promise.race([
+      new Promise(resolve => browser.child.once('close', resolve)),
+      simpCityDelay(3000)
+    ]);
+  }
+  await removeSimpCityTempProfile(browser.profile).catch(() => {});
+}
+
+async function startSimpCityBrowser({ headless, targetUrl, cookies = [], userAgent = '' }) {
+  try {
+    await fs.access(SIMPCITY_CHROME_PATH);
+  } catch (_) {
+    throw new Error(`Google Chrome was not found at ${SIMPCITY_CHROME_PATH}`);
+  }
+  const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'pong-simpcity-'));
+  const args = [
+    '--remote-debugging-port=0',
+    `--user-data-dir=${profile}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-sync',
+    '--disable-extensions',
+    '--disable-notifications',
+    '--disable-features=MediaRouter,Translate',
+    '--autoplay-policy=document-user-activation-required',
+    '--mute-audio',
+    '--disable-audio-output',
+    '--disk-cache-size=1',
+    '--media-cache-size=1',
+    '--window-size=1100,800'
+  ];
+  if (userAgent) args.push(`--user-agent=${userAgent}`);
+  if (headless) args.push('--headless=new');
+  args.push('about:blank');
+  const child = spawn(SIMPCITY_CHROME_PATH, args, {
+    stdio: 'ignore',
+    windowsHide: headless === true
+  });
+  let spawnError = null;
+  child.once('error', error => { spawnError = error; });
+  let cdp = null;
+  try {
+    const port = await simpCityWaitFor(async () => {
+      if (spawnError) throw spawnError;
+      if (child.exitCode !== null) throw new Error('Chrome exited before login opened');
+      const raw = await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8');
+      return Number(raw.split(/\r?\n/)[0]) || 0;
+    }, 15_000, 'SimpCity Chrome DevTools');
+    const debuggerUrl = await simpCityWaitFor(async () => {
+      const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+        signal: AbortSignal.timeout(2000)
+      });
+      if (!response.ok) return '';
+      const targets = await response.json();
+      return targets.find(item => item.type === 'page')?.webSocketDebuggerUrl || '';
+    }, 10_000, 'SimpCity Chrome page');
+    cdp = new SimpCityCdpSession(debuggerUrl);
+    await cdp.connect();
+    await cdp.send('Page.enable');
+    await cdp.send('Network.enable');
+    await cdp.send('Runtime.enable');
+    await cdp.send('Network.setBlockedURLs', { urls: SIMPCITY_MEDIA_BLOCK_PATTERNS });
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `(() => {
+        const disableMedia = () => {
+          document.querySelectorAll('video,audio').forEach(media => {
+            try { media.pause(); } catch (_) {}
+            media.removeAttribute('src');
+            media.querySelectorAll('source').forEach(source => source.removeAttribute('src'));
+            media.style.setProperty('display', 'none', 'important');
+          });
+        };
+        try {
+          Object.defineProperty(HTMLMediaElement.prototype, 'play', {
+            configurable: true,
+            value() { return Promise.reject(new DOMException('Media disabled', 'NotAllowedError')); }
+          });
+        } catch (_) {}
+        addEventListener('DOMContentLoaded', disableMedia, { once: true });
+        new MutationObserver(disableMedia).observe(document, { childList: true, subtree: true });
+      })();`
+    });
+    const browserVersion = await cdp.send('Browser.getVersion').catch(() => ({}));
+    const effectiveUserAgent = String(
+      userAgent ||
+      browserVersion.userAgent ||
+      SIMPCITY_USER_AGENT
+    ).replace(/\bHeadlessChrome\//, 'Chrome/');
+    if (userAgent || /\bHeadlessChrome\//.test(String(browserVersion.userAgent || ''))) {
+      await cdp.send('Network.setUserAgentOverride', {
+        userAgent: effectiveUserAgent,
+        platform: 'Windows'
+      });
+    }
+    const cleanCookies = (Array.isArray(cookies) ? cookies : []).map(compactSimpCityCookie).filter(Boolean);
+    if (cleanCookies.length) await cdp.send('Network.setCookies', { cookies: cleanCookies });
+    await cdp.send('Page.navigate', { url: targetUrl });
+    await simpCityWaitFor(
+      () => cdp.evaluate('document.readyState !== "loading"').catch(() => false),
+      30_000,
+      'SimpCity page load',
+      250
+    );
+    return {
+      child,
+      profile,
+      cdp,
+      userAgent: effectiveUserAgent,
+      headless: headless === true
+    };
+  } catch (error) {
+    cdp?.close();
+    try { child.kill(); } catch (_) {}
+    await removeSimpCityTempProfile(profile).catch(() => {});
+    throw error;
+  }
+}
+
+async function simpCityBrowserAuthState(browser) {
+  const dom = await browser.cdp.evaluate(`(() => {
+    const title = String(document.title || '');
+    const path = String(location.pathname || '');
+    const text = String(document.body?.innerText || '').slice(0, 5000);
+    const hasAccountUi = Boolean(document.querySelector(
+      '.p-navgroup-link--user, [data-xf-click="account-menu"], a[href*="/account/"]'
+    ));
+    const hasLoginForm = Boolean(document.querySelector(
+      'form[action*="/login"], input[name="login"], input[name="password"]'
+    ));
+    const blocked = /(?:http\\s*403|access denied|just a moment|checking your browser)/i.test(title + ' ' + text);
+    return {
+      url: location.href,
+      title,
+      ready: document.readyState !== 'loading',
+      hasAccountUi,
+      hasLoginForm,
+      blocked,
+      loginPath: /\\/login\\/?$/i.test(path)
+    };
+  })()`);
+  const cookieResult = await browser.cdp.send('Network.getAllCookies');
+  const cookies = (cookieResult.cookies || []).map(compactSimpCityCookie).filter(Boolean);
+  const hasUserCookie = cookies.some(cookie =>
+    /(?:^|_)(?:user|member)$/i.test(cookie.name) &&
+    cookie.value &&
+    cookie.value !== '0'
+  );
+  return {
+    ...dom,
+    cookies,
+    authenticated: Boolean(
+      !dom.blocked &&
+      !dom.hasLoginForm &&
+      !dom.loginPath &&
+      (dom.hasAccountUi || hasUserCookie)
+    )
+  };
+}
+
+async function startSimpCityInteractiveLogin(rawThreadUrl) {
+  const targetUrl = normalizeSimpCityThreadUrl(rawThreadUrl);
+  if (!targetUrl) throw new Error('A valid SimpCity thread URL is required');
+  if (simpCityLoginState?.promise && ['opening', 'awaiting_login'].includes(simpCityLoginState.status)) {
+    return simpCityLoginState;
+  }
+  const state = {
+    status: 'opening',
+    targetUrl,
+    startedAt: new Date().toISOString(),
+    error: '',
+    browser: null,
+    promise: null,
+    resolve: null,
+    reject: null
+  };
+  state.promise = new Promise((resolve, reject) => {
+    state.resolve = resolve;
+    state.reject = reject;
+  });
+  // The awaiting import job owns the rejection path, so a timed-out login
+  // never becomes an unhandled process-level promise rejection.
+  state.promise.catch(() => {});
+  simpCityLoginState = state;
+  (async () => {
+    try {
+      state.browser = await startSimpCityBrowser({
+        headless: false,
+        targetUrl,
+        cookies: []
+      });
+      state.status = 'awaiting_login';
+      const deadline = Date.now() + SIMPCITY_LOGIN_TIMEOUT_MS;
+      while (Date.now() < deadline && simpCityLoginState === state) {
+        if (state.browser.child.exitCode !== null) {
+          throw new Error('The SimpCity login window was closed before login finished');
+        }
+        const auth = await simpCityBrowserAuthState(state.browser).catch(() => null);
+        if (auth?.authenticated) {
+          const session = await saveSimpCitySession(auth.cookies, state.browser.userAgent);
+          state.status = 'connected';
+          state.resolve(session);
+          await stopSimpCityBrowser(state.browser);
+          state.browser = null;
+          return;
+        }
+        await simpCityDelay(1250);
+      }
+      throw new Error('SimpCity login timed out');
+    } catch (error) {
+      state.status = 'error';
+      state.error = String(error?.message || error);
+      state.reject(error);
+      await stopSimpCityBrowser(state.browser).catch(() => {});
+      state.browser = null;
+    }
+  })();
+  return state;
+}
+
+async function getSimpCitySessionOrLogin(threadUrl) {
+  const stored = await loadSimpCitySession();
+  if (stored?.cookies?.length) return stored;
+  const login = await startSimpCityInteractiveLogin(threadUrl);
+  return login.promise;
+}
+
+async function disconnectSimpCitySession() {
+  const login = simpCityLoginState;
+  simpCityLoginState = null;
+  if (login?.status === 'awaiting_login' || login?.status === 'opening') {
+    login.status = 'disconnected';
+    login.reject?.(new Error('SimpCity login disconnected'));
+  }
+  await stopSimpCityBrowser(login?.browser).catch(() => {});
+  await clearSimpCitySession();
+}
+
+async function simpCityBrowserFetchHtml(browser, rawUrl) {
+  const result = await browser.cdp.evaluate(`(async () => {
+    const response = await fetch(${JSON.stringify(rawUrl)}, {
+      credentials: 'include',
+      cache: 'no-store',
+      redirect: 'follow',
+      headers: { Accept: 'text/html,application/xhtml+xml' }
+    });
+    const text = await response.text();
+    return {
+      ok: response.ok,
+      status: response.status,
+      url: response.url,
+      text: text.slice(0, 5000000)
+    };
+  })()`, 90_000);
+  if (!result?.ok) throw new Error(`SimpCity source HTTP ${Number(result?.status || 0)}`);
+  if (
+    /<title[^>]*>\s*(?:Log in|Just a moment|Access denied)/i.test(result.text || '') ||
+    /name=["']login["']|action=["'][^"']*\/login/i.test(result.text || '')
+  ) {
+    const error = new Error('SimpCity login is required');
+    error.code = 'SIMP_CITY_LOGIN_REQUIRED';
+    throw error;
+  }
+  return String(result.text || '');
+}
+
+function createSimpCityLimiter(limit) {
+  const maximum = Math.max(1, Number(limit || 1));
+  let active = 0;
+  const queue = [];
+  const drain = () => {
+    while (active < maximum && queue.length) {
+      const item = queue.shift();
+      active++;
+      Promise.resolve()
+        .then(item.task)
+        .then(item.resolve, item.reject)
+        .finally(() => {
+          active--;
+          drain();
+        });
+    }
+  };
+  return task => new Promise((resolve, reject) => {
+    queue.push({ task, resolve, reject });
+    drain();
+  });
+}
+
+function simpCityPublicJob(job) {
+  return {
+    ok: true,
+    jobId: job.id,
+    threadUrl: job.threadUrl,
+    state: job.state,
+    phase: job.phase,
+    error: job.error,
+    startedAt: job.startedAt,
+    updatedAt: job.updatedAt,
+    totalPages: job.totalPages,
+    completedPages: job.completedPages,
+    failedPages: [...job.failedPages],
+    creatorsDiscovered: job.creators.length,
+    creatorsSearched: job.creatorsSearched,
+    creatorNames: job.creators.slice(0, 500).map(item => item.name),
+    albums: job.albums.slice(0, 1000),
+    albumCount: job.albums.length,
+    login: {
+      status: simpCityLoginState?.status || (simpCitySessionCache?.cookies?.length ? 'connected' : 'disconnected'),
+      windowOpen: Boolean(simpCityLoginState?.browser),
+      error: simpCityLoginState?.error || ''
+    }
+  };
+}
+
+async function runSimpCityImportJob(job) {
+  const touch = () => { job.updatedAt = new Date().toISOString(); };
+  const creatorKeys = new Set();
+  const albumUrls = new Set();
+  const searchTasks = [];
+  const searchLimit = createSimpCityLimiter(SIMPCITY_SEARCH_CONCURRENCY);
+
+  const queueCreatorSearch = candidate => {
+    if (!candidate?.key || creatorKeys.has(candidate.key) || job.cancelled) return;
+    creatorKeys.add(candidate.key);
+    job.creators.push(candidate);
+    touch();
+    searchTasks.push(searchLimit(async () => {
+      if (job.cancelled) return;
+      const searchUrl = buildBAlbumsCreatorSearchUrl(candidate.query || candidate.name);
+      try {
+        const albums = await discoverBunkrAlbums(searchUrl);
+        const matching = bunkrAlbumsMatchingCreator(albums, candidate);
+        for (const album of matching) {
+          if (!album?.url || albumUrls.has(album.url)) continue;
+          albumUrls.add(album.url);
+          job.albums.push({
+            url: album.url,
+            title: album.title || candidate.name,
+            creatorName: candidate.name,
+            creatorKey: candidate.key,
+            sourceUrl: job.threadUrl,
+            sourceTitle: candidate.name,
+            searchUrl,
+            source: 'bunkr'
+          });
+        }
+      } catch (error) {
+        job.searchErrors.push({
+          name: candidate.name,
+          error: String(error?.message || error).slice(0, 160)
+        });
+      } finally {
+        job.creatorsSearched++;
+        touch();
+      }
+    }));
+  };
+
+  const processPage = (html, page) => {
+    extractSimpCityCreatorCandidates(html, job.threadUrl).forEach(queueCreatorSearch);
+    job.completedPages++;
+    job.lastPage = page;
+    touch();
+  };
+
+  try {
+    job.state = 'running';
+    job.phase = 'waiting_for_login';
+    touch();
+    let session = await getSimpCitySessionOrLogin(job.threadUrl);
+    if (job.cancelled) return;
+    job.phase = 'opening_thread';
+    touch();
+
+    let browser = null;
+    try {
+      browser = await startSimpCityBrowser({
+        headless: true,
+        targetUrl: job.threadUrl,
+        cookies: session.cookies,
+        userAgent: session.userAgent
+      });
+      const auth = await simpCityWaitFor(async () => {
+        const value = await simpCityBrowserAuthState(browser).catch(() => null);
+        return value?.authenticated ? value : null;
+      }, 30_000, 'authenticated SimpCity session', 500).catch(() => null);
+      if (!auth?.authenticated) {
+        const error = new Error('SimpCity login is required');
+        error.code = 'SIMP_CITY_LOGIN_REQUIRED';
+        throw error;
+      }
+
+      const firstHtml = await browser.cdp.evaluate(
+        'String(document.documentElement?.outerHTML || "").slice(0, 5000000)',
+        30_000
+      );
+      job.totalPages = simpCityThreadPageCount(firstHtml, SIMPCITY_MAX_THREAD_PAGES);
+      job.phase = 'scanning_pages';
+      processPage(firstHtml, 1);
+
+      const pages = Array.from({ length: Math.max(0, job.totalPages - 1) }, (_, index) => index + 2);
+      await mapWithConcurrency(pages, SIMPCITY_PAGE_CONCURRENCY, async page => {
+        if (job.cancelled) return;
+        try {
+          const html = await simpCityBrowserFetchHtml(
+            browser,
+            simpCityThreadPageUrl(job.threadUrl, page)
+          );
+          processPage(html, page);
+        } catch (error) {
+          job.failedPages.push(page);
+          touch();
+        }
+      });
+
+      if (!job.cancelled && job.failedPages.length) {
+        const failed = [...job.failedPages];
+        job.failedPages = [];
+        await mapWithConcurrency(failed, 1, async page => {
+          try {
+            const html = await simpCityBrowserFetchHtml(
+              browser,
+              simpCityThreadPageUrl(job.threadUrl, page)
+            );
+            processPage(html, page);
+          } catch (_) {
+            job.failedPages.push(page);
+          }
+        });
+      }
+    } catch (error) {
+      if (error?.code !== 'SIMP_CITY_LOGIN_REQUIRED') throw error;
+      await clearSimpCitySession();
+      job.phase = 'waiting_for_login';
+      touch();
+      await stopSimpCityBrowser(browser).catch(() => {});
+      browser = null;
+      session = await getSimpCitySessionOrLogin(job.threadUrl);
+      if (job.cancelled) return;
+      browser = await startSimpCityBrowser({
+        headless: true,
+        targetUrl: job.threadUrl,
+        cookies: session.cookies,
+        userAgent: session.userAgent
+      });
+      const firstHtml = await simpCityBrowserFetchHtml(browser, job.threadUrl);
+      job.totalPages = simpCityThreadPageCount(firstHtml, SIMPCITY_MAX_THREAD_PAGES);
+      job.completedPages = 0;
+      job.failedPages = [];
+      job.phase = 'scanning_pages';
+      processPage(firstHtml, 1);
+      const pages = Array.from({ length: Math.max(0, job.totalPages - 1) }, (_, index) => index + 2);
+      await mapWithConcurrency(pages, SIMPCITY_PAGE_CONCURRENCY, async page => {
+        if (job.cancelled) return;
+        try {
+          processPage(await simpCityBrowserFetchHtml(
+            browser,
+            simpCityThreadPageUrl(job.threadUrl, page)
+          ), page);
+        } catch (_) {
+          job.failedPages.push(page);
+        }
+      });
+    } finally {
+      await stopSimpCityBrowser(browser).catch(() => {});
+    }
+
+    job.phase = 'searching_balbums';
+    touch();
+    await Promise.allSettled(searchTasks);
+    if (job.cancelled) {
+      job.state = 'cancelled';
+      job.phase = 'cancelled';
+    } else {
+      job.state = 'complete';
+      job.phase = 'complete';
+    }
+    touch();
+  } catch (error) {
+    job.state = job.cancelled ? 'cancelled' : 'error';
+    job.phase = job.state;
+    job.error = job.cancelled ? '' : String(error?.message || error).slice(0, 500);
+    touch();
+  }
+}
+
+function startSimpCityImportJob(rawThreadUrl) {
+  const threadUrl = normalizeSimpCityThreadUrl(rawThreadUrl);
+  if (!threadUrl) throw new Error('A valid SimpCity thread URL is required');
+  const now = Date.now();
+  for (const [id, job] of simpCityImportJobs) {
+    const age = now - Date.parse(job.updatedAt || job.startedAt || 0);
+    if (age > SIMPCITY_JOB_RETENTION_MS) simpCityImportJobs.delete(id);
+  }
+  const id = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+  const job = {
+    id,
+    threadUrl,
+    state: 'queued',
+    phase: 'queued',
+    error: '',
+    startedAt: timestamp,
+    updatedAt: timestamp,
+    totalPages: 1,
+    completedPages: 0,
+    lastPage: 0,
+    failedPages: [],
+    creators: [],
+    creatorsSearched: 0,
+    searchErrors: [],
+    albums: [],
+    cancelled: false
+  };
+  simpCityImportJobs.set(id, job);
+  runSimpCityImportJob(job).catch(error => {
+    job.state = 'error';
+    job.phase = 'error';
+    job.error = String(error?.message || error).slice(0, 500);
+    job.updatedAt = new Date().toISOString();
+  });
+  return job;
+}
+
+process.once('exit', () => {
+  try { simpCityLoginState?.browser?.child?.kill(); } catch (_) {}
+});
 
 function extractVideoUrlsFromHtml(html, postUrl) {
   const urls = [];
@@ -7742,6 +8556,56 @@ const server = http.createServer(async (req, res) => {
       });
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/simpcity/session/status') {
+      const session = await loadSimpCitySession();
+      json(res, 200, {
+        ok: true,
+        connected: Boolean(session?.cookies?.length),
+        stored: Boolean(session?.cookies?.length),
+        savedAt: session?.savedAt || '',
+        status: simpCityLoginState?.status || (session?.cookies?.length ? 'connected' : 'disconnected'),
+        windowOpen: Boolean(simpCityLoginState?.browser),
+        error: simpCityLoginState?.error || ''
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/session/disconnect') {
+      for (const job of simpCityImportJobs.values()) {
+        if (['queued', 'running'].includes(job.state)) job.cancelled = true;
+      }
+      await disconnectSimpCitySession();
+      json(res, 200, { ok: true, connected: false, status: 'disconnected' });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/import/start') {
+      const payload = JSON.parse(await readBody(req));
+      const job = startSimpCityImportJob(payload?.url);
+      json(res, 202, simpCityPublicJob(job));
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/simpcity/import/status') {
+      const job = simpCityImportJobs.get(String(url.searchParams.get('jobId') || ''));
+      if (!job) {
+        json(res, 404, { ok: false, error: 'SimpCity import job was not found' });
+        return;
+      }
+      json(res, 200, simpCityPublicJob(job));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/import/stop') {
+      const payload = JSON.parse(await readBody(req));
+      const job = simpCityImportJobs.get(String(payload?.jobId || ''));
+      if (!job) {
+        json(res, 404, { ok: false, error: 'SimpCity import job was not found' });
+        return;
+      }
+      job.cancelled = true;
+      job.state = 'cancelled';
+      job.phase = 'cancelled';
+      job.updatedAt = new Date().toISOString();
+      json(res, 200, simpCityPublicJob(job));
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/browser-state/github-token') {
       const secrets = await readBrowserSecrets();
       json(res, 200, {
@@ -8614,6 +9478,7 @@ const server = http.createServer(async (req, res) => {
 
 // Privacy is fail-closed: do not expose the server unless stale bytes were
 // removed and the new cache directory is verifiably hidden.
+await cleanupStaleSimpCityProfiles();
 await initializeVideoFileCache();
 
 server.listen(PORT, HOST, () => {

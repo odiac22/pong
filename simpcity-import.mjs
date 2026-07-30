@@ -1,0 +1,285 @@
+const SIMPCITY_HOSTS = new Set(['simpcity.cr', 'www.simpcity.cr']);
+const CREATOR_STOP_WORDS = new Set([
+  'admin', 'album', 'albums', 'anyone', 'attachment', 'attachments', 'beautiful',
+  'bunkr', 'content', 'discussion', 'download', 'downloads', 'enjoy', 'forum',
+  'girl', 'girls', 'here', 'image', 'images', 'instagram', 'leak', 'leaked',
+  'light skin', 'lightskin', 'link', 'links', 'media', 'mega', 'message', 'model',
+  'more', 'new', 'onlyfans', 'photo', 'photos', 'please', 'post', 'posts',
+  'quote', 'reddit', 'reply', 'report', 'request', 'repost', 'simpcity', 'source',
+  'spoiler', 'telegram', 'thanks', 'thank you', 'thread', 'threads', 'tiktok',
+  'twitter', 'update', 'updated', 'video', 'videos'
+]);
+const SOCIAL_HOSTS = new Set([
+  'instagram.com', 'www.instagram.com',
+  'onlyfans.com', 'www.onlyfans.com',
+  'tiktok.com', 'www.tiktok.com',
+  'twitter.com', 'www.twitter.com',
+  'x.com', 'www.x.com'
+]);
+
+export function decodeSimpCityHtmlText(value) {
+  return String(value || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function normalizeSimpCityThreadUrl(rawValue) {
+  try {
+    const url = new URL(String(rawValue || '').trim());
+    if (!SIMPCITY_HOSTS.has(url.hostname.toLowerCase())) return '';
+    if (!/^\/threads\/[^/?#]+(?:\/page-\d+)?\/?$/i.test(url.pathname)) return '';
+    url.protocol = 'https:';
+    url.hostname = 'simpcity.cr';
+    url.username = '';
+    url.password = '';
+    url.hash = '';
+    url.pathname = url.pathname
+      .replace(/\/page-\d+\/?$/i, '/')
+      .replace(/\/?$/, '/');
+    // Ordering affects which posts appear on each page, but unrelated tracking
+    // parameters must not create duplicate import jobs.
+    const order = url.searchParams.get('order') || '';
+    url.search = '';
+    if (order) url.searchParams.set('order', order);
+    return url.toString();
+  } catch (_) {
+    return '';
+  }
+}
+
+export function simpCityThreadPageUrl(rawThreadUrl, pageNumber) {
+  const normalized = normalizeSimpCityThreadUrl(rawThreadUrl);
+  if (!normalized) return '';
+  const page = Math.max(1, Math.floor(Number(pageNumber || 1)));
+  if (page === 1) return normalized;
+  const url = new URL(normalized);
+  url.pathname = `${url.pathname.replace(/\/+$/, '')}/page-${page}`;
+  return url.toString();
+}
+
+export function simpCityThreadPageCount(html, maximum = 250) {
+  const source = String(html || '');
+  let pageCount = 1;
+  const patterns = [
+    /\/page-(\d+)(?:[/?#"'&<]|$)/gi,
+    /\bdata-page=["'](\d+)["']/gi,
+    /\bPage\s+\d+\s+of\s+(\d+)\b/gi
+  ];
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      pageCount = Math.max(pageCount, Number(match[1] || 1));
+    }
+  }
+  return Math.max(1, Math.min(Math.max(1, Number(maximum || 250)), pageCount));
+}
+
+export function simpCityCreatorKey(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function cleanCreatorName(value) {
+  return decodeSimpCityHtmlText(value)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/^[\s"'`~*#@|:;,.()[\]{}<>+=!?/\\-]+/, '')
+    .replace(/[\s"'`~*#@|:;,.()[\]{}<>+=!?/\\-]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isPlausibleCreatorName(value) {
+  const name = cleanCreatorName(value);
+  const lower = name.toLowerCase();
+  const words = name.split(/\s+/).filter(Boolean);
+  const key = simpCityCreatorKey(name);
+  if (!key || key.length < 4 || name.length > 45 || words.length > 4) return false;
+  if (!/[a-z]/i.test(name) || /^\d+$/.test(key)) return false;
+  if (CREATOR_STOP_WORDS.has(lower)) return false;
+  if (/\b(?:thread|request|discussion|collection|compilation|megathread)\b/i.test(name)) return false;
+  if (/^(?:page|post|part|update)\s*\d*$/i.test(name)) return false;
+  return true;
+}
+
+function creatorAliasesFromTitle(rawTitle) {
+  const cleaned = cleanCreatorName(rawTitle)
+    .replace(/\s*(?:\||-)\s*SimpCity.*$/i, '')
+    .replace(/^\s*(?:request|discussion)\s*[:|-]\s*/i, '')
+    .trim();
+  if (!cleaned) return [];
+  const aliases = cleaned
+    .split(/\s+(?:a\.?k\.?a\.?|aka|also\s+known\s+as)\s+|\s*[|/]\s*/i)
+    .map(cleanCreatorName)
+    .filter(Boolean);
+  return aliases.length > 1 ? aliases : [cleaned];
+}
+
+function threadTitleFromUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl, 'https://simpcity.cr/');
+    const slug = url.pathname.match(/^\/threads\/(.+?)(?:\.\d+)?\/?(?:page-\d+)?$/i)?.[1] || '';
+    return decodeURIComponent(slug).replace(/[-_]+/g, ' ').trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+function anchorParts(anchorHtml) {
+  const href = anchorHtml.match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1] || '';
+  const title = anchorHtml.match(/\btitle\s*=\s*["']([^"']+)["']/i)?.[1] || '';
+  const text = cleanCreatorName(anchorHtml.replace(/^<a\b[^>]*>/i, '').replace(/<\/a>\s*$/i, ''));
+  return { href: decodeSimpCityHtmlText(href), title: decodeSimpCityHtmlText(title), text };
+}
+
+function extractMessageBodies(html) {
+  const source = String(html || '');
+  const bodies = [];
+  const starts = [...source.matchAll(/<div\b[^>]*class=["'][^"']*\bbbWrapper\b[^"']*["'][^>]*>/gi)];
+  for (const [index, match] of starts.entries()) {
+    const start = Number(match.index || 0) + match[0].length;
+    const nextStart = starts[index + 1]?.index ?? source.length;
+    const articleEnd = source.indexOf('</article>', start);
+    const end = articleEnd >= 0 && articleEnd < nextStart ? articleEnd : nextStart;
+    bodies.push(source.slice(start, end));
+  }
+  return bodies;
+}
+
+export function extractSimpCityCreatorCandidates(html, currentThreadUrl = '') {
+  const source = String(html || '');
+  const candidates = new Map();
+  const excludedMemberKeys = new Set();
+  const current = normalizeSimpCityThreadUrl(currentThreadUrl);
+
+  const add = (rawName, origin, confidence = 0.7) => {
+    const name = cleanCreatorName(rawName);
+    const key = simpCityCreatorKey(name);
+    if (!isPlausibleCreatorName(name) || excludedMemberKeys.has(key)) return;
+    const prior = candidates.get(key);
+    if (!prior || confidence > prior.confidence) {
+      candidates.set(key, { name, query: name, key, origin, confidence });
+    }
+  };
+
+  for (const match of source.matchAll(/<a\b[^>]*>[\s\S]*?<\/a>/gi)) {
+    const anchor = anchorParts(match[0]);
+    let resolved = '';
+    try { resolved = new URL(anchor.href, current || 'https://simpcity.cr/').toString(); }
+    catch (_) {}
+    if (/\/members\//i.test(resolved)) {
+      const key = simpCityCreatorKey(anchor.text || anchor.title);
+      if (key) excludedMemberKeys.add(key);
+      continue;
+    }
+  }
+  for (const match of source.matchAll(/\bdata-author=["']([^"']+)["']/gi)) {
+    const key = simpCityCreatorKey(decodeSimpCityHtmlText(match[1]));
+    if (key) excludedMemberKeys.add(key);
+  }
+
+  // Creator-thread links are the strongest evidence. Their visible title is
+  // preferred, with the XenForo thread slug as a deterministic fallback.
+  for (const match of source.matchAll(/<a\b[^>]*>[\s\S]*?<\/a>/gi)) {
+    const anchor = anchorParts(match[0]);
+    let resolved;
+    try { resolved = new URL(anchor.href, current || 'https://simpcity.cr/'); }
+    catch (_) { continue; }
+    if (!SIMPCITY_HOSTS.has(resolved.hostname.toLowerCase()) || !/^\/threads\//i.test(resolved.pathname)) continue;
+    const normalized = normalizeSimpCityThreadUrl(resolved.toString());
+    if (!normalized || normalized === current) continue;
+    const title = anchor.text || anchor.title || threadTitleFromUrl(normalized);
+    creatorAliasesFromTitle(title).forEach(alias => add(alias, 'linked-thread', 1));
+  }
+
+  for (const bodySource of extractMessageBodies(source)) {
+    const withoutQuotes = bodySource
+      .replace(/<blockquote\b[\s\S]*?<\/blockquote>/gi, ' ')
+      .replace(/<div\b[^>]*class=["'][^"']*\bbbCodeBlock\b[^"']*["'][\s\S]*?<\/div>/gi, ' ');
+
+    for (const match of withoutQuotes.matchAll(/<a\b[^>]*>[\s\S]*?<\/a>/gi)) {
+      const anchor = anchorParts(match[0]);
+      let resolved;
+      try { resolved = new URL(anchor.href, current || 'https://simpcity.cr/'); }
+      catch (_) { continue; }
+      if (!SOCIAL_HOSTS.has(resolved.hostname.toLowerCase())) continue;
+      const segment = decodeURIComponent(resolved.pathname.split('/').filter(Boolean).pop() || '')
+        .replace(/^@/, '');
+      add(segment || anchor.text, 'social-link', 0.95);
+    }
+
+    for (const match of withoutQuotes.matchAll(/(?:^|[^\w])@([a-z][a-z0-9_.]{3,29})\b/gi)) {
+      add(match[1], 'handle', 0.92);
+    }
+    for (const match of withoutQuotes.matchAll(
+      /\b(?:name|model|creator|performer|aka|a\.k\.a\.)\s*[:=-]\s*([a-z0-9_.'-]+(?:\s+[a-z0-9_.'-]+){0,3})/gi
+    )) {
+      add(match[1], 'label', 0.9);
+    }
+    for (const match of withoutQuotes.matchAll(/<(?:b|strong|h[1-6])\b[^>]*>([\s\S]*?)<\/(?:b|strong|h[1-6])>/gi)) {
+      creatorAliasesFromTitle(match[1]).forEach(alias => add(alias, 'emphasized-text', 0.82));
+    }
+
+    const lineSource = withoutQuotes
+      .replace(/<(?:br|hr)\b[^>]*>/gi, '\n')
+      .replace(/<\/(?:p|div|li|h[1-6])>/gi, '\n')
+      .replace(/<[^>]*>/g, ' ');
+    for (const rawLine of lineSource.split(/\r?\n/)) {
+      const line = cleanCreatorName(rawLine);
+      if (!line || line.length > 45 || /https?:\/\//i.test(line)) continue;
+      const words = line.split(/\s+/).filter(Boolean);
+      if (words.length === 1 && /^[a-z][a-z0-9_.]{3,29}$/i.test(line)) {
+        add(line, 'standalone-handle', 0.74);
+        continue;
+      }
+      if (
+        words.length >= 2 &&
+        words.length <= 3 &&
+        words.every(word => /^[A-Z][A-Za-z0-9_.'-]{2,}$/.test(word))
+      ) add(line, 'standalone-name', 0.76);
+    }
+  }
+
+  for (const key of excludedMemberKeys) candidates.delete(key);
+  return [...candidates.values()].sort((left, right) =>
+    right.confidence - left.confidence || left.name.localeCompare(right.name)
+  );
+}
+
+export function buildBAlbumsCreatorSearchUrl(rawName) {
+  const name = cleanCreatorName(rawName);
+  const url = new URL('https://balbums.st/');
+  url.searchParams.set('search', name);
+  url.searchParams.set('mode', 'fuzzy');
+  url.searchParams.set('per', '60');
+  url.searchParams.set('sort', 'latest');
+  return url.toString();
+}
+
+export function bunkrAlbumsMatchingCreator(albums, candidate) {
+  const query = cleanCreatorName(candidate?.query || candidate?.name || candidate || '');
+  const queryKey = simpCityCreatorKey(query);
+  const queryTokens = query
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(token => token.length >= 2);
+  if (queryKey.length < 4 || !queryTokens.length) return [];
+  return (Array.isArray(albums) ? albums : []).filter(album => {
+    const title = cleanCreatorName(album?.title || '');
+    const titleKey = simpCityCreatorKey(title);
+    if (!titleKey) return false;
+    if (titleKey.includes(queryKey)) return true;
+    return queryTokens.length >= 2 && queryTokens.every(token => titleKey.includes(token));
+  });
+}
