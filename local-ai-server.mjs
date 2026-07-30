@@ -3080,6 +3080,77 @@ function startSimpCityImportJob(rawThreadUrl) {
   return job;
 }
 
+function startSimpCityNamesJob(rawNames, rawSourceUrl = '') {
+  const names = [...new Set((Array.isArray(rawNames) ? rawNames : [])
+    .map(name => String(name || '').trim())
+    .filter(name => name.length >= 2 && name.length <= 100))].slice(0, 1000);
+  if (!names.length) throw new Error('No SimpCity creator names were supplied');
+  const id = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+  const job = {
+    id,
+    threadUrl: normalizeSimpCityThreadUrl(rawSourceUrl) || 'https://simpcity.cr/',
+    state: 'running',
+    phase: 'searching_balbums',
+    error: '',
+    startedAt: timestamp,
+    updatedAt: timestamp,
+    totalPages: 1,
+    completedPages: 1,
+    lastPage: 1,
+    failedPages: [],
+    creators: names.map(name => ({
+      name,
+      query: name,
+      key: name.toLowerCase().replace(/[^a-z0-9]+/g, '')
+    })).filter(item => item.key),
+    creatorsSearched: 0,
+    searchErrors: [],
+    albums: [],
+    cancelled: false
+  };
+  simpCityImportJobs.set(id, job);
+  (async () => {
+    const albumUrls = new Set();
+    const limit = createSimpCityLimiter(SIMPCITY_SEARCH_CONCURRENCY);
+    await Promise.allSettled(job.creators.map(candidate => limit(async () => {
+      if (job.cancelled) return;
+      const searchUrl = buildBAlbumsCreatorSearchUrl(candidate.query);
+      try {
+        const matching = bunkrAlbumsMatchingCreator(await discoverBunkrAlbums(searchUrl), candidate);
+        for (const album of matching) {
+          if (!album?.url || albumUrls.has(album.url)) continue;
+          albumUrls.add(album.url);
+          job.albums.push({
+            url: album.url,
+            title: album.title || candidate.name,
+            creatorName: candidate.name,
+            creatorKey: candidate.key,
+            sourceUrl: job.threadUrl,
+            sourceTitle: candidate.name,
+            searchUrl,
+            source: 'bunkr'
+          });
+        }
+      } catch (error) {
+        job.searchErrors.push({ name: candidate.name, error: String(error?.message || error).slice(0, 160) });
+      } finally {
+        job.creatorsSearched++;
+        job.updatedAt = new Date().toISOString();
+      }
+    })));
+    job.state = job.cancelled ? 'cancelled' : 'complete';
+    job.phase = job.state;
+    job.updatedAt = new Date().toISOString();
+  })().catch(error => {
+    job.state = 'error';
+    job.phase = 'error';
+    job.error = String(error?.message || error).slice(0, 500);
+    job.updatedAt = new Date().toISOString();
+  });
+  return job;
+}
+
 process.once('exit', () => {
   try { simpCityLoginState?.browser?.child?.kill(); } catch (_) {}
 });
@@ -8775,6 +8846,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/simpcity/import/start') {
       const payload = JSON.parse(await readBody(req));
       const job = startSimpCityImportJob(payload?.url);
+      json(res, 202, simpCityPublicJob(job));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/import/names/start') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const job = startSimpCityNamesJob(payload?.names, payload?.sourceUrl);
       json(res, 202, simpCityPublicJob(job));
       return;
     }

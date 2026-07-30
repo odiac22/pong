@@ -831,7 +831,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.32</div>
+    <div class="version-number">25.33</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -16779,7 +16779,15 @@ function openSimpCityLoginOverlay(endpoint) {
   refreshFrame();
 }
 
-async function loadSimpCityAsCards(targets) {
+async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
+  if (
+    !suppliedCreatorNames.length &&
+    window.PongPrivateAndroid?.openSimpCity &&
+    targets[0]
+  ) {
+    window.PongPrivateAndroid.openSimpCity(targets[0]);
+    return;
+  }
   const loadGeneration = ++bunkrLoadGeneration;
   const endpoint = await getRandom40LocalEndpoint(true);
   if (!endpoint) {
@@ -16818,6 +16826,7 @@ async function loadSimpCityAsCards(targets) {
   let discoveredAlbums = 0;
   let discoveryError = null;
 
+  const sourceThreadUrl = targets[0] || 'https://simpcity.cr/';
   const bunkrPlaybackBase = location.protocol === 'https:'
     ? EROME_PROXY_BASE.replace(/\/+$/, '')
     : endpoint.replace(/\/+$/, '');
@@ -16834,7 +16843,7 @@ async function loadSimpCityAsCards(targets) {
         ...rawAlbum,
         url: albumUrl,
         title: String(rawAlbum?.title || rawAlbum?.creatorName || 'Bunkr album'),
-        sourceUrl: normalizeEromeLaunchUrl(rawAlbum?.sourceUrl || '') || rawAlbum?.sourceUrl || targets[0],
+        sourceUrl: normalizeEromeLaunchUrl(rawAlbum?.sourceUrl || '') || rawAlbum?.sourceUrl || sourceThreadUrl,
         sourceTitle: String(rawAlbum?.creatorName || rawAlbum?.sourceTitle || rawAlbum?.title || 'SimpCity creator'),
         source: 'bunkr'
       });
@@ -16918,7 +16927,7 @@ async function loadSimpCityAsCards(targets) {
           title: album.creatorName
             ? `${album.creatorName} - ${album.title || data.title || 'Bunkr album'}`
             : album.title || data.title || 'Bunkr album',
-          sourceUrl: album.sourceUrl || targets[0],
+          sourceUrl: album.sourceUrl || sourceThreadUrl,
           sourceTitle: album.creatorName || album.sourceTitle || album.title || 'SimpCity creator',
           source: 'bunkr',
           videos: data.videos
@@ -16956,9 +16965,17 @@ async function loadSimpCityAsCards(targets) {
   });
 
   try {
-    for (const target of targets) {
+    const discoveryInputs = suppliedCreatorNames.length
+      ? [{ names: suppliedCreatorNames }]
+      : targets.map(url => ({ url }));
+    for (const input of discoveryInputs) {
       if (loadGeneration !== bunkrLoadGeneration) break;
-      const started = await postJson('/simpcity/import/start', { url: target });
+      const started = input.names
+        ? await postJson('/simpcity/import/names/start', {
+            names: input.names,
+            sourceUrl: sourceThreadUrl
+          })
+        : await postJson('/simpcity/import/start', { url: input.url });
       const jobId = String(started.jobId || '');
       if (!jobId) throw new Error('The PC did not create a SimpCity import job');
       simpCityActiveJobIds.add(jobId);
@@ -17035,6 +17052,18 @@ async function loadSimpCityAsCards(targets) {
     force: true
   });
 }
+
+window.PongReceiveSimpCityNames = async (rawNames, rawThreadUrl = '') => {
+  const names = [...new Set((Array.isArray(rawNames) ? rawNames : [])
+    .map(value => String(value || '').trim())
+    .filter(value => value.length >= 2 && value.length <= 100))];
+  if (!names.length) {
+    alert('The private SimpCity scraper did not find creator names.');
+    return;
+  }
+  const threadUrl = normalizeEromeLaunchUrl(rawThreadUrl) || 'https://simpcity.cr/';
+  await loadSimpCityAsCards([threadUrl], names);
+};
 
 async function loadBunkrAsCards(targets) {
   const loadGeneration = ++bunkrLoadGeneration;
