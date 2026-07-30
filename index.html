@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.35</div>
+    <div class="version-number">25.36</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -17077,9 +17077,43 @@ function saveSimpCityRecall(rawNames, rawThreadUrl = '') {
   if (!payload.names.length) return null;
   simpCityRecallMemory = payload;
   try { localStorage.setItem(SIMPCITY_RECALL_STORAGE_KEY, JSON.stringify(payload)); } catch (_) {}
+  void publishSimpCityRecallToServer(payload);
   updateSimpCityRecallButton();
   showSortingIndicator(`SC Recall ready: ${payload.names.length} names`);
   return payload;
+}
+
+async function publishSimpCityRecallToServer(payload) {
+  if (!payload?.names?.length) return false;
+  const storedEndpoint = random40NormalizeLocalEndpoint(
+    random40StoredLocalEndpoint() || RANDOM40_LOCAL_ENDPOINTS[RANDOM40_LOCAL_ENDPOINTS.length - 1]
+  );
+  const endpoint = location.port === '8787' ? location.origin : storedEndpoint;
+  if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) return false;
+  try {
+    const response = await fetch(`${endpoint}/simpcity/recall`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    return response.ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function fetchSharedSimpCityRecall(endpoint) {
+  try {
+    const response = await fetch(`${endpoint}/simpcity/recall?t=${Date.now()}`, { cache: 'no-store' });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const recall = data?.recall;
+    return Array.isArray(recall?.names) && recall.names.length
+      ? normalizeSimpCityRecallPayload(recall.names, recall.threadUrl)
+      : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function loadSimpCityRecall() {
@@ -17106,25 +17140,35 @@ function updateSimpCityRecallButton() {
   if (!button) return;
   const count = Number(loadSimpCityRecall()?.names?.length || 0);
   button.textContent = count ? `SC Recall (${count})` : 'SC Recall';
-  button.disabled = count < 1;
+  button.disabled = false;
+  button.title = count ? `${count} locally saved SimpCity names` : 'Load the latest SimpCity scrape from either Pong app';
 }
 
 async function startSimpCityRecall() {
-  const payload = loadSimpCityRecall();
-  if (!payload?.names?.length) {
-    alert('Run the Pong SimpCity userscript on a thread first.');
-    return;
-  }
+  let payload = loadSimpCityRecall();
   const endpoint = random40NormalizeLocalEndpoint(
     random40StoredLocalEndpoint() || RANDOM40_LOCAL_ENDPOINTS[RANDOM40_LOCAL_ENDPOINTS.length - 1]
   );
   if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) {
     const target = new URL('/pong', `${endpoint}/`);
     target.searchParams.set('pongAutoStart', 'scRecall');
-    target.hash = `pongSimpCity=${encodeSimpCityRecall(payload)}`;
+    if (payload?.names?.length) target.hash = `pongSimpCity=${encodeSimpCityRecall(payload)}`;
     location.assign(target.href);
     return;
   }
+  if (!payload?.names?.length) {
+    payload = await fetchSharedSimpCityRecall(location.port === '8787' ? location.origin : endpoint);
+    if (payload?.names?.length) {
+      simpCityRecallMemory = payload;
+      try { localStorage.setItem(SIMPCITY_RECALL_STORAGE_KEY, JSON.stringify(payload)); } catch (_) {}
+      updateSimpCityRecallButton();
+    }
+  }
+  if (!payload?.names?.length) {
+    alert('No shared SC Recall is ready. Run Scrape on a SimpCity thread first.');
+    return;
+  }
+  await publishSimpCityRecallToServer(payload);
   await loadSimpCityAsCards([payload.threadUrl], payload.names);
 }
 

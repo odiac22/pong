@@ -2140,6 +2140,7 @@ const SIMPCITY_JOB_RETENTION_MS = 30 * 60 * 1000;
 let simpCitySessionCache;
 let simpCityLoginState = null;
 const simpCityImportJobs = new Map();
+let simpCityRecallPayload = null;
 
 function simpCityDelay(ms) {
   return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms || 0))));
@@ -8818,6 +8819,24 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/simpcity/login/frame') {
       json(res, 200, { ok: true, ...(await getSimpCityLoginFrame()) });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/simpcity/recall') {
+      json(res, 200, { ok: true, recall: simpCityRecallPayload });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/recall') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const names = [...new Set((Array.isArray(payload?.names) ? payload.names : [])
+        .map(value => String(value || '').trim())
+        .filter(value => value.length >= 2 && value.length <= 100))].slice(0, 1000);
+      if (!names.length) throw new Error('No SimpCity recall names were supplied');
+      simpCityRecallPayload = {
+        names,
+        threadUrl: normalizeSimpCityThreadUrl(payload?.threadUrl) || 'https://simpcity.cr/',
+        savedAt: new Date().toISOString()
+      };
+      json(res, 200, { ok: true, recall: simpCityRecallPayload });
       return;
     }
 
