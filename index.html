@@ -272,6 +272,7 @@
     #saved-erome { background: rgba(251,191,36,0.18); }
     #random-40-local { background: rgba(244,114,182,0.20); }
     #random-40-local2 { background: rgba(168,85,247,0.20); }
+    #simpcity-recall { background: rgba(56,189,248,0.20); }
     #random-40-nano { background: rgba(14,165,233,0.20); }
     #train-ai { background: linear-gradient(135deg,rgba(236,72,153,0.28),rgba(139,92,246,0.28)); }
     #random-40 { background: rgba(244,114,182,0.20); }
@@ -831,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.34</div>
+    <div class="version-number">25.35</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -844,6 +845,7 @@
         <button id="saved-erome">Saved Erome</button>
         <button id="random-40-local2">R40 Local 2</button>
         <button id="random-40-local">R40 Local 2.2</button>
+        <button id="simpcity-recall">SC Recall</button>
         <button id="train-ai">Train AI</button>
       </div>
     </div>
@@ -17056,16 +17058,80 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
   });
 }
 
-window.PongReceiveSimpCityNames = async (rawNames, rawThreadUrl = '') => {
+const SIMPCITY_RECALL_STORAGE_KEY = 'pong_simpcity_recall_v1';
+let simpCityRecallMemory = null;
+
+function normalizeSimpCityRecallPayload(rawNames, rawThreadUrl = '') {
   const names = [...new Set((Array.isArray(rawNames) ? rawNames : [])
     .map(value => String(value || '').trim())
     .filter(value => value.length >= 2 && value.length <= 100))];
-  if (!names.length) {
-    alert('The private SimpCity scraper did not find creator names.');
+  return {
+    names,
+    threadUrl: normalizeEromeLaunchUrl(rawThreadUrl) || 'https://simpcity.cr/',
+    savedAt: new Date().toISOString()
+  };
+}
+
+function saveSimpCityRecall(rawNames, rawThreadUrl = '') {
+  const payload = normalizeSimpCityRecallPayload(rawNames, rawThreadUrl);
+  if (!payload.names.length) return null;
+  simpCityRecallMemory = payload;
+  try { localStorage.setItem(SIMPCITY_RECALL_STORAGE_KEY, JSON.stringify(payload)); } catch (_) {}
+  updateSimpCityRecallButton();
+  showSortingIndicator(`SC Recall ready: ${payload.names.length} names`);
+  return payload;
+}
+
+function loadSimpCityRecall() {
+  if (simpCityRecallMemory?.names?.length) return simpCityRecallMemory;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SIMPCITY_RECALL_STORAGE_KEY) || 'null');
+    if (Array.isArray(parsed?.names) && parsed.names.length) {
+      simpCityRecallMemory = normalizeSimpCityRecallPayload(parsed.names, parsed.threadUrl);
+      return simpCityRecallMemory;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function encodeSimpCityRecall(payload) {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = '';
+  bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function updateSimpCityRecallButton() {
+  const button = document.getElementById('simpcity-recall');
+  if (!button) return;
+  const count = Number(loadSimpCityRecall()?.names?.length || 0);
+  button.textContent = count ? `SC Recall (${count})` : 'SC Recall';
+  button.disabled = count < 1;
+}
+
+async function startSimpCityRecall() {
+  const payload = loadSimpCityRecall();
+  if (!payload?.names?.length) {
+    alert('Run the Pong SimpCity userscript on a thread first.');
     return;
   }
-  const threadUrl = normalizeEromeLaunchUrl(rawThreadUrl) || 'https://simpcity.cr/';
-  await loadSimpCityAsCards([threadUrl], names);
+  const endpoint = random40NormalizeLocalEndpoint(
+    random40StoredLocalEndpoint() || RANDOM40_LOCAL_ENDPOINTS[RANDOM40_LOCAL_ENDPOINTS.length - 1]
+  );
+  if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) {
+    const target = new URL('/pong', `${endpoint}/`);
+    target.searchParams.set('pongAutoStart', 'scRecall');
+    target.hash = `pongSimpCity=${encodeSimpCityRecall(payload)}`;
+    location.assign(target.href);
+    return;
+  }
+  await loadSimpCityAsCards([payload.threadUrl], payload.names);
+}
+
+window.PongReceiveSimpCityNames = (rawNames, rawThreadUrl = '') => {
+  const payload = saveSimpCityRecall(rawNames, rawThreadUrl);
+  if (!payload) alert('The SimpCity scraper did not find creator names.');
+  return payload;
 };
 
 (() => {
@@ -17077,10 +17143,10 @@ window.PongReceiveSimpCityNames = async (rawNames, rawThreadUrl = '') => {
     const bytes = Uint8Array.from(atob(padded), character => character.charCodeAt(0));
     const payload = JSON.parse(new TextDecoder().decode(bytes));
     history.replaceState(null, '', location.pathname + location.search);
-    setTimeout(() => window.PongReceiveSimpCityNames(
+    saveSimpCityRecall(
       Array.isArray(payload?.names) ? payload.names : [],
       String(payload?.threadUrl || '')
-    ), 0);
+    );
   } catch (error) {
     console.warn('Could not read the SimpCity bookmark result:', error);
   }
@@ -17987,6 +18053,7 @@ async function startRandom40Local2Fast(buttonStartedAt = Date.now()) {
 
 document.getElementById('random-40-local')?.addEventListener('click',()=>startRandom40Local22(Date.now()));
 document.getElementById('random-40-local2')?.addEventListener('click',()=>startRandom40Local2Fast(Date.now()));
+document.getElementById('simpcity-recall')?.addEventListener('click', startSimpCityRecall);
 document.getElementById('random-40-nano')?.addEventListener('click',()=>startRandom40('nano', Date.now()));
 document.getElementById('train-ai')?.addEventListener('click', openTrainAiPanel);
 document.getElementById('train-ai-close')?.addEventListener('click', closeTrainAiPanel);
@@ -18292,6 +18359,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   createSaveButtons();
   setupMobileAudioUnlock();
   setupDeckSwipeController();
+  updateSimpCityRecallButton();
 
   const autoStartMode = new URLSearchParams(location.search).get('pongAutoStart');
   if (autoStartMode === 'local22') {
@@ -18311,6 +18379,14 @@ document.addEventListener('DOMContentLoaded',()=>{
     }
     const startedAt = Number(new URLSearchParams(location.search).get('pongStartedAt')) || Date.now();
     setTimeout(() => startRandom40('local2', startedAt, { playbackProfile: 'local2fast' }), 0);
+  }
+  if (autoStartMode === 'scRecall') {
+    const overlay = document.getElementById('pong-overlay');
+    if (overlay) {
+      overlay.classList.add('hidden');
+      overlay.style.display = 'none';
+    }
+    setTimeout(startSimpCityRecall, 0);
   }
 
   if (!PONG_PLAYBACK_BENCHMARK_FRESH && loadSession()) {
