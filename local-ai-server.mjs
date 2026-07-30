@@ -2589,6 +2589,7 @@ async function autofillSimpCityLogin(browser) {
     setValue(login, credentials.username);
     setValue(password, credentials.password);
     password.focus();
+    login.closest('form')?.scrollIntoView({ block: 'center', inline: 'nearest' });
     const needsVerification = Boolean(document.querySelector('[data-captcha-widget]'));
     return { filled: true, needsVerification, submitted: false };
   })()`);
@@ -2707,6 +2708,33 @@ async function sendSimpCityLoginInput(payload = {}) {
       deltaX: 0,
       deltaY: Math.max(-1200, Math.min(1200, Number(payload.deltaY) || 0))
     });
+  } else if (type === 'verify') {
+    const point = await cdp.evaluate(`(() => {
+      const target = document.querySelector(
+        '[data-captcha-widget] iframe, [data-captcha-widget], input[name="captchaToken"]'
+      );
+      if (!target) return null;
+      target.scrollIntoView({ block: 'center', inline: 'nearest' });
+      const rect = target.getBoundingClientRect();
+      return { x: rect.left + Math.min(34, rect.width / 2), y: rect.top + Math.min(34, rect.height / 2) };
+    })()`);
+    if (!point) throw new Error('SimpCity verification control was not found');
+    await simpCityDelay(250);
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1
+    });
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1
+    });
+  } else if (type === 'submit') {
+    const clicked = await cdp.evaluate(`(() => {
+      const button = document.querySelector('form[action*="/login/login"] button[type="submit"]');
+      if (!button) return false;
+      button.scrollIntoView({ block: 'center', inline: 'nearest' });
+      button.click();
+      return true;
+    })()`);
+    if (!clicked) throw new Error('SimpCity login button was not found');
   } else {
     throw new Error('Unsupported SimpCity login input');
   }
