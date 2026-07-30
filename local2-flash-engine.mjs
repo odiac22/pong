@@ -37,6 +37,7 @@ export class Local2FlashEngine {
     candidateConcurrency = 12,
     maximumPendingCandidates = 32,
     maximumPages = 120,
+    variant = 'local2-flash',
     now = () => Date.now()
   } = {}) {
     if (typeof discoverPages !== 'function' || typeof qualifyCandidate !== 'function') {
@@ -51,6 +52,7 @@ export class Local2FlashEngine {
     this.candidateConcurrency = integer(candidateConcurrency, 12, 1, 48);
     this.maximumPendingCandidates = integer(maximumPendingCandidates, 32, this.candidateConcurrency, 256);
     this.maximumPages = integer(maximumPages, 120, 1, 3500);
+    this.variant = text(variant, 64) || 'local2-flash';
     this.now = now;
     this.generation = 0;
     this.run = null;
@@ -182,7 +184,8 @@ export class Local2FlashEngine {
       const candidates = await this.discoverPages(pages, {
         signal: run.controller.signal,
         revision: run.revision,
-        generation: run.generation
+        generation: run.generation,
+        variant: this.variant
       });
       run.stats.timings.discoveryMs += this.now() - discoveryStarted;
       run.stats.pages += pages.length;
@@ -221,7 +224,8 @@ export class Local2FlashEngine {
       const result = await this.qualifyCandidate(candidate, {
         signal: run.controller.signal,
         revision: run.revision,
-        generation: run.generation
+        generation: run.generation,
+        variant: this.variant
       });
       if (this.run !== run || run.controller.signal.aborted) return;
       run.stats.completed++;

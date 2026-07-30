@@ -755,6 +755,95 @@
     return normalized;
   }
 
+  function mergeSharedData(baseValue, incomingValue) {
+    const base = normalizeSharedData(cloneSharedData(baseValue));
+    const incoming = normalizeSharedData(incomingValue);
+    Object.entries(incoming.savedVideos || {}).forEach(([key, record]) => {
+      if (!key || !record || typeof record !== 'object') return;
+      base.savedVideos[key] = {
+        ...(base.savedVideos[key] || {}),
+        ...record
+      };
+    });
+    Object.entries(incoming.savedArtists || {}).forEach(([key, record]) => {
+      if (!key || !record || typeof record !== 'object') return;
+      const previous = base.savedArtists[key] || {};
+      base.savedArtists[key] = {
+        ...previous,
+        ...record,
+        videos: dedupeAndRefreshMediaUrls([
+          ...(Array.isArray(previous.videos) ? previous.videos : []),
+          ...(Array.isArray(record.videos) ? record.videos : [])
+        ]),
+        videoMeta: {
+          ...(previous.videoMeta && typeof previous.videoMeta === 'object' ? previous.videoMeta : {}),
+          ...(record.videoMeta && typeof record.videoMeta === 'object' ? record.videoMeta : {})
+        }
+      };
+    });
+    return normalizeSharedData(base);
+  }
+
+  function localSharedDataSnapshot() {
+    return normalizeSharedData({
+      savedVideos: loadSavedMap(SAVED_VIDEOS_KEY),
+      savedArtists: loadSavedMap(SAVED_ARTISTS_KEY)
+    });
+  }
+
+  function pcSavedLinksEndpoint() {
+    return location.port === '8787' ? location.origin : '';
+  }
+
+  async function fetchPcSavedLinks() {
+    const endpoint = pcSavedLinksEndpoint();
+    if (!endpoint) return null;
+    try {
+      const response = await fetch(`${endpoint}/saved-links/state?t=${Date.now()}`, { cache: 'no-store' });
+      if (!response.ok) return null;
+      const payload = await response.json();
+      return normalizeSharedData(payload?.data);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function publishSavedDeltaToPc(delta) {
+    const endpoint = pcSavedLinksEndpoint();
+    if (!endpoint) return false;
+    try {
+      const response = await fetch(`${endpoint}/saved-links/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ data: normalizeSharedData(delta) })
+      });
+      return response.ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function updateLocalSharedData(mutatorFn) {
+    const before = localSharedDataSnapshot();
+    const data = cloneSharedData(before);
+    const result = await mutatorFn(data) || {};
+    assertNoUnexpectedSavedDataRemoval(before, data, result);
+    mirrorSharedDataToLocal(data);
+    return { ok: true, data, result };
+  }
+
+  function syncSaveToGitHubSilently(mutatorFn) {
+    if (!getGitHubToken()) return;
+    void updateSharedData(mutatorFn)
+      .then(result => {
+        mirrorSharedDataToLocal(mergeSharedData(localSharedDataSnapshot(), result.data));
+      })
+      .catch(error => {
+        console.warn('[Pong saved] GitHub background sync skipped; the PC/local save is safe', error);
+      });
+  }
+
   async function fetchRawSharedData(rawUrl) {
     const target = rawUrl || `https://raw.githubusercontent.com/${GITHUB_SYNC.owner}/${GITHUB_SYNC.repo}/${GITHUB_SYNC.branch}/${GITHUB_SYNC.path}`;
     const rawRes = await fetch(`${target}${target.includes('?') ? '&' : '?'}t=${Date.now()}`, {
@@ -1265,7 +1354,15 @@
   }
 
   function mirrorSharedDataToLocal(data) {
-    if (data) cacheSharedData(data);
+    if (data) {
+      try {
+        localStorage.setItem(SAVED_VIDEOS_KEY, JSON.stringify(data.savedVideos || {}));
+        localStorage.setItem(SAVED_ARTISTS_KEY, JSON.stringify(data.savedArtists || {}));
+      } catch (e) {
+        console.warn('[Pong saved] Could not mirror full saved maps locally', e);
+      }
+      cacheSharedData(data);
+    }
     updateSaveCountersFromData(data);
   }
 
@@ -1295,12 +1392,22 @@
   }
 
   async function updateSaveCountersOverride() {
-    updateSaveCountersFromData();
+    let combined = localSharedDataSnapshot();
+    updateSaveCountersFromData(combined);
+
+    try {
+      const pcData = await fetchPcSavedLinks();
+      if (pcData) combined = mergeSharedData(combined, pcData);
+      mirrorSharedDataToLocal(combined);
+    } catch (error) {
+      console.warn('[Pong saved] Could not refresh save counters from PC memory', error);
+    }
 
     try {
       const loaded = await fetchSharedDataFromGitHub();
-      updateSaveCountersFromData(loaded.data);
-      scheduleSavedPlaybackCacheWrite(loaded.data);
+      combined = mergeSharedData(loaded.data, combined);
+      mirrorSharedDataToLocal(combined);
+      scheduleSavedPlaybackCacheWrite(combined);
     } catch (error) {
       console.warn('[Pong saved] Could not refresh save counters from shared data', error);
     }
@@ -3010,17 +3117,27 @@
     }
 
     const artistKey = extractArtistKeyOverride(url);
-    showMsg('Saving video to GitHub...');
+    showMsg('Saving video...');
 
     try {
-      const result = await updateSharedDataWithTokenRetry(data => {
+      const mutation = data => {
         return {
           added: addSavedVideosToData(data, [url], artistKey)
         };
-      });
+      };
+      const result = await updateLocalSharedData(mutation);
 
       updateSaveCountersFromData(result.data);
       scheduleSavedPlaybackCacheWrite(result.data);
+      const mediaKey = getSavedVideoKey(url);
+      const savedRecord = mediaKey ? result.data.savedVideos?.[mediaKey] : null;
+      if (mediaKey && savedRecord) {
+        void publishSavedDeltaToPc({
+          savedVideos: { [mediaKey]: savedRecord },
+          savedArtists: {}
+        });
+      }
+      syncSaveToGitHubSilently(mutation);
 
       if (result.result.added) {
         showMsg('Saved current video 💾');
@@ -3043,15 +3160,24 @@
 
     const artistKey = bundleInfo.bundleKey;
     const artistVideos = dedupeAndRefreshMediaUrls(bundleInfo.urls.filter(Boolean));
-    showMsg('Saving artist to GitHub...');
+    showMsg('Saving artist...');
 
     try {
-      const result = await updateSharedDataWithTokenRetry(data => {
+      const mutation = data => {
         return applyArtistBundleToData(data, bundleInfo, artistVideos);
-      });
+      };
+      const result = await updateLocalSharedData(mutation);
 
       updateSaveCountersFromData(result.data);
       scheduleSavedPlaybackCacheWrite(result.data);
+      const savedArtist = result.data.savedArtists?.[artistKey];
+      if (savedArtist) {
+        void publishSavedDeltaToPc({
+          savedVideos: {},
+          savedArtists: { [artistKey]: savedArtist }
+        });
+      }
+      syncSaveToGitHubSilently(mutation);
 
       if (
         bundleInfo.source === 'random40' &&

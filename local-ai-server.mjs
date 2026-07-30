@@ -40,6 +40,10 @@ const QWEN_REJECT_EXAMPLES = Number(process.env.PONG_QWEN_REJECT_EXAMPLE_IMAGES 
 const QWEN_CANDIDATE_IMAGES = Number(process.env.PONG_QWEN_CANDIDATE_IMAGES || 2);
 const LOCAL2_CLEAN_MAX_IMAGES = Math.max(4, Math.min(12, Number(process.env.PONG_LOCAL2_CLEAN_MAX_IMAGES || 8)));
 const LOCAL2_FLASH_DECISION_IMAGES = 4;
+const LOCAL22_TURBO_DECISION_IMAGES = Math.max(
+  6,
+  Math.min(10, Number(process.env.PONG_LOCAL22_TURBO_DECISION_IMAGES || 8))
+);
 const LOCAL2_FLASH_CONFIRMATION_IMAGES = Math.max(
   6,
   Math.min(12, Number(process.env.PONG_LOCAL2_FLASH_CONFIRMATION_IMAGES || 8))
@@ -53,6 +57,7 @@ const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD 
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const PONG_INDEX_PATH = path.join(process.cwd(), 'index.html');
 const PONG_SYNC_PATH = path.join(process.cwd(), 'pong-sync.js');
+const PC_SAVED_LINKS_PATH = path.join(LOCAL_AI_DIR, 'shared-saved-links-v1.json');
 const SIMPCITY_SESSION_PATH = path.join(LOCAL_AI_DIR, 'simpcity-session-v1.dpapi');
 const SIMPCITY_CREDENTIALS_PATH = path.join(LOCAL_AI_DIR, 'simpcity-credentials-v1.dpapi');
 const SIMPCITY_CHROME_PATH = process.env.PONG_SIMPCITY_CHROME || path.join(
@@ -2142,6 +2147,8 @@ const SIMPCITY_JOB_RETENTION_MS = 30 * 60 * 1000;
 let simpCitySessionCache;
 let simpCityLoginState = null;
 const simpCityImportJobs = new Map();
+const SIMPCITY_RECALL_QUEUE_LIMIT = 20;
+const simpCityRecallQueue = [];
 let simpCityRecallPayload = null;
 
 function simpCityDelay(ms) {
@@ -5073,6 +5080,75 @@ async function readJsonFile(filePath, fallback) {
 async function writeJsonFile(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, JSON.stringify(value, null, 2), 'utf8');
+}
+
+let pcSavedLinksWriteTail = Promise.resolve();
+
+function emptyPcSavedLinks() {
+  return { savedVideos: {}, savedArtists: {}, updatedAt: '' };
+}
+
+function normalizePcSavedLinks(value) {
+  const data = value && typeof value === 'object' && !Array.isArray(value)
+    ? value
+    : emptyPcSavedLinks();
+  return {
+    savedVideos: data.savedVideos && typeof data.savedVideos === 'object' && !Array.isArray(data.savedVideos)
+      ? data.savedVideos
+      : {},
+    savedArtists: data.savedArtists && typeof data.savedArtists === 'object' && !Array.isArray(data.savedArtists)
+      ? data.savedArtists
+      : {},
+    updatedAt: String(data.updatedAt || '')
+  };
+}
+
+function mergePcSavedLinks(baseValue, incomingValue) {
+  const base = normalizePcSavedLinks(baseValue);
+  const incoming = normalizePcSavedLinks(incomingValue);
+  for (const [key, record] of Object.entries(incoming.savedVideos)) {
+    if (!key || !record || typeof record !== 'object') continue;
+    base.savedVideos[key] = {
+      ...(base.savedVideos[key] || {}),
+      ...record,
+      url: String(record.url || base.savedVideos[key]?.url || key)
+    };
+  }
+  for (const [key, record] of Object.entries(incoming.savedArtists)) {
+    if (!key || !record || typeof record !== 'object') continue;
+    const previous = base.savedArtists[key] || {};
+    base.savedArtists[key] = {
+      ...previous,
+      ...record,
+      videos: [...new Set([
+        ...(Array.isArray(previous.videos) ? previous.videos : []),
+        ...(Array.isArray(record.videos) ? record.videos : [])
+      ].map(value => String(value || '').trim()).filter(Boolean))],
+      videoMeta: {
+        ...(previous.videoMeta && typeof previous.videoMeta === 'object' ? previous.videoMeta : {}),
+        ...(record.videoMeta && typeof record.videoMeta === 'object' ? record.videoMeta : {})
+      }
+    };
+  }
+  base.updatedAt = new Date().toISOString();
+  return base;
+}
+
+async function readPcSavedLinks() {
+  return normalizePcSavedLinks(await readJsonFile(PC_SAVED_LINKS_PATH, emptyPcSavedLinks()));
+}
+
+function mergeAndWritePcSavedLinks(delta) {
+  const run = pcSavedLinksWriteTail.catch(() => {}).then(async () => {
+    const merged = mergePcSavedLinks(await readPcSavedLinks(), delta);
+    const temporaryPath = `${PC_SAVED_LINKS_PATH}.${process.pid}.${Date.now()}.tmp`;
+    await fs.mkdir(path.dirname(PC_SAVED_LINKS_PATH), { recursive: true });
+    await fs.writeFile(temporaryPath, JSON.stringify(merged), 'utf8');
+    await fs.rename(temporaryPath, PC_SAVED_LINKS_PATH);
+    return merged;
+  });
+  pcSavedLinksWriteTail = run.catch(() => {});
+  return run;
 }
 
 async function getExtractor() {
@@ -8209,10 +8285,13 @@ async function local2FlashPrepareProfile(candidate, context) {
       artistInfo
     )
   ), 32);
+  const decisionImageLimit = context?.variant === 'local22-turbo'
+    ? LOCAL22_TURBO_DECISION_IMAGES
+    : LOCAL2_FLASH_DECISION_IMAGES;
   const candidateImageUrls = [...new Set([
     profileImageUrl,
     ...postImageEntries.map(entry => entry.imageUrl)
-  ].map(url => normalizeUrl(url)).filter(Boolean))].slice(0, LOCAL2_FLASH_DECISION_IMAGES);
+  ].map(url => normalizeUrl(url)).filter(Boolean))].slice(0, decisionImageLimit);
   if (candidateImageUrls.length < 2) throw new Error('Local2 Flash found fewer than two review images');
   return {
     ...artistInfo,
@@ -8421,6 +8500,8 @@ function local2FlashProtectForegroundPlayback(durationMs = 8000) {
   local2FlashPlaybackPriorityTimer = setTimeout(() => {
     local2FlashPlaybackPriorityUntil = 0;
     local2FlashDrainMediaProbeWaiters();
+    local22TurboDrainQualificationWaiters();
+    local22TurboDrainWorkWaiters();
   }, Math.max(25, local2FlashPlaybackPriorityUntil - Date.now() + 25));
   local2FlashPlaybackPriorityTimer.unref?.();
 }
@@ -8430,6 +8511,8 @@ function local2FlashClearForegroundPlaybackProtection() {
   local2FlashPlaybackPriorityTimer = null;
   local2FlashPlaybackPriorityUntil = 0;
   local2FlashDrainMediaProbeWaiters();
+  local22TurboDrainQualificationWaiters();
+  local22TurboDrainWorkWaiters();
 }
 
 function local2FlashAcquireMediaProbeSlot(signal) {
@@ -8666,6 +8749,266 @@ async function local2FlashQualifyCandidate(candidate, context) {
   }
 }
 
+let local22TurboQualificationActive = 0;
+const local22TurboQualificationWaiters = [];
+let local22TurboWorkActive = 0;
+const local22TurboWorkWaiters = [];
+const local22TurboBranchControllers = new Set();
+let local22TurboDeliveredArtists = 0;
+
+function local22TurboPlaybackPhaseActive() {
+  return local22TurboDeliveredArtists >= 5 &&
+    Date.now() < local2FlashPlaybackPriorityUntil;
+}
+
+function local22TurboQualificationLimit() {
+  return local22TurboPlaybackPhaseActive() ? 1 : 16;
+}
+
+function local22TurboDrainQualificationWaiters() {
+  while (
+    local22TurboQualificationActive < local22TurboQualificationLimit() &&
+    local22TurboQualificationWaiters.length
+  ) {
+    local22TurboQualificationWaiters.shift()?.();
+  }
+}
+
+function local22TurboWorkLimit() {
+  return local22TurboPlaybackPhaseActive() ? 1 : 40;
+}
+
+function local22TurboDrainWorkWaiters() {
+  while (
+    local22TurboWorkActive < local22TurboWorkLimit() &&
+    local22TurboWorkWaiters.length
+  ) {
+    local22TurboWorkWaiters.shift()?.();
+  }
+}
+
+function local22TurboAcquireWorkSlot(signal) {
+  if (local22TurboWorkActive < local22TurboWorkLimit()) {
+    local22TurboWorkActive++;
+    return Promise.resolve(() => {
+      local22TurboWorkActive = Math.max(0, local22TurboWorkActive - 1);
+      local22TurboDrainWorkWaiters();
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const enter = () => {
+      signal?.removeEventListener('abort', abort);
+      local22TurboWorkActive++;
+      resolve(() => {
+        local22TurboWorkActive = Math.max(0, local22TurboWorkActive - 1);
+        local22TurboDrainWorkWaiters();
+      });
+    };
+    const abort = () => {
+      const index = local22TurboWorkWaiters.indexOf(enter);
+      if (index >= 0) local22TurboWorkWaiters.splice(index, 1);
+      reject(signal?.reason || new Error('Local2.2 Turbo stopped'));
+    };
+    if (signal?.aborted) return abort();
+    local22TurboWorkWaiters.push(enter);
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function local22TurboEnterPlaybackPhase() {
+  if (local22TurboDeliveredArtists < 5) return;
+  local2FlashProtectForegroundPlayback(12000);
+  for (const controller of local22TurboBranchControllers) {
+    if (!controller.signal.aborted) {
+      controller.abort(new Error('Local2.2 foreground playback took priority'));
+    }
+  }
+  local22TurboDrainQualificationWaiters();
+  local22TurboDrainWorkWaiters();
+}
+
+function local22TurboResetRuntime() {
+  local22TurboDeliveredArtists = 0;
+  for (const controller of local22TurboBranchControllers) {
+    if (!controller.signal.aborted) controller.abort(new Error('Local2.2 Turbo reset'));
+  }
+  local22TurboBranchControllers.clear();
+}
+
+function local22TurboAcquireQualificationSlot(signal) {
+  if (local22TurboQualificationActive < local22TurboQualificationLimit()) {
+    local22TurboQualificationActive++;
+    return Promise.resolve(() => {
+      local22TurboQualificationActive = Math.max(0, local22TurboQualificationActive - 1);
+      local22TurboDrainQualificationWaiters();
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const enter = () => {
+      signal?.removeEventListener('abort', abort);
+      local22TurboQualificationActive++;
+      resolve(() => {
+        local22TurboQualificationActive = Math.max(0, local22TurboQualificationActive - 1);
+        local22TurboDrainQualificationWaiters();
+      });
+    };
+    const abort = () => {
+      const index = local22TurboQualificationWaiters.indexOf(enter);
+      if (index >= 0) local22TurboQualificationWaiters.splice(index, 1);
+      reject(signal?.reason || new Error('Local2.2 Turbo stopped'));
+    };
+    if (signal?.aborted) return abort();
+    local22TurboQualificationWaiters.push(enter);
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+async function local22TurboQualifyCandidateInner(candidate, context) {
+  const startedAt = Date.now();
+  const profile = await local2FlashPrepareProfile(candidate, {
+    ...context,
+    variant: 'local22-turbo'
+  });
+  // Work that began during the wide discovery phase yields immediately once
+  // the five-artist playback cohort is ready. One fresh lane remains available
+  // through the dynamic work semaphore below.
+  if (local22TurboPlaybackPhaseActive() && local22TurboWorkActive > 1) {
+    return {
+      accepted: false,
+      reason: 'Local2.2 foreground playback superseded queued profile work'
+    };
+  }
+  if (profile.candidateImageUrls.length < 6) {
+    return {
+      accepted: false,
+      reason: `only ${profile.candidateImageUrls.length}/6 distinct hard-filter images`
+    };
+  }
+  const release = await local22TurboAcquireQualificationSlot(context.signal);
+  const branchController = new AbortController();
+  local22TurboBranchControllers.add(branchController);
+  const abortBranch = () => branchController.abort(
+    context.signal?.reason || new Error('Local2.2 Turbo stopped')
+  );
+  if (context.signal?.aborted) abortBranch();
+  else context.signal?.addEventListener('abort', abortBranch, { once: true });
+  const branchContext = { ...context, signal: branchController.signal, variant: 'local22-turbo' };
+  const mediaPromise = local2FlashVerifyProfile(profile, branchContext)
+    .then(async media => {
+      if (media.length < 15) return { branch: 'media', media, fastStartProven: 0 };
+      const prioritized = await local2FlashPrioritizePlayableMedia(media, branchContext);
+      return {
+        branch: 'media',
+        media: prioritized.media,
+        fastStartProven: prioritized.fastStartProven
+      };
+    })
+    .catch(error => ({ branch: 'media', error }));
+  const decisionPromise = classifyInner({
+    app: 'pong-random40-local22-turbo',
+    localVariant: 'local2',
+    preferencePolicy: 'broad-hard-safe',
+    stage: 'full',
+    deferQwenReview: true,
+    visionModel: LOCAL2_QWEN_MODEL,
+    artist: profile,
+    candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL22_TURBO_DECISION_IMAGES)
+  }, workloadGeneration, branchController.signal)
+    .then(result => ({
+      branch: 'decision',
+      decision: local2PipelineDecision(result, profile.candidateImageUrls)
+    }))
+    .catch(error => ({ branch: 'decision', error }));
+  try {
+    const first = await Promise.race([mediaPromise, decisionPromise]);
+    if (first.error) {
+      branchController.abort();
+      return { accepted: false, reason: String(first.error?.message || first.error) };
+    }
+    if (first.branch === 'media' && (
+      first.media.length < 15 || first.fastStartProven < 5
+    )) {
+      branchController.abort();
+      return {
+        accepted: false,
+        reason: first.media.length < 15
+          ? `only ${first.media.length}/15 verified media URLs`
+          : `only ${first.fastStartProven}/5 foreground media URLs passed the fast-start byte probe`
+      };
+    }
+    if (first.branch === 'decision' && !local2FlashDecisionIsSafe(first.decision)) {
+      branchController.abort();
+      return {
+        accepted: false,
+        reason: first.decision?.reason || 'Local2.2 hard-filter or preference rejection',
+        diagnostic: first.decision
+      };
+    }
+    const second = first.branch === 'media' ? await decisionPromise : await mediaPromise;
+    if (second.error) return { accepted: false, reason: String(second.error?.message || second.error) };
+    const mediaResult = first.branch === 'media' ? first : second;
+    const decision = first.branch === 'decision' ? first.decision : second.decision;
+    if (mediaResult.media.length < 15) {
+      return { accepted: false, reason: `only ${mediaResult.media.length}/15 verified media URLs` };
+    }
+    if (mediaResult.fastStartProven < 5) {
+      return {
+        accepted: false,
+        reason: `only ${mediaResult.fastStartProven}/5 foreground media URLs passed the fast-start byte probe`
+      };
+    }
+    if (!local2FlashDecisionIsSafe(decision)) {
+      return {
+        accepted: false,
+        reason: decision?.reason || 'Local2.2 hard-filter or preference rejection',
+        diagnostic: decision
+      };
+    }
+    const examined = Number(decision?.evidence?.examinedImages || 0);
+    const clearBody = Number(decision?.evidence?.clearBodyViews || 0);
+    if (examined < 6) {
+      return {
+        accepted: false,
+        reason: `only ${examined}/6 perceptually distinct hard-filter images`,
+        diagnostic: decision
+      };
+    }
+    if (clearBody < LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES) {
+      return {
+        accepted: false,
+        reason: `only ${clearBody}/${LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES} clear body views`,
+        diagnostic: decision
+      };
+    }
+    return {
+      accepted: true,
+      dto: local2FlashAcceptedDto(profile, mediaResult.media, {
+        ...decision,
+        reason: `Local2.2 one-pass personalized and hard-filter decision passed: ${decision.reason || 'accepted'}`.slice(0, 240)
+      }, context.revision),
+      diagnostic: {
+        ...decision,
+        turbo: true,
+        elapsedMs: Date.now() - startedAt
+      }
+    };
+  } finally {
+    local22TurboBranchControllers.delete(branchController);
+    context.signal?.removeEventListener('abort', abortBranch);
+    if (!branchController.signal.aborted) branchController.abort();
+    release();
+  }
+}
+
+async function local22TurboQualifyCandidate(candidate, context) {
+  const releaseWork = await local22TurboAcquireWorkSlot(context.signal);
+  try {
+    return await local22TurboQualifyCandidateInner(candidate, context);
+  } finally {
+    releaseWork();
+  }
+}
+
 const local2FlashEngine = new Local2FlashEngine({
   discoverPages: local2FlashDiscoverPages,
   qualifyCandidate: local2FlashQualifyCandidate,
@@ -8682,6 +9025,22 @@ const local2FlashEngine = new Local2FlashEngine({
   candidateConcurrency: 32,
   maximumPendingCandidates: 64,
   maximumPages: 120
+});
+
+const local22TurboEngine = new Local2FlashEngine({
+  discoverPages: local2FlashDiscoverPages,
+  qualifyCandidate: local22TurboQualifyCandidate,
+  getRevision: async () => {
+    const health = await local2CleanHealth().catch(() => null);
+    return String(health?.local2_revision || local2LastKnownRevision || 'local22-turbo-uninitialized');
+  },
+  targetAccepted: 48,
+  readyMinimum: 1,
+  pageConcurrency: 1,
+  candidateConcurrency: 40,
+  maximumPendingCandidates: 80,
+  maximumPages: 120,
+  variant: 'local22-turbo'
 });
 
 const local2Adapter = createLocal2NodeAdapter({
@@ -8777,7 +9136,11 @@ const server = http.createServer(async (req, res) => {
     req.method === 'POST' &&
     requestUrl.pathname === '/simpcity/recall' &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
-  if (!anonymousLanMediaRead && !simpCityRecallLanWrite && !sameOriginLanBrowser && !authenticatedLanBrowser && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
+  const pcSavedLinksLanWrite =
+    req.method === 'POST' &&
+    requestUrl.pathname === '/saved-links/save' &&
+    (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
+  if (!anonymousLanMediaRead && !simpCityRecallLanWrite && !pcSavedLinksLanWrite && !sameOriginLanBrowser && !authenticatedLanBrowser && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
     json(res, 403, { ok: false, error: 'browser origin is not allowed' });
     return;
   }
@@ -8789,6 +9152,31 @@ const server = http.createServer(async (req, res) => {
 
   try {
     const url = requestUrl;
+    if (req.method === 'GET' && url.pathname === '/saved-links/state') {
+      const data = await readPcSavedLinks();
+      json(res, 200, {
+        ok: true,
+        data,
+        counts: {
+          videos: Object.keys(data.savedVideos).length,
+          artists: Object.keys(data.savedArtists).length
+        }
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/saved-links/save') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const data = await mergeAndWritePcSavedLinks(payload?.data);
+      json(res, 200, {
+        ok: true,
+        data,
+        counts: {
+          videos: Object.keys(data.savedVideos).length,
+          artists: Object.keys(data.savedArtists).length
+        }
+      });
+      return;
+    }
     if (req.method === 'POST' && url.pathname === '/bunkr/discover') {
       const payload = JSON.parse(await readBody(req));
       const albums = await discoverBunkrAlbums(payload?.url);
@@ -8828,7 +9216,15 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'GET' && url.pathname === '/simpcity/recall') {
-      json(res, 200, { ok: true, recall: simpCityRecallPayload });
+      const consume = url.searchParams.get('consume') === '1';
+      const recall = consume
+        ? (simpCityRecallQueue.shift() || null)
+        : (simpCityRecallQueue[0] || simpCityRecallPayload);
+      json(res, 200, {
+        ok: true,
+        recall,
+        queueCount: simpCityRecallQueue.length
+      });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/recall') {
@@ -8838,11 +9234,18 @@ const server = http.createServer(async (req, res) => {
         .filter(value => value.length >= 2 && value.length <= 100))].slice(0, 1000);
       if (!names.length) throw new Error('No SimpCity recall names were supplied');
       simpCityRecallPayload = {
+        id: crypto.randomUUID(),
         names,
         threadUrl: normalizeSimpCityThreadUrl(payload?.threadUrl) || 'https://simpcity.cr/',
         savedAt: new Date().toISOString()
       };
-      json(res, 200, { ok: true, recall: simpCityRecallPayload });
+      simpCityRecallQueue.push(simpCityRecallPayload);
+      while (simpCityRecallQueue.length > SIMPCITY_RECALL_QUEUE_LIMIT) simpCityRecallQueue.shift();
+      json(res, 200, {
+        ok: true,
+        recall: simpCityRecallPayload,
+        queueCount: simpCityRecallQueue.length
+      });
       return;
     }
 
@@ -8931,6 +9334,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST' && url.pathname === '/local2-fast/start') {
         await local2Adapter.stop({ clearAudit: true }).catch(() => {});
+        await local22TurboEngine.stop().catch(() => {});
         local2FlashClearForegroundPlaybackProtection();
         const state = await local2FlashEngine.start({
           pages: Array.isArray(body.pages) ? body.pages : [],
@@ -8983,11 +9387,84 @@ const server = http.createServer(async (req, res) => {
       json(res, 404, { ok: false, error: 'Local2 Flash route not found' });
       return;
     }
+    if (url.pathname.startsWith('/local22-turbo/')) {
+      const body = ['POST', 'PUT', 'PATCH'].includes(String(req.method || '').toUpperCase())
+        ? JSON.parse(await readBody(req) || '{}')
+        : {};
+      if (req.method === 'GET' && url.pathname === '/local22-turbo/health') {
+        json(res, 200, local22TurboEngine.snapshot());
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/local22-turbo/start') {
+        await local2Adapter.stop({ clearAudit: true }).catch(() => {});
+        await local2FlashEngine.stop().catch(() => {});
+        await local22TurboEngine.stop().catch(() => {});
+        local2FlashClearForegroundPlaybackProtection();
+        local22TurboResetRuntime();
+        const state = await local22TurboEngine.start({
+          pages: Array.isArray(body.pages) ? body.pages : [],
+          seed: Number(body.seed || 0),
+          diagnostics: body.diagnostics === true
+        });
+        json(res, 200, state);
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/local22-turbo/stop') {
+        await local22TurboEngine.stop();
+        local2FlashClearForegroundPlaybackProtection();
+        local22TurboResetRuntime();
+        json(res, 200, local22TurboEngine.snapshot());
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/local22-turbo/playback-priority') {
+        if (local22TurboDeliveredArtists >= 5) {
+          local2FlashProtectForegroundPlayback(Math.max(3000, Math.min(15000, Number(body.durationMs || 12000))));
+        }
+        json(res, 200, {
+          ok: true,
+          protected: local22TurboDeliveredArtists >= 5,
+          until: new Date(local2FlashPlaybackPriorityUntil).toISOString()
+        });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/local22-turbo/candidates') {
+        if (!local22TurboEngine.snapshot().active && !local22TurboEngine.snapshot().done) {
+          await local22TurboEngine.start();
+        }
+        const count = Math.max(1, Math.min(64, Number(url.searchParams.get('count') || 12)));
+        const candidates = local22TurboEngine.lease(count);
+        if (candidates.length) {
+          local22TurboDeliveredArtists += candidates.length;
+          if (local22TurboDeliveredArtists >= 5) local22TurboEnterPlaybackPhase();
+        }
+        const state = local22TurboEngine.snapshot();
+        json(res, 200, {
+          ...state,
+          candidates,
+          remaining: state.accepted,
+          leased: state.leased
+        });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/local22-turbo/candidates/ack') {
+        const values = [
+          ...(Array.isArray(body.artistIds) ? body.artistIds : []),
+          ...(Array.isArray(body.artistUrls) ? body.artistUrls.map(random40ReservoirIdentity) : [])
+        ].filter(Boolean);
+        const consumed = local22TurboEngine.acknowledge(values);
+        json(res, 200, { ...local22TurboEngine.snapshot(), consumed });
+        return;
+      }
+      json(res, 404, { ok: false, error: 'Local2.2 Turbo route not found' });
+      return;
+    }
     if (url.pathname.startsWith('/local2/')) {
       const body = ['POST', 'PUT', 'PATCH'].includes(String(req.method || '').toUpperCase())
         ? JSON.parse(await readBody(req))
         : {};
       if (req.method === 'POST' && url.pathname === '/local2/start' && Array.isArray(body.pages)) {
+        await local2FlashEngine.stop().catch(() => {});
+        await local22TurboEngine.stop().catch(() => {});
         await local2Adapter.stop({ clearAudit: true }).catch(() => {});
         local2ProducerRecentArtists.clear();
         local2ProducerRecentPages.clear();
@@ -9601,6 +10078,7 @@ const server = http.createServer(async (req, res) => {
       const leasedBeforeReset = random40AcceptedLeases.size;
       await local2Adapter.stop({ clearAudit: true }).catch(() => {});
       await local2FlashEngine.stop().catch(() => {});
+      await local22TurboEngine.stop().catch(() => {});
       local2ForcedProducerPages = [];
       local2ProducerRecentArtists.clear();
       local2ProducerRecentPages.clear();

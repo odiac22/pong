@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.38</div>
+    <div class="version-number">25.39</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -9903,13 +9903,16 @@ function random40PcGatewayUrl(rawUrl) {
 
 let random40Local2FastPlaybackPriorityAt = 0;
 function random40ProtectLocal2FastPlayback(force = false) {
-  if (!pongLocal2FastPlaybackActive()) return;
+  if (!pongLocal22PlaybackActive()) return;
   const now = Date.now();
   if (!force && now - random40Local2FastPlaybackPriorityAt < 750) return;
   const endpoint = random40GatewayEndpoint || random40State?.localEndpoint || '';
   if (!endpoint) return;
   random40Local2FastPlaybackPriorityAt = now;
-  void fetch(`${endpoint}/local2-fast/playback-priority`, {
+  const route = pongLocal2FastPlaybackActive()
+    ? 'local2-fast'
+    : 'local22-turbo';
+  void fetch(`${endpoint}/${route}/playback-priority`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     cache: 'no-store',
@@ -9932,7 +9935,7 @@ function random40PcFileCacheStreamUrl(rawUrl) {
   // downloads the same file in parallel. A partially growing LAN stream can
   // wait forever for MP4 tail metadata; switch only after the local file is
   // fully ready.
-  if (pongLocal2FastPlaybackActive()) return '';
+  if (pongLocal2FastPlaybackActive() || pongLocal22PlaybackActive()) return '';
   const profile = pongLocal22PlaybackActive() ? '&profile=local22' : '';
   return `${endpoint}/video-cache/stream?url=${encodeURIComponent(rawUrl)}${profile}`;
 }
@@ -10077,8 +10080,7 @@ function random40ForegroundPlaybackUrl(rawUrl) {
   if (!random40ServerVideoCacheEndpoint()) return key;
   const serverRecord = random40ServerVideoCacheTracked.get(key);
   if (serverRecord?.ready === true && serverRecord.playbackUrl) return serverRecord.playbackUrl;
-  if (pongLocal2FastPlaybackActive()) return key;
-  if (pongLocal22PlaybackActive()) return random40PcFileCacheStreamUrl(key) || key;
+  if (pongLocal2FastPlaybackActive() || pongLocal22PlaybackActive()) return key;
   return random40PcPlaybackGatewayUrl(key) || key;
 }
 
@@ -15832,19 +15834,22 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
       return;
     }
     if (runState.playbackProfile === 'local22') {
-      if (runState.benchmarkPages.length) {
-        const sourcePages = RANDOM40_PAIR_BENCHMARK
-          ? random40PairBenchmarkPagePlan(runState.benchmarkPages[0], 12)
-          : runState.benchmarkPages;
-        await fetch(`${localEndpoint}/local2/start`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          cache: 'no-store',
-          body: JSON.stringify({ pages: sourcePages })
-        }).catch(() => null);
-      }
+      const sourcePages = RANDOM40_PAIR_BENCHMARK
+        ? random40PairBenchmarkPagePlan(runState.benchmarkPages[0], 12)
+        : runState.benchmarkPages;
+      await fetch(`${localEndpoint}/local22-turbo/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({
+          pages: sourcePages,
+          seed: Number(RANDOM40_BENCHMARK_PARAMS.get('pongSeed') || 0)
+        })
+      });
       await random40RunCleanLocal2(runState, localEndpoint, {
-        deadlineMs: RANDOM40_PAIR_BENCHMARK ? 0 : 30000
+        deadlineMs: RANDOM40_PAIR_BENCHMARK ? 0 : 30000,
+        endpointPath: '/local22-turbo',
+        label: 'Local 2.2'
       });
       if (random40State !== runState) return;
       if (runState.stop || runState.accepted >= RANDOM40_TARGET_ACCEPTED || RANDOM40_PAIR_BENCHMARK) {
@@ -15862,7 +15867,7 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
         hideRandom40Progress(2500);
         return;
       }
-      await fetch(`${localEndpoint}/local2/stop`, { method: 'POST', cache: 'no-store' }).catch(() => null);
+      await fetch(`${localEndpoint}/local22-turbo/stop`, { method: 'POST', cache: 'no-store' }).catch(() => null);
       updateRandom40Progress({
         detail: 'Local2.2 fast lane was empty; switching to live scan...',
         accepted: runState.accepted,
@@ -17111,17 +17116,27 @@ async function publishSimpCityRecallToServer(payload) {
   }
 }
 
-async function fetchSharedSimpCityRecall(endpoint) {
+async function fetchSharedSimpCityRecall(endpoint, { consume = false } = {}) {
   try {
-    const response = await fetch(`${endpoint}/simpcity/recall?t=${Date.now()}`, { cache: 'no-store' });
-    if (!response.ok) return null;
+    const response = await fetch(
+      `${endpoint}/simpcity/recall?consume=${consume ? '1' : '0'}&t=${Date.now()}`,
+      { cache: 'no-store' }
+    );
+    if (!response.ok) return { reachable: false, recall: null, queueCount: 0 };
     const data = await response.json();
     const recall = data?.recall;
-    return Array.isArray(recall?.names) && recall.names.length
-      ? normalizeSimpCityRecallPayload(recall.names, recall.threadUrl)
-      : null;
+    return {
+      reachable: true,
+      recall: Array.isArray(recall?.names) && recall.names.length
+        ? {
+            ...normalizeSimpCityRecallPayload(recall.names, recall.threadUrl),
+            id: String(recall.id || '')
+          }
+        : null,
+      queueCount: Math.max(0, Number(data?.queueCount || 0))
+    };
   } catch (_) {
-    return null;
+    return { reachable: false, recall: null, queueCount: 0 };
   }
 }
 
@@ -17153,32 +17168,43 @@ function updateSimpCityRecallButton() {
   button.title = count ? `${count} locally saved SimpCity names` : 'Load the latest SimpCity scrape from either Pong app';
 }
 
+let simpCityRecallStarting = false;
+
 async function startSimpCityRecall() {
-  let payload = loadSimpCityRecall();
+  if (simpCityRecallStarting) return;
+  simpCityRecallStarting = true;
+  const button = document.getElementById('simpcity-recall');
+  if (button) button.disabled = true;
   const endpoint = random40NormalizeLocalEndpoint(
     random40StoredLocalEndpoint() || RANDOM40_LOCAL_ENDPOINTS[RANDOM40_LOCAL_ENDPOINTS.length - 1]
   );
-  if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) {
-    const target = new URL('/pong', `${endpoint}/`);
-    target.searchParams.set('pongAutoStart', 'scRecall');
-    if (payload?.names?.length) target.hash = `pongSimpCity=${encodeSimpCityRecall(payload)}`;
-    location.assign(target.href);
-    return;
-  }
-  if (!payload?.names?.length) {
-    payload = await fetchSharedSimpCityRecall(location.port === '8787' ? location.origin : endpoint);
-    if (payload?.names?.length) {
-      simpCityRecallMemory = payload;
-      try { localStorage.setItem(SIMPCITY_RECALL_STORAGE_KEY, JSON.stringify(payload)); } catch (_) {}
-      updateSimpCityRecallButton();
+  try {
+    if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) {
+      const target = new URL('/pong', `${endpoint}/`);
+      target.searchParams.set('pongAutoStart', 'scRecall');
+      location.assign(target.href);
+      return;
     }
+    const shared = await fetchSharedSimpCityRecall(
+      location.port === '8787' ? location.origin : endpoint,
+      { consume: true }
+    );
+    let payload = shared.recall;
+    if (!payload?.names?.length && !shared.reachable) {
+      payload = loadSimpCityRecall();
+    }
+    if (!payload?.names?.length) {
+      alert('No queued SC Recall is ready. Run Scrape on a SimpCity thread first.');
+      return;
+    }
+    simpCityRecallMemory = null;
+    try { localStorage.removeItem(SIMPCITY_RECALL_STORAGE_KEY); } catch (_) {}
+    updateSimpCityRecallButton();
+    await loadSimpCityAsCards([payload.threadUrl], payload.names);
+  } finally {
+    simpCityRecallStarting = false;
+    if (button) button.disabled = false;
   }
-  if (!payload?.names?.length) {
-    alert('No shared SC Recall is ready. Run Scrape on a SimpCity thread first.');
-    return;
-  }
-  await publishSimpCityRecallToServer(payload);
-  await loadSimpCityAsCards([payload.threadUrl], payload.names);
 }
 
 window.PongReceiveSimpCityNames = (rawNames, rawThreadUrl = '') => {
@@ -18549,6 +18575,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=108"></script>
+<script src="pong-sync.js?v=109"></script>
 </body>
 </html>

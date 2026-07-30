@@ -482,7 +482,7 @@ async function runMode(page, mode, trialIndex) {
     cdp.close();
     await fetch(`http://127.0.0.1:${chrome.port}/json/close/${target.id}`).catch(() => {});
     await stopChrome(chrome);
-    await fetch(`${API}/${mode === 'local2' ? 'local2-fast' : 'local2'}/stop`, { method: 'POST' }).catch(() => {});
+    await fetch(`${API}/${mode === 'local2' ? 'local2-fast' : 'local22-turbo'}/stop`, { method: 'POST' }).catch(() => {});
   }
 }
 
@@ -518,7 +518,7 @@ async function main() {
     const metrics = ['firstArtistMs', 'firstPlayableMs', 'fiveArtistsMs', 'fiveByFiveMs'];
     const wins = Object.fromEntries(metrics.map(metric => [
       metric,
-      Number(local2?.[metric] || Infinity) < Number(local22?.[metric] || Infinity)
+      Number(local22?.[metric] || Infinity) < Number(local2?.[metric] || Infinity)
     ]));
     const overlap = local2?.acceptedUrls?.filter(url => local22?.acceptedUrls?.includes(url)) || [];
     return {
@@ -535,8 +535,8 @@ async function main() {
   });
   const passed = comparisons.every(comparison =>
     comparison.allTimingWins &&
-    comparison.local2?.hardSafe &&
-    comparison.local2?.fiveByFive?.ok
+    comparison.local22?.hardSafe &&
+    comparison.local22?.fiveByFive?.ok
   );
   await emitReport({
     benchmark: 'actual Pong Local 2 versus Local 2.2 paired one-page hidden muted playback',
