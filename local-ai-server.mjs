@@ -2567,7 +2567,7 @@ async function startSimpCityInteractiveLogin(rawThreadUrl) {
   (async () => {
     try {
       state.browser = await startSimpCityBrowser({
-        headless: false,
+        headless: true,
         targetUrl,
         cookies: []
       });
@@ -2598,6 +2598,60 @@ async function startSimpCityInteractiveLogin(rawThreadUrl) {
     }
   })();
   return state;
+}
+
+async function getSimpCityLoginFrame() {
+  const login = simpCityLoginState;
+  if (!login?.browser || !['opening', 'awaiting_login'].includes(login.status)) {
+    return { available: false, status: login?.status || 'disconnected', error: login?.error || '' };
+  }
+  const result = await login.browser.cdp.send('Page.captureScreenshot', {
+    format: 'jpeg',
+    quality: 72,
+    fromSurface: true,
+    captureBeyondViewport: false
+  });
+  return {
+    available: Boolean(result?.data),
+    status: login.status,
+    image: result?.data ? `data:image/jpeg;base64,${result.data}` : ''
+  };
+}
+
+async function sendSimpCityLoginInput(payload = {}) {
+  const login = simpCityLoginState;
+  if (!login?.browser || !['opening', 'awaiting_login'].includes(login.status)) {
+    throw new Error('The SimpCity login view is not active');
+  }
+  const cdp = login.browser.cdp;
+  const type = String(payload.type || '');
+  if (type === 'click') {
+    const x = Math.max(0, Math.min(1100, Number(payload.x) || 0));
+    const y = Math.max(0, Math.min(800, Number(payload.y) || 0));
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+  } else if (type === 'text') {
+    const value = String(payload.value || '').slice(0, 500);
+    if (value) await cdp.send('Input.insertText', { text: value });
+  } else if (type === 'key') {
+    const key = String(payload.key || '').slice(0, 32);
+    const allowed = new Set(['Backspace', 'Tab', 'Enter', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+    if (!allowed.has(key)) throw new Error('Unsupported login key');
+    const code = key === 'Backspace' ? 'Backspace' : key;
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code });
+  } else if (type === 'scroll') {
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x: 550,
+      y: 400,
+      deltaX: 0,
+      deltaY: Math.max(-1200, Math.min(1200, Number(payload.deltaY) || 0))
+    });
+  } else {
+    throw new Error('Unsupported SimpCity login input');
+  }
+  return { ok: true };
 }
 
 async function getSimpCitySessionOrLogin(threadUrl) {
@@ -8567,6 +8621,17 @@ const server = http.createServer(async (req, res) => {
         windowOpen: Boolean(simpCityLoginState?.browser),
         error: simpCityLoginState?.error || ''
       });
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/simpcity/login/frame') {
+      json(res, 200, { ok: true, ...(await getSimpCityLoginFrame()) });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/simpcity/login/input') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      json(res, 200, await sendSimpCityLoginInput(payload));
       return;
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/session/disconnect') {

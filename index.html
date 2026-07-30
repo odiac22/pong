@@ -831,7 +831,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.25</div>
+    <div class="version-number">25.26</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -16674,6 +16674,81 @@ async function disconnectSimpCity() {
   }
 }
 
+let simpCityLoginOverlay = null;
+let simpCityLoginFrameTimer = 0;
+
+function closeSimpCityLoginOverlay() {
+  clearTimeout(simpCityLoginFrameTimer);
+  simpCityLoginFrameTimer = 0;
+  simpCityLoginOverlay?.remove();
+  simpCityLoginOverlay = null;
+}
+
+function openSimpCityLoginOverlay(endpoint) {
+  if (simpCityLoginOverlay) return;
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:100000;background:#08090dcc;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:8px';
+  overlay.innerHTML = `
+    <div style="width:min(100%,720px);background:#11151d;border:1px solid #48546a;border-radius:12px;padding:8px;color:#fff">
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:7px">
+        <b style="flex:1">SimpCity login inside Pong</b>
+        <button data-sc-close type="button" style="padding:6px 10px">Cancel</button>
+      </div>
+      <img data-sc-frame alt="SimpCity login" style="display:block;width:100%;max-height:68vh;object-fit:contain;background:#000;touch-action:none">
+      <div style="display:flex;gap:5px;margin-top:7px">
+        <input data-sc-text type="text" autocomplete="off" placeholder="Tap a field above, then type here" style="min-width:0;flex:1;padding:8px">
+        <button data-sc-send type="button">Type</button>
+        <button data-sc-tab type="button">Tab</button>
+        <button data-sc-enter type="button">Enter</button>
+      </div>
+      <small style="display:block;margin-top:5px;color:#aeb9cc">The login page runs invisibly on the PC. Nothing opens on its monitor.</small>
+    </div>`;
+  document.body.appendChild(overlay);
+  simpCityLoginOverlay = overlay;
+  const frame = overlay.querySelector('[data-sc-frame]');
+  const textInput = overlay.querySelector('[data-sc-text]');
+  const postInput = async payload => {
+    await fetch(`${endpoint}/simpcity/login/input`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  };
+  overlay.querySelector('[data-sc-close]').onclick = () => {
+    disconnectSimpCity();
+    closeSimpCityLoginOverlay();
+  };
+  frame.addEventListener('click', event => {
+    const rect = frame.getBoundingClientRect();
+    postInput({
+      type: 'click',
+      x: (event.clientX - rect.left) * 1100 / rect.width,
+      y: (event.clientY - rect.top) * 800 / rect.height
+    }).catch(() => {});
+  });
+  overlay.querySelector('[data-sc-send]').onclick = async () => {
+    const value = textInput.value;
+    textInput.value = '';
+    await postInput({ type: 'text', value }).catch(() => {});
+  };
+  overlay.querySelector('[data-sc-tab]').onclick = () => postInput({ type: 'key', key: 'Tab' }).catch(() => {});
+  overlay.querySelector('[data-sc-enter]').onclick = () => postInput({ type: 'key', key: 'Enter' }).catch(() => {});
+  const refreshFrame = async () => {
+    if (simpCityLoginOverlay !== overlay) return;
+    try {
+      const response = await fetch(`${endpoint}/simpcity/login/frame`, { cache: 'no-store' });
+      const data = await response.json();
+      if (data.available && data.image) frame.src = data.image;
+      if (data.status === 'connected') {
+        closeSimpCityLoginOverlay();
+        return;
+      }
+    } catch (_) {}
+    simpCityLoginFrameTimer = setTimeout(refreshFrame, 650);
+  };
+  refreshFrame();
+}
+
 async function loadSimpCityAsCards(targets) {
   const loadGeneration = ++bunkrLoadGeneration;
   const endpoint = await getRandom40LocalEndpoint(true);
@@ -16872,16 +16947,18 @@ async function loadSimpCityAsCards(targets) {
         if (waitingForLogin || status.login?.status === 'connected') {
           setSimpCityDisconnectVisible(true);
         }
+        if (waitingForLogin) openSimpCityLoginOverlay(endpoint);
+        else if (status.login?.status === 'connected') closeSimpCityLoginOverlay();
         updateEromeProgress({
           title: waitingForLogin
-            ? 'Log in to SimpCity on the PC'
+            ? 'Log in to SimpCity inside Pong'
             : status.phase === 'searching_balbums'
               ? 'Searching Balbums'
               : cardsStarted
                 ? 'SimpCity playing while more load'
                 : 'Scanning SimpCity names',
           detail: waitingForLogin
-            ? 'Use the temporary Chrome window; Pong continues automatically after login'
+            ? 'Use the embedded login view; nothing opens on the PC monitor'
             : `${Number(status.completedPages || 0)}/${Math.max(1, Number(status.totalPages || 1))} pages · ${Number(status.creatorsDiscovered || 0)} names · ${Number(status.albumCount || 0)} matches`,
           completed: status.phase === 'searching_balbums' || status.state === 'complete'
             ? Number(status.creatorsSearched || 0)
