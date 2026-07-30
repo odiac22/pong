@@ -52,6 +52,7 @@ const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const PONG_INDEX_PATH = path.join(process.cwd(), 'index.html');
 const PONG_SYNC_PATH = path.join(process.cwd(), 'pong-sync.js');
 const SIMPCITY_SESSION_PATH = path.join(LOCAL_AI_DIR, 'simpcity-session-v1.dpapi');
+const SIMPCITY_CREDENTIALS_PATH = path.join(LOCAL_AI_DIR, 'simpcity-credentials-v1.dpapi');
 const SIMPCITY_CHROME_PATH = process.env.PONG_SIMPCITY_CHROME || path.join(
   process.env.PROGRAMFILES || 'C:\\Program Files',
   'Google',
@@ -2282,6 +2283,36 @@ async function clearSimpCitySession() {
   await fs.rm(SIMPCITY_SESSION_PATH, { force: true }).catch(() => {});
 }
 
+async function saveSimpCityCredentials(username, password) {
+  const cleanUsername = String(username || '').trim().slice(0, 200);
+  const cleanPassword = String(password || '').slice(0, 500);
+  if (!cleanUsername || !cleanPassword) throw new Error('SimpCity username and password are required');
+  const plaintext = Buffer.from(JSON.stringify({
+    schema: 'pong-simpcity-credentials-v1',
+    username: cleanUsername,
+    password: cleanPassword
+  }), 'utf8').toString('base64');
+  const protectedValue = await runSimpCityDpapi('protect', plaintext);
+  await fs.mkdir(LOCAL_AI_DIR, { recursive: true });
+  await fs.writeFile(SIMPCITY_CREDENTIALS_PATH, `${protectedValue}\n`, 'utf8');
+}
+
+async function loadSimpCityCredentials() {
+  try {
+    const protectedValue = (await fs.readFile(SIMPCITY_CREDENTIALS_PATH, 'utf8')).trim();
+    const plaintext = await runSimpCityDpapi('unprotect', protectedValue);
+    const credentials = JSON.parse(Buffer.from(plaintext, 'base64').toString('utf8'));
+    if (
+      credentials?.schema !== 'pong-simpcity-credentials-v1' ||
+      !credentials.username ||
+      !credentials.password
+    ) return null;
+    return { username: String(credentials.username), password: String(credentials.password) };
+  } catch (_) {
+    return null;
+  }
+}
+
 class SimpCityCdpSession {
   constructor(url) {
     this.url = url;
@@ -2540,6 +2571,34 @@ async function simpCityBrowserAuthState(browser) {
   };
 }
 
+async function autofillSimpCityLogin(browser) {
+  const credentials = await loadSimpCityCredentials();
+  if (!credentials || !browser?.cdp) return { configured: false, filled: false };
+  const encoded = Buffer.from(JSON.stringify(credentials), 'utf8').toString('base64');
+  const result = await browser.cdp.evaluate(`(() => {
+    const credentials = JSON.parse(atob(${JSON.stringify(encoded)}));
+    const login = document.querySelector('input[name="login"]');
+    const password = document.querySelector('input[name="password"]');
+    if (!login || !password) return { filled: false };
+    const setValue = (input, value) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    setValue(login, credentials.username);
+    setValue(password, credentials.password);
+    password.focus();
+    const captcha = document.querySelector('[data-captcha-widget]');
+    const captchaToken = document.querySelector('input[name="captchaToken"]')?.value || '';
+    const submit = document.querySelector('form[action*="/login/login"] button[type="submit"]');
+    const needsVerification = Boolean(captcha && !captchaToken);
+    if (submit && !needsVerification) submit.click();
+    return { filled: true, needsVerification, submitted: Boolean(submit && !needsVerification) };
+  })()`);
+  return { configured: true, ...(result || {}) };
+}
+
 async function startSimpCityInteractiveLogin(rawThreadUrl) {
   const targetUrl = normalizeSimpCityThreadUrl(rawThreadUrl);
   if (!targetUrl) throw new Error('A valid SimpCity thread URL is required');
@@ -2572,6 +2631,10 @@ async function startSimpCityInteractiveLogin(rawThreadUrl) {
         cookies: []
       });
       state.status = 'awaiting_login';
+      state.autofill = await autofillSimpCityLogin(state.browser).catch(() => ({
+        configured: true,
+        filled: false
+      }));
       const deadline = Date.now() + SIMPCITY_LOGIN_TIMEOUT_MS;
       while (Date.now() < deadline && simpCityLoginState === state) {
         if (state.browser.child.exitCode !== null) {
@@ -8632,6 +8695,15 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/simpcity/login/input') {
       const payload = JSON.parse(await readBody(req) || '{}');
       json(res, 200, await sendSimpCityLoginInput(payload));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/login/credentials') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      await saveSimpCityCredentials(payload?.username, payload?.password);
+      const autofill = simpCityLoginState?.browser
+        ? await autofillSimpCityLogin(simpCityLoginState.browser)
+        : { configured: true, filled: false };
+      json(res, 200, { ok: true, configured: true, autofill });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/session/disconnect') {

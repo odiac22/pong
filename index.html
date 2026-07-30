@@ -831,7 +831,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.26</div>
+    <div class="version-number">25.27</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -16687,21 +16687,22 @@ function closeSimpCityLoginOverlay() {
 function openSimpCityLoginOverlay(endpoint) {
   if (simpCityLoginOverlay) return;
   const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:100000;background:#08090dcc;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:8px';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:100000;background:#08090d;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:6px 4px 4px;overscroll-behavior:none';
   overlay.innerHTML = `
-    <div style="width:min(100%,720px);background:#11151d;border:1px solid #48546a;border-radius:12px;padding:8px;color:#fff">
-      <div style="display:flex;gap:6px;align-items:center;margin-bottom:7px">
+    <div style="width:min(100%,760px);background:#11151d;border:1px solid #48546a;border-radius:12px;padding:7px;color:#fff">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:7px;min-height:42px">
         <b style="flex:1">SimpCity login inside Pong</b>
-        <button data-sc-close type="button" style="padding:6px 10px">Cancel</button>
+        <button data-sc-close type="button" style="padding:10px 15px;font-size:16px">Cancel</button>
       </div>
-      <img data-sc-frame alt="SimpCity login" style="display:block;width:100%;max-height:68vh;object-fit:contain;background:#000;touch-action:none">
-      <div style="display:flex;gap:5px;margin-top:7px">
-        <input data-sc-text type="text" autocomplete="off" placeholder="Tap a field above, then type here" style="min-width:0;flex:1;padding:8px">
-        <button data-sc-send type="button">Type</button>
-        <button data-sc-tab type="button">Tab</button>
-        <button data-sc-enter type="button">Enter</button>
+      <img data-sc-frame alt="SimpCity login" draggable="false" style="display:block;width:100%;aspect-ratio:11/8;object-fit:fill;background:#000;touch-action:none;user-select:none;border-radius:7px">
+      <div style="display:grid;grid-template-columns:minmax(0,1fr) auto auto auto auto;gap:5px;margin-top:7px">
+        <input data-sc-text type="text" autocomplete="off" placeholder="Tap field, type here" style="min-width:0;padding:11px;font-size:16px">
+        <button data-sc-send type="button" style="padding:9px">Type</button>
+        <button data-sc-back type="button" style="padding:9px">⌫</button>
+        <button data-sc-tab type="button" style="padding:9px">Tab</button>
+        <button data-sc-enter type="button" style="padding:9px">Enter</button>
       </div>
-      <small style="display:block;margin-top:5px;color:#aeb9cc">The login page runs invisibly on the PC. Nothing opens on its monitor.</small>
+      <small style="display:block;margin-top:6px;color:#aeb9cc">Tap directly. Swipe to scroll. The PC remains invisible and silent.</small>
     </div>`;
   document.body.appendChild(overlay);
   simpCityLoginOverlay = overlay;
@@ -16718,13 +16719,26 @@ function openSimpCityLoginOverlay(endpoint) {
     disconnectSimpCity();
     closeSimpCityLoginOverlay();
   };
-  frame.addEventListener('click', event => {
+  let touchStart = null;
+  frame.addEventListener('pointerdown', event => {
+    touchStart = { x: event.clientX, y: event.clientY };
+    frame.setPointerCapture?.(event.pointerId);
+  });
+  frame.addEventListener('pointerup', event => {
+    if (!touchStart) return;
+    const deltaY = touchStart.y - event.clientY;
+    const moved = Math.hypot(event.clientX - touchStart.x, event.clientY - touchStart.y);
     const rect = frame.getBoundingClientRect();
-    postInput({
-      type: 'click',
-      x: (event.clientX - rect.left) * 1100 / rect.width,
-      y: (event.clientY - rect.top) * 800 / rect.height
-    }).catch(() => {});
+    if (moved > 18) {
+      postInput({ type: 'scroll', deltaY: deltaY * 3 }).catch(() => {});
+    } else {
+      postInput({
+        type: 'click',
+        x: (event.clientX - rect.left) * 1100 / rect.width,
+        y: (event.clientY - rect.top) * 800 / rect.height
+      }).catch(() => {});
+    }
+    touchStart = null;
   });
   overlay.querySelector('[data-sc-send]').onclick = async () => {
     const value = textInput.value;
@@ -16732,6 +16746,7 @@ function openSimpCityLoginOverlay(endpoint) {
     await postInput({ type: 'text', value }).catch(() => {});
   };
   overlay.querySelector('[data-sc-tab]').onclick = () => postInput({ type: 'key', key: 'Tab' }).catch(() => {});
+  overlay.querySelector('[data-sc-back]').onclick = () => postInput({ type: 'key', key: 'Backspace' }).catch(() => {});
   overlay.querySelector('[data-sc-enter]').onclick = () => postInput({ type: 'key', key: 'Enter' }).catch(() => {});
   const refreshFrame = async () => {
     if (simpCityLoginOverlay !== overlay) return;
