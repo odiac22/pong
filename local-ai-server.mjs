@@ -8773,7 +8773,11 @@ const server = http.createServer(async (req, res) => {
     );
   const sameOriginLanBrowser = isSameOriginLanBrowserRequest(req, requestUrl);
   const authenticatedLanBrowser = hasValidLanBrowserSession(req);
-  if (!anonymousLanMediaRead && !sameOriginLanBrowser && !authenticatedLanBrowser && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
+  const simpCityRecallLanWrite =
+    req.method === 'POST' &&
+    requestUrl.pathname === '/simpcity/recall' &&
+    (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
+  if (!anonymousLanMediaRead && !simpCityRecallLanWrite && !sameOriginLanBrowser && !authenticatedLanBrowser && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
     json(res, 403, { ok: false, error: 'browser origin is not allowed' });
     return;
   }

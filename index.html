@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.37</div>
+    <div class="version-number">25.38</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -4447,7 +4447,12 @@ function goToNextDeckVideo() {
   if (nextIndex == null) {
     if (loadNextEromeBatchIfAvailable()) return true;
 
-    showDeckEmptyNotice('No more videos in this batch');
+    if (canNavigateToNextPasteEvent()) {
+      navigateToNextPasteEvent();
+      return true;
+    }
+
+    showDeckEmptyNotice('No more videos or artists loaded yet');
     return true;
   }
 
@@ -4578,6 +4583,10 @@ function goToPreviousDeckVideo() {
 
   const previousIndex = getPreviousDeckIndex();
   if (previousIndex == null) {
+    if (paperclipHistoryPosition > 0) {
+      navigateToPreviousPasteEvent();
+      return true;
+    }
     showDeckEmptyNotice('No previous video');
     return true;
   }

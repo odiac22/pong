@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Pong SimpCity Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.1.0
-// @description  Adds a Scrape button to authenticated SimpCity threads and returns creator names to Pong.
+// @version      1.2.0
+// @description  Adds a Scrape button to authenticated SimpCity threads and saves creator names for Pong SC Recall.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
 // @run-at       document-idle
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
+// @connect      192.168.1.124
 // @downloadURL  https://odiac22.github.io/pong/pong-simpcity.user.js
 // @updateURL    https://odiac22.github.io/pong/pong-simpcity.user.js
 // ==/UserScript==
@@ -120,15 +122,39 @@
           });
         });
       }
-      status.textContent = `${names.size} names — returning to Pong`;
-      const payload = new TextEncoder().encode(JSON.stringify({
+      status.textContent = `${names.size} names - saving for SC Recall`;
+      const payload = {
         threadUrl: first.href,
         names: [...names.values()].slice(0, 1000)
-      }));
-      let binary = '';
-      payload.forEach(byte => { binary += String.fromCharCode(byte); });
-      const encoded = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-      location.replace(`https://odiac22.github.io/pong/#pongSimpCity=${encoded}`);
+      };
+      const endpoints = ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
+      let saved = false;
+      let lastError = '';
+      for (const endpoint of endpoints) {
+        try {
+          await new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+              method: 'POST',
+              url: `${endpoint}/simpcity/recall`,
+              headers: { 'Content-Type': 'application/json' },
+              data: JSON.stringify(payload),
+              timeout: 8000,
+              onload: response => response.status >= 200 && response.status < 300
+                ? resolve()
+                : reject(new Error(`HTTP ${response.status}`)),
+              onerror: () => reject(new Error('connection failed')),
+              ontimeout: () => reject(new Error('connection timed out'))
+            });
+          });
+          saved = true;
+          break;
+        } catch (error) {
+          lastError = error?.message || String(error);
+        }
+      }
+      if (!saved) throw new Error(`PC recall unavailable: ${lastError || 'server not reachable'}`);
+      status.textContent = `${names.size} names saved — open Pong and tap SC Recall`;
+      button.disabled = false;
     } catch (error) {
       status.textContent = `Failed: ${error?.message || error}`;
       button.disabled = false;
