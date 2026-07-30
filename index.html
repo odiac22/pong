@@ -831,7 +831,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.33</div>
+    <div class="version-number">25.34</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -16780,12 +16780,15 @@ function openSimpCityLoginOverlay(endpoint) {
 }
 
 async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
-  if (
-    !suppliedCreatorNames.length &&
-    window.PongPrivateAndroid?.openSimpCity &&
-    targets[0]
-  ) {
-    window.PongPrivateAndroid.openSimpCity(targets[0]);
+  if (!suppliedCreatorNames.length && targets[0]) {
+    const installed = confirm(
+      'Open the real SimpCity page now?\n\n' +
+      'Press OK if the “Pong Scrape” bookmark is installed. After login, run that bookmark.\n\n' +
+      'Press Cancel to open the one-time bookmark setup page.'
+    );
+    location.href = installed
+      ? targets[0]
+      : 'https://odiac22.github.io/pong/simpcity-bookmarklet.html';
     return;
   }
   const loadGeneration = ++bunkrLoadGeneration;
@@ -17064,6 +17067,24 @@ window.PongReceiveSimpCityNames = async (rawNames, rawThreadUrl = '') => {
   const threadUrl = normalizeEromeLaunchUrl(rawThreadUrl) || 'https://simpcity.cr/';
   await loadSimpCityAsCards([threadUrl], names);
 };
+
+(() => {
+  const prefix = '#pongSimpCity=';
+  if (!location.hash.startsWith(prefix)) return;
+  try {
+    const encoded = location.hash.slice(prefix.length).replace(/-/g, '+').replace(/_/g, '/');
+    const padded = encoded + '='.repeat((4 - encoded.length % 4) % 4);
+    const bytes = Uint8Array.from(atob(padded), character => character.charCodeAt(0));
+    const payload = JSON.parse(new TextDecoder().decode(bytes));
+    history.replaceState(null, '', location.pathname + location.search);
+    setTimeout(() => window.PongReceiveSimpCityNames(
+      Array.isArray(payload?.names) ? payload.names : [],
+      String(payload?.threadUrl || '')
+    ), 0);
+  } catch (error) {
+    console.warn('Could not read the SimpCity bookmark result:', error);
+  }
+})();
 
 async function loadBunkrAsCards(targets) {
   const loadGeneration = ++bunkrLoadGeneration;

@@ -6,9 +6,3 @@ local-ai-server.log
 __pycache__/
 *.pyc
 yolo11n-pose.pt
-android-private/.gradle/
-android-private/build/
-android-private/app/build/
-android-private/local.properties
-.android-sdk/
-.gradle-dist/

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Install Pong Scrape</title>
+<style>
+  body{margin:0;background:#090b10;color:#eef2ff;font:16px system-ui,sans-serif}
+  main{max-width:680px;margin:auto;padding:22px}
+  .card{background:#131824;border:1px solid #34405a;border-radius:14px;padding:18px}
+  button,a.tool{display:block;width:100%;box-sizing:border-box;margin:12px 0;padding:14px;border:0;border-radius:10px;background:#367bd8;color:white;text-align:center;font:700 17px system-ui;text-decoration:none}
+  code{overflow-wrap:anywhere;color:#a9c8ff}
+  small{color:#aeb8ca}
+</style>
+<main>
+  <div class="card">
+    <h1>Pong Scrape</h1>
+    <p>This is the browser-only SimpCity scraper. It stores nothing and returns directly to Pong.</p>
+    <p><b>One-time setup:</b> bookmark this page, edit that bookmark, name it <code>Pong Scrape</code>, and replace its address with the copied code below.</p>
+    <button id="copy">Copy bookmark code</button>
+    <a class="tool" id="tool" href="#">Pong Scrape</a>
+    <p>Then open SimpCity in an Incognito tab, log in, open the desired thread, type <code>Pong Scrape</code> in Chrome’s address bar, and select the bookmark. Tap the Scrape button that appears.</p>
+    <small>Websites cannot create Incognito tabs automatically. Start Pong or SimpCity from an Incognito tab when you want Chrome to erase that session on close.</small>
+  </div>
+</main>
+<script>
+  const code = `javascript:(()=>{const s=document.createElement('script');s.src='https://odiac22.github.io/pong/simpcity-bookmarklet.js?v=1';document.head.appendChild(s)})()`;
+  document.getElementById('tool').href = code;
+  document.getElementById('copy').onclick = async event => {
+    await navigator.clipboard.writeText(code);
+    event.currentTarget.textContent = 'Copied';
+  };
+</script>
+</html>
