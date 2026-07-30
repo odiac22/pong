@@ -2589,12 +2589,8 @@ async function autofillSimpCityLogin(browser) {
     setValue(login, credentials.username);
     setValue(password, credentials.password);
     password.focus();
-    const captcha = document.querySelector('[data-captcha-widget]');
-    const captchaToken = document.querySelector('input[name="captchaToken"]')?.value || '';
-    const submit = document.querySelector('form[action*="/login/login"] button[type="submit"]');
-    const needsVerification = Boolean(captcha && !captchaToken);
-    if (submit && !needsVerification) submit.click();
-    return { filled: true, needsVerification, submitted: Boolean(submit && !needsVerification) };
+    const needsVerification = Boolean(document.querySelector('[data-captcha-widget]'));
+    return { filled: true, needsVerification, submitted: false };
   })()`);
   return { configured: true, ...(result || {}) };
 }
