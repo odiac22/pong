@@ -6,3 +6,4 @@ local-ai-server.log
 __pycache__/
 *.pyc
 yolo11n-pose.pt
+*-unsigned.xpi

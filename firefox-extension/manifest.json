@@ -1,0 +1,31 @@
+{
+  "manifest_version": 2,
+  "name": "Pong SimpCity Scraper",
+  "version": "1.0.0",
+  "description": "Adds a private Scrape button to authenticated SimpCity threads and returns creator names to Pong.",
+  "permissions": [
+    "https://simpcity.cr/*",
+    "https://www.simpcity.cr/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://simpcity.cr/threads/*",
+        "https://www.simpcity.cr/threads/*"
+      ],
+      "js": [
+        "content-script.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "pong-simpcity@odiac22.github.io",
+      "strict_min_version": "120.0"
+    },
+    "gecko_android": {
+      "strict_min_version": "120.0"
+    }
+  }
+}
