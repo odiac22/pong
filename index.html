@@ -550,10 +550,14 @@
       display: flex; justify-content: space-between; gap: 10px;
       font-size: 10px; font-weight: 750; margin-bottom: 3px;
     }
-    #simpcity-disconnect {
+    #simpcity-disconnect, #simpcity-skip {
       display: none; margin-left: auto; padding: 2px 6px; border-radius: 5px;
       border: 1px solid rgba(248,113,113,0.42); background: rgba(127,29,29,0.34);
-      color: #fecaca; font-size: 8px; font-weight: 800; cursor: pointer;
+      color: #fecaca; font-size: 8px; font-weight: 800; cursor: pointer; pointer-events: auto;
+    }
+    #simpcity-skip {
+      margin-left: 0; border-color: rgba(96,165,250,0.52);
+      background: rgba(30,64,175,0.40); color: #dbeafe;
     }
     .erome-progress-detail {
       font-size: 9px; color: rgba(226,232,240,0.72); margin-bottom: 4px;
@@ -832,7 +836,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.40</div>
+    <div class="version-number">25.41</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7968,6 +7972,7 @@ function ensureEromeProgressEl() {
   el.innerHTML = `
     <div class="erome-progress-title">
       <span id="erome-progress-title">Scraping Erome</span>
+      <button id="simpcity-skip" type="button">Skip</button>
       <button id="simpcity-disconnect" type="button">Disconnect</button>
       <span id="erome-progress-percent">0%</span>
     </div>
@@ -7977,6 +7982,7 @@ function ensureEromeProgressEl() {
     </div>
   `;
   document.body.appendChild(el);
+  document.getElementById('simpcity-skip')?.addEventListener('click', skipCurrentSimpCityCreator);
   document.getElementById('simpcity-disconnect')?.addEventListener('click', disconnectSimpCity);
   return el;
 }
@@ -8457,6 +8463,9 @@ function compactSavedEromeVideoGroups(groups) {
       sourceUrl: sourceUrl || url,
       sourceTitle: String(group?.sourceTitle || getEromeTargetLabel(sourceUrl || url)).trim(),
       source: group?.source === 'bunkr' ? 'bunkr' : 'erome',
+      creatorName: String(group?.creatorName || ''),
+      creatorKey: String(group?.creatorKey || ''),
+      simpCityJobId: String(group?.simpCityJobId || ''),
       videos
     });
   });
@@ -9351,6 +9360,9 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         artistKey: groupSourceUrl,
         artistUrl: groupSourceUrl,
         postUrl: group.url || groupSourceUrl,
+        simpCityJobId: String(group.simpCityJobId || ''),
+        simpCityCreatorKey: String(group.creatorKey || ''),
+        simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         postIndex: videoIndex,
         scrapedAt,
         mediaKey
@@ -9370,6 +9382,9 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         postUrl: group.url || groupSourceUrl,
         artistDisplayName: groupSourceTitle,
         bundleLabel: group.title || groupSourceTitle,
+        simpCityJobId: String(group.simpCityJobId || ''),
+        simpCityCreatorKey: String(group.creatorKey || ''),
+        simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         loadAll: false,
         ready: true,
         pending: false
@@ -16666,6 +16681,61 @@ async function waitForEromeBackgroundScrapeSlot() {
 
 let bunkrLoadGeneration = 0;
 const simpCityActiveJobIds = new Set();
+const simpCitySkippedCreatorKeys = new Set();
+let simpCityActiveCreatorChoices = [];
+let simpCitySkipQueuePurger = null;
+
+function normalizeSimpCityCreatorKey(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function setSimpCitySkipVisible(visible) {
+  ensureEromeProgressEl();
+  const button = document.getElementById('simpcity-skip');
+  if (button) button.style.display = visible ? 'inline-block' : 'none';
+}
+
+async function skipCurrentSimpCityCreator(event) {
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+  const visibleIndex = typeof syncCurrentPasteIndexFromVisibleVideo === 'function'
+    ? syncCurrentPasteIndexFromVisibleVideo()
+    : -1;
+  const activeEvent = pasteEvents[visibleIndex >= 0 ? visibleIndex : currentPasteIndex] || {};
+  const activeChoice = simpCityActiveCreatorChoices[0] || {};
+  const creatorKey = normalizeSimpCityCreatorKey(
+    activeEvent.simpCityCreatorKey || activeChoice.key || ''
+  );
+  const creatorName = String(
+    activeEvent.simpCityCreatorName ||
+    activeEvent.artistDisplayName ||
+    activeChoice.name ||
+    ''
+  ).trim();
+  if (!creatorKey && !creatorName) {
+    showSortingIndicator('No SimpCity creator is currently available to skip');
+    return;
+  }
+  const key = creatorKey || normalizeSimpCityCreatorKey(creatorName);
+  if (key) simpCitySkippedCreatorKeys.add(key);
+  const jobId = String(activeEvent.simpCityJobId || '');
+  const jobIds = jobId ? [jobId] : [...simpCityActiveJobIds];
+  const endpoint = await getRandom40LocalEndpoint(true);
+  if (endpoint) {
+    const response = await fetch(`${endpoint}/simpcity/import/skip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId, jobIds, creatorKey: key, creatorName })
+    }).catch(() => null);
+    const data = response ? await response.json().catch(() => null) : null;
+    (data?.results || []).flatMap(result => result?.keys || []).forEach(value => {
+      const relatedKey = normalizeSimpCityCreatorKey(value);
+      if (relatedKey) simpCitySkippedCreatorKeys.add(relatedKey);
+    });
+  }
+  simpCitySkipQueuePurger?.(simpCitySkippedCreatorKeys);
+  showSortingIndicator(`Skipped ${creatorName || key} for this SC Recall only`);
+}
 
 function setSimpCityDisconnectVisible(visible) {
   ensureEromeProgressEl();
@@ -16687,6 +16757,9 @@ async function disconnectSimpCity() {
       body: '{}'
     });
     simpCityActiveJobIds.clear();
+    simpCitySkippedCreatorKeys.clear();
+    simpCityActiveCreatorChoices = [];
+    setSimpCitySkipVisible(false);
     setSimpCityDisconnectVisible(false);
     showSortingIndicator('SimpCity disconnected; its encrypted session was erased');
   } catch (error) {
@@ -16812,6 +16885,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
     return;
   }
   const loadGeneration = ++bunkrLoadGeneration;
+  simpCitySkippedCreatorKeys.clear();
+  simpCityActiveCreatorChoices = [];
+  setSimpCitySkipVisible(true);
   const endpoint = await getRandom40LocalEndpoint(true);
   if (!endpoint) {
     alert('SimpCity imports need the Pong PC server to be running and reachable.');
@@ -16848,6 +16924,12 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
   let discoveredCreators = 0;
   let discoveredAlbums = 0;
   let discoveryError = null;
+  simpCitySkipQueuePurger = skippedKeys => {
+    for (let index = albumQueue.length - 1; index >= 0; index--) {
+      const key = normalizeSimpCityCreatorKey(albumQueue[index]?.creatorKey);
+      if (key && skippedKeys.has(key)) albumQueue.splice(index, 1);
+    }
+  };
 
   const sourceThreadUrl = targets[0] || 'https://simpcity.cr/';
   const bunkrPlaybackBase = location.protocol === 'https:'
@@ -16857,10 +16939,16 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
   const wakeAlbumWorkers = () => {
     while (albumWaiters.length) albumWaiters.shift()();
   };
-  const enqueueAlbums = albums => {
+  const enqueueAlbums = (albums, jobId = '') => {
     (albums || []).forEach(rawAlbum => {
       const albumUrl = normalizeEromeLaunchUrl(rawAlbum?.url || '');
-      if (!albumUrl || !isBunkrImportLaunchUrl(albumUrl) || seenAlbumUrls.has(albumUrl)) return;
+      const creatorKey = normalizeSimpCityCreatorKey(rawAlbum?.creatorKey || rawAlbum?.creatorName);
+      if (
+        !albumUrl ||
+        !isBunkrImportLaunchUrl(albumUrl) ||
+        seenAlbumUrls.has(albumUrl) ||
+        (creatorKey && simpCitySkippedCreatorKeys.has(creatorKey))
+      ) return;
       seenAlbumUrls.add(albumUrl);
       albumQueue.push({
         ...rawAlbum,
@@ -16868,6 +16956,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
         title: String(rawAlbum?.title || rawAlbum?.creatorName || 'Bunkr album'),
         sourceUrl: normalizeEromeLaunchUrl(rawAlbum?.sourceUrl || '') || rawAlbum?.sourceUrl || sourceThreadUrl,
         sourceTitle: String(rawAlbum?.creatorName || rawAlbum?.sourceTitle || rawAlbum?.title || 'SimpCity creator'),
+        creatorName: String(rawAlbum?.creatorName || rawAlbum?.sourceTitle || ''),
+        creatorKey,
+        simpCityJobId: String(jobId || rawAlbum?.simpCityJobId || ''),
         source: 'bunkr'
       });
     });
@@ -16883,7 +16974,11 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
       await new Promise(resolve => albumWaiters.push(resolve));
     }
     if (loadGeneration !== bunkrLoadGeneration || (!albumQueue.length && feedClosed)) return null;
-    return albumQueue.shift() || null;
+    while (albumQueue.length) {
+      const album = albumQueue.shift();
+      if (!album?.creatorKey || !simpCitySkippedCreatorKeys.has(album.creatorKey)) return album;
+    }
+    return feedClosed ? null : takeAlbum();
   };
   const unviewedAlbumCount = () => pasteEvents.reduce((count, event, index) => {
     if (
@@ -16939,11 +17034,13 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
     );
   };
   const scrapeAlbum = async album => {
+    if (album?.creatorKey && simpCitySkippedCreatorKeys.has(album.creatorKey)) return;
     const acquired = await acquireAlbumSlot();
     if (!acquired) return;
     try {
       const data = await postJson('/bunkr/album', album);
       if (loadGeneration !== bunkrLoadGeneration) return;
+      if (album?.creatorKey && simpCitySkippedCreatorKeys.has(album.creatorKey)) return;
       if (Array.isArray(data.videos) && data.videos.length) {
         publishGroup({
           url: album.url,
@@ -16952,6 +17049,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
             : album.title || data.title || 'Bunkr album',
           sourceUrl: album.sourceUrl || sourceThreadUrl,
           sourceTitle: album.creatorName || album.sourceTitle || album.title || 'SimpCity creator',
+          creatorName: album.creatorName || album.sourceTitle || '',
+          creatorKey: album.creatorKey || '',
+          simpCityJobId: album.simpCityJobId || '',
           source: 'bunkr',
           videos: data.videos
         });
@@ -17002,16 +17102,15 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
       const jobId = String(started.jobId || '');
       if (!jobId) throw new Error('The PC did not create a SimpCity import job');
       simpCityActiveJobIds.add(jobId);
-      let knownAlbumCount = 0;
       while (loadGeneration === bunkrLoadGeneration) {
         const status = await getJson(
           `/simpcity/import/status?jobId=${encodeURIComponent(jobId)}`
         );
         discoveredCreators = Math.max(discoveredCreators, Number(status.creatorsDiscovered || 0));
-        if (Array.isArray(status.albums) && status.albums.length > knownAlbumCount) {
-          enqueueAlbums(status.albums.slice(knownAlbumCount));
-          knownAlbumCount = status.albums.length;
-        }
+        simpCityActiveCreatorChoices = Array.isArray(status.activeCreators)
+          ? status.activeCreators
+          : [];
+        enqueueAlbums(status.albums, jobId);
         const waitingForLogin = status.phase === 'waiting_for_login' ||
           ['opening', 'awaiting_login'].includes(String(status.login?.status || ''));
         if (waitingForLogin || status.login?.status === 'connected') {
@@ -17052,6 +17151,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
     console.warn('SimpCity import failed:', error);
   } finally {
     feedClosed = true;
+    simpCityActiveCreatorChoices = [];
+    if (loadGeneration === bunkrLoadGeneration) simpCitySkipQueuePurger = null;
+    setSimpCitySkipVisible(false);
     wakeAlbumWorkers();
   }
 
@@ -17079,19 +17181,20 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
 const SIMPCITY_RECALL_STORAGE_KEY = 'pong_simpcity_recall_v1';
 let simpCityRecallMemory = null;
 
-function normalizeSimpCityRecallPayload(rawNames, rawThreadUrl = '') {
+function normalizeSimpCityRecallPayload(rawNames, rawThreadUrl = '', rawId = '') {
   const names = [...new Set((Array.isArray(rawNames) ? rawNames : [])
     .map(value => String(value || '').trim())
     .filter(value => value.length >= 2 && value.length <= 100))];
   return {
+    id: String(rawId || globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`),
     names,
     threadUrl: normalizeEromeLaunchUrl(rawThreadUrl) || 'https://simpcity.cr/',
     savedAt: new Date().toISOString()
   };
 }
 
-function saveSimpCityRecall(rawNames, rawThreadUrl = '') {
-  const payload = normalizeSimpCityRecallPayload(rawNames, rawThreadUrl);
+function saveSimpCityRecall(rawNames, rawThreadUrl = '', rawId = '') {
+  const payload = normalizeSimpCityRecallPayload(rawNames, rawThreadUrl, rawId);
   if (!payload.names.length) return null;
   simpCityRecallMemory = payload;
   try { localStorage.setItem(SIMPCITY_RECALL_STORAGE_KEY, JSON.stringify(payload)); } catch (_) {}
@@ -17133,8 +17236,7 @@ async function fetchSharedSimpCityRecall(endpoint, { consume = false } = {}) {
       reachable: true,
       recall: Array.isArray(recall?.names) && recall.names.length
         ? {
-            ...normalizeSimpCityRecallPayload(recall.names, recall.threadUrl),
-            id: String(recall.id || '')
+            ...normalizeSimpCityRecallPayload(recall.names, recall.threadUrl, recall.id)
           }
         : null,
       queueCount: Math.max(0, Number(data?.queueCount || 0))
@@ -17149,7 +17251,7 @@ function loadSimpCityRecall() {
   try {
     const parsed = JSON.parse(localStorage.getItem(SIMPCITY_RECALL_STORAGE_KEY) || 'null');
     if (Array.isArray(parsed?.names) && parsed.names.length) {
-      simpCityRecallMemory = normalizeSimpCityRecallPayload(parsed.names, parsed.threadUrl);
+      simpCityRecallMemory = normalizeSimpCityRecallPayload(parsed.names, parsed.threadUrl, parsed.id);
       return simpCityRecallMemory;
     }
   } catch (_) {}

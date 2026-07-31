@@ -2855,6 +2855,9 @@ function createSimpCityLimiter(limit) {
 }
 
 function simpCityPublicJob(job) {
+  const skippedCreatorKeys = job.skippedCreatorKeys instanceof Set
+    ? job.skippedCreatorKeys
+    : new Set();
   return {
     ok: true,
     jobId: job.id,
@@ -2870,8 +2873,12 @@ function simpCityPublicJob(job) {
     creatorsDiscovered: job.creators.length,
     creatorsSearched: job.creatorsSearched,
     creatorNames: job.creators.slice(0, 500).map(item => item.name),
-    albums: job.albums.slice(0, 1000),
-    albumCount: job.albums.length,
+    albums: job.albums.filter(album => !skippedCreatorKeys.has(String(album?.creatorKey || ''))).slice(0, 1000),
+    albumCount: job.albums.filter(album => !skippedCreatorKeys.has(String(album?.creatorKey || ''))).length,
+    activeCreators: job.activeCreators instanceof Map
+      ? [...job.activeCreators].map(([key, name]) => ({ key, name })).slice(0, 20)
+      : [],
+    skippedCreators: skippedCreatorKeys.size,
     login: {
       status: simpCityLoginState?.status || (simpCitySessionCache?.cookies?.length ? 'connected' : 'disconnected'),
       windowOpen: Boolean(simpCityLoginState?.browser),
@@ -2894,11 +2901,19 @@ async function runSimpCityImportJob(job) {
     touch();
     searchTasks.push(searchLimit(async () => {
       if (job.cancelled) return;
+      if (job.skippedCreatorKeys.has(candidate.key)) {
+        job.creatorsSearched++;
+        touch();
+        return;
+      }
+      job.activeCreators.set(candidate.key, candidate.name);
       const searchUrl = buildBAlbumsCreatorSearchUrl(candidate.query || candidate.name);
       try {
         const albums = await discoverBunkrAlbums(searchUrl);
+        if (job.cancelled || job.skippedCreatorKeys.has(candidate.key)) return;
         const matching = bunkrAlbumsMatchingCreator(albums, candidate);
         for (const album of matching) {
+          if (job.skippedCreatorKeys.has(candidate.key)) break;
           if (!album?.url || albumUrls.has(album.url)) continue;
           albumUrls.add(album.url);
           job.albums.push({
@@ -2918,6 +2933,7 @@ async function runSimpCityImportJob(job) {
           error: String(error?.message || error).slice(0, 160)
         });
       } finally {
+        job.activeCreators.delete(candidate.key);
         job.creatorsSearched++;
         touch();
       }
@@ -3078,6 +3094,8 @@ function startSimpCityImportJob(rawThreadUrl) {
     creatorsSearched: 0,
     searchErrors: [],
     albums: [],
+    activeCreators: new Map(),
+    skippedCreatorKeys: new Set(),
     cancelled: false
   };
   simpCityImportJobs.set(id, job);
@@ -3117,6 +3135,8 @@ function startSimpCityNamesJob(rawNames, rawSourceUrl = '') {
     creatorsSearched: 0,
     searchErrors: [],
     albums: [],
+    activeCreators: new Map(),
+    skippedCreatorKeys: new Set(),
     cancelled: false
   };
   simpCityImportJobs.set(id, job);
@@ -3125,10 +3145,18 @@ function startSimpCityNamesJob(rawNames, rawSourceUrl = '') {
     const limit = createSimpCityLimiter(SIMPCITY_SEARCH_CONCURRENCY);
     await Promise.allSettled(job.creators.map(candidate => limit(async () => {
       if (job.cancelled) return;
+      if (job.skippedCreatorKeys.has(candidate.key)) {
+        job.creatorsSearched++;
+        job.updatedAt = new Date().toISOString();
+        return;
+      }
+      job.activeCreators.set(candidate.key, candidate.name);
       const searchUrl = buildBAlbumsCreatorSearchUrl(candidate.query);
       try {
         const matching = bunkrAlbumsMatchingCreator(await discoverBunkrAlbums(searchUrl), candidate);
+        if (job.cancelled || job.skippedCreatorKeys.has(candidate.key)) return;
         for (const album of matching) {
+          if (job.skippedCreatorKeys.has(candidate.key)) break;
           if (!album?.url || albumUrls.has(album.url)) continue;
           albumUrls.add(album.url);
           job.albums.push({
@@ -3145,6 +3173,7 @@ function startSimpCityNamesJob(rawNames, rawSourceUrl = '') {
       } catch (error) {
         job.searchErrors.push({ name: candidate.name, error: String(error?.message || error).slice(0, 160) });
       } finally {
+        job.activeCreators.delete(candidate.key);
         job.creatorsSearched++;
         job.updatedAt = new Date().toISOString();
       }
@@ -3159,6 +3188,39 @@ function startSimpCityNamesJob(rawNames, rawSourceUrl = '') {
     job.updatedAt = new Date().toISOString();
   });
   return job;
+}
+
+function skipSimpCityJobCreator(job, rawKey, rawName = '') {
+  if (!job) return { skipped: false, keys: [] };
+  if (!(job.skippedCreatorKeys instanceof Set)) job.skippedCreatorKeys = new Set();
+  const keys = new Set();
+  const addKey = value => {
+    const key = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (key) keys.add(key);
+  };
+  addKey(rawKey);
+  simpCityCreatorAliases(String(rawName || '')).forEach(addKey);
+  for (const candidate of job.creators || []) {
+    if (
+      keys.has(String(candidate?.key || '')) ||
+      String(candidate?.name || '').toLowerCase() === String(rawName || '').toLowerCase()
+    ) {
+      addKey(candidate?.key);
+      simpCityCreatorAliases(String(candidate?.name || '')).forEach(addKey);
+    }
+  }
+  if (!keys.size) return { skipped: false, keys: [] };
+  keys.forEach(key => job.skippedCreatorKeys.add(key));
+  job.albums = job.albums.filter(album => !keys.has(String(album?.creatorKey || '')));
+  job.updatedAt = new Date().toISOString();
+  return { skipped: true, keys: [...keys] };
+}
+
+function simpCityRecallFingerprint(threadUrl, names) {
+  return crypto.createHash('sha256')
+    .update(`${String(threadUrl || '')}\n${(names || []).join('\n')}`)
+    .digest('hex')
+    .slice(0, 24);
 }
 
 process.once('exit', () => {
@@ -9246,8 +9308,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/simpcity/recall') {
       const consume = url.searchParams.get('consume') === '1';
       const recall = consume
-        ? (simpCityRecallQueue.shift() || null)
-        : (simpCityRecallQueue[0] || simpCityRecallPayload);
+        ? (simpCityRecallQueue.pop() || null)
+        : (simpCityRecallQueue.at(-1) || simpCityRecallPayload);
       json(res, 200, {
         ok: true,
         recall,
@@ -9261,12 +9323,22 @@ const server = http.createServer(async (req, res) => {
         .map(value => String(value || '').trim())
         .filter(value => value.length >= 2 && value.length <= 100))].slice(0, 1000);
       if (!names.length) throw new Error('No SimpCity recall names were supplied');
+      const threadUrl = normalizeSimpCityThreadUrl(payload?.threadUrl) || 'https://simpcity.cr/';
+      const fingerprint = simpCityRecallFingerprint(threadUrl, names);
+      const suppliedId = String(payload?.id || '').trim();
       simpCityRecallPayload = {
-        id: crypto.randomUUID(),
+        id: /^[a-z0-9-]{8,100}$/i.test(suppliedId) ? suppliedId : crypto.randomUUID(),
+        fingerprint,
         names,
-        threadUrl: normalizeSimpCityThreadUrl(payload?.threadUrl) || 'https://simpcity.cr/',
+        threadUrl,
         savedAt: new Date().toISOString()
       };
+      for (let index = simpCityRecallQueue.length - 1; index >= 0; index--) {
+        const queued = simpCityRecallQueue[index];
+        if (queued?.id === simpCityRecallPayload.id || queued?.fingerprint === fingerprint) {
+          simpCityRecallQueue.splice(index, 1);
+        }
+      }
       simpCityRecallQueue.push(simpCityRecallPayload);
       while (simpCityRecallQueue.length > SIMPCITY_RECALL_QUEUE_LIMIT) simpCityRecallQueue.shift();
       json(res, 200, {
@@ -9309,6 +9381,26 @@ const server = http.createServer(async (req, res) => {
       const payload = JSON.parse(await readBody(req) || '{}');
       const job = startSimpCityNamesJob(payload?.names, payload?.sourceUrl);
       json(res, 202, simpCityPublicJob(job));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/import/skip') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const requestedIds = [
+        String(payload?.jobId || ''),
+        ...(Array.isArray(payload?.jobIds) ? payload.jobIds.map(String) : [])
+      ].filter(Boolean);
+      const jobs = requestedIds.length
+        ? [...new Set(requestedIds)].map(id => simpCityImportJobs.get(id)).filter(Boolean)
+        : [...simpCityImportJobs.values()].filter(job => ['queued', 'running'].includes(job.state));
+      const results = jobs.map(job => ({
+        jobId: job.id,
+        ...skipSimpCityJobCreator(job, payload?.creatorKey, payload?.creatorName)
+      }));
+      json(res, 200, {
+        ok: true,
+        skipped: results.some(result => result.skipped),
+        results
+      });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/simpcity/import/status') {

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Pong SimpCity Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.2.0
-// @description  Adds a Scrape button to authenticated SimpCity threads and saves creator names for Pong SC Recall.
+// @version      1.3.0
+// @description  Adds a Scrape button to authenticated SimpCity threads and creates an isolated Pong SC Recall session.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
 // @run-at       document-idle
@@ -124,6 +124,7 @@
       }
       status.textContent = `${names.size} names - saving for SC Recall`;
       const payload = {
+        id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         threadUrl: first.href,
         names: [...names.values()].slice(0, 1000)
       };
