@@ -90,12 +90,12 @@ const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
 const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 16)));
 const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(12, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
-// While the visible card is below its healthy buffer, keep only one background
-// cache download alive. The active stream remains priority zero, and normal
-// background concurrency resumes after its buffer recovers.
+// While the visible card is below its healthy buffer, keep only two background
+// cache downloads alive. The active stream remains dominant without completely
+// stopping preparation of the next cards.
 const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(
   VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY,
-  Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY ?? 8)
+  Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY ?? 2)
 ));
 const VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE = Math.max(20, Math.min(500, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE || 120)));
 // Random40 artist bundles commonly place every verified video on one CDN host.
@@ -4171,6 +4171,34 @@ function updateVideoFileCachePlaybackBuffer(id, bufferedSeconds, { critical = fa
   else if (critical || seconds <= VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS) record.playbackBufferConstrained = true;
   else if (seconds >= VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS) record.playbackBufferConstrained = false;
   return true;
+}
+
+function protectVideoFileCacheForegroundPlayback(durationMs = 12000) {
+  const protectedForMs = Math.max(3000, Math.min(30000, Number(durationMs || 12000)));
+  videoFileCacheGlobalPlaybackConstrainedUntil = Math.max(
+    videoFileCacheGlobalPlaybackConstrainedUntil,
+    Date.now() + protectedForMs
+  );
+  const runningBackground = [...videoFileCacheRecords.values()]
+    .filter(record => (
+      record.status === 'downloading' &&
+      record.downloadPromise &&
+      currentVideoFileCachePriority(record) > 0 &&
+      Number(record.activeReaders || 0) === 0
+    ))
+    .sort((left, right) => (
+      Number(left.priority || 0) - Number(right.priority || 0) ||
+      Number(right.bytes || 0) - Number(left.bytes || 0) ||
+      Number(left.order || 0) - Number(right.order || 0)
+    ));
+  runningBackground.slice(VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY).forEach(record => {
+    record.deferWhenIdle = true;
+    record.controller?.abort();
+  });
+  normalizeVideoFileCachePriorities();
+  rebalanceVideoFileCacheDownloads();
+  pumpVideoFileCache();
+  return videoFileCacheGlobalPlaybackConstrainedUntil;
 }
 
 function rebalanceVideoFileCacheDownloads() {
@@ -9351,11 +9379,14 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/local2-fast/playback-priority') {
-        local2FlashProtectForegroundPlayback(Math.max(3000, Math.min(15000, Number(body.durationMs || 12000))));
+        const durationMs = Math.max(3000, Math.min(15000, Number(body.durationMs || 12000)));
+        local2FlashProtectForegroundPlayback(durationMs);
+        const cacheProtectedUntil = protectVideoFileCacheForegroundPlayback(durationMs);
         json(res, 200, {
           ok: true,
           protected: true,
-          until: new Date(local2FlashPlaybackPriorityUntil).toISOString()
+          until: new Date(local2FlashPlaybackPriorityUntil).toISOString(),
+          cacheUntil: new Date(cacheProtectedUntil).toISOString()
         });
         return;
       }
@@ -9417,13 +9448,17 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/local22-turbo/playback-priority') {
+        const durationMs = Math.max(3000, Math.min(15000, Number(body.durationMs || 12000)));
         if (local22TurboDeliveredArtists >= 5) {
-          local2FlashProtectForegroundPlayback(Math.max(3000, Math.min(15000, Number(body.durationMs || 12000))));
+          local2FlashProtectForegroundPlayback(durationMs);
         }
+        const cacheProtectedUntil = protectVideoFileCacheForegroundPlayback(durationMs);
         json(res, 200, {
           ok: true,
-          protected: local22TurboDeliveredArtists >= 5,
-          until: new Date(local2FlashPlaybackPriorityUntil).toISOString()
+          protected: true,
+          classificationProtected: local22TurboDeliveredArtists >= 5,
+          until: new Date(local2FlashPlaybackPriorityUntil).toISOString(),
+          cacheUntil: new Date(cacheProtectedUntil).toISOString()
         });
         return;
       }

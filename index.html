@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.39</div>
+    <div class="version-number">25.40</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3486,12 +3486,15 @@ function refreshForegroundVideoPriority(video, force = false) {
   const mustSuspendSpeculativeLoad = needsPriority &&
     wrapper.dataset.deckNextWarm === 'true' &&
     videoHasCriticalForegroundBuffer(video);
+  if (needsPriority) random40ProtectLocal2FastPlayback();
   if (!force && video.dataset.foregroundPriorityState === nextState && !mustSuspendSpeculativeLoad) return;
 
   video.dataset.foregroundPriorityState = nextState;
   tuneVideoPreloadAround(wrapper);
 
-  if (needsPriority) random40PauseHiddenPreloadsForPlayback();
+  if (needsPriority) {
+    random40PauseHiddenPreloadsForPlayback();
+  }
   random40PumpSourceFetchQueue();
   random40PumpPostFetchQueue();
   random40PumpPreloadQueue(needsPriority ? 450 : 50);
@@ -3555,6 +3558,7 @@ function transferForegroundVideoPriority(video) {
 
   nextVideo.dataset.foregroundPriority = 'true';
   nextVideo.dataset.foregroundNoLoadRetries = '0';
+  random40ProtectLocal2FastPlayback(true);
   const nextWrapper = nextVideo.closest('.video-wrapper');
   if (nextWrapper) {
     random40PromoteWrapperToServerCache(nextWrapper, { forceActive: false });
