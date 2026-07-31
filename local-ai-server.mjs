@@ -2147,8 +2147,6 @@ const SIMPCITY_JOB_RETENTION_MS = 30 * 60 * 1000;
 let simpCitySessionCache;
 let simpCityLoginState = null;
 const simpCityImportJobs = new Map();
-const SIMPCITY_RECALL_QUEUE_LIMIT = 20;
-const simpCityRecallQueue = [];
 let simpCityRecallPayload = null;
 
 function simpCityDelay(ms) {
@@ -9307,13 +9305,12 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/simpcity/recall') {
       const consume = url.searchParams.get('consume') === '1';
-      const recall = consume
-        ? (simpCityRecallQueue.pop() || null)
-        : (simpCityRecallQueue.at(-1) || simpCityRecallPayload);
+      const recall = simpCityRecallPayload;
+      if (consume) simpCityRecallPayload = null;
       json(res, 200, {
         ok: true,
         recall,
-        queueCount: simpCityRecallQueue.length
+        queueCount: simpCityRecallPayload ? 1 : 0
       });
       return;
     }
@@ -9333,18 +9330,10 @@ const server = http.createServer(async (req, res) => {
         threadUrl,
         savedAt: new Date().toISOString()
       };
-      for (let index = simpCityRecallQueue.length - 1; index >= 0; index--) {
-        const queued = simpCityRecallQueue[index];
-        if (queued?.id === simpCityRecallPayload.id || queued?.fingerprint === fingerprint) {
-          simpCityRecallQueue.splice(index, 1);
-        }
-      }
-      simpCityRecallQueue.push(simpCityRecallPayload);
-      while (simpCityRecallQueue.length > SIMPCITY_RECALL_QUEUE_LIMIT) simpCityRecallQueue.shift();
       json(res, 200, {
         ok: true,
         recall: simpCityRecallPayload,
-        queueCount: simpCityRecallQueue.length
+        queueCount: 1
       });
       return;
     }
