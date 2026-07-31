@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.3.0
+// @version      1.3.1
 // @description  Adds a Scrape button to authenticated SimpCity threads and creates an isolated Pong SC Recall session.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -98,19 +98,19 @@
       for (const html of htmls) {
         const doc = new DOMParser().parseFromString(html, 'text/html');
         doc.querySelectorAll('blockquote,.bbCodeBlock--quote').forEach(node => node.remove());
-        doc.querySelectorAll('a[href*="/threads/"]').forEach(anchor => {
-          if (/page-\d+|#post-/i.test(anchor.href)) return;
-          let slug = '';
-          try {
-            slug = decodeURIComponent(new URL(anchor.href).pathname.match(
-              /^\/threads\/(.+?)(?:\.\d+)?\/?$/i
-            )?.[1] || '').replace(/[-_]+/g, ' ');
-          } catch (_) {}
-          addAliases(anchor.title);
-          addAliases(anchor.textContent);
-          addAliases(slug);
-        });
         doc.querySelectorAll('.message-body,.bbWrapper').forEach(body => {
+          body.querySelectorAll('a[href*="/threads/"]').forEach(anchor => {
+            if (/page-\d+|#post-/i.test(anchor.href)) return;
+            let slug = '';
+            try {
+              slug = decodeURIComponent(new URL(anchor.href).pathname.match(
+                /^\/threads\/(.+?)(?:\.\d+)?\/?$/i
+              )?.[1] || '').replace(/[-_]+/g, ' ');
+            } catch (_) {}
+            addAliases(anchor.title);
+            addAliases(anchor.textContent);
+            addAliases(slug);
+          });
           const text = body.innerText || '';
           for (const match of text.matchAll(
             /(?:aka|also known as|model|creator)\s*[:\-]?\s*([@A-Za-z0-9_. -]{2,60})/gi

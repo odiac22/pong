@@ -836,7 +836,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.42</div>
+    <div class="version-number">25.43</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -16893,6 +16893,20 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
     alert('SimpCity imports need the Pong PC server to be running and reachable.');
     return;
   }
+  document.querySelectorAll('video').forEach(video => {
+    try { video.pause(); } catch (_) {}
+    video.removeAttribute('src');
+  });
+  allVideoUrls = [];
+  allVideoMetadata = [];
+  videoUrls = [];
+  videoMetadata = [];
+  currentBatch = 0;
+  currentVideoIndex = 0;
+  activePlaybackRange = null;
+  resetPasteEvents();
+  clearSession();
+  videoContainer.innerHTML = `<div class="loading-message">Starting latest SC Recall: ${escapeHtmlText(getEromeTargetLabel(targets[0] || 'SimpCity'))}</div>`;
   const postJson = async (pathname, payload) => {
     const response = await fetch(`${endpoint}${pathname}`, {
       method: 'POST',
