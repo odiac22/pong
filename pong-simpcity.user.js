@@ -1,14 +1,16 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.5.1
+// @version      1.5.2
 // @description  Extracts creator identities from every post with the local Pong AI and prepares Balbums matches as pages arrive.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
 // @connect      127.0.0.1
 // @connect      192.168.1.124
+// @connect      *
 // @downloadURL  https://odiac22.github.io/pong/pong-simpcity.user.js
 // @updateURL    https://odiac22.github.io/pong/pong-simpcity.user.js
 // ==/UserScript==
@@ -27,8 +29,16 @@
     let lastError = '';
     for (const endpoint of endpoints) {
       try {
+        const modernRequest = globalThis.GM?.xmlHttpRequest;
+        const legacyRequest = globalThis.GM_xmlhttpRequest;
+        const request = typeof modernRequest === 'function'
+          ? modernRequest.bind(globalThis.GM)
+          : typeof legacyRequest === 'function'
+            ? legacyRequest
+            : null;
+        if (!request) throw new Error('Tampermonkey network permission is unavailable');
         return await new Promise((resolve, reject) => {
-          GM_xmlhttpRequest({
+          request({
             method: 'POST', url: `${endpoint}${pathname}`,
             headers: { 'Content-Type': 'application/json' },
             data: JSON.stringify(payload), timeout,
@@ -38,11 +48,26 @@
               if (response.status >= 200 && response.status < 300 && data.ok !== false) resolve(data);
               else reject(new Error(data.error || `HTTP ${response.status}`));
             },
-            onerror: () => reject(new Error('connection failed')),
+            onerror: response => reject(new Error(
+              `connection failed${response?.error ? `: ${response.error}` : ''}`
+            )),
             ontimeout: () => reject(new Error('connection timed out'))
           });
         });
       } catch (error) { lastError = error?.message || String(error); }
+      try {
+        const response = await fetch(`${endpoint}${pathname}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          cache: 'no-store'
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.ok !== false) return data;
+        lastError = data.error || `HTTP ${response.status}`;
+      } catch (error) {
+        lastError = `${lastError}; fetch ${error?.message || error}`;
+      }
     }
     throw new Error(`PC AI unavailable: ${lastError || 'server not reachable'}`);
   };
@@ -100,7 +125,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.5.1 · Ready: live AI extraction</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.5.2 · Ready: live AI extraction</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
