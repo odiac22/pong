@@ -10515,28 +10515,9 @@ const server = http.createServer(async (req, res) => {
       (Array.isArray(payload?.items) ? payload.items : []).forEach(item => {
         addUrl(item?.url, { artistKey: item?.artistKey || item?.bundleKey || '' });
       });
-      if (payload?.authoritative === true) {
-        const keepIds = new Set();
-        for (const rawUrl of urls) {
-          try { keepIds.add(videoFileCacheCanonical(rawUrl).id); } catch (_) {}
-        }
-        for (const record of videoFileCacheRecords.values()) {
-          if (keepIds.has(record.id) || record.status === 'ready' || Number(record.activeReaders || 0) > 0) continue;
-          if (record.status === 'queued') {
-            videoFileCacheQueue = videoFileCacheQueue.filter(candidate => candidate !== record);
-            record.status = 'idle';
-            record.retryNotBefore = 0;
-          } else if (record.status === 'downloading' && record.downloadPromise) {
-            record.deferWhenIdle = true;
-            record.controller?.abort();
-          }
-          record.playbackLease = false;
-          record.playbackBufferConstrained = false;
-          record.activeUntil = 0;
-          record.currentUntil = 0;
-          record.priority = 2;
-        }
-      }
+      // Multiple Pong tabs share this cache. An authoritative manifest belongs
+      // only to its caller, so it must not cancel records requested by another
+      // tab. Explicit deferredUrl messages and rolling eviction retire old work.
       const currentUrls = new Set((Array.isArray(payload?.currentUrls) ? payload.currentUrls : []).map(String));
       const records = [];
       for (const rawUrl of urls) {
