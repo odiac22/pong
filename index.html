@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.58</div>
+    <div class="version-number">25.59</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -7792,6 +7792,7 @@ let eromeCheckpointAvailable = false;
 let eromeCheckpointActiveThisPage = false;
 let activeEromeScrapeTargets = [];
 let activeEromeScrapeProgress = null;
+let activeSimpCityRecallContext = null;
 let eromeCheckpointAutosaveTimer = null;
 const savedEromeRefreshJobs = new Set();
 const SAVED_EROME_FULL_RECORD_WRITE_DELAY_MS = 7000;
@@ -8170,6 +8171,71 @@ async function writeEromeCheckpoint(record) {
   }
 }
 
+async function restoreSavedEromeMenuFromDb() {
+  let restored = 0;
+  try {
+    const db = await openSavedEromeDb();
+    const tx = db.transaction(SAVED_EROME_DB_STORE, 'readonly');
+    const records = await idbRequestToPromise(tx.objectStore(SAVED_EROME_DB_STORE).getAll());
+    db.close();
+    const saved = loadSavedEromeArtists();
+    (Array.isArray(records) ? records : []).forEach(record => {
+      const item = summarizeSavedEromeRecord(record);
+      if (!item.url || saved[item.url]) return;
+      saved[item.url] = item;
+      restored++;
+    });
+    // Recover Erome profiles that were saved through the normal video/artist
+    // buttons too. This committed backup survives app-origin and browser-cache
+    // changes that can hide the local Saved Erome menu.
+    try {
+      const response = await fetch('pong-data/saved-links-v2.json', { cache: 'no-store' });
+      const payload = response.ok ? await response.json() : {};
+      const recovered = new Map();
+      Object.values(payload?.savedVideos || {}).forEach(video => {
+        if (String(video?.source || '').toLowerCase() !== 'erome') return;
+        const artistUrl = normalizeEromeProfileSaveUrl(video?.artistUrl || '');
+        const videoUrl = String(video?.url || '').trim();
+        if (!artistUrl || !videoUrl) return;
+        if (!recovered.has(artistUrl)) recovered.set(artistUrl, new Map());
+        const albumUrl = normalizeEromeLaunchUrl(video?.postUrl || '') || artistUrl;
+        const albums = recovered.get(artistUrl);
+        if (!albums.has(albumUrl)) albums.set(albumUrl, []);
+        if (!albums.get(albumUrl).includes(videoUrl)) albums.get(albumUrl).push(videoUrl);
+      });
+      for (const [artistUrl, albums] of recovered) {
+        if (saved[artistUrl]) continue;
+        const videoGroups = [...albums].map(([albumUrl, videos]) => ({
+          url: albumUrl,
+          title: getEromeTargetLabel(albumUrl),
+          sourceUrl: artistUrl,
+          sourceTitle: getEromeTargetLabel(artistUrl),
+          source: 'erome',
+          videos
+        }));
+        const record = {
+          url: artistUrl,
+          label: artistUrl,
+          albums: [...albums.keys()].map(url => ({ url, title: getEromeTargetLabel(url), source: 'erome' })),
+          videoGroups,
+          savedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        saved[artistUrl] = summarizeSavedEromeRecord(record);
+        await putSavedEromeFullRecord(record);
+        restored++;
+      }
+    } catch (error) {
+      console.warn('Saved Erome committed-backup recovery failed:', error);
+    }
+    if (restored) saveSavedEromeArtists(saved);
+    return restored;
+  } catch (error) {
+    console.warn('Saved Erome menu recovery failed:', error);
+    return 0;
+  }
+}
+
 function updateEromeCheckpointButton() {
   const button = document.getElementById('erome-checkpoint');
   if (!button) return;
@@ -8209,7 +8275,14 @@ async function saveCurrentEromeCheckpoint() {
     paperclipStepCount,
     scrapeTargets: activeEromeScrapeTargets.slice(),
     completedAlbumUrls,
-    scrapeProgress
+    scrapeProgress,
+    simpCityContext: activeSimpCityRecallContext ? {
+      targets: activeSimpCityRecallContext.targets.slice(),
+      suppliedCreatorNames: activeSimpCityRecallContext.suppliedCreatorNames.slice(),
+      suppliedAlbums: activeSimpCityRecallContext.suppliedAlbums.slice(),
+      aiExtracted: activeSimpCityRecallContext.aiExtracted === true,
+      recallChannel: Number(activeSimpCityRecallContext.recallChannel || 0)
+    } : null
   };
   const saved = await writeEromeCheckpoint(checkpoint);
   if (!saved) {
@@ -8275,7 +8348,20 @@ async function loadCurrentEromeCheckpoint() {
   activeEromeScrapeTargets = resumeTargets.slice();
   activeEromeScrapeProgress = savedScrapeProgress;
   showSortingIndicator(`Loaded saved Erome/Balbums place from ${new Date(checkpoint.savedAt).toLocaleString()}`);
-  if (resumeTargets.length && !savedScrapeProgress?.finished) {
+  const simpCityContext = checkpoint.simpCityContext;
+  if (simpCityContext?.targets?.length) {
+    showSortingIndicator('Loaded saved SimpCity place. Continuing its recall...');
+    setTimeout(() => {
+      loadSimpCityAsCards(
+        simpCityContext.targets,
+        simpCityContext.suppliedCreatorNames || [],
+        simpCityContext.suppliedAlbums || [],
+        simpCityContext.aiExtracted === true,
+        Number(simpCityContext.recallChannel || 0),
+        { resumeExisting: true }
+      );
+    }, 120);
+  } else if (resumeTargets.length && !savedScrapeProgress?.finished) {
     window.PongEromeResumeState = {
       completedAlbumUrls: (savedScrapeProgress?.completedAlbumUrls || checkpoint.completedAlbumUrls || pasteEvents.map(event => event?.postUrl))
         .map(normalizeEromeLaunchUrl)
@@ -8304,9 +8390,11 @@ function scheduleEromeCheckpointAutosave() {
 }
 
 async function initializeEromeCheckpointButton() {
+  const restored = await restoreSavedEromeMenuFromDb();
   eromeCheckpointAvailable = Boolean(await readEromeCheckpoint());
   eromeCheckpointActiveThisPage = false;
   updateEromeCheckpointButton();
+  if (restored) scheduleSavedEromeMenuRender(0);
 }
 
 async function putSavedEromeFullRecord(record) {
@@ -16895,7 +16983,7 @@ function openSimpCityLoginOverlay(endpoint) {
   refreshFrame();
 }
 
-async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedAlbums = [], aiExtracted = false, recallChannel = 0) {
+async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedAlbums = [], aiExtracted = false, recallChannel = 0, options = {}) {
   if (!suppliedCreatorNames.length && targets[0] && !recallChannel) {
     const installed = confirm(
       'Open the real SimpCity page now?\n\n' +
@@ -16907,7 +16995,16 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       : 'https://odiac22.github.io/pong/simpcity-bookmarklet.html';
     return;
   }
+  const resumeExisting = options?.resumeExisting === true;
   const loadGeneration = ++bunkrLoadGeneration;
+  activeSimpCityRecallContext = {
+    targets: targets.slice(),
+    suppliedCreatorNames: suppliedCreatorNames.slice(),
+    suppliedAlbums: suppliedAlbums.slice(),
+    aiExtracted: aiExtracted === true,
+    recallChannel: Number(recallChannel || 0)
+  };
+  activeEromeScrapeTargets = targets.slice();
   simpCitySkippedCreatorKeys.clear();
   simpCityActiveCreatorChoices = [];
   setSimpCitySkipVisible(true);
@@ -16919,20 +17016,22 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   // SimpCity uses the hidden PC media cache too. Keep its liveness heartbeat
   // running during long recall sessions, even though Random40 is not active.
   random40StartServerVideoCacheTimers();
-  document.querySelectorAll('video').forEach(video => {
-    try { video.pause(); } catch (_) {}
-    video.removeAttribute('src');
-  });
-  allVideoUrls = [];
-  allVideoMetadata = [];
-  videoUrls = [];
-  videoMetadata = [];
-  currentBatch = 0;
-  currentVideoIndex = 0;
-  activePlaybackRange = null;
-  resetPasteEvents();
-  clearSession();
-  videoContainer.innerHTML = `<div class="loading-message">Starting latest SC Recall: ${escapeHtmlText(getEromeTargetLabel(targets[0] || 'SimpCity'))}</div>`;
+  if (!resumeExisting) {
+    document.querySelectorAll('video').forEach(video => {
+      try { video.pause(); } catch (_) {}
+      video.removeAttribute('src');
+    });
+    allVideoUrls = [];
+    allVideoMetadata = [];
+    videoUrls = [];
+    videoMetadata = [];
+    currentBatch = 0;
+    currentVideoIndex = 0;
+    activePlaybackRange = null;
+    resetPasteEvents();
+    clearSession();
+    videoContainer.innerHTML = `<div class="loading-message">Starting latest SC Recall: ${escapeHtmlText(getEromeTargetLabel(targets[0] || 'SimpCity'))}</div>`;
+  }
   const postJson = async (pathname, payload) => {
     const response = await fetch(`${endpoint}${pathname}`, {
       method: 'POST',
@@ -16954,13 +17053,17 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   const ALBUM_WORKERS = 4;
   const albumQueue = [];
   const albumWaiters = [];
-  const seenAlbumUrls = new Set();
+  const seenAlbumUrls = new Set(
+    resumeExisting
+      ? pasteEvents.map(event => normalizeEromeLaunchUrl(event?.postUrl || '')).filter(Boolean)
+      : []
+  );
   let feedClosed = false;
   let reservedAlbumSlots = 0;
-  let cardsStarted = false;
-  let loadedAlbums = 0;
+  let cardsStarted = resumeExisting && pasteEvents.some(isEromePasteEvent);
+  let loadedAlbums = cardsStarted ? pasteEvents.filter(isEromePasteEvent).length : 0;
   let completedAlbums = 0;
-  let videoCount = 0;
+  let videoCount = cardsStarted ? allVideoUrls.length : 0;
   let discoveredCreators = suppliedCreatorNames.length;
   let discoveredAlbums = 0;
   let discoveryError = null;
@@ -17058,6 +17161,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     }
     loadedAlbums++;
     videoCount += imported.urls.length;
+    scheduleEromeCheckpointAutosave();
     if (location.protocol !== 'https:' && Array.isArray(group.videos)) {
       postJson('/video-cache/warm', {
         playbackProfile: 'bunkr',
@@ -17692,6 +17796,7 @@ async function loadEromeAsCards() {
     await loadSimpCityAsCards(simpCityTargets);
     return;
   }
+  activeSimpCityRecallContext = null;
 
   const bunkrTargets = targets.filter(isBunkrImportLaunchUrl);
   if (bunkrTargets.length) {
