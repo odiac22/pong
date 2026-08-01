@@ -4,7 +4,7 @@ import http2 from 'node:http2';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
@@ -87,13 +87,19 @@ const SIMPCITY_RECALL_AI_BATCH_LIMIT = Math.max(
   0,
   Math.min(20, Number(process.env.PONG_SIMPCITY_RECALL_AI_BATCH_LIMIT || 6))
 );
-const VIDEO_FILE_CACHE_DIR = path.join(LOCAL_AI_DIR, '.ephemeral-video-cache');
-// This PC currently has a small amount of free C: space. A 12 GB cache could
-// exhaust the drive before normal eviction began, so preserve hard headroom.
-const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_BYTES || 3 * 1024 * 1024 * 1024));
-const VIDEO_FILE_CACHE_MIN_FREE_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MIN_FREE_BYTES || 2 * 1024 * 1024 * 1024));
+const VIDEO_FILE_CACHE_DIR = path.resolve(
+  process.env.PONG_VIDEO_FILE_CACHE_DIR ||
+  (process.platform === 'win32' && existsSync('F:\\')
+    ? 'F:\\.pong-ephemeral-video-cache'
+    : path.join(LOCAL_AI_DIR, '.ephemeral-video-cache'))
+);
+// Count both completed and partial files. The cache is rolling and disposable;
+// it must never consume a drive just because several large videos are in flight.
+const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_BYTES || 12 * 1024 * 1024 * 1024));
+const VIDEO_FILE_CACHE_MIN_FREE_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MIN_FREE_BYTES || 8 * 1024 * 1024 * 1024));
 const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 2 * 1024 * 1024 * 1024));
-const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_TTL_MS || 60 * 60 * 1000));
+const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_TTL_MS || 10 * 60 * 1000));
+const VIDEO_FILE_CACHE_VIEWED_TTL_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_VIEWED_TTL_MS || 2 * 60 * 1000));
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
 const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 10)));
 const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(8, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
@@ -4303,9 +4309,13 @@ function videoFileCachePathFor(id, suffix = '.cache') {
 }
 
 function assertVideoFileCachePathIsSafe(targetPath = VIDEO_FILE_CACHE_DIR) {
-  const resolvedRoot = path.resolve(LOCAL_AI_DIR);
   const resolvedTarget = path.resolve(targetPath);
-  if (!resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`)) {
+  const parsed = path.parse(resolvedTarget);
+  if (
+    resolvedTarget !== VIDEO_FILE_CACHE_DIR ||
+    resolvedTarget === parsed.root ||
+    path.basename(resolvedTarget) !== '.pong-ephemeral-video-cache'
+  ) {
     throw new Error(`unsafe video cache path: ${resolvedTarget}`);
   }
 }
@@ -4405,6 +4415,7 @@ function videoFileCacheSnapshot() {
       cancellations: videoFileCacheTailRangeStats.cancellations
     },
     idle_wipe_ms: VIDEO_FILE_CACHE_IDLE_WIPE_MS,
+    viewed_ttl_ms: VIDEO_FILE_CACHE_VIEWED_TTL_MS,
     last_heartbeat_at: videoFileCacheLastHeartbeatAt ? new Date(videoFileCacheLastHeartbeatAt).toISOString() : ''
   };
 }
@@ -4746,22 +4757,51 @@ async function evictVideoFileCacheIfNeeded(extraBytes = 0) {
   const now = Date.now();
   let availableBytes = Number.POSITIVE_INFINITY;
   try {
-    const stats = await fs.statfs(LOCAL_AI_DIR);
+    const stats = await fs.statfs(VIDEO_FILE_CACHE_DIR);
     availableBytes = Number(stats.bavail || stats.bfree || 0) * Number(stats.bsize || 0);
   } catch (_) {}
+  let residentBytes = [...videoFileCacheRecords.values()]
+    .reduce((total, record) => total + Math.max(0, Number(record.bytes || 0)), 0);
   const candidates = [...videoFileCacheRecords.values()]
-    .filter(record => record.status === 'ready' && Number(record.activeReaders || 0) === 0)
+    .filter(record => (
+      ['ready', 'idle', 'error'].includes(record.status) &&
+      !record.downloadPromise &&
+      Number(record.activeReaders || 0) === 0
+    ))
     .sort((a, b) => Number(a.lastAccessedAt || a.updatedAt || 0) - Number(b.lastAccessedAt || b.updatedAt || 0));
   for (const record of candidates) {
-    const expired = now - Number(record.updatedAt || 0) > VIDEO_FILE_CACHE_TTL_MS;
-    const oversized = videoFileCacheBytes + extraBytes > VIDEO_FILE_CACHE_MAX_BYTES;
+    const viewedExpired = Number(record.lastAccessedAt || 0) > 0 &&
+      now - Number(record.lastAccessedAt) > VIDEO_FILE_CACHE_VIEWED_TTL_MS;
+    const expired = viewedExpired || now - Number(record.updatedAt || 0) > VIDEO_FILE_CACHE_TTL_MS;
+    const oversized = residentBytes + extraBytes > VIDEO_FILE_CACHE_MAX_BYTES;
     const lowDisk = availableBytes < VIDEO_FILE_CACHE_MIN_FREE_BYTES;
     if (!expired && !oversized && !lowDisk) break;
-    try { await fs.rm(record.filePath, { force: true }); } catch (_) {}
+    const wasReady = record.status === 'ready';
+    const recordPath = wasReady
+      ? (record.filePath || videoFileCachePathFor(record.id, '.cache'))
+      : videoFileCachePathFor(record.id, '.part');
+    try { await fs.rm(recordPath, { force: true }); } catch (_) {}
     const removedBytes = Number(record.bytes || 0);
-    videoFileCacheBytes = Math.max(0, videoFileCacheBytes - removedBytes);
+    residentBytes = Math.max(0, residentBytes - removedBytes);
+    if (wasReady) videoFileCacheBytes = Math.max(0, videoFileCacheBytes - removedBytes);
     if (Number.isFinite(availableBytes)) availableBytes += removedBytes;
     videoFileCacheRecords.delete(record.id);
+  }
+  if (residentBytes + extraBytes > VIDEO_FILE_CACHE_MAX_BYTES || availableBytes < VIDEO_FILE_CACHE_MIN_FREE_BYTES) {
+    const downloads = [...videoFileCacheRecords.values()]
+      .filter(record => (
+        record.status === 'downloading' &&
+        record.downloadPromise &&
+        Number(record.activeReaders || 0) === 0 &&
+        currentVideoFileCachePriority(record, now) > 0
+      ))
+      .sort((a, b) => Number(a.lastAccessedAt || a.startedAt || 0) - Number(b.lastAccessedAt || b.startedAt || 0));
+    for (const record of downloads) {
+      record.deferWhenIdle = true;
+      record.controller?.abort();
+      residentBytes = Math.max(0, residentBytes - Number(record.bytes || 0));
+      if (residentBytes + extraBytes <= VIDEO_FILE_CACHE_MAX_BYTES && availableBytes >= VIDEO_FILE_CACHE_MIN_FREE_BYTES) break;
+    }
   }
 }
 
@@ -4944,7 +4984,6 @@ async function downloadVideoFileCacheRecord(record, generation) {
     record.totalBytes = bytes;
     record.status = 'ready';
     record.updatedAt = Date.now();
-    record.lastAccessedAt = Date.now();
     record.activeUntil = 0;
     record.currentUntil = 0;
     record.playbackLease = false;
@@ -4957,10 +4996,12 @@ async function downloadVideoFileCacheRecord(record, generation) {
     if (generation === videoFileCacheGeneration) {
       record.updatedAt = Date.now();
       if (record.deferWhenIdle) {
-        // A growing-file reader switched to proxy/direct playback. Preserve the
-        // partial file for a later resume, but do not keep a duplicate origin
-        // transfer alive while that fallback is the foreground connection.
+        // This item is no longer in the useful foreground/background window.
+        // Delete its partial bytes immediately so long sessions remain rolling.
         record.deferWhenIdle = false;
+        await fs.rm(partPath, { force: true }).catch(() => {});
+        record.bytes = 0;
+        record.totalBytes = 0;
         record.status = 'idle';
         record.error = '';
         record.retryNotBefore = 0;
