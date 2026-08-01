@@ -836,7 +836,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.43</div>
+    <div class="version-number">25.44</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -17305,21 +17305,28 @@ async function startSimpCityRecall() {
       location.assign(target.href);
       return;
     }
+    // SC Recall is deliberately server-authoritative. Never reuse a recall
+    // left in this app's local storage when the PC is unreachable, because
+    // that can silently replay an older SimpCity scrape.
+    simpCityRecallMemory = null;
+    try { localStorage.removeItem(SIMPCITY_RECALL_STORAGE_KEY); } catch (_) {}
+    updateSimpCityRecallButton();
     const shared = await fetchSharedSimpCityRecall(
       location.port === '8787' ? location.origin : endpoint,
       { consume: true }
     );
-    let payload = shared.recall;
-    if (!payload?.names?.length && !shared.reachable) {
-      payload = loadSimpCityRecall();
-    }
-    if (!payload?.names?.length) {
-      alert('No queued SC Recall is ready. Run Scrape on a SimpCity thread first.');
+    const payload = shared.recall;
+    if (!shared.reachable) {
+      alert('SC Recall could not reach the PC server. No older scrape was loaded.');
       return;
     }
-    simpCityRecallMemory = null;
-    try { localStorage.removeItem(SIMPCITY_RECALL_STORAGE_KEY); } catch (_) {}
-    updateSimpCityRecallButton();
+    if (!payload?.names?.length) {
+      alert('No latest SC Recall is ready. Run Scrape on the SimpCity thread first, then return here.');
+      return;
+    }
+    showSortingIndicator(
+      `Latest SC Recall: ${getEromeTargetLabel(payload.threadUrl)} - ${payload.names.length} names`
+    );
     await loadSimpCityAsCards([payload.threadUrl], payload.names);
   } finally {
     simpCityRecallStarting = false;
