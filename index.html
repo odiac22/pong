@@ -836,7 +836,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.48</div>
+    <div class="version-number">25.49</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -17325,10 +17325,16 @@ function encodeSimpCityRecall(payload) {
 function updateSimpCityRecallButton() {
   const one = document.getElementById('simpcity-recall-1');
   const two = document.getElementById('simpcity-recall-2');
-  if (one) one.textContent = 'Recall 1';
-  if (two) two.textContent = 'Recall 2';
-  button.disabled = false;
-  button.title = count ? `${count} locally saved SimpCity names` : 'Load the latest SimpCity scrape from either Pong app';
+  if (one) {
+    one.textContent = 'Recall 1';
+    one.disabled = false;
+    one.title = 'Stream the current Pong 1 SimpCity scrape';
+  }
+  if (two) {
+    two.textContent = 'Recall 2';
+    two.disabled = false;
+    two.title = 'Stream the current Pong 2 SimpCity scrape';
+  }
 }
 
 let simpCityRecallStarting = false;
