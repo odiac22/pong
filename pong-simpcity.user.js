@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.5.4
-// @description  Extracts creator identities from every post with the local Pong AI and prepares Balbums matches as pages arrive.
+// @version      1.6.0
+// @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
 // @run-at       document-idle
@@ -20,7 +20,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/\/threads\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 4;
-  const AI_BATCH_SIZE = 6;
+  const AI_BATCH_SIZE = 10;
   const AI_CONCURRENCY = 2;
   const endpoints = ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
   const monthDate = /^(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\s*$/i;
@@ -199,7 +199,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.5.4 · Ready: resilient live AI extraction</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.6.0 · Direct handles first; AI runs in background</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -258,12 +258,11 @@
         update();
       }
       await Promise.all(aiTasks);
-      if (!names.size) throw new Error('Local AI found no creator identities in the thread posts');
       await sendToPong('/simpcity/recall', {
         id: scrapeId, channel, schema: 'pong-simpcity-ai-v1', threadUrl: first.href,
         names: [...names.values()].slice(0, 1000), albums: [...albums.values()], aiExtracted: true
       }, 15000);
-      if (isCurrentRun()) status.textContent = `Pong ${channel} done: ${names.size} AI names · ${albums.size} albums`;
+      if (isCurrentRun()) status.textContent = `Pong ${channel}: ${names.size} immediate creators · remaining AI streams to Recall`;
     } catch (error) {
       if (isCurrentRun()) status.textContent = `Pong ${channel} failed: ${error?.message || error}`;
     }

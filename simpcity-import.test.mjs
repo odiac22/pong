@@ -75,7 +75,31 @@ test('splits linked-thread aliases and rejects vague first names', () => {
     ['cozyzozie', 'fairyz222']
   );
   assert.equal(isDistinctSimpCityCreatorName('Ana'), false);
+  assert.equal(isDistinctSimpCityCreatorName('Kayce'), false);
   assert.equal(isDistinctSimpCityCreatorName('Sarah'), false);
+  assert.equal(isDistinctSimpCityCreatorName('Zoe'), false);
   assert.equal(isDistinctSimpCityCreatorName('Ash Kaashh'), true);
   assert.equal(isDistinctSimpCityCreatorName('emmmyxo'), true);
+});
+
+test('extracts authoritative social handles without accepting ordinary first names', () => {
+  const html = `
+    <article class="message" data-author="forum-poster">
+      <a class="username" href="/members/forum-poster.1/">forum-poster</a>
+      <div class="bbWrapper">
+        <a href="https://onlyfans.com/deminovak_">Demi</a>
+        <a href="https://onlyfans.com/hyliafawkes">OnlyFans</a>
+        <a href="https://onlyfans.com/tyiistarr">profile</a>
+        <a href="https://onlyfans.com/Kayce">Kayce</a>
+        <a href="https://onlyfans.com/Zoe">Zoe</a>
+      </div>
+    </article>
+  `;
+  const names = extractSimpCityCreatorCandidates(html, THREAD).map(item => item.name.toLowerCase());
+  assert.ok(names.includes('deminovak_'));
+  assert.ok(names.includes('hyliafawkes'));
+  assert.ok(names.includes('tyiistarr'));
+  assert.ok(!names.includes('kayce'));
+  assert.ok(!names.includes('zoe'));
+  assert.ok(!names.includes('forum-poster'));
 });

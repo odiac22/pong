@@ -20,7 +20,7 @@ const COMMON_SINGLE_FIRST_NAMES = new Set([
   'abby', 'alice', 'alyssa', 'amanda', 'amber', 'amy', 'ana', 'anna', 'ashley',
   'bella', 'brianna', 'brooke', 'chloe', 'claire', 'danielle', 'ella', 'emily',
   'emma', 'grace', 'hailey', 'hannah', 'isabella', 'jasmine', 'jessica',
-  'julia', 'katie', 'kayla', 'lauren', 'lily', 'madison', 'maya', 'mia',
+  'julia', 'katie', 'kayce', 'kayla', 'lauren', 'lily', 'madison', 'maya', 'mia',
   'molly', 'natalie', 'nicole', 'olivia', 'paige', 'rachel', 'rebecca',
   'samantha', 'sarah', 'sophia', 'taylor', 'victoria', 'zoe'
 ]);
@@ -239,8 +239,9 @@ export function extractSimpCityCreatorCandidates(html, currentThreadUrl = '') {
       try { resolved = new URL(anchor.href, current || 'https://simpcity.cr/'); }
       catch (_) { continue; }
       if (!SOCIAL_HOSTS.has(resolved.hostname.toLowerCase())) continue;
-      const segment = decodeURIComponent(resolved.pathname.split('/').filter(Boolean).pop() || '')
-        .replace(/^@/, '');
+      const pathParts = resolved.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+      const segment = String(pathParts[0] || '').replace(/^@/, '');
+      if (/^(?:home|explore|search|share|p|reel|video)$/i.test(segment)) continue;
       add(segment || anchor.text, 'social-link', 0.95);
     }
 
