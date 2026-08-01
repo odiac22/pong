@@ -836,7 +836,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.45</div>
+    <div class="version-number">25.46</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -16872,7 +16872,7 @@ function openSimpCityLoginOverlay(endpoint) {
   refreshFrame();
 }
 
-async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
+async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedAlbums = [], aiExtracted = false) {
   if (!suppliedCreatorNames.length && targets[0]) {
     const installed = confirm(
       'Open the real SimpCity page now?\n\n' +
@@ -16935,7 +16935,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
   let loadedAlbums = 0;
   let completedAlbums = 0;
   let videoCount = 0;
-  let discoveredCreators = 0;
+  let discoveredCreators = suppliedCreatorNames.length;
   let discoveredAlbums = 0;
   let discoveryError = null;
   simpCitySkipQueuePurger = skippedKeys => {
@@ -17092,6 +17092,10 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
     }
   });
 
+  // AI extraction searches Balbums while later SimpCity pages are still downloading.
+  // Feed those results to the player immediately instead of searching for them twice.
+  enqueueAlbums(suppliedAlbums);
+
   updateEromeProgress({
     title: 'Connecting SimpCity',
     detail: 'Checking the encrypted PC browser session',
@@ -17102,15 +17106,18 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
   });
 
   try {
-    const discoveryInputs = suppliedCreatorNames.length
+    const discoveryInputs = suppliedAlbums.length
+      ? []
+      : suppliedCreatorNames.length
       ? [{ names: suppliedCreatorNames }]
       : targets.map(url => ({ url }));
     for (const input of discoveryInputs) {
       if (loadGeneration !== bunkrLoadGeneration) break;
       const started = input.names
-        ? await postJson('/simpcity/import/names/start', {
+          ? await postJson('/simpcity/import/names/start', {
             names: input.names,
-            sourceUrl: sourceThreadUrl
+            sourceUrl: sourceThreadUrl,
+            aiExtracted
           })
         : await postJson('/simpcity/import/start', { url: input.url });
       const jobId = String(started.jobId || '');
@@ -17195,13 +17202,15 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = []) {
 const SIMPCITY_RECALL_STORAGE_KEY = 'pong_simpcity_recall_v1';
 let simpCityRecallMemory = null;
 
-function normalizeSimpCityRecallPayload(rawNames, rawThreadUrl = '', rawId = '') {
+function normalizeSimpCityRecallPayload(rawNames, rawThreadUrl = '', rawId = '', rawAlbums = [], aiExtracted = false) {
   const names = [...new Set((Array.isArray(rawNames) ? rawNames : [])
     .map(value => String(value || '').trim())
     .filter(value => value.length >= 2 && value.length <= 100))];
   return {
     id: String(rawId || globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`),
     names,
+    albums: (Array.isArray(rawAlbums) ? rawAlbums : []).filter(album => album && typeof album === 'object' && album.url),
+    aiExtracted: aiExtracted === true,
     threadUrl: normalizeEromeLaunchUrl(rawThreadUrl) || 'https://simpcity.cr/',
     savedAt: new Date().toISOString()
   };
@@ -17250,7 +17259,7 @@ async function fetchSharedSimpCityRecall(endpoint, { consume = false } = {}) {
       reachable: true,
       recall: Array.isArray(recall?.names) && recall.names.length
         ? {
-            ...normalizeSimpCityRecallPayload(recall.names, recall.threadUrl, recall.id)
+            ...normalizeSimpCityRecallPayload(recall.names, recall.threadUrl, recall.id, recall.albums, recall.aiExtracted)
           }
         : null,
       pending: data?.pending && data.pending.threadUrl
@@ -17272,7 +17281,7 @@ function loadSimpCityRecall() {
   try {
     const parsed = JSON.parse(localStorage.getItem(SIMPCITY_RECALL_STORAGE_KEY) || 'null');
     if (Array.isArray(parsed?.names) && parsed.names.length) {
-      simpCityRecallMemory = normalizeSimpCityRecallPayload(parsed.names, parsed.threadUrl, parsed.id);
+      simpCityRecallMemory = normalizeSimpCityRecallPayload(parsed.names, parsed.threadUrl, parsed.id, parsed.albums, parsed.aiExtracted);
       return simpCityRecallMemory;
     }
   } catch (_) {}
@@ -17341,7 +17350,7 @@ async function startSimpCityRecall() {
     showSortingIndicator(
       `Latest SC Recall: ${getEromeTargetLabel(payload.threadUrl)} - ${payload.names.length} names`
     );
-    await loadSimpCityAsCards([payload.threadUrl], payload.names);
+    await loadSimpCityAsCards([payload.threadUrl], payload.names, payload.albums, payload.aiExtracted);
   } finally {
     simpCityRecallStarting = false;
     if (button) button.disabled = false;

@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Pong SimpCity Scraper
+// @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.3.2
-// @description  Adds a Scrape button to authenticated SimpCity threads and creates an isolated Pong SC Recall session.
+// @version      1.4.0
+// @description  Extracts creator identities from every post with the local Pong AI and prepares Balbums matches as pages arrive.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
 // @run-at       document-idle
@@ -15,154 +15,155 @@
 
 (() => {
   'use strict';
-  if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/\/threads\//i.test(location.pathname)) {
-    alert('Open a SimpCity thread before running Pong Scrape.');
-    return;
-  }
-  document.getElementById('pong-simpcity-scraper')?.remove();
-  const panel = document.createElement('div');
-  panel.id = 'pong-simpcity-scraper';
-  panel.style.cssText = [
-    'position:fixed', 'z-index:2147483647', 'left:10px', 'right:10px', 'bottom:12px',
-    'display:flex', 'gap:8px', 'align-items:center', 'padding:10px',
-    'background:#10141eee', 'border:1px solid #5f78a8', 'border-radius:12px',
-    'color:#fff', 'font:600 15px system-ui,sans-serif', 'box-shadow:0 4px 24px #000b'
-  ].join(';');
-  panel.innerHTML = `
-    <span data-status style="flex:1">Ready to scrape this entire thread</span>
-    <button data-scrape style="padding:11px 16px;font:inherit">Scrape</button>
-    <button data-close style="padding:11px;font:inherit">×</button>`;
-  document.body.appendChild(panel);
-  panel.querySelector('[data-close]').onclick = () => panel.remove();
-  const status = panel.querySelector('[data-status]');
-  const button = panel.querySelector('[data-scrape]');
-  const clean = value => String(value || '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/^(?:by|from|credit|credits?)\s*[:\-]\s*/i, '');
-  const commonFirstNames = new Set([
-    'abby','alice','alyssa','amanda','amber','amy','ana','anna','ashley','bella',
-    'brianna','brooke','chloe','claire','danielle','ella','emily','emma','grace',
-    'hailey','hannah','isabella','jasmine','jessica','julia','katie','kayla',
-    'lauren','lily','madison','maya','mia','molly','natalie','nicole','olivia',
-    'paige','rachel','rebecca','samantha','sarah','sophia','taylor','victoria','zoe'
-  ]);
+  if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/\/threads\//i.test(location.pathname)) return;
+
+  const PAGE_CONCURRENCY = 4;
+  const AI_BATCH_SIZE = 6;
+  const AI_CONCURRENCY = 2;
   const endpoints = ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
-  const sendToPong = async (pathname, payload) => {
+  const monthDate = /^(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\s*$/i;
+
+  const sendToPong = async (pathname, payload, timeout = 90000) => {
     let lastError = '';
     for (const endpoint of endpoints) {
       try {
-        await new Promise((resolve, reject) => {
+        return await new Promise((resolve, reject) => {
           GM_xmlhttpRequest({
-            method: 'POST',
-            url: `${endpoint}${pathname}`,
+            method: 'POST', url: `${endpoint}${pathname}`,
             headers: { 'Content-Type': 'application/json' },
-            data: JSON.stringify(payload),
-            timeout: 8000,
-            onload: response => response.status >= 200 && response.status < 300
-              ? resolve()
-              : reject(new Error(`HTTP ${response.status}`)),
+            data: JSON.stringify(payload), timeout,
+            onload: response => {
+              let data = {};
+              try { data = JSON.parse(response.responseText || '{}'); } catch (_) {}
+              if (response.status >= 200 && response.status < 300 && data.ok !== false) resolve(data);
+              else reject(new Error(data.error || `HTTP ${response.status}`));
+            },
             onerror: () => reject(new Error('connection failed')),
             ontimeout: () => reject(new Error('connection timed out'))
           });
         });
-        return true;
-      } catch (error) {
-        lastError = error?.message || String(error);
-      }
+      } catch (error) { lastError = error?.message || String(error); }
     }
-    throw new Error(`PC recall unavailable: ${lastError || 'server not reachable'}`);
+    throw new Error(`PC AI unavailable: ${lastError || 'server not reachable'}`);
   };
+
+  const absoluteUrl = (raw, base) => {
+    try { return new URL(raw, base).href; } catch (_) { return ''; }
+  };
+  const fileLabel = raw => {
+    try { return decodeURIComponent(new URL(raw, location.href).pathname.split('/').filter(Boolean).at(-1) || ''); }
+    catch (_) { return ''; }
+  };
+  const uniqueObjects = (items, keyFn) => [...new Map(items.filter(Boolean).map(item => [keyFn(item), item])).values()];
+
+  function extractPostPayloads(html, pageNumber, pageUrl) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    let articles = [...doc.querySelectorAll('article.message')];
+    if (!articles.length) articles = [...doc.querySelectorAll('.message')];
+    return articles.map((article, index) => {
+      const body = article.querySelector('.message-body .bbWrapper, .message-body, .bbWrapper');
+      if (!body) return null;
+      const clone = body.cloneNode(true);
+      clone.querySelectorAll('blockquote,.bbCodeBlock--quote,.message-signature,.message-footer,.reactionsBar,button,script,style').forEach(node => node.remove());
+      const links = [...clone.querySelectorAll('a[href]')].map(anchor => {
+        const url = absoluteUrl(anchor.getAttribute('href'), pageUrl);
+        if (!url || /\/members\//i.test(url) || /(?:#post-|\/page-\d+)/i.test(url)) return null;
+        return { text: String(anchor.textContent || anchor.title || '').trim().slice(0, 240), url: url.slice(0, 1500) };
+      }).filter(Boolean);
+      const attachments = [];
+      clone.querySelectorAll('img').forEach(image => {
+        [image.alt, image.title, fileLabel(image.getAttribute('src'))].forEach(value => {
+          value = String(value || '').trim();
+          if (value) attachments.push(value.slice(0, 300));
+        });
+      });
+      clone.querySelectorAll('a[href]').forEach(anchor => {
+        const href = anchor.getAttribute('href') || '';
+        if (/\.(?:jpe?g|png|webp|gif|mp4|mov|webm)(?:\?|$)/i.test(href)) attachments.push(fileLabel(href));
+      });
+      let lines = String(clone.innerText || clone.textContent || '').split(/\r?\n/).map(line => line.trim());
+      while (lines.length && (!lines[0] || monthDate.test(lines[0]) || /^Add bookmark$/i.test(lines[0]) || /^#\d+$/.test(lines[0]))) lines.shift();
+      const edited = lines.findIndex(line => /^Last edited\s*:/i.test(line));
+      if (edited >= 0) lines = lines.slice(0, edited);
+      const text = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, 14000);
+      if (!text && !links.length && !attachments.length) return null;
+      return {
+        postId: String(article.id || article.dataset?.content || `page-${pageNumber}-post-${index + 1}`),
+        page: pageNumber, text,
+        links: uniqueObjects(links, item => `${item.url}|${item.text}`).slice(0, 60),
+        attachments: [...new Set(attachments.filter(Boolean))].slice(0, 50)
+      };
+    }).filter(Boolean);
+  }
+
+  document.getElementById('pong-simpcity-scraper')?.remove();
+  const panel = document.createElement('div');
+  panel.id = 'pong-simpcity-scraper';
+  panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
+  panel.innerHTML = '<span data-status style="flex:1">Ready: all pages, local AI extraction</span><button data-scrape style="padding:11px 16px;font:inherit">Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  document.body.appendChild(panel);
+  panel.querySelector('[data-close]').onclick = () => panel.remove();
+  const status = panel.querySelector('[data-status]');
+  const button = panel.querySelector('[data-scrape]');
+
   button.onclick = async () => {
     button.disabled = true;
     try {
       const first = new URL(location.href);
       first.searchParams.delete('page');
-      first.pathname = first.pathname.replace(/page-\d+\/?$/i, '');
-      const scrapeId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      status.textContent = `Starting ${first.pathname.split('/').filter(Boolean).at(-1) || 'thread'}...`;
-      await sendToPong('/simpcity/recall/begin', { id: scrapeId, threadUrl: first.href });
-      const pageNumbers = [...document.querySelectorAll('a[href*="/page-"]')]
-        .map(anchor => Number(anchor.href.match(/page-(\d+)/)?.[1] || 1));
-      const total = Math.max(1, ...pageNumbers);
-      const htmls = [document.documentElement.outerHTML];
-      for (let start = 2; start <= total; start += 4) {
-        const pages = [start, start + 1, start + 2, start + 3].filter(page => page <= total);
-        status.textContent = `Pages ${start}-${pages.at(-1)} of ${total}`;
-        const batch = await Promise.all(pages.map(async page => {
-          const url = new URL(first);
-          url.pathname = url.pathname.replace(/\/$/, '') + `/page-${page}`;
+      first.pathname = first.pathname.replace(/page-\d+\/?$/i, '').replace(/\/$/, '') + '/';
+      const scrapeId = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      await sendToPong('/simpcity/recall/begin', { id: scrapeId, threadUrl: first.href }, 12000);
+      const pageNumbers = [...document.querySelectorAll('a[href*="/page-"]')].map(a => Number(a.href.match(/page-(\d+)/)?.[1] || 1));
+      const totalPages = Math.max(1, ...pageNumbers);
+      const names = new Map();
+      const albums = new Map();
+      const aiSlots = Array.from({ length: AI_CONCURRENCY }, () => Promise.resolve());
+      const aiTasks = [];
+      let slotIndex = 0, pagesFetched = 0, postsSent = 0;
+      const update = () => { status.textContent = `${pagesFetched}/${totalPages} pages · ${postsSent} posts · ${names.size} creators · ${albums.size} albums`; };
+      const queuePosts = posts => {
+        for (let offset = 0; offset < posts.length; offset += AI_BATCH_SIZE) {
+          const batch = posts.slice(offset, offset + AI_BATCH_SIZE);
+          const slot = slotIndex++ % AI_CONCURRENCY;
+          const task = aiSlots[slot] = aiSlots[slot].then(async () => {
+            const result = await sendToPong('/simpcity/extract-creators', { id: scrapeId, posts: batch });
+            postsSent += batch.length;
+            for (const creator of result.creators || []) {
+              for (const raw of [creator.primaryName, ...(creator.aliases || []), ...(creator.usernames || [])]) {
+                const value = String(raw || '').trim();
+                const key = value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+                if (key.length >= 2 && value.length <= 100 && !names.has(key)) names.set(key, value);
+              }
+            }
+            for (const album of result.albums || []) if (album?.url) albums.set(album.url, album);
+            update();
+          });
+          aiTasks.push(task);
+        }
+      };
+      queuePosts(extractPostPayloads(document.documentElement.outerHTML, 1, first.href));
+      pagesFetched = 1; update();
+      for (let start = 2; start <= totalPages; start += PAGE_CONCURRENCY) {
+        const pages = Array.from({ length: PAGE_CONCURRENCY }, (_, i) => start + i).filter(page => page <= totalPages);
+        const fetched = await Promise.all(pages.map(async page => {
+          const url = new URL(first); url.pathname = `${first.pathname.replace(/\/$/, '')}/page-${page}`;
           const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
           if (!response.ok) throw new Error(`page ${page} HTTP ${response.status}`);
-          return response.text();
+          return { page, url: url.href, html: await response.text() };
         }));
-        htmls.push(...batch);
+        for (const item of fetched) { queuePosts(extractPostPayloads(item.html, item.page, item.url)); pagesFetched++; }
+        update();
       }
-      const names = new Map();
-      const add = raw => {
-        const name = clean(raw);
-        const words = name.split(/\s+/).filter(Boolean);
-        const lower = name.toLowerCase().replace(/^@/, '');
-        const distinctSingle = words.length === 1 &&
-          !commonFirstNames.has(lower) &&
-          (lower.replace(/[^a-z0-9]+/g, '').length >= 7 || /[0-9_.]/.test(lower));
-        if (
-          name.length < 2 ||
-          name.length > 45 ||
-          words.length > 4 ||
-          (words.length === 1 && !distinctSingle) ||
-          /^(?:reply|report|quote|simpcity|forums?|members?|login|register)$/i.test(name)
-        ) return;
-        const key = name.toLowerCase().replace(/[^a-z0-9]+/g, '');
-        if (key.length >= 4 && !names.has(key)) names.set(key, name);
-      };
-      const addAliases = raw => {
-        const cleaned = clean(raw).replace(/\s*(?:\||-)\s*SimpCity.*$/i, '');
-        const aliases = cleaned.split(
-          /\s+(?:a\.?k\.?a\.?|aka|also\s+known\s+as)\s+|\s*[|/]\s*/i
-        );
-        aliases.forEach(add);
-      };
-      for (const html of htmls) {
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        doc.querySelectorAll('blockquote,.bbCodeBlock--quote').forEach(node => node.remove());
-        doc.querySelectorAll('.message-body,.bbWrapper').forEach(body => {
-          body.querySelectorAll('a[href*="/threads/"]').forEach(anchor => {
-            if (/page-\d+|#post-/i.test(anchor.href)) return;
-            let slug = '';
-            try {
-              slug = decodeURIComponent(new URL(anchor.href).pathname.match(
-                /^\/threads\/(.+?)(?:\.\d+)?\/?$/i
-              )?.[1] || '').replace(/[-_]+/g, ' ');
-            } catch (_) {}
-            addAliases(anchor.title);
-            addAliases(anchor.textContent);
-            addAliases(slug);
-          });
-          const text = body.innerText || '';
-          for (const match of text.matchAll(
-            /(?:aka|also known as|model|creator)\s*[:\-]?\s*([@A-Za-z0-9_. -]{2,60})/gi
-          )) addAliases(match[1]);
-          body.querySelectorAll(
-            'a[href*="instagram.com/"],a[href*="twitter.com/"],a[href*="x.com/"],a[href*="onlyfans.com/"]'
-          ).forEach(anchor => {
-            try { add(new URL(anchor.href).pathname.split('/').filter(Boolean)[0]); } catch (_) {}
-          });
-        });
-      }
-      status.textContent = `${names.size} names - saving for SC Recall`;
-      const payload = {
-        id: scrapeId,
-        threadUrl: first.href,
-        names: [...names.values()].slice(0, 1000)
-      };
-      await sendToPong('/simpcity/recall', payload);
-      status.textContent = `${names.size} names saved — open Pong and tap SC Recall`;
-      button.disabled = false;
+      await Promise.all(aiTasks);
+      if (!names.size) throw new Error('Local AI found no creator identities in the thread posts');
+      await sendToPong('/simpcity/recall', {
+        id: scrapeId, schema: 'pong-simpcity-ai-v1', threadUrl: first.href,
+        names: [...names.values()].slice(0, 1000), albums: [...albums.values()], aiExtracted: true
+      }, 15000);
+      status.textContent = `Saved: ${names.size} AI names · ${albums.size} ready albums — tap SC Recall`;
     } catch (error) {
       status.textContent = `Failed: ${error?.message || error}`;
-      button.disabled = false;
-    }
+    } finally { button.disabled = false; }
   };
 })();
