@@ -836,7 +836,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.44</div>
+    <div class="version-number">25.45</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -17243,7 +17243,7 @@ async function fetchSharedSimpCityRecall(endpoint, { consume = false } = {}) {
       `${endpoint}/simpcity/recall?consume=${consume ? '1' : '0'}&t=${Date.now()}`,
       { cache: 'no-store' }
     );
-    if (!response.ok) return { reachable: false, recall: null, queueCount: 0 };
+    if (!response.ok) return { reachable: false, recall: null, pending: null, queueCount: 0 };
     const data = await response.json();
     const recall = data?.recall;
     return {
@@ -17253,10 +17253,17 @@ async function fetchSharedSimpCityRecall(endpoint, { consume = false } = {}) {
             ...normalizeSimpCityRecallPayload(recall.names, recall.threadUrl, recall.id)
           }
         : null,
+      pending: data?.pending && data.pending.threadUrl
+        ? {
+            id: String(data.pending.id || ''),
+            threadUrl: normalizeEromeLaunchUrl(data.pending.threadUrl) || String(data.pending.threadUrl),
+            startedAt: String(data.pending.startedAt || '')
+          }
+        : null,
       queueCount: Math.max(0, Number(data?.queueCount || 0))
     };
   } catch (_) {
-    return { reachable: false, recall: null, queueCount: 0 };
+    return { reachable: false, recall: null, pending: null, queueCount: 0 };
   }
 }
 
@@ -17318,6 +17325,13 @@ async function startSimpCityRecall() {
     const payload = shared.recall;
     if (!shared.reachable) {
       alert('SC Recall could not reach the PC server. No older scrape was loaded.');
+      return;
+    }
+    if (!payload?.names?.length && shared.pending?.threadUrl) {
+      alert(
+        `The latest SimpCity scrape (${getEromeTargetLabel(shared.pending.threadUrl)}) is still running in Firefox. ` +
+        'Wait until the script says it was saved, then press SC Recall again.'
+      );
       return;
     }
     if (!payload?.names?.length) {

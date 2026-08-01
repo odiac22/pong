@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.3.1
+// @version      1.3.2
 // @description  Adds a Scrape button to authenticated SimpCity threads and creates an isolated Pong SC Recall session.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -48,12 +48,41 @@
     'lauren','lily','madison','maya','mia','molly','natalie','nicole','olivia',
     'paige','rachel','rebecca','samantha','sarah','sophia','taylor','victoria','zoe'
   ]);
+  const endpoints = ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
+  const sendToPong = async (pathname, payload) => {
+    let lastError = '';
+    for (const endpoint of endpoints) {
+      try {
+        await new Promise((resolve, reject) => {
+          GM_xmlhttpRequest({
+            method: 'POST',
+            url: `${endpoint}${pathname}`,
+            headers: { 'Content-Type': 'application/json' },
+            data: JSON.stringify(payload),
+            timeout: 8000,
+            onload: response => response.status >= 200 && response.status < 300
+              ? resolve()
+              : reject(new Error(`HTTP ${response.status}`)),
+            onerror: () => reject(new Error('connection failed')),
+            ontimeout: () => reject(new Error('connection timed out'))
+          });
+        });
+        return true;
+      } catch (error) {
+        lastError = error?.message || String(error);
+      }
+    }
+    throw new Error(`PC recall unavailable: ${lastError || 'server not reachable'}`);
+  };
   button.onclick = async () => {
     button.disabled = true;
     try {
       const first = new URL(location.href);
       first.searchParams.delete('page');
       first.pathname = first.pathname.replace(/page-\d+\/?$/i, '');
+      const scrapeId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      status.textContent = `Starting ${first.pathname.split('/').filter(Boolean).at(-1) || 'thread'}...`;
+      await sendToPong('/simpcity/recall/begin', { id: scrapeId, threadUrl: first.href });
       const pageNumbers = [...document.querySelectorAll('a[href*="/page-"]')]
         .map(anchor => Number(anchor.href.match(/page-(\d+)/)?.[1] || 1));
       const total = Math.max(1, ...pageNumbers);
@@ -124,36 +153,11 @@
       }
       status.textContent = `${names.size} names - saving for SC Recall`;
       const payload = {
-        id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        id: scrapeId,
         threadUrl: first.href,
         names: [...names.values()].slice(0, 1000)
       };
-      const endpoints = ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
-      let saved = false;
-      let lastError = '';
-      for (const endpoint of endpoints) {
-        try {
-          await new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
-              method: 'POST',
-              url: `${endpoint}/simpcity/recall`,
-              headers: { 'Content-Type': 'application/json' },
-              data: JSON.stringify(payload),
-              timeout: 8000,
-              onload: response => response.status >= 200 && response.status < 300
-                ? resolve()
-                : reject(new Error(`HTTP ${response.status}`)),
-              onerror: () => reject(new Error('connection failed')),
-              ontimeout: () => reject(new Error('connection timed out'))
-            });
-          });
-          saved = true;
-          break;
-        } catch (error) {
-          lastError = error?.message || String(error);
-        }
-      }
-      if (!saved) throw new Error(`PC recall unavailable: ${lastError || 'server not reachable'}`);
+      await sendToPong('/simpcity/recall', payload);
       status.textContent = `${names.size} names saved — open Pong and tap SC Recall`;
       button.disabled = false;
     } catch (error) {

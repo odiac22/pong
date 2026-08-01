@@ -2148,6 +2148,7 @@ let simpCitySessionCache;
 let simpCityLoginState = null;
 const simpCityImportJobs = new Map();
 let simpCityRecallPayload = null;
+let simpCityRecallPending = null;
 
 function simpCityDelay(ms) {
   return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms || 0))));
@@ -9222,7 +9223,7 @@ const server = http.createServer(async (req, res) => {
   const authenticatedLanBrowser = hasValidLanBrowserSession(req);
   const simpCityRecallLanWrite =
     req.method === 'POST' &&
-    requestUrl.pathname === '/simpcity/recall' &&
+    requestUrl.pathname.startsWith('/simpcity/recall') &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
   const pcSavedLinksLanWrite =
     req.method === 'POST' &&
@@ -9304,14 +9305,35 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'GET' && url.pathname === '/simpcity/recall') {
+      if (
+        simpCityRecallPending &&
+        Date.now() - Date.parse(simpCityRecallPending.startedAt || 0) > 15 * 60_000
+      ) simpCityRecallPending = null;
       const consume = url.searchParams.get('consume') === '1';
       const recall = simpCityRecallPayload;
       if (consume) simpCityRecallPayload = null;
       json(res, 200, {
         ok: true,
         recall,
+        pending: simpCityRecallPending,
         queueCount: simpCityRecallPayload ? 1 : 0
       });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/recall/begin') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const suppliedId = String(payload?.id || '').trim();
+      const threadUrl = normalizeSimpCityThreadUrl(payload?.threadUrl);
+      if (!/^[a-z0-9-]{8,100}$/i.test(suppliedId) || !threadUrl) {
+        throw new Error('A valid SimpCity scrape ID and thread URL are required');
+      }
+      simpCityRecallPayload = null;
+      simpCityRecallPending = {
+        id: suppliedId,
+        threadUrl,
+        startedAt: new Date().toISOString()
+      };
+      json(res, 200, { ok: true, pending: simpCityRecallPending, queueCount: 0 });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/recall') {
@@ -9323,6 +9345,10 @@ const server = http.createServer(async (req, res) => {
       const threadUrl = normalizeSimpCityThreadUrl(payload?.threadUrl) || 'https://simpcity.cr/';
       const fingerprint = simpCityRecallFingerprint(threadUrl, names);
       const suppliedId = String(payload?.id || '').trim();
+      if (simpCityRecallPending?.id && simpCityRecallPending.id !== suppliedId) {
+        json(res, 409, { ok: false, error: 'A newer SimpCity scrape is already running' });
+        return;
+      }
       simpCityRecallPayload = {
         id: /^[a-z0-9-]{8,100}$/i.test(suppliedId) ? suppliedId : crypto.randomUUID(),
         fingerprint,
@@ -9330,6 +9356,7 @@ const server = http.createServer(async (req, res) => {
         threadUrl,
         savedAt: new Date().toISOString()
       };
+      simpCityRecallPending = null;
       json(res, 200, {
         ok: true,
         recall: simpCityRecallPayload,
