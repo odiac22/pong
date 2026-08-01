@@ -88,12 +88,15 @@ const SIMPCITY_RECALL_AI_BATCH_LIMIT = Math.max(
   Math.min(20, Number(process.env.PONG_SIMPCITY_RECALL_AI_BATCH_LIMIT || 6))
 );
 const VIDEO_FILE_CACHE_DIR = path.join(LOCAL_AI_DIR, '.ephemeral-video-cache');
-const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_BYTES || 12 * 1024 * 1024 * 1024));
+// This PC currently has a small amount of free C: space. A 12 GB cache could
+// exhaust the drive before normal eviction began, so preserve hard headroom.
+const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_BYTES || 3 * 1024 * 1024 * 1024));
+const VIDEO_FILE_CACHE_MIN_FREE_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MIN_FREE_BYTES || 2 * 1024 * 1024 * 1024));
 const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 2 * 1024 * 1024 * 1024));
 const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_TTL_MS || 60 * 60 * 1000));
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
-const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 16)));
-const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(12, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
+const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 10)));
+const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(8, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
 // While the visible card is below its healthy buffer, keep only two background
 // cache downloads alive. The active stream remains dominant without completely
 // stopping preparation of the next cards.
@@ -4377,6 +4380,7 @@ function videoFileCacheSnapshot() {
     bytes: videoFileCacheBytes,
     partial_bytes: partialBytes,
     max_bytes: VIDEO_FILE_CACHE_MAX_BYTES,
+    minimum_free_bytes: VIDEO_FILE_CACHE_MIN_FREE_BYTES,
     concurrency: VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY,
     background_concurrency: VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY,
     playback_background_concurrency: VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY,
@@ -4740,15 +4744,23 @@ function trimVideoFileCacheQueue() {
 
 async function evictVideoFileCacheIfNeeded(extraBytes = 0) {
   const now = Date.now();
+  let availableBytes = Number.POSITIVE_INFINITY;
+  try {
+    const stats = await fs.statfs(LOCAL_AI_DIR);
+    availableBytes = Number(stats.bavail || stats.bfree || 0) * Number(stats.bsize || 0);
+  } catch (_) {}
   const candidates = [...videoFileCacheRecords.values()]
     .filter(record => record.status === 'ready' && Number(record.activeReaders || 0) === 0)
     .sort((a, b) => Number(a.lastAccessedAt || a.updatedAt || 0) - Number(b.lastAccessedAt || b.updatedAt || 0));
   for (const record of candidates) {
     const expired = now - Number(record.updatedAt || 0) > VIDEO_FILE_CACHE_TTL_MS;
     const oversized = videoFileCacheBytes + extraBytes > VIDEO_FILE_CACHE_MAX_BYTES;
-    if (!expired && !oversized) break;
+    const lowDisk = availableBytes < VIDEO_FILE_CACHE_MIN_FREE_BYTES;
+    if (!expired && !oversized && !lowDisk) break;
     try { await fs.rm(record.filePath, { force: true }); } catch (_) {}
-    videoFileCacheBytes = Math.max(0, videoFileCacheBytes - Number(record.bytes || 0));
+    const removedBytes = Number(record.bytes || 0);
+    videoFileCacheBytes = Math.max(0, videoFileCacheBytes - removedBytes);
+    if (Number.isFinite(availableBytes)) availableBytes += removedBytes;
     videoFileCacheRecords.delete(record.id);
   }
 }

@@ -550,14 +550,10 @@
       display: flex; justify-content: space-between; gap: 10px;
       font-size: 10px; font-weight: 750; margin-bottom: 3px;
     }
-    #simpcity-disconnect, #simpcity-skip {
+    #simpcity-disconnect {
       display: none; margin-left: auto; padding: 2px 6px; border-radius: 5px;
       border: 1px solid rgba(248,113,113,0.42); background: rgba(127,29,29,0.34);
       color: #fecaca; font-size: 8px; font-weight: 800; cursor: pointer; pointer-events: auto;
-    }
-    #simpcity-skip {
-      margin-left: 0; border-color: rgba(96,165,250,0.52);
-      background: rgba(30,64,175,0.40); color: #dbeafe;
     }
     .erome-progress-detail {
       font-size: 9px; color: rgba(226,232,240,0.72); margin-bottom: 4px;
@@ -836,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.55</div>
+    <div class="version-number">25.56</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3163,6 +3159,24 @@ function createSaveButtons() {
   rejectBtn.addEventListener('click', e => {
     e.preventDefault();
     e.stopPropagation();
+    const visibleIndex = typeof syncCurrentPasteIndexFromVisibleVideo === 'function'
+      ? syncCurrentPasteIndexFromVisibleVideo()
+      : -1;
+    const activeEvent = pasteEvents[visibleIndex >= 0 ? visibleIndex : currentPasteIndex] || {};
+    if (
+      activeEvent.source === 'bunkr' &&
+      (
+        activeEvent.simpCityJobId ||
+        /(?:^|\.)simpcity\.cr$/i.test((() => {
+          try { return new URL(activeEvent.artistUrl || activeEvent.artistKey || '').hostname; }
+          catch (_) { return ''; }
+        })())
+      )
+    ) {
+      rejectMenu.classList.remove('open');
+      void skipCurrentSimpCityCreator(e);
+      return;
+    }
     rejectMenu.classList.toggle('open');
   });
 
@@ -7977,7 +7991,6 @@ function ensureEromeProgressEl() {
   el.innerHTML = `
     <div class="erome-progress-title">
       <span id="erome-progress-title">Scraping Erome</span>
-      <button id="simpcity-skip" type="button">Skip</button>
       <button id="simpcity-disconnect" type="button">Disconnect</button>
       <span id="erome-progress-percent">0%</span>
     </div>
@@ -7987,7 +8000,6 @@ function ensureEromeProgressEl() {
     </div>
   `;
   document.body.appendChild(el);
-  document.getElementById('simpcity-skip')?.addEventListener('click', skipCurrentSimpCityCreator);
   document.getElementById('simpcity-disconnect')?.addEventListener('click', disconnectSimpCity);
   return el;
 }
@@ -10434,18 +10446,13 @@ function resetRandom40ServerVideoCacheClientState() {
 }
 
 function random40ResetServerVideoCacheOnClose() {
-  const endpoint = random40ServerVideoCacheEndpoint();
-  if (!endpoint) return;
+  // Multiple Pong tabs share one PC cache. Closing either tab must not erase
+  // files still serving the other; the server scrubs after all activity idles.
   resetRandom40ServerVideoCacheClientState();
-  try {
-    const payload = new Blob(['{}'], { type: 'text/plain' });
-    if (navigator.sendBeacon?.(`${endpoint}/video-cache/reset`, payload)) return;
-  } catch (_) {}
-  fetch(`${endpoint}/video-cache/reset`, { method: 'POST', cache: 'no-store', keepalive: true }).catch(() => {});
 }
 
-// Refreshing, closing, or discarding Pong requests an immediate scrub. The
-// server also keeps the short heartbeat idle wipe as a crash/network fallback.
+// Closing one tab releases only its client state. The shared cache is scrubbed
+// by the server after no Pong instance has sent a heartbeat for the idle window.
 window.addEventListener('pagehide', random40ResetServerVideoCacheOnClose);
 window.addEventListener('pageshow', () => {
   if (!isRandom40PlaybackActive()) return;
@@ -16705,9 +16712,10 @@ function normalizeSimpCityCreatorKey(value) {
 }
 
 function setSimpCitySkipVisible(visible) {
-  ensureEromeProgressEl();
-  const button = document.getElementById('simpcity-skip');
-  if (button) button.style.display = visible ? 'inline-block' : 'none';
+  const button = document.getElementById('reject-current-artist-button');
+  if (button && visible) {
+    button.title = 'Skip the current SimpCity creator for this Recall session';
+  }
 }
 
 async function skipCurrentSimpCityCreator(event) {
@@ -16908,6 +16916,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     alert('SimpCity imports need the Pong PC server to be running and reachable.');
     return;
   }
+  // SimpCity uses the hidden PC media cache too. Keep its liveness heartbeat
+  // running during long recall sessions, even though Random40 is not active.
+  random40StartServerVideoCacheTimers();
   document.querySelectorAll('video').forEach(video => {
     try { video.pause(); } catch (_) {}
     video.removeAttribute('src');
