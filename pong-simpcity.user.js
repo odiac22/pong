@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.4.0
+// @version      1.5.0
 // @description  Extracts creator identities from every post with the local Pong AI and prepares Balbums matches as pages arrive.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -100,20 +100,20 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">Ready: all pages, local AI extraction</span><button data-scrape style="padding:11px 16px;font:inherit">Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.5.0 · Ready: live AI extraction</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
-  const button = panel.querySelector('[data-scrape]');
+  const buttons = [...panel.querySelectorAll('[data-scrape]')];
 
-  button.onclick = async () => {
-    button.disabled = true;
+  const runScrape = async channel => {
+    buttons.forEach(button => { button.disabled = true; });
     try {
       const first = new URL(location.href);
       first.searchParams.delete('page');
       first.pathname = first.pathname.replace(/page-\d+\/?$/i, '').replace(/\/$/, '') + '/';
       const scrapeId = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      await sendToPong('/simpcity/recall/begin', { id: scrapeId, threadUrl: first.href }, 12000);
+      await sendToPong('/simpcity/recall/begin', { id: scrapeId, threadUrl: first.href, channel }, 12000);
       const pageNumbers = [...document.querySelectorAll('a[href*="/page-"]')].map(a => Number(a.href.match(/page-(\d+)/)?.[1] || 1));
       const totalPages = Math.max(1, ...pageNumbers);
       const names = new Map();
@@ -127,7 +127,7 @@
           const batch = posts.slice(offset, offset + AI_BATCH_SIZE);
           const slot = slotIndex++ % AI_CONCURRENCY;
           const task = aiSlots[slot] = aiSlots[slot].then(async () => {
-            const result = await sendToPong('/simpcity/extract-creators', { id: scrapeId, posts: batch });
+            const result = await sendToPong('/simpcity/extract-creators', { id: scrapeId, channel, posts: batch });
             postsSent += batch.length;
             for (const creator of result.creators || []) {
               for (const raw of [creator.primaryName, ...(creator.aliases || []), ...(creator.usernames || [])]) {
@@ -158,12 +158,15 @@
       await Promise.all(aiTasks);
       if (!names.size) throw new Error('Local AI found no creator identities in the thread posts');
       await sendToPong('/simpcity/recall', {
-        id: scrapeId, schema: 'pong-simpcity-ai-v1', threadUrl: first.href,
+        id: scrapeId, channel, schema: 'pong-simpcity-ai-v1', threadUrl: first.href,
         names: [...names.values()].slice(0, 1000), albums: [...albums.values()], aiExtracted: true
       }, 15000);
-      status.textContent = `Saved: ${names.size} AI names · ${albums.size} ready albums — tap SC Recall`;
+      status.textContent = `Pong ${channel} done: ${names.size} AI names · ${albums.size} albums`;
     } catch (error) {
       status.textContent = `Failed: ${error?.message || error}`;
-    } finally { button.disabled = false; }
+    } finally { buttons.forEach(button => { button.disabled = false; }); }
   };
+  buttons.forEach(button => {
+    button.onclick = () => runScrape(Number(button.dataset.scrape) === 2 ? 2 : 1);
+  });
 })();

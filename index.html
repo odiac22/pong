@@ -272,7 +272,7 @@
     #saved-erome { background: rgba(251,191,36,0.18); }
     #random-40-local { background: rgba(244,114,182,0.20); }
     #random-40-local2 { background: rgba(168,85,247,0.20); }
-    #simpcity-recall { background: rgba(56,189,248,0.20); }
+    #simpcity-recall-1, #simpcity-recall-2 { background: rgba(56,189,248,0.20); }
     #random-40-nano { background: rgba(14,165,233,0.20); }
     #train-ai { background: linear-gradient(135deg,rgba(236,72,153,0.28),rgba(139,92,246,0.28)); }
     #random-40 { background: rgba(244,114,182,0.20); }
@@ -836,7 +836,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.46</div>
+    <div class="version-number">25.47</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -849,7 +849,8 @@
         <button id="saved-erome">Saved Erome</button>
         <button id="random-40-local2">R40 Local 2</button>
         <button id="random-40-local">R40 Local 2.2</button>
-        <button id="simpcity-recall">SC Recall</button>
+        <button id="simpcity-recall-1">Recall 1</button>
+        <button id="simpcity-recall-2">Recall 2</button>
         <button id="train-ai">Train AI</button>
       </div>
     </div>
@@ -16872,8 +16873,8 @@ function openSimpCityLoginOverlay(endpoint) {
   refreshFrame();
 }
 
-async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedAlbums = [], aiExtracted = false) {
-  if (!suppliedCreatorNames.length && targets[0]) {
+async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedAlbums = [], aiExtracted = false, recallChannel = 0) {
+  if (!suppliedCreatorNames.length && targets[0] && !recallChannel) {
     const installed = confirm(
       'Open the real SimpCity page now?\n\n' +
       'Press OK if the “Pong Scrape” bookmark is installed. After login, run that bookmark.\n\n' +
@@ -17106,7 +17107,28 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   });
 
   try {
-    const discoveryInputs = suppliedAlbums.length
+    if (recallChannel) {
+      while (loadGeneration === bunkrLoadGeneration) {
+        const shared = await fetchSharedSimpCityRecall(endpoint, { channel: recallChannel });
+        if (!shared.reachable) throw new Error(`Recall ${recallChannel} lost contact with the PC server`);
+        if (shared.recall) {
+          discoveredCreators = Math.max(discoveredCreators, shared.recall.names.length);
+          enqueueAlbums(shared.recall.albums);
+          updateEromeProgress({
+            title: cardsStarted ? `Recall ${recallChannel} playing while more load` : `Recall ${recallChannel} waiting for first match`,
+            detail: `${discoveredCreators} AI names · ${discoveredAlbums} matching albums`,
+            completed: Number(shared.pending?.postsProcessed || discoveredCreators),
+            total: Math.max(1, Number(shared.pending?.postsProcessed || discoveredCreators)),
+            videos: videoCount
+          });
+        }
+        if (!shared.pending) break;
+        await sleep(800);
+      }
+    }
+    const discoveryInputs = recallChannel
+      ? []
+      : suppliedAlbums.length
       ? []
       : suppliedCreatorNames.length
       ? [{ names: suppliedCreatorNames }]
@@ -17202,7 +17224,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
 const SIMPCITY_RECALL_STORAGE_KEY = 'pong_simpcity_recall_v1';
 let simpCityRecallMemory = null;
 
-function normalizeSimpCityRecallPayload(rawNames, rawThreadUrl = '', rawId = '', rawAlbums = [], aiExtracted = false) {
+function normalizeSimpCityRecallPayload(rawNames, rawThreadUrl = '', rawId = '', rawAlbums = [], aiExtracted = false, channel = 1, live = false) {
   const names = [...new Set((Array.isArray(rawNames) ? rawNames : [])
     .map(value => String(value || '').trim())
     .filter(value => value.length >= 2 && value.length <= 100))];
@@ -17211,6 +17233,8 @@ function normalizeSimpCityRecallPayload(rawNames, rawThreadUrl = '', rawId = '',
     names,
     albums: (Array.isArray(rawAlbums) ? rawAlbums : []).filter(album => album && typeof album === 'object' && album.url),
     aiExtracted: aiExtracted === true,
+    channel: Number(channel) === 2 ? 2 : 1,
+    live: live === true,
     threadUrl: normalizeEromeLaunchUrl(rawThreadUrl) || 'https://simpcity.cr/',
     savedAt: new Date().toISOString()
   };
@@ -17246,10 +17270,10 @@ async function publishSimpCityRecallToServer(payload) {
   }
 }
 
-async function fetchSharedSimpCityRecall(endpoint, { consume = false } = {}) {
+async function fetchSharedSimpCityRecall(endpoint, { consume = false, channel = 1 } = {}) {
   try {
     const response = await fetch(
-      `${endpoint}/simpcity/recall?consume=${consume ? '1' : '0'}&t=${Date.now()}`,
+      `${endpoint}/simpcity/recall?channel=${Number(channel) === 2 ? 2 : 1}&consume=${consume ? '1' : '0'}&t=${Date.now()}`,
       { cache: 'no-store' }
     );
     if (!response.ok) return { reachable: false, recall: null, pending: null, queueCount: 0 };
@@ -17259,7 +17283,7 @@ async function fetchSharedSimpCityRecall(endpoint, { consume = false } = {}) {
       reachable: true,
       recall: Array.isArray(recall?.names) && recall.names.length
         ? {
-            ...normalizeSimpCityRecallPayload(recall.names, recall.threadUrl, recall.id, recall.albums, recall.aiExtracted)
+            ...normalizeSimpCityRecallPayload(recall.names, recall.threadUrl, recall.id, recall.albums, recall.aiExtracted, recall.channel || channel, recall.live)
           }
         : null,
       pending: data?.pending && data.pending.threadUrl
@@ -17296,20 +17320,21 @@ function encodeSimpCityRecall(payload) {
 }
 
 function updateSimpCityRecallButton() {
-  const button = document.getElementById('simpcity-recall');
-  if (!button) return;
-  const count = Number(loadSimpCityRecall()?.names?.length || 0);
-  button.textContent = count ? `SC Recall (${count})` : 'SC Recall';
+  const one = document.getElementById('simpcity-recall-1');
+  const two = document.getElementById('simpcity-recall-2');
+  if (one) one.textContent = 'Recall 1';
+  if (two) two.textContent = 'Recall 2';
   button.disabled = false;
   button.title = count ? `${count} locally saved SimpCity names` : 'Load the latest SimpCity scrape from either Pong app';
 }
 
 let simpCityRecallStarting = false;
 
-async function startSimpCityRecall() {
+async function startSimpCityRecall(channel = 1) {
+  channel = Number(channel) === 2 ? 2 : 1;
   if (simpCityRecallStarting) return;
   simpCityRecallStarting = true;
-  const button = document.getElementById('simpcity-recall');
+  const button = document.getElementById(`simpcity-recall-${channel}`);
   if (button) button.disabled = true;
   const endpoint = random40NormalizeLocalEndpoint(
     random40StoredLocalEndpoint() || RANDOM40_LOCAL_ENDPOINTS[RANDOM40_LOCAL_ENDPOINTS.length - 1]
@@ -17329,28 +17354,27 @@ async function startSimpCityRecall() {
     updateSimpCityRecallButton();
     const shared = await fetchSharedSimpCityRecall(
       location.port === '8787' ? location.origin : endpoint,
-      { consume: true }
+      { channel }
     );
     const payload = shared.recall;
     if (!shared.reachable) {
       alert('SC Recall could not reach the PC server. No older scrape was loaded.');
       return;
     }
-    if (!payload?.names?.length && shared.pending?.threadUrl) {
-      alert(
-        `The latest SimpCity scrape (${getEromeTargetLabel(shared.pending.threadUrl)}) is still running in Firefox. ` +
-        'Wait until the script says it was saved, then press SC Recall again.'
-      );
+    if (!payload?.names?.length && !shared.pending?.threadUrl) {
+      alert(`No Recall ${channel} scrape is active. Press Pong ${channel} Scrape in the SimpCity script first.`);
       return;
     }
-    if (!payload?.names?.length) {
-      alert('No latest SC Recall is ready. Run Scrape on the SimpCity thread first, then return here.');
-      return;
-    }
-    showSortingIndicator(
-      `Latest SC Recall: ${getEromeTargetLabel(payload.threadUrl)} - ${payload.names.length} names`
+    const activePayload = payload || normalizeSimpCityRecallPayload(
+      [], shared.pending.threadUrl, shared.pending.id, [], true, channel, true
     );
-    await loadSimpCityAsCards([payload.threadUrl], payload.names, payload.albums, payload.aiExtracted);
+    showSortingIndicator(
+      `Recall ${channel}: ${getEromeTargetLabel(activePayload.threadUrl)} - ${activePayload.names.length} names so far`
+    );
+    await loadSimpCityAsCards(
+      [activePayload.threadUrl], activePayload.names, activePayload.albums,
+      activePayload.aiExtracted, channel
+    );
   } finally {
     simpCityRecallStarting = false;
     if (button) button.disabled = false;
@@ -18282,7 +18306,8 @@ async function startRandom40Local2Fast(buttonStartedAt = Date.now()) {
 
 document.getElementById('random-40-local')?.addEventListener('click',()=>startRandom40Local22(Date.now()));
 document.getElementById('random-40-local2')?.addEventListener('click',()=>startRandom40Local2Fast(Date.now()));
-document.getElementById('simpcity-recall')?.addEventListener('click', startSimpCityRecall);
+document.getElementById('simpcity-recall-1')?.addEventListener('click', () => startSimpCityRecall(1));
+document.getElementById('simpcity-recall-2')?.addEventListener('click', () => startSimpCityRecall(2));
 document.getElementById('random-40-nano')?.addEventListener('click',()=>startRandom40('nano', Date.now()));
 document.getElementById('train-ai')?.addEventListener('click', openTrainAiPanel);
 document.getElementById('train-ai-close')?.addEventListener('click', closeTrainAiPanel);
