@@ -2990,7 +2990,7 @@ async function prefetchSimpCityCreatorAlbums(creators) {
   await mapWithConcurrency(candidates.slice(0, 40), SIMPCITY_SEARCH_CONCURRENCY, async candidate => {
     try {
       const searchUrl = buildBAlbumsCreatorSearchUrl(candidate.query);
-      const matching = bunkrAlbumsMatchingCreator(await discoverBunkrAlbums(searchUrl), candidate);
+      const matching = bunkrAlbumsMatchingCreator(await discoverBunkrAlbums(searchUrl), candidate).slice(0, 3);
       for (const album of matching) {
         if (!album?.url || albumUrls.has(album.url)) continue;
         albumUrls.add(album.url);
@@ -3005,7 +3005,14 @@ async function prefetchSimpCityCreatorAlbums(creators) {
       }
     } catch (_) {}
   });
-  return albums;
+  const verified = [];
+  await mapWithConcurrency(albums.slice(0, 60), 8, async album => {
+    try {
+      const videos = await extractBunkrVideoUrls(album.url);
+      if (videos.length) verified.push({ ...album, videos });
+    } catch (_) {}
+  });
+  return verified;
 }
 
 function simpCityPublicJob(job) {
@@ -9597,8 +9604,21 @@ const server = http.createServer(async (req, res) => {
           creatorName: String(rawAlbum?.creatorName || '').slice(0, 120),
           creatorKey: String(rawAlbum?.creatorKey || '').slice(0, 120),
           searchUrl: String(rawAlbum?.searchUrl || '').slice(0, 1200),
+          videos: [...new Set((Array.isArray(rawAlbum?.videos) ? rawAlbum.videos : [])
+            .map(value => String(value || '').trim())
+            .filter(value => /^https?:\/\//i.test(value)))].slice(0, 500),
           source: 'bunkr'
         });
+      }
+      if (albums.length && !albums.some(album => album.videos.length)) {
+        const playableAlbums = [];
+        await mapWithConcurrency(albums.slice(0, 60), 8, async album => {
+          try {
+            const videos = await extractBunkrVideoUrls(album.url);
+            if (videos.length) playableAlbums.push({ ...album, videos });
+          } catch (_) {}
+        });
+        albums.splice(0, albums.length, ...playableAlbums);
       }
       state.payload = {
         id: /^[a-z0-9-]{8,100}$/i.test(suppliedId) ? suppliedId : crypto.randomUUID(),
