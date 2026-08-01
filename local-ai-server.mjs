@@ -2151,6 +2151,7 @@ const simpCityRecallChannels = new Map([
   [1, { payload: null, pending: null }],
   [2, { payload: null, pending: null }]
 ]);
+const simpCityRecallAlbumTasks = new Map();
 function simpCityRecallChannel(rawChannel) {
   return Number(rawChannel) === 2 ? 2 : 1;
 }
@@ -6648,6 +6649,22 @@ function personalQwenReviewReasons(result = {}) {
   ) {
     derivedReasons.push('female presentation is not yet explicit on otherwise usable visual evidence');
   }
+  const checks = result?.checks || {};
+  const anatomy = result?.anatomy_assessment || {};
+  if (checks.male_present !== false || checks.male_only !== false || checks.female_presenting_adult !== true) {
+    derivedReasons.push('female presentation and absence of a male-presenting person must be explicitly verified');
+  }
+  if (
+    checks.attached_male_anatomy !== false || anatomy.attached_male_anatomy !== false ||
+    checks.anatomy_ambiguous === true || anatomy.ambiguous === true
+  ) {
+    derivedReasons.push('attached anatomy versus toy must be explicitly verified');
+  }
+  if (checks.feet_dominant !== false) derivedReasons.push('feet dominance must be explicitly resolved');
+  if (checks.appears_over_50 !== false) derivedReasons.push('visible age limit must be explicitly resolved');
+  if (checks.photograph !== true || checks.logo_or_placeholder !== false) {
+    derivedReasons.push('photograph and logo usability must be explicitly resolved');
+  }
   const rawReasons = [
     ...derivedReasons,
     ...(Array.isArray(result.qwen_review_reasons) ? result.qwen_review_reasons : []),
@@ -6672,7 +6689,8 @@ function personalDecisionNeedsQwenReview(result = {}) {
     result.requires_qwen_hard_check === true ||
     result.hard_review_required === true ||
     result.anatomy_assessment?.ambiguous === true ||
-    result.ambiguity?.requires_qwen_review === true;
+    result.ambiguity?.requires_qwen_review === true ||
+    personalQwenReviewReasons(result).length > 0;
 }
 
 function enforcePersonalAnatomyVeto(result = {}) {
@@ -6737,6 +6755,10 @@ function reviewReasonsIncludeGender(reasons = []) {
   return reasons.some(reason => /\b(gender|female|woman|male presenting|sex presentation)\b/i.test(String(reason || '')));
 }
 
+function reviewReasonsIncludeUsability(reasons = []) {
+  return reasons.some(reason => /\b(photograph|logo|placeholder|usability|non-photo)\b/i.test(String(reason || '')));
+}
+
 function enforceHardCheckReviewCompleteness(result = {}, reviewReasons = []) {
   const checks = { ...(result?.checks || {}) };
   const anatomy = normalizeAnatomyAssessment(result?.anatomy_assessment || {}, checks);
@@ -6777,6 +6799,9 @@ function enforceHardCheckReviewCompleteness(result = {}, reviewReasons = []) {
   if (reviewReasonsIncludeFeet(reviewReasons) && checks.feet_dominant !== false) {
     unresolved.push('feet dominance');
   }
+  if (reviewReasonsIncludeUsability(reviewReasons) && !(
+    checks.photograph === true && checks.logo_or_placeholder === false
+  )) unresolved.push('photograph usability');
   if (!unresolved.length) {
     return {
       ...normalizedResult,
@@ -6829,13 +6854,16 @@ function mergePersonalQwenReview(personal, qwen, reviewReasons = []) {
     checks.male_only === false
   );
   const feetUnresolved = reviewReasonsIncludeFeet(reviewReasons) && checks.feet_dominant !== false;
+  const usabilityUnresolved = reviewReasonsIncludeUsability(reviewReasons) && !(
+    checks.photograph === true && checks.logo_or_placeholder === false
+  );
   // A narrow review must be decided by the fields it was asked to resolve.
   // Qwen often fills unrelated age/anatomy fields with "ambiguous"; treating
   // those incidental nulls as artist-wide vetoes caused systematic false rejects.
   const ambiguity =
     (reviewReasonsIncludeAnatomy(reviewReasons) && (checks.anatomy_ambiguous === true || anatomy.ambiguous === true)) ||
     (reviewReasonsIncludeBody(reviewReasons) && checks.body_evidence_ambiguous === true) ||
-    anatomyUnresolved || bodyUnresolved || ageUnresolved || genderUnresolved || feetUnresolved;
+    anatomyUnresolved || bodyUnresolved || ageUnresolved || genderUnresolved || feetUnresolved || usabilityUnresolved;
   const concrete = hasConcreteVisionChecks(qwen);
 
   if (!qwen || hardVeto || bodyVeto || ambiguity || !concrete) {
@@ -7422,9 +7450,12 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
         localVariant: 'local2',
         candidateImageUrls: personalCandidateUrls
       }, trainAiRequest ? 45000 : 120000, { workload: true, signal });
-      const personal = enforcePersonalAnatomyVeto(personalRaw);
+      let personal = enforcePersonalAnatomyVeto(personalRaw);
       const personalDecision = String(personal?.decision || '').toLowerCase();
-      if (personalDecision === 'reject' || (personalDecision === 'accept' && personal.requires_qwen_review !== true)) {
+      if (
+        personalDecision === 'reject' ||
+        (personalDecision === 'accept' && local2CleanResultIsExplicitlyHardSafe(personal))
+      ) {
         return personal;
       }
       if (payload.deferQwenReview === true) return personal;
@@ -8015,9 +8046,9 @@ function local2ProfileTextEvidence(html = '', artistInfo = {}) {
 }
 
 function local2ExplicitCreatorTextHardReason(artistInfo = {}) {
-  const compactName = String(artistInfo?.artistName || '')
+  const rawName = String(artistInfo?.artistName || '').normalize('NFKD').toLowerCase();
+  const compactName = rawName
     .normalize('NFKD')
-    .toLowerCase()
     .replace(/[^a-z0-9]+/g, '');
   if (!compactName) return '';
   // These are explicit creator self-descriptions in the account slug, not an
@@ -8025,7 +8056,8 @@ function local2ExplicitCreatorTextHardReason(artistInfo = {}) {
   // "transformation" do not become false positives.
   if (
     /^ts[a-z0-9]/.test(compactName) ||
-    /(?:transgender|transgirl|transwoman|transfem|shemale|ladyboy)/.test(compactName) ||
+    /(?:transgender|transgirl|transwoman|transfem|tgirl|shemale|ladyboy)/.test(compactName) ||
+    /(?:^|[^a-z0-9])(?:ts|trans|transgender|tgirl|mtf)(?:$|[^a-z0-9])/.test(rawName) ||
     /(?:mtf|trans)$/.test(compactName)
   ) return 'blocked explicit creator self-description';
   return '';
@@ -9610,7 +9642,6 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const extracted = await extractSimpCityCreatorsWithAi(payload?.posts);
-      const albums = await prefetchSimpCityCreatorAlbums(extracted.creators);
       if (!state.pending?.id || state.pending.id !== suppliedId) {
         json(res, 409, { ok: false, error: 'A newer SimpCity scrape replaced this scrape' });
         return;
@@ -9618,24 +9649,38 @@ const server = http.createServer(async (req, res) => {
       const creatorKeys = new Set(state.pending.creators.map(creator => (
         String(creator?.primaryName || '').toLowerCase().replace(/[^a-z0-9]+/g, '')
       )));
+      const newCreators = [];
       for (const creator of extracted.creators) {
         const key = String(creator?.primaryName || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
         if (!key || creatorKeys.has(key)) continue;
         creatorKeys.add(key);
         state.pending.creators.push(creator);
-      }
-      const albumUrls = new Set(state.pending.albums.map(album => album.url));
-      for (const album of albums) {
-        if (!album?.url || albumUrls.has(album.url)) continue;
-        albumUrls.add(album.url);
-        state.pending.albums.push(album);
+        newCreators.push(creator);
       }
       state.pending.postsProcessed += extracted.posts.length;
+      if (newCreators.length) {
+        const taskKey = `${channel}:${suppliedId}`;
+        const tasks = simpCityRecallAlbumTasks.get(taskKey) || new Set();
+        const task = prefetchSimpCityCreatorAlbums(newCreators).then(albums => {
+          if (!state.pending?.id || state.pending.id !== suppliedId) return;
+          const albumUrls = new Set(state.pending.albums.map(album => album.url));
+          for (const album of albums) {
+            if (!album?.url || albumUrls.has(album.url)) continue;
+            albumUrls.add(album.url);
+            state.pending.albums.push(album);
+          }
+        }).catch(() => {}).finally(() => {
+          tasks.delete(task);
+          if (!tasks.size) simpCityRecallAlbumTasks.delete(taskKey);
+        });
+        tasks.add(task);
+        simpCityRecallAlbumTasks.set(taskKey, tasks);
+      }
       json(res, 200, {
         ok: true,
         id: suppliedId,
         creators: extracted.creators,
-        albums,
+        albums: [],
         totals: {
           posts: state.pending.postsProcessed,
           creators: state.pending.creators.length,
@@ -9660,6 +9705,9 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const pending = state.pending?.id === suppliedId ? state.pending : null;
+      const albumTaskKey = `${channel}:${suppliedId}`;
+      const pendingAlbumTasks = simpCityRecallAlbumTasks.get(albumTaskKey);
+      if (pendingAlbumTasks?.size) await Promise.allSettled([...pendingAlbumTasks]);
       const suppliedAlbums = [
         ...(Array.isArray(payload?.albums) ? payload.albums : []),
         ...(Array.isArray(pending?.albums) ? pending.albums : [])

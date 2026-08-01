@@ -113,9 +113,9 @@ BODY_POSITIVE_STRONG_MIN = float(os.environ.get("PONG_BODY_POSITIVE_STRONG_MIN",
 FACE_ONLY_ACCEPT_MIN = float(os.environ.get("PONG_FACE_ONLY_ACCEPT_MIN", "0.72"))
 FACE_HEAD_MIN_LOCAL1 = float(os.environ.get("PONG_FACE_REJECT_LOCAL1_MIN", "0.56"))
 FACE_HEAD_MIN_LOCAL2 = float(os.environ.get("PONG_FACE_REJECT_LOCAL2_MIN", "0.55"))
-ANATOMY_ATTACHED_MIN = float(os.environ.get("PONG_ANATOMY_ATTACHED_MIN", "0.78"))
-ANATOMY_ATTACHED_MARGIN = float(os.environ.get("PONG_ANATOMY_ATTACHED_MARGIN", "0.28"))
-ANATOMY_AMBIGUOUS_MIN = float(os.environ.get("PONG_ANATOMY_AMBIGUOUS_MIN", "0.50"))
+ANATOMY_ATTACHED_MIN = float(os.environ.get("PONG_ANATOMY_ATTACHED_MIN", "0.72"))
+ANATOMY_ATTACHED_MARGIN = float(os.environ.get("PONG_ANATOMY_ATTACHED_MARGIN", "0.20"))
+ANATOMY_AMBIGUOUS_MIN = float(os.environ.get("PONG_ANATOMY_AMBIGUOUS_MIN", "0.38"))
 # Keep the legacy output key for wire compatibility, but its meaning is now the
 # requested 60+ upper-age preference. The new environment name wins while the
 # old one remains a transition fallback for existing launch configurations.
@@ -1530,9 +1530,9 @@ def anatomy_assessment(analysis: dict[str, Any]) -> dict[str, Any]:
         # attached result rejects and a confident toy result passes; all material
         # evidence between those two outcomes is explicitly reviewed by Qwen.
         possible_explicit_content = bool(
-            none_visible < 0.55
-            and attached >= min(ANATOMY_AMBIGUOUS_MIN, 0.32)
-            and (attached >= toy - 0.18 or attached >= 0.44)
+            none_visible < 0.68
+            and attached >= min(ANATOMY_AMBIGUOUS_MIN, 0.24)
+            and (attached >= toy - 0.24 or attached >= 0.34)
         )
         is_ambiguous = bool(
             female_context
@@ -1702,8 +1702,8 @@ def hard_checks(
         material_male_ambiguity = bool(
             (clear_body or person_photo)
             and not clear_male_presentation
-            and male >= 0.28
-            and male > female + 0.06
+            and male >= 0.24
+            and male > female + 0.02
         )
         gender_presentation_ambiguous = bool(
             (clear_body or person_photo)
