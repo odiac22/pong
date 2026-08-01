@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.5.2
+// @version      1.5.4
 // @description  Extracts creator identities from every post with the local Pong AI and prepares Balbums matches as pages arrive.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -28,6 +28,7 @@
   const sendToPong = async (pathname, payload, timeout = 90000) => {
     let lastError = '';
     for (const endpoint of endpoints) {
+      for (let attempt = 1; attempt <= 4; attempt++) {
       try {
         const modernRequest = globalThis.GM?.xmlHttpRequest;
         const legacyRequest = globalThis.GM_xmlhttpRequest;
@@ -46,7 +47,11 @@
               let data = {};
               try { data = JSON.parse(response.responseText || '{}'); } catch (_) {}
               if (response.status >= 200 && response.status < 300 && data.ok !== false) resolve(data);
-              else reject(new Error(data.error || `HTTP ${response.status}`));
+              else {
+                const error = new Error(data.error || `HTTP ${response.status}`);
+                error.status = response.status;
+                reject(error);
+              }
             },
             onerror: response => reject(new Error(
               `connection failed${response?.error ? `: ${response.error}` : ''}`
@@ -54,7 +59,10 @@
             ontimeout: () => reject(new Error('connection timed out'))
           });
         });
-      } catch (error) { lastError = error?.message || String(error); }
+      } catch (error) {
+        if (error?.status === 409) throw error;
+        lastError = error?.message || String(error);
+      }
       try {
         const response = await fetch(`${endpoint}${pathname}`, {
           method: 'POST',
@@ -64,9 +72,17 @@
         });
         const data = await response.json().catch(() => ({}));
         if (response.ok && data.ok !== false) return data;
+        if (response.status === 409) {
+          const error = new Error(data.error || 'This scrape was superseded');
+          error.status = 409;
+          throw error;
+        }
         lastError = data.error || `HTTP ${response.status}`;
       } catch (error) {
+        if (error?.status === 409) throw error;
         lastError = `${lastError}; fetch ${error?.message || error}`;
+      }
+      if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 600 * attempt));
       }
     }
     throw new Error(`PC AI unavailable: ${lastError || 'server not reachable'}`);
@@ -80,6 +96,64 @@
     catch (_) { return ''; }
   };
   const uniqueObjects = (items, keyFn) => [...new Map(items.filter(Boolean).map(item => [keyFn(item), item])).values()];
+
+  const userscriptRequest = options => new Promise((resolve, reject) => {
+    const modernRequest = globalThis.GM?.xmlHttpRequest;
+    const legacyRequest = globalThis.GM_xmlhttpRequest;
+    const request = typeof modernRequest === 'function'
+      ? modernRequest.bind(globalThis.GM)
+      : typeof legacyRequest === 'function'
+        ? legacyRequest
+        : null;
+    if (!request) return reject(new Error('Tampermonkey request API unavailable'));
+    request({
+      ...options,
+      onload: response => response.status >= 200 && response.status < 300
+        ? resolve(response)
+        : reject(new Error(`HTTP ${response.status}`)),
+      onerror: response => reject(new Error(response?.error || 'connection failed')),
+      ontimeout: () => reject(new Error('connection timed out'))
+    });
+  });
+
+  async function fetchSimpCityPage(url, pageNumber) {
+    let lastError = '';
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      try {
+        const response = await fetch(url, {
+          credentials: 'include',
+          cache: 'no-store',
+          redirect: 'follow'
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const html = await response.text();
+        if (!/<(?:article|div)\b[^>]*class=["'][^"']*\bmessage\b/i.test(html)) {
+          throw new Error('page contained no posts');
+        }
+        return html;
+      } catch (nativeError) {
+        lastError = nativeError?.message || String(nativeError);
+      }
+      try {
+        const response = await userscriptRequest({
+          method: 'GET',
+          url,
+          timeout: 30000,
+          anonymous: false,
+          headers: { Accept: 'text/html,application/xhtml+xml' }
+        });
+        const html = String(response.responseText || '');
+        if (!/<(?:article|div)\b[^>]*class=["'][^"']*\bmessage\b/i.test(html)) {
+          throw new Error('page contained no posts');
+        }
+        return html;
+      } catch (userscriptError) {
+        lastError = `${lastError}; ${userscriptError?.message || userscriptError}`;
+      }
+      await new Promise(resolve => setTimeout(resolve, 500 * attempt));
+    }
+    throw new Error(`page ${pageNumber} failed after retries: ${lastError}`);
+  }
 
   function extractPostPayloads(html, pageNumber, pageUrl) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -125,7 +199,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.5.2 · Ready: live AI extraction</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.5.4 · Ready: resilient live AI extraction</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -178,9 +252,7 @@
         const pages = Array.from({ length: PAGE_CONCURRENCY }, (_, i) => start + i).filter(page => page <= totalPages);
         const fetched = await Promise.all(pages.map(async page => {
           const url = new URL(first); url.pathname = `${first.pathname.replace(/\/$/, '')}/page-${page}`;
-          const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
-          if (!response.ok) throw new Error(`page ${page} HTTP ${response.status}`);
-          return { page, url: url.href, html: await response.text() };
+          return { page, url: url.href, html: await fetchSimpCityPage(url.href, page) };
         }));
         for (const item of fetched) { queuePosts(extractPostPayloads(item.html, item.page, item.url)); pagesFetched++; }
         update();
