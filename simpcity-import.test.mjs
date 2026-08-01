@@ -78,6 +78,8 @@ test('splits linked-thread aliases and rejects vague first names', () => {
   assert.equal(isDistinctSimpCityCreatorName('Kayce'), false);
   assert.equal(isDistinctSimpCityCreatorName('Sarah'), false);
   assert.equal(isDistinctSimpCityCreatorName('Zoe'), false);
+  assert.equal(isDistinctSimpCityCreatorName('Australian Girls'), false);
+  assert.equal(isDistinctSimpCityCreatorName('Professional Athletes'), false);
   assert.equal(isDistinctSimpCityCreatorName('Ash Kaashh'), true);
   assert.equal(isDistinctSimpCityCreatorName('emmmyxo'), true);
 });

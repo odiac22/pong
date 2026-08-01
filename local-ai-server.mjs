@@ -83,6 +83,10 @@ const SIMPCITY_SEARCH_CONCURRENCY = Math.max(
   1,
   Math.min(8, Number(process.env.PONG_SIMPCITY_SEARCH_CONCURRENCY || 6))
 );
+const SIMPCITY_RECALL_AI_BATCH_LIMIT = Math.max(
+  0,
+  Math.min(20, Number(process.env.PONG_SIMPCITY_RECALL_AI_BATCH_LIMIT || 6))
+);
 const VIDEO_FILE_CACHE_DIR = path.join(LOCAL_AI_DIR, '.ephemeral-video-cache');
 const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_BYTES || 12 * 1024 * 1024 * 1024));
 const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 2 * 1024 * 1024 * 1024));
@@ -2924,8 +2928,9 @@ function simpCityAiValueGrounded(post, value) {
   return haystack.includes(lower) || haystack.replace(/[^a-z0-9]+/g, '').includes(key);
 }
 
-function simpCityExplicitUrlCreators(post) {
+function simpCityExplicitUrlCreators(post, currentThreadUrl = '') {
   const creators = [];
+  const currentThread = normalizeSimpCityThreadUrl(currentThreadUrl);
   for (const link of post?.links || []) {
     try {
       const url = new URL(link?.url || '');
@@ -2934,6 +2939,8 @@ function simpCityExplicitUrlCreators(post) {
       if (host === 'simpcity.cr' && segments[0]?.toLowerCase() === 'threads' && segments[1]) {
         const slug = segments[1].replace(/\.\d+$/, '');
         if (/\b(?:rules?|who-is-this|request|megathread)\b/i.test(slug)) continue;
+        const linkedThread = normalizeSimpCityThreadUrl(url.href);
+        if (linkedThread && linkedThread === currentThread) continue;
         const aliases = simpCityCreatorAliases(url.href).filter(isDistinctSimpCityCreatorName);
         if (aliases.length) {
           creators.push({
@@ -2968,7 +2975,7 @@ function simpCityExplicitUrlCreators(post) {
   return creators;
 }
 
-function extractSimpCityCreatorsDeterministically(rawPosts) {
+function extractSimpCityCreatorsDeterministically(rawPosts, currentThreadUrl = '') {
   const posts = (Array.isArray(rawPosts) ? rawPosts : [])
     .slice(0, 10)
     .map(compactSimpCityAiPost)
@@ -2977,7 +2984,7 @@ function extractSimpCityCreatorsDeterministically(rawPosts) {
   const seen = new Set();
   const resolvedPostIds = new Set();
   for (const post of posts) {
-    const explicit = simpCityExplicitUrlCreators(post);
+    const explicit = simpCityExplicitUrlCreators(post, currentThreadUrl);
     if (explicit.length) resolvedPostIds.add(post.postId);
     for (const creator of explicit) {
       const key = String(creator?.primaryName || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -2993,8 +3000,8 @@ function extractSimpCityCreatorsDeterministically(rawPosts) {
   };
 }
 
-async function extractSimpCityCreatorsWithAi(rawPosts, signal = null) {
-  const deterministic = extractSimpCityCreatorsDeterministically(rawPosts);
+async function extractSimpCityCreatorsWithAi(rawPosts, signal = null, currentThreadUrl = '') {
+  const deterministic = extractSimpCityCreatorsDeterministically(rawPosts, currentThreadUrl);
   const allPosts = deterministic.posts;
   const posts = deterministic.unresolvedPosts;
   if (!allPosts.length) return { creators: [], posts: [], aiPosts: 0, deterministicPosts: 0 };
@@ -3087,12 +3094,21 @@ async function extractSimpCityCreatorsWithAi(rawPosts, signal = null) {
 }
 
 const simpCityRecallSearchLimit = createSimpCityLimiter(SIMPCITY_SEARCH_CONCURRENCY);
-const simpCityRecallAlbumLimit = createSimpCityLimiter(8);
 
 function simpCityCreatorSearchCandidates(creators) {
   const candidates = [];
   const seen = new Set();
-  for (const creator of creators || []) {
+  const prioritizedCreators = [...(creators || [])].sort((left, right) => {
+    const priority = creator => /^https?:\/\/(?:www\.)?onlyfans\.com\//i.test(String(creator?.evidence || ''))
+      ? 0
+      : /^https?:\/\/(?:www\.)?(?:instagram|tiktok|x|twitter)\.com\//i.test(String(creator?.evidence || ''))
+        ? 1
+        : creator?.threadUrl
+          ? 2
+          : 3;
+    return priority(left) - priority(right);
+  });
+  for (const creator of prioritizedCreators) {
     const creatorName = String(creator?.primaryName || '').trim();
     const creatorKey = creatorName.toLowerCase().replace(/[^a-z0-9]+/g, '');
     if (!creatorKey) continue;
@@ -3117,7 +3133,6 @@ async function prefetchSimpCityCreatorAlbums(creators, { onAlbum = null, signal 
   const candidates = simpCityCreatorSearchCandidates(creators);
   const verified = [];
   const albumUrls = new Set();
-  const albumTasks = [];
   const searches = candidates.map(candidate => simpCityRecallSearchLimit(async () => {
     if (signal?.aborted) return;
     for (const query of candidate.queries) {
@@ -3140,16 +3155,10 @@ async function prefetchSimpCityCreatorAlbums(creators, { onAlbum = null, signal 
             searchUrl,
             source: 'bunkr'
           };
-          albumTasks.push(simpCityRecallAlbumLimit(async () => {
-            if (signal?.aborted) return;
-            try {
-              const videos = await extractBunkrVideoUrls(prepared.url);
-              if (!videos.length || signal?.aborted) return;
-              const ready = { ...prepared, videos };
-              verified.push(ready);
-              if (typeof onAlbum === 'function') await onAlbum(ready);
-            } catch (_) {}
-          }));
+          // Publish the matching album immediately. Pong's bounded album
+          // workers resolve its playable URLs without blocking other names.
+          verified.push(prepared);
+          if (typeof onAlbum === 'function') await onAlbum(prepared);
         }
         // Balbums fuzzy search already normalizes most punctuation. Only run a
         // fallback query when the authoritative handle produced no match.
@@ -3158,7 +3167,6 @@ async function prefetchSimpCityCreatorAlbums(creators, { onAlbum = null, signal 
     }
   }));
   await Promise.allSettled(searches);
-  await Promise.allSettled(albumTasks);
   return verified;
 }
 
@@ -9832,6 +9840,8 @@ const server = http.createServer(async (req, res) => {
         aiPostsQueued: 0,
         aiBatchesQueued: 0,
         aiBatchesCompleted: 0,
+        aiBatchesSkipped: 0,
+        aiPostsSkipped: 0,
         aiErrors: 0,
         albumSearchesQueued: 0,
         albumSearchesCompleted: 0,
@@ -9852,7 +9862,10 @@ const server = http.createServer(async (req, res) => {
         json(res, 409, { ok: false, error: 'This SimpCity scrape is no longer the active scrape' });
         return;
       }
-      const deterministic = extractSimpCityCreatorsDeterministically(payload?.posts);
+      const deterministic = extractSimpCityCreatorsDeterministically(
+        payload?.posts,
+        state.pending.threadUrl
+      );
       const newCreators = addSimpCityRecallCreators(state, suppliedId, deterministic.creators);
       state.pending.postsProcessed += deterministic.posts.length;
       state.pending.batchesReceived++;
@@ -9860,14 +9873,21 @@ const server = http.createServer(async (req, res) => {
       state.pending.updatedAt = new Date().toISOString();
       scheduleSimpCityRecallAlbums(state, channel, suppliedId, newCreators);
 
-      if (deterministic.unresolvedPosts.length) {
+      if (
+        deterministic.unresolvedPosts.length &&
+        state.pending.aiBatchesQueued < SIMPCITY_RECALL_AI_BATCH_LIMIT
+      ) {
         const signal = state.controller?.signal || null;
         const taskKey = simpCityRecallTaskKey(channel, suppliedId);
         state.pending.aiPostsQueued += deterministic.unresolvedPosts.length;
         state.pending.aiBatchesQueued++;
         const aiTask = (async () => {
           try {
-            const extracted = await extractSimpCityCreatorsWithAi(deterministic.unresolvedPosts, signal);
+            const extracted = await extractSimpCityCreatorsWithAi(
+              deterministic.unresolvedPosts,
+              signal,
+              state.pending?.threadUrl || ''
+            );
             if (!state.pending?.id || state.pending.id !== suppliedId || signal?.aborted) return;
             const aiCreators = addSimpCityRecallCreators(state, suppliedId, extracted.creators);
             state.pending.aiBatchesCompleted++;
@@ -9882,6 +9902,9 @@ const server = http.createServer(async (req, res) => {
           }
         })();
         trackSimpCityRecallTask(taskKey, aiTask);
+      } else if (deterministic.unresolvedPosts.length) {
+        state.pending.aiBatchesSkipped++;
+        state.pending.aiPostsSkipped += deterministic.unresolvedPosts.length;
       }
       json(res, 200, {
         ok: true,

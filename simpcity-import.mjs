@@ -115,6 +115,7 @@ function isPlausibleCreatorName(value) {
   if (!/[a-z]/i.test(name) || /^\d+$/.test(key)) return false;
   if (CREATOR_STOP_WORDS.has(lower)) return false;
   if (/\b(?:thread|request|discussion|collection|compilation|megathread)\b/i.test(name)) return false;
+  if (/\b(?:australian girls?|perfect bodies|professional athletes?|redheads?|gingers?)\b/i.test(name)) return false;
   if (/^(?:page|post|part|update)\s*\d*$/i.test(name)) return false;
   return true;
 }
