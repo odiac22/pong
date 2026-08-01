@@ -162,6 +162,10 @@ const VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST = Math.max(4, Math.min(96, Number(
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY ||
   36
 )));
+const VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST = Math.max(1, Math.min(
+  VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST,
+  Number(process.env.PONG_VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST || 2)
+));
 const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(32, Number(process.env.PONG_VIDEO_VERIFY_PER_ARTIST_CONCURRENCY || 6)));
 const VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST = Math.max(1, Math.min(
   VIDEO_VERIFY_PER_ARTIST_CONCURRENCY,
@@ -579,7 +583,10 @@ function videoVerifyStateForHost(hostname) {
 }
 
 function pumpVideoVerifyFetchQueue(state) {
-  while (state.active < VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST && state.queue.length) {
+  const concurrency = Date.now() < local2FlashPlaybackPriorityUntil
+    ? VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST
+    : VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST;
+  while (state.active < concurrency && state.queue.length) {
     const eligibleIndex = state.queue.findIndex(item =>
       (state.activeByGroup.get(item.groupId) || 0) < VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST
     );
@@ -608,6 +615,10 @@ function pumpVideoVerifyFetchQueue(state) {
         pumpVideoVerifyFetchQueue(state);
       });
   }
+}
+
+function pumpAllVideoVerifyFetchQueues() {
+  for (const state of videoVerifyHostStates.values()) pumpVideoVerifyFetchQueue(state);
 }
 
 function scheduleVideoVerifyFetch(hostname, groupId, task, signal) {
@@ -4318,6 +4329,7 @@ async function initializeVideoFileCache() {
   videoFileCacheBackgroundActive = 0;
   videoFileCacheBytes = 0;
   videoFileCachePriorityEpoch = 0;
+  videoFileCacheGlobalPlaybackConstrainedUntil = 0;
   if (videoFileCacheRetryTimer) clearTimeout(videoFileCacheRetryTimer);
   videoFileCacheRetryTimer = null;
   videoFileCacheGeneration++;
@@ -4348,6 +4360,7 @@ async function resetVideoFileCache(reason = 'reset') {
     videoFileCacheBackgroundActive = 0;
     videoFileCacheBytes = 0;
     videoFileCachePriorityEpoch = 0;
+    videoFileCacheGlobalPlaybackConstrainedUntil = 0;
     videoFileCacheLastHeartbeatAt = 0;
     videoFileCacheHealthy = true;
     console.log(`Video file cache wiped: ${reason}`);
@@ -4473,6 +4486,7 @@ function updateVideoFileCachePlaybackBuffer(id, bufferedSeconds, { critical = fa
 
 function protectVideoFileCacheForegroundPlayback(durationMs = 12000) {
   const protectedForMs = Math.max(3000, Math.min(30000, Number(durationMs || 12000)));
+  const wasAlreadyProtected = Date.now() < videoFileCacheGlobalPlaybackConstrainedUntil;
   videoFileCacheGlobalPlaybackConstrainedUntil = Math.max(
     videoFileCacheGlobalPlaybackConstrainedUntil,
     Date.now() + protectedForMs
@@ -4489,10 +4503,15 @@ function protectVideoFileCacheForegroundPlayback(durationMs = 12000) {
       Number(right.bytes || 0) - Number(left.bytes || 0) ||
       Number(left.order || 0) - Number(right.order || 0)
     ));
-  runningBackground.slice(VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY).forEach(record => {
-    record.deferWhenIdle = true;
-    record.controller?.abort();
-  });
+  // Trim the wide background set once when foreground protection begins.
+  // Repeated one-second status updates only extend the lease; aborting the two
+  // permitted trickle downloads on every update prevented either from ending.
+  if (!wasAlreadyProtected) {
+    runningBackground.slice(VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY).forEach(record => {
+      record.deferWhenIdle = true;
+      record.controller?.abort();
+    });
+  }
   normalizeVideoFileCachePriorities();
   rebalanceVideoFileCacheDownloads();
   pumpVideoFileCache();
@@ -8859,6 +8878,7 @@ function local2FlashProtectForegroundPlayback(durationMs = 8000) {
     local2FlashDrainMediaProbeWaiters();
     local22TurboDrainQualificationWaiters();
     local22TurboDrainWorkWaiters();
+    pumpAllVideoVerifyFetchQueues();
   }, Math.max(25, local2FlashPlaybackPriorityUntil - Date.now() + 25));
   local2FlashPlaybackPriorityTimer.unref?.();
 }
@@ -8870,6 +8890,7 @@ function local2FlashClearForegroundPlaybackProtection() {
   local2FlashDrainMediaProbeWaiters();
   local22TurboDrainQualificationWaiters();
   local22TurboDrainWorkWaiters();
+  pumpAllVideoVerifyFetchQueues();
 }
 
 function local2FlashAcquireMediaProbeSlot(signal) {
@@ -10191,15 +10212,12 @@ const server = http.createServer(async (req, res) => {
       const payload = JSON.parse(await readBody(req) || '{}');
       const playbackProfile = String(payload?.playbackProfile || 'current');
       touchVideoFileCacheHeartbeat();
-      videoFileCacheGlobalPlaybackConstrainedUntil = Date.now() + 60000;
-      const runningBackground = [...videoFileCacheRecords.values()]
-        .filter(record => record.status === 'downloading' && record.downloadPromise && currentVideoFileCachePriority(record) > 0)
-        .sort((left, right) => Number(left.order || 0) - Number(right.order || 0));
-      runningBackground.slice(VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY).forEach(record => {
-        if (Number(record.activeReaders || 0) > 0) return;
-        record.deferWhenIdle = true;
-        record.controller?.abort();
-      });
+      // A preload manifest is not a low-buffer signal. Only a real foreground
+      // stall narrows cache concurrency; otherwise upcoming cards use all
+      // background lanes and can actually finish before the next swipe.
+      if (payload?.foregroundStalled === true) {
+        protectVideoFileCacheForegroundPlayback(12000);
+      }
       const activeUrl = String(payload?.activeUrl || '');
       if (payload?.authoritative === true) beginVideoFileCachePriorityEpoch();
       const urls = [];
@@ -10303,20 +10321,20 @@ const server = http.createServer(async (req, res) => {
       const activeId = String(url.searchParams.get('activeId') || '');
       const reportedBufferedSeconds = Number(url.searchParams.get('bufferedSeconds'));
       const reportedCritical = url.searchParams.get('critical') === '1';
-      if (reportedCritical || (Number.isFinite(reportedBufferedSeconds) && reportedBufferedSeconds <= VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS)) {
-        videoFileCacheGlobalPlaybackConstrainedUntil = Date.now() + 5000;
-        for (const record of videoFileCacheRecords.values()) {
-          if (
-            record.status !== 'downloading' || !record.downloadPromise ||
-            currentVideoFileCachePriority(record) === 0 || Number(record.activeReaders || 0) > 0
-          ) continue;
-          record.deferWhenIdle = true;
-          record.controller?.abort();
-        }
-      } else if (Number.isFinite(reportedBufferedSeconds) && reportedBufferedSeconds >= VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS) {
+      const reportedPlaying = url.searchParams.get('playing') === '1';
+      if (reportedPlaying && (
+        reportedCritical ||
+        (Number.isFinite(reportedBufferedSeconds) && reportedBufferedSeconds <= VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS)
+      )) {
+        protectVideoFileCacheForegroundPlayback(5000);
+      } else if (
+        reportedPlaying &&
+        Number.isFinite(reportedBufferedSeconds) &&
+        reportedBufferedSeconds >= VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS
+      ) {
         videoFileCacheGlobalPlaybackConstrainedUntil = 0;
       }
-      if (activeId) {
+      if (activeId && reportedPlaying) {
         updateVideoFileCachePlaybackBuffer(activeId, reportedBufferedSeconds, {
           critical: reportedCritical
         });
@@ -10341,15 +10359,8 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/video-cache/heartbeat') {
       touchVideoFileCacheHeartbeat();
-      videoFileCacheGlobalPlaybackConstrainedUntil = Date.now() + 5000;
-      const runningBackground = [...videoFileCacheRecords.values()]
-        .filter(record => record.status === 'downloading' && record.downloadPromise && currentVideoFileCachePriority(record) > 0)
-        .sort((left, right) => Number(left.order || 0) - Number(right.order || 0));
-      runningBackground.slice(VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY).forEach(record => {
-        if (Number(record.activeReaders || 0) > 0) return;
-        record.deferWhenIdle = true;
-        record.controller?.abort();
-      });
+      // Liveness does not imply playback pressure. Buffer-aware status and the
+      // explicit playback-priority route own foreground throttling.
       normalizeVideoFileCachePriorities();
       rebalanceVideoFileCacheDownloads();
       pumpVideoFileCache();
@@ -10482,6 +10493,7 @@ const server = http.createServer(async (req, res) => {
         video_verifier: {
           storage: 'memory-only',
           fetch_concurrency_per_host: VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST,
+          playback_fetch_concurrency_per_host: VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST,
           maximum_total_concurrency: VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST * videoVerifyHostStates.size,
           per_artist_concurrency: VIDEO_VERIFY_PER_ARTIST_CONCURRENCY,
           active_per_artist_host: VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST,

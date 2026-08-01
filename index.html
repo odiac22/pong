@@ -836,7 +836,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.52</div>
+    <div class="version-number">25.53</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -5163,7 +5163,10 @@ function createVideoElements() {
     video.addEventListener('waiting', () => {
       random40ProtectLocal2FastPlayback(true);
       refreshForegroundVideoPriority(video, true);
-      random40PromoteWrapperToServerCache(wrapper, { forceActive: false });
+      if (wrapper.classList.contains('deck-active')) {
+        wrapper.dataset.serverCacheRecoveryRequested = 'true';
+      }
+      random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
       random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
       random40PauseHiddenPreloadsForPlayback();
       random40PumpPostFetchQueue();
@@ -5172,8 +5175,9 @@ function createVideoElements() {
     });
     video.addEventListener('stalled', () => {
       if (!wrapper.classList.contains('deck-active')) return;
+      wrapper.dataset.serverCacheRecoveryRequested = 'true';
       random40ProtectLocal2FastPlayback(true);
-      random40PromoteWrapperToServerCache(wrapper, { forceActive: false });
+      random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
       random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
       random40PauseHiddenPreloadsForPlayback();
     });
@@ -5976,7 +5980,7 @@ function getRandom40PreloadBundleStats(event, index = -1) {
 
   const bounds = getPasteEventVideoBounds(event);
   const serverEndpoint = random40ServerVideoCacheEndpoint();
-  if (serverEndpoint && bounds && !pongLocal2FastPlaybackActive()) {
+  if (serverEndpoint && bounds) {
     let ready = 0;
     let loading = 0;
     let total = 0;
@@ -6570,7 +6574,7 @@ function runRandom40PreloadPool() {
   // hidden <video> requests in Android wastes the shared source connection and
   // can starve the visible card. Keep browser preloads only as a no-PC fallback.
   const local2FastPlayback = pongLocal2FastPlaybackActive();
-  const useServerFileCache = Boolean(random40ServerVideoCacheEndpoint()) && !local2FastPlayback;
+  const useServerFileCache = Boolean(random40ServerVideoCacheEndpoint());
   const currentPreloadReserve = pongLocal2FastPlaybackActive()
     ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
     : RANDOM40_PRELOAD_CURRENT_RESERVE;
@@ -10033,10 +10037,10 @@ function random40SwapRenderedVideoSource(wrapper, playbackUrl, { forceActive = f
   const playbackStarted = video.dataset.hasPlayedFrame === 'true' ||
     decodedFrames > 0 ||
     Number(video.currentTime || 0) > 0.01;
-  // Never replace the src of a video after playback has begun. Changing src
-  // resets the decoder and is visible as a flash/pause even when currentTime is
-  // restored. The LAN URL will be used the next time this card is attached.
-  if (isActive && playbackStarted) return false;
+  // Normal cache promotion never replaces a decoder that has started. A
+  // foreground recovery explicitly opts in after the origin stream stalls;
+  // the stable completed LAN file is then preferable to repeated buffering.
+  if (isActive && playbackStarted && !forceActive) return false;
 
   const resumePlayback = isActive && (wasPlaying || wrapper.dataset.playIntent === 'true');
   const resumeAt = Number(video.currentTime || 0);
@@ -10079,7 +10083,13 @@ function random40ApplyServerCachePlaybackUrl(originalUrl, playbackUrl, { forceAc
   document.querySelectorAll('.video-wrapper').forEach(wrapper => {
     if (String(wrapper.dataset.originalVideoUrl || '') !== String(originalUrl)) return;
     if (wrapper.dataset.networkSuspended === 'true') wrapper.dataset.suspendedVideoSrc = playbackUrl;
-    changed = random40SwapRenderedVideoSource(wrapper, playbackUrl, { forceActive }) || changed;
+    const recoverActive = forceActive || (
+      wrapper.classList.contains('deck-active') &&
+      wrapper.dataset.serverCacheRecoveryRequested === 'true'
+    );
+    const swapped = random40SwapRenderedVideoSource(wrapper, playbackUrl, { forceActive: recoverActive });
+    if (swapped && recoverActive) delete wrapper.dataset.serverCacheRecoveryRequested;
+    changed = swapped || changed;
   });
   return changed;
 }
@@ -10228,8 +10238,12 @@ async function random40PollServerVideoCache() {
   const activeVideo = activeWrapper?.querySelector('video');
   const activeOriginalUrl = String(activeWrapper?.dataset?.originalVideoUrl || '');
   const activeRecord = activeOriginalUrl ? random40ServerVideoCacheTracked.get(activeOriginalUrl) : null;
-  const playbackQuery = activeVideo
+  const activePlaybackDemand = Boolean(activeVideo && (
+    !activeVideo.paused || activeWrapper?.dataset?.playIntent === 'true'
+  ));
+  const playbackQuery = activePlaybackDemand
     ? `${activeRecord?.id ? `&activeId=${encodeURIComponent(activeRecord.id)}` : ''}` +
+      '&playing=1' +
       `&bufferedSeconds=${encodeURIComponent(getVideoBufferedAheadSeconds(activeVideo).toFixed(3))}` +
       `&critical=${activeVideo.readyState < 3 || videoHasCriticalForegroundBuffer(activeVideo) ? '1' : '0'}`
     : '';
@@ -10370,7 +10384,6 @@ function random40WarmServerVideoCacheForActiveWrapper(
   { urgent = false } = {}
 ) {
   if (!wrapper || !isRandom40PlaybackActive()) return;
-  if (pongLocal2FastPlaybackActive()) return;
   const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
   if (!originalUrl) return;
   const video = wrapper.querySelector('video');
@@ -10378,7 +10391,8 @@ function random40WarmServerVideoCacheForActiveWrapper(
     video?.currentSrc || video?.src || random40PlaybackUrlOverrides.get(originalUrl) || ''
   );
   const activeIsCompleteCache = random40IsPcFileCachePlaybackUrl(activePlaybackUrl);
-  const currentUrls = activeIsCompleteCache ? [originalUrl] : [];
+  const activeNeedsHedge = urgent && !activeIsCompleteCache;
+  const currentUrls = (activeIsCompleteCache || activeNeedsHedge) ? [originalUrl] : [];
   const localIndex = Number(wrapper.dataset.index || 0);
   const activeGlobalIndex = Number(currentLoadedRangeStart || 0) + (Number.isInteger(localIndex) ? localIndex : 0);
   const eventIndex = getPasteEventIndexForGlobalVideo(activeGlobalIndex);
@@ -10398,8 +10412,8 @@ function random40WarmServerVideoCacheForActiveWrapper(
   }
   if (currentUrls.length) {
     void random40WarmServerVideoCache(currentUrls, {
-      activeUrl: activeIsCompleteCache ? originalUrl : '',
-      deferredUrl: activeIsCompleteCache ? '' : originalUrl,
+      activeUrl: (activeIsCompleteCache || activeNeedsHedge) ? originalUrl : '',
+      deferredUrl: (activeIsCompleteCache || activeNeedsHedge) ? '' : originalUrl,
       currentUrls,
       urgent
     });
