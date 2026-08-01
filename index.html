@@ -836,7 +836,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.50</div>
+    <div class="version-number">25.51</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -17338,10 +17338,15 @@ function updateSimpCityRecallButton() {
 }
 
 let simpCityRecallStarting = false;
+let simpCityRecallStartToken = 0;
 
 async function startSimpCityRecall(channel = 1) {
   channel = Number(channel) === 2 ? 2 : 1;
-  if (simpCityRecallStarting) return;
+  const startToken = ++simpCityRecallStartToken;
+  if (simpCityRecallStarting) {
+    // A second press explicitly replaces the active Recall import/player queue.
+    bunkrLoadGeneration++;
+  }
   simpCityRecallStarting = true;
   const button = document.getElementById(`simpcity-recall-${channel}`);
   if (button) button.disabled = true;
@@ -17385,8 +17390,10 @@ async function startSimpCityRecall(channel = 1) {
       activePayload.aiExtracted, channel
     );
   } finally {
-    simpCityRecallStarting = false;
-    if (button) button.disabled = false;
+    if (startToken === simpCityRecallStartToken) {
+      simpCityRecallStarting = false;
+      if (button) button.disabled = false;
+    }
   }
 }
 

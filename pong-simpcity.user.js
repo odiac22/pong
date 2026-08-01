@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.5.0
+// @version      1.5.1
 // @description  Extracts creator identities from every post with the local Pong AI and prepares Balbums matches as pages arrive.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -100,14 +100,17 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.5.0 · Ready: live AI extraction</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.5.1 · Ready: live AI extraction</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
   const buttons = [...panel.querySelectorAll('[data-scrape]')];
+  const activeRunTokens = new Map();
 
   const runScrape = async channel => {
-    buttons.forEach(button => { button.disabled = true; });
+    const runToken = `${Date.now()}-${Math.random()}`;
+    activeRunTokens.set(channel, runToken);
+    const isCurrentRun = () => activeRunTokens.get(channel) === runToken;
     try {
       const first = new URL(location.href);
       first.searchParams.delete('page');
@@ -121,7 +124,9 @@
       const aiSlots = Array.from({ length: AI_CONCURRENCY }, () => Promise.resolve());
       const aiTasks = [];
       let slotIndex = 0, pagesFetched = 0, postsSent = 0;
-      const update = () => { status.textContent = `${pagesFetched}/${totalPages} pages · ${postsSent} posts · ${names.size} creators · ${albums.size} albums`; };
+      const update = () => {
+        if (isCurrentRun()) status.textContent = `Pong ${channel}: ${pagesFetched}/${totalPages} pages · ${postsSent} posts · ${names.size} creators · ${albums.size} albums`;
+      };
       const queuePosts = posts => {
         for (let offset = 0; offset < posts.length; offset += AI_BATCH_SIZE) {
           const batch = posts.slice(offset, offset + AI_BATCH_SIZE);
@@ -161,10 +166,10 @@
         id: scrapeId, channel, schema: 'pong-simpcity-ai-v1', threadUrl: first.href,
         names: [...names.values()].slice(0, 1000), albums: [...albums.values()], aiExtracted: true
       }, 15000);
-      status.textContent = `Pong ${channel} done: ${names.size} AI names · ${albums.size} albums`;
+      if (isCurrentRun()) status.textContent = `Pong ${channel} done: ${names.size} AI names · ${albums.size} albums`;
     } catch (error) {
-      status.textContent = `Failed: ${error?.message || error}`;
-    } finally { buttons.forEach(button => { button.disabled = false; }); }
+      if (isCurrentRun()) status.textContent = `Pong ${channel} failed: ${error?.message || error}`;
+    }
   };
   buttons.forEach(button => {
     button.onclick = () => runScrape(Number(button.dataset.scrape) === 2 ? 2 : 1);

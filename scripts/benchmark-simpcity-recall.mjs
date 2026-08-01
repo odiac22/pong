@@ -5,6 +5,8 @@ import path from 'node:path';
 
 const chromePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const port = 9347;
+const recallChannel = Number(process.env.PONG_SC_RECALL_CHANNEL) === 2 ? 2 : 1;
+const doublePress = process.env.PONG_SC_RECALL_DOUBLE === '1';
 const profile = await mkdtemp(path.join(os.tmpdir(), 'pong-sc-recall-'));
 const chrome = spawn(chromePath, [
   '--headless=new', '--mute-audio', '--autoplay-policy=user-gesture-required',
@@ -63,7 +65,7 @@ try {
     }
   }
   await send('Runtime.evaluate', {
-    expression: `document.getElementById('pong-hotspot')?.click(); globalThis.__scResult='running'; startSimpCityRecall(1).then(()=>globalThis.__scResult='done').catch(error=>globalThis.__scResult=String(error?.stack||error));`,
+    expression: `document.getElementById('pong-hotspot')?.click(); globalThis.__scResult='running'; startSimpCityRecall(${recallChannel}).then(()=>globalThis.__scResult='done').catch(error=>globalThis.__scResult=String(error?.stack||error));${doublePress ? `setTimeout(() => startSimpCityRecall(${recallChannel}), 25);` : ''}`,
     awaitPromise: false
   });
   const started = Date.now();
@@ -82,6 +84,7 @@ try {
         ,result: globalThis.__scResult
         ,buttonDisabled: document.getElementById('simpcity-recall-1')?.disabled
         ,indicator: document.getElementById('sorting-indicator')?.textContent || ''
+        ,startToken: simpCityRecallStartToken
       })`,
       returnByValue: true
     });
