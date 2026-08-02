@@ -3203,7 +3203,15 @@ async function resolvePixeldrainVideos(rawUrl, signal = null) {
   const url = new URL(rawUrl);
   const [, kind, id] = url.pathname.match(/^\/(u|l|d)\/([a-z0-9_-]+)/i) || [];
   if (!id) return [];
-  if (kind.toLowerCase() === 'u') return [`https://pixeldrain.com/api/file/${encodeURIComponent(id)}`];
+  if (kind.toLowerCase() === 'u') {
+    const info = await fetchSimpCityMediaPayload(
+      `https://pixeldrain.com/api/file/${encodeURIComponent(id)}/info`,
+      { json: true, signal }
+    );
+    return isLikelyVideoRecord(info)
+      ? [`https://pixeldrain.com/api/file/${encodeURIComponent(id)}`]
+      : [];
+  }
   if (kind.toLowerCase() === 'l') {
     const payload = await fetchSimpCityMediaPayload(
       `https://pixeldrain.com/api/list/${encodeURIComponent(id)}`,
@@ -3215,8 +3223,19 @@ async function resolvePixeldrainVideos(rawUrl, signal = null) {
       .filter(Boolean))];
   }
   const html = await fetchSimpCityMediaPayload(rawUrl, { signal });
-  const fileIds = [...html.matchAll(/(?:pixeldrain\.com)?\/u\/([a-z0-9_-]+)/gi)].map(match => match[1]);
-  return [...new Set(fileIds.map(fileId => `https://pixeldrain.com/api/file/${encodeURIComponent(fileId)}`))];
+  const fileIds = [...new Set(
+    [...html.matchAll(/(?:pixeldrain\.com)?\/u\/([a-z0-9_-]+)/gi)].map(match => match[1])
+  )].slice(0, 100);
+  const checked = await Promise.allSettled(fileIds.map(async fileId => {
+    const info = await fetchSimpCityMediaPayload(
+      `https://pixeldrain.com/api/file/${encodeURIComponent(fileId)}/info`,
+      { json: true, signal }
+    );
+    return isLikelyVideoRecord(info)
+      ? `https://pixeldrain.com/api/file/${encodeURIComponent(fileId)}`
+      : '';
+  }));
+  return checked.map(item => item.status === 'fulfilled' ? item.value : '').filter(Boolean);
 }
 
 async function resolveGofileVideos(rawUrl, signal = null) {
