@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.6.0
+// @version      1.6.1
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -164,10 +164,34 @@
       if (!body) return null;
       const clone = body.cloneNode(true);
       clone.querySelectorAll('blockquote,.bbCodeBlock--quote,.message-signature,.message-footer,.reactionsBar,button,script,style').forEach(node => node.remove());
-      const links = [...clone.querySelectorAll('a[href]')].map(anchor => {
-        const url = absoluteUrl(anchor.getAttribute('href'), pageUrl);
-        if (!url || /\/members\//i.test(url) || /(?:#post-|\/page-\d+)/i.test(url)) return null;
-        return { text: String(anchor.textContent || anchor.title || '').trim().slice(0, 240), url: url.slice(0, 1500) };
+      const links = [...clone.querySelectorAll('a[href]')].flatMap(anchor => {
+        const text = String(anchor.textContent || anchor.title || '').trim().slice(0, 240);
+        const pending = [anchor.getAttribute('href'), anchor.dataset?.url, anchor.dataset?.href, anchor.getAttribute('data-target'), anchor.outerHTML];
+        const found = [];
+        const seen = new Set();
+        while (pending.length && found.length < 12) {
+          const raw = String(pending.shift() || '').replace(/&amp;/gi, '&').trim();
+          if (!raw || seen.has(raw)) continue;
+          seen.add(raw);
+          let decoded = raw;
+          try { decoded = decodeURIComponent(raw.replace(/\+/g, '%20')); } catch (_) {}
+          if (decoded !== raw) pending.push(decoded);
+          for (const match of raw.matchAll(/https?(?::|%3a)(?:\/\/|%2f%2f)[^\s<>'"\])}]+/gi)) pending.push(match[0]);
+          const url = absoluteUrl(raw, pageUrl);
+          if (!url) continue;
+          try {
+            const parsed = new URL(url);
+            if (/^(?:www\.)?simpcity\.cr$/i.test(parsed.hostname)) {
+              for (const key of ['link', 'url', 'target', 'to', 'u', 'redirect']) {
+                const target = parsed.searchParams.get(key);
+                if (target) pending.push(target);
+              }
+            } else if (!/\/members\//i.test(url) && !/(?:#post-|\/page-\d+)/i.test(url)) {
+              found.push({ text, url: url.slice(0, 1500) });
+            }
+          } catch (_) {}
+        }
+        return found;
       }).filter(Boolean);
       const attachments = [];
       clone.querySelectorAll('img').forEach(image => {
@@ -189,7 +213,7 @@
       return {
         postId: String(article.id || article.dataset?.content || `page-${pageNumber}-post-${index + 1}`),
         page: pageNumber, text,
-        links: uniqueObjects(links, item => `${item.url}|${item.text}`).slice(0, 60),
+        links: uniqueObjects(links, item => `${item.url}|${item.text}`).slice(0, 120),
         attachments: [...new Set(attachments.filter(Boolean))].slice(0, 50)
       };
     }).filter(Boolean);
@@ -199,7 +223,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.6.0 · Direct handles first; AI runs in background</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.6.1 · External videos + AI names</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');

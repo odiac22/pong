@@ -2889,7 +2889,7 @@ function createSimpCityLimiter(limit) {
 
 function compactSimpCityAiPost(rawPost, index = 0) {
   const text = String(rawPost?.text || '').replace(/\u0000/g, '').trim().slice(0, 14000);
-  const links = (Array.isArray(rawPost?.links) ? rawPost.links : []).slice(0, 60).map(link => ({
+  const links = (Array.isArray(rawPost?.links) ? rawPost.links : []).slice(0, 120).map(link => ({
     text: String(link?.text || '').replace(/\s+/g, ' ').trim().slice(0, 180),
     url: String(link?.url || '').trim().slice(0, 1200)
   })).filter(link => link.text || link.url);
@@ -3272,6 +3272,7 @@ async function resolveSimpCityMediaLink(link, signal = null) {
   if (link?.kind === 'direct') videos = [link.url];
   else if (link?.kind === 'pixeldrain') videos = await resolvePixeldrainVideos(link.url, signal);
   else if (link?.kind === 'gofile') videos = await resolveGofileVideos(link.url, signal);
+  else if (link?.kind === 'bunkr') videos = await extractBunkrVideoUrls(link.url);
   return [...new Set(videos)].slice(0, 250);
 }
 
@@ -3307,7 +3308,7 @@ function scheduleSimpCityMediaLinks(state, channel, suppliedId, posts, creators)
         sourceUrl: state.pending.threadUrl,
         // Pixeldrain actively rejects some datacenter proxy traffic while its
         // public API URL plays correctly as a normal browser media request.
-        source: link.kind === 'gofile' ? 'hosted' : 'direct',
+        source: link.kind === 'gofile' ? 'hosted' : link.kind === 'bunkr' ? 'bunkr' : 'direct',
         videos
       });
       state.pending.albumsReady = state.pending.albums.length;

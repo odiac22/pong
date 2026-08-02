@@ -91,15 +91,41 @@ export function simpCityThreadPageCount(html, maximum = 250) {
 
 const SIMPCITY_DIRECT_VIDEO_RE = /\.(?:mp4|m4v|mov|webm)(?:$|[?#])/i;
 
+function simpCityUrlCandidates(rawValue) {
+  const pending = [decodeSimpCityHtmlText(rawValue)];
+  const results = [];
+  const seen = new Set();
+  while (pending.length && results.length < 20) {
+    const value = String(pending.shift() || '').trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    let decoded = value;
+    try { decoded = decodeURIComponent(value.replace(/\+/g, '%20')); } catch (_) {}
+    if (decoded !== value) pending.push(decoded);
+    for (const match of value.matchAll(/https?(?::|%3a)(?:\/\/|%2f%2f)[^\s<>'"\])}]+/gi)) pending.push(match[0]);
+    try {
+      const url = new URL(value);
+      if (/^(?:www\.)?simpcity\.cr$/i.test(url.hostname)) {
+        for (const key of ['link', 'url', 'target', 'to', 'u', 'redirect']) {
+          const target = url.searchParams.get(key);
+          if (target) pending.push(target);
+        }
+      } else results.push(url.toString());
+    } catch (_) {}
+  }
+  return results;
+}
+
 export function classifySimpCityMediaUrl(rawValue) {
   try {
-    const url = new URL(decodeSimpCityHtmlText(rawValue));
+    const url = new URL(simpCityUrlCandidates(rawValue)[0] || decodeSimpCityHtmlText(rawValue));
     if (url.protocol !== 'https:' || url.username || url.password) return null;
     const host = url.hostname.replace(/^www\./, '').toLowerCase();
     const path = url.pathname.replace(/\/+$/, '');
     let kind = '';
     if (host === 'gofile.io' && /^\/d\/[a-z0-9_-]+$/i.test(path)) kind = 'gofile';
     else if (host === 'pixeldrain.com' && /^\/(?:u|l|d)\/[a-z0-9_-]+$/i.test(path)) kind = 'pixeldrain';
+    else if (/^bunkr\.(?:cr|si|ru|su|la|fi|site|black|media)$/i.test(host) && /^\/a\/[a-z0-9_-]+$/i.test(path)) kind = 'bunkr';
     else if (SIMPCITY_DIRECT_VIDEO_RE.test(`${path}${url.search}`)) kind = 'direct';
     if (!kind) return null;
     url.hash = '';
@@ -115,14 +141,17 @@ export function extractSimpCityMediaLinks(rawPosts) {
   for (const [index, rawPost] of (Array.isArray(rawPosts) ? rawPosts : []).entries()) {
     const postId = String(rawPost?.postId || `post-${index + 1}`).slice(0, 120);
     const candidates = [
-      ...(Array.isArray(rawPost?.links) ? rawPost.links.map(link => link?.url) : []),
-      ...String(rawPost?.text || '').match(/https:\/\/[^\s<>'"\])}]+/gi) || []
+      ...(Array.isArray(rawPost?.links) ? rawPost.links.flatMap(link => [link?.url, link?.text]) : []),
+      rawPost?.text || '',
+      ...(Array.isArray(rawPost?.attachments) ? rawPost.attachments : [])
     ];
-    for (const rawUrl of candidates) {
-      const classified = classifySimpCityMediaUrl(rawUrl);
-      if (!classified || seen.has(classified.url)) continue;
-      seen.add(classified.url);
-      results.push({ ...classified, postId });
+    for (const candidate of candidates) {
+      for (const rawUrl of simpCityUrlCandidates(candidate)) {
+        const classified = classifySimpCityMediaUrl(rawUrl);
+        if (!classified || seen.has(classified.url)) continue;
+        seen.add(classified.url);
+        results.push({ ...classified, postId });
+      }
     }
   }
   return results;
