@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.59</div>
+    <div class="version-number">25.60</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3166,7 +3166,9 @@ function createSaveButtons() {
     if (
       activeEvent.source === 'bunkr' &&
       (
+        activeSimpCityRecallContext ||
         activeEvent.simpCityJobId ||
+        activeEvent.simpCityCreatorKey ||
         /(?:^|\.)simpcity\.cr$/i.test((() => {
           try { return new URL(activeEvent.artistUrl || activeEvent.artistKey || '').hostname; }
           catch (_) { return ''; }
@@ -16836,16 +16838,51 @@ async function skipCurrentSimpCityCreator(event) {
     const response = await fetch(`${endpoint}/simpcity/import/skip`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId, jobIds, creatorKey: key, creatorName })
+      body: JSON.stringify({
+        jobId,
+        jobIds,
+        creatorKey: key,
+        creatorName,
+        recallChannel: Number(activeSimpCityRecallContext?.recallChannel || 0)
+      })
     }).catch(() => null);
     const data = response ? await response.json().catch(() => null) : null;
     (data?.results || []).flatMap(result => result?.keys || []).forEach(value => {
       const relatedKey = normalizeSimpCityCreatorKey(value);
       if (relatedKey) simpCitySkippedCreatorKeys.add(relatedKey);
     });
+    (data?.recall?.keys || []).forEach(value => {
+      const relatedKey = normalizeSimpCityCreatorKey(value);
+      if (relatedKey) simpCitySkippedCreatorKeys.add(relatedKey);
+    });
   }
   simpCitySkipQueuePurger?.(simpCitySkippedCreatorKeys);
+  const skippedIndexes = new Set();
+  pasteEvents.forEach((item, index) => {
+    const itemKeys = [
+      item?.simpCityCreatorKey,
+      item?.simpCityCreatorName,
+      item?.artistDisplayName
+    ].map(normalizeSimpCityCreatorKey).filter(Boolean);
+    if (!itemKeys.some(itemKey => simpCitySkippedCreatorKeys.has(itemKey))) return;
+    skippedIndexes.add(index);
+    markPasteEventVisitedForPaperclip(item, index);
+    const bundleKey = getPasteEventPaperclipKey(item, index);
+    if (bundleKey) paperclipRetiredBundleKeys.add(bundleKey);
+  });
+  if (skippedIndexes.size) {
+    paperclipHistory = paperclipHistory.filter(index => !skippedIndexes.has(index));
+    paperclipHistoryPosition = Math.min(paperclipHistoryPosition, paperclipHistory.length - 1);
+  }
   showSortingIndicator(`Skipped ${creatorName || key} for this SC Recall only`);
+  if (canNavigateToNextPasteEvent()) {
+    navigateToNextPasteEvent();
+  } else {
+    document.querySelectorAll('.video-wrapper video').forEach(video => {
+      try { video.pause(); video.removeAttribute('src'); video.load(); } catch (_) {}
+    });
+    videoContainer.innerHTML = '<div class="loading-message">Skipped creator. Waiting for the next SimpCity match...</div>';
+  }
 }
 
 function setSimpCityDisconnectVisible(visible) {

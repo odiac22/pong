@@ -2172,8 +2172,8 @@ let simpCitySessionCache;
 let simpCityLoginState = null;
 const simpCityImportJobs = new Map();
 const simpCityRecallChannels = new Map([
-  [1, { payload: null, pending: null, controller: null, finalizingId: '' }],
-  [2, { payload: null, pending: null, controller: null, finalizingId: '' }]
+  [1, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set() }],
+  [2, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set() }]
 ]);
 const simpCityRecallAlbumTasks = new Map();
 function simpCityRecallChannel(rawChannel) {
@@ -3230,6 +3230,7 @@ function scheduleSimpCityRecallAlbums(state, channel, suppliedId, creators) {
     signal,
     onAlbum: album => {
       if (!state.pending?.id || state.pending.id !== suppliedId || signal?.aborted) return;
+      if (state.skippedCreatorKeys?.has(String(album?.creatorKey || ''))) return;
       const albumUrls = new Set(state.pending.albums.map(item => item.url));
       if (!album?.url || albumUrls.has(album.url)) return;
       state.pending.albums.push(album);
@@ -4318,6 +4319,43 @@ function assertVideoFileCachePathIsSafe(targetPath = VIDEO_FILE_CACHE_DIR) {
   ) {
     throw new Error(`unsafe video cache path: ${resolvedTarget}`);
   }
+}
+
+function skipSimpCityRecallCreator(state, rawKey, rawName = '') {
+  if (!state) return { skipped: false, keys: [] };
+  if (!(state.skippedCreatorKeys instanceof Set)) state.skippedCreatorKeys = new Set();
+  const keys = new Set();
+  const addKey = value => {
+    const key = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (key) keys.add(key);
+  };
+  addKey(rawKey);
+  simpCityCreatorAliases(String(rawName || '')).forEach(addKey);
+  const creators = state.pending?.creators || [];
+  for (const creator of creators) {
+    const creatorValues = [creator?.primaryName, ...(creator?.aliases || []), ...(creator?.usernames || [])];
+    const creatorKeys = creatorValues.map(value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '')).filter(Boolean);
+    if (!creatorKeys.some(key => keys.has(key))) continue;
+    creatorValues.forEach(value => simpCityCreatorAliases(String(value || '')).forEach(addKey));
+    creatorKeys.forEach(addKey);
+  }
+  if (!keys.size) return { skipped: false, keys: [] };
+  keys.forEach(key => state.skippedCreatorKeys.add(key));
+  const keepAlbum = album => !keys.has(String(album?.creatorKey || '').toLowerCase().replace(/[^a-z0-9]+/g, ''));
+  if (state.pending) {
+    state.pending.creators = state.pending.creators.filter(creator => {
+      const values = [creator?.primaryName, ...(creator?.aliases || []), ...(creator?.usernames || [])];
+      return !values.some(value => keys.has(String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '')));
+    });
+    state.pending.albums = state.pending.albums.filter(keepAlbum);
+    state.pending.albumsReady = state.pending.albums.length;
+    state.pending.updatedAt = new Date().toISOString();
+  }
+  if (state.payload) {
+    state.payload.names = (state.payload.names || []).filter(value => !keys.has(String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '')));
+    state.payload.albums = (state.payload.albums || []).filter(keepAlbum);
+  }
+  return { skipped: true, keys: [...keys] };
 }
 
 function videoFileCacheCanonical(rawUrl) {
@@ -9879,6 +9917,7 @@ const server = http.createServer(async (req, res) => {
       state.controller = new AbortController();
       state.finalizingId = '';
       state.payload = null;
+      state.skippedCreatorKeys = new Set();
       state.pending = {
         id: suppliedId,
         channel,
@@ -10110,10 +10149,19 @@ const server = http.createServer(async (req, res) => {
         jobId: job.id,
         ...skipSimpCityJobCreator(job, payload?.creatorKey, payload?.creatorName)
       }));
+      const recallChannel = Number(payload?.recallChannel || 0);
+      const recallResult = recallChannel
+        ? skipSimpCityRecallCreator(
+            simpCityRecallState(recallChannel),
+            payload?.creatorKey,
+            payload?.creatorName
+          )
+        : { skipped: false, keys: [] };
       json(res, 200, {
         ok: true,
-        skipped: results.some(result => result.skipped),
-        results
+        skipped: recallResult.skipped || results.some(result => result.skipped),
+        results,
+        recall: recallResult
       });
       return;
     }
