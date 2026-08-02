@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.61</div>
+    <div class="version-number">25.62</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1821,6 +1821,83 @@ videoUrlsInput.addEventListener('input', e => {
 
 // ─── Session persistence ──────────────────────────────────────────────────────
 const SESSION_KEY = 'pong_session_v1';
+const PLAYBACK_POSITIONS_KEY = 'pong_video_positions_v1';
+const PLAYBACK_POSITION_MAX_RECORDS = 1200;
+const PLAYBACK_POSITION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+let playbackPositionsSaveTimer = null;
+let playbackPositions = (() => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PLAYBACK_POSITIONS_KEY) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+})();
+
+function playbackPositionKey(wrapper, video) {
+  const localIndex = Number(wrapper?.dataset?.index || 0);
+  const metadata = videoMetadata[localIndex] || {};
+  const originalUrl = String(wrapper?.dataset?.originalVideoUrl || video?.currentSrc || video?.src || '');
+  return String(metadata.mediaKey || (originalUrl ? eromeMediaKey(originalUrl) : '')).slice(0, 900);
+}
+
+function persistPlaybackPositions() {
+  clearTimeout(playbackPositionsSaveTimer);
+  playbackPositionsSaveTimer = null;
+  try {
+    const cutoff = Date.now() - PLAYBACK_POSITION_MAX_AGE_MS;
+    const entries = Object.entries(playbackPositions)
+      .filter(([, record]) => Number(record?.updatedAt || 0) >= cutoff)
+      .sort((left, right) => Number(right[1]?.updatedAt || 0) - Number(left[1]?.updatedAt || 0))
+      .slice(0, PLAYBACK_POSITION_MAX_RECORDS);
+    playbackPositions = Object.fromEntries(entries);
+    localStorage.setItem(PLAYBACK_POSITIONS_KEY, JSON.stringify(playbackPositions));
+  } catch (_) {}
+}
+
+function schedulePlaybackPositionsSave(delay = 900) {
+  clearTimeout(playbackPositionsSaveTimer);
+  playbackPositionsSaveTimer = setTimeout(persistPlaybackPositions, Math.max(0, Number(delay || 0)));
+}
+
+function rememberVideoPlaybackPosition(video, wrapper, { immediate = false } = {}) {
+  if (!video || !wrapper) return;
+  const key = playbackPositionKey(wrapper, video);
+  const time = Math.max(0, Number(video.currentTime || 0));
+  if (!key || !Number.isFinite(time)) return;
+  const duration = Math.max(0, Number(video.duration || 0));
+  if (video.ended || (duration > 0 && time >= duration - 0.15)) delete playbackPositions[key];
+  else playbackPositions[key] = { time, duration, updatedAt: Date.now() };
+  if (immediate) persistPlaybackPositions();
+  else schedulePlaybackPositionsSave();
+}
+
+function restoreVideoPlaybackPosition(video, wrapper, { force = false } = {}) {
+  if (!video || !wrapper || !Number.isFinite(video.duration) || video.duration <= 0) return false;
+  const key = playbackPositionKey(wrapper, video);
+  const record = key ? playbackPositions[key] : null;
+  const savedTime = Number(record?.time || 0);
+  if (!key || !Number.isFinite(savedTime) || savedTime <= 0.05) return false;
+  if (!force && video.dataset.playbackPositionRestoredKey === key) return false;
+  if (force && Number(video.currentTime || 0) > 0.05) return false;
+  const target = Math.min(savedTime, Math.max(0, video.duration - 0.15));
+  if (target <= 0.05) return false;
+  try {
+    video.currentTime = target;
+    video.dataset.playbackPositionRestoredKey = key;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function snapshotRenderedPlaybackPositions({ immediate = false } = {}) {
+  document.querySelectorAll('.video-wrapper').forEach(wrapper => {
+    const video = wrapper.querySelector('video');
+    if (video) rememberVideoPlaybackPosition(video, wrapper);
+  });
+  if (immediate) persistPlaybackPositions();
+}
 const UPDATE_PRESERVED_PONG_KEYS = new Set([
   'pong_github_token_v1',
   'pong_coomerfans_proxy_url_v1',
@@ -1830,7 +1907,8 @@ const UPDATE_PRESERVED_PONG_KEYS = new Set([
   PONG_AUTO_SCROLL_KEY,
   'pong_repair_item_concurrency_v1',
   'pong_saved_videos_v1',
-  'pong_saved_artists_v1'
+  'pong_saved_artists_v1',
+  PLAYBACK_POSITIONS_KEY
 ]);
 const UPDATE_TRANSIENT_PONG_KEYS = new Set([
   SESSION_KEY,
@@ -1902,7 +1980,10 @@ function saveSession() {
       currentRenderBatchSize,
       eromeBatchAutoAdvance,
       slidingPlaybackRespectsRange,
-      viewedVideoKeys: [...viewedVideoKeys]
+      viewedVideoKeys: [...viewedVideoKeys],
+      sessionSkippedCreatorKeys: typeof simpCitySkippedCreatorKeys !== 'undefined'
+        ? [...simpCitySkippedCreatorKeys]
+        : []
     }));
   } catch(e) {}
 }
@@ -1937,6 +2018,13 @@ function loadSession() {
     slidingPlaybackRespectsRange = s.slidingPlaybackRespectsRange === true;
     window.PongSlidingPlaybackRespectsRange = slidingPlaybackRespectsRange;
     viewedVideoKeys = new Set(Array.isArray(s.viewedVideoKeys) ? s.viewedVideoKeys.map(String) : []);
+    if (typeof simpCitySkippedCreatorKeys !== 'undefined') {
+      simpCitySkippedCreatorKeys.clear();
+      (Array.isArray(s.sessionSkippedCreatorKeys) ? s.sessionSkippedCreatorKeys : [])
+        .map(normalizeSimpCityCreatorKey)
+        .filter(Boolean)
+        .forEach(key => simpCitySkippedCreatorKeys.add(key));
+    }
     setCurrentLoadedRange(
       Number(s.currentLoadedRangeStart || 0),
       Number(s.currentLoadedRangeEnd || 0),
@@ -2226,6 +2314,7 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   }
 
   wrapper.dataset.networkSuspended = 'true';
+  wrapper.dataset.recyclingSource = 'true';
   delete wrapper.dataset.deckNextWarm;
   try {
     video.pause();
@@ -2288,7 +2377,10 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   video.muted = true;
   video.volume = 0;
   video.dataset.lastLoadKick = '0';
+  delete video.dataset.playbackPositionRestoredKey;
+  delete video.dataset.lastPlaybackPositionCaptureAt;
   applyPlayerAudioPreference(video, wrapper);
+  delete wrapper.dataset.recyclingSource;
 
   const audioBtn = wrapper.querySelector('.audio-toggle-button');
   if (audioBtn) {
@@ -3163,17 +3255,10 @@ function createSaveButtons() {
       ? syncCurrentPasteIndexFromVisibleVideo()
       : -1;
     const activeEvent = pasteEvents[visibleIndex >= 0 ? visibleIndex : currentPasteIndex] || {};
+    const activeGlobalIndex = getCurrentLoadedGlobalVideoIndex();
+    const activeMetadata = allVideoMetadata[activeGlobalIndex] || {};
     if (
-      activeEvent.source === 'bunkr' &&
-      (
-        activeSimpCityRecallContext ||
-        activeEvent.simpCityJobId ||
-        activeEvent.simpCityCreatorKey ||
-        /(?:^|\.)simpcity\.cr$/i.test((() => {
-          try { return new URL(activeEvent.artistUrl || activeEvent.artistKey || '').hostname; }
-          catch (_) { return ''; }
-        })())
-      )
+      activeEvent.source === 'bunkr' || activeMetadata.source === 'bunkr'
     ) {
       rejectMenu.classList.remove('open');
       void skipCurrentSimpCityCreator(e);
@@ -5158,6 +5243,9 @@ function createVideoElements() {
       random40PumpPreloadQueue(350);
     });
     video.addEventListener('pause', () => {
+      if (wrapper.dataset.recyclingSource !== 'true') {
+        rememberVideoPlaybackPosition(video, wrapper, { immediate: true });
+      }
       if (wrapper.dataset.serverCachePromoting === 'true') return;
       const wasCurrent = window.currentlyPlayingVideo === video;
       const ownedForeground = foregroundPriorityVideo === video;
@@ -5224,7 +5312,13 @@ function createVideoElements() {
       random40PumpPostFetchQueue();
       random40PumpPreloadQueue(500);
     });
-    video.addEventListener('loadedmetadata', () => { updateVideoReadyLoader(video); });
+    video.addEventListener('loadedmetadata', () => {
+      restoreVideoPlaybackPosition(video, wrapper);
+      updateVideoReadyLoader(video);
+    });
+    video.addEventListener('seeked', () => {
+      rememberVideoPlaybackPosition(video, wrapper, { immediate: true });
+    });
     video.addEventListener('playing', () => {
       // Local classification can outlive the initiating click. Keep delayed
       // autoplay muted; unmuting here makes Chrome revoke playback. A direct
@@ -5238,6 +5332,11 @@ function createVideoElements() {
       const viewThreshold = video.duration ? 0.01 : 0.75;
       if (!video.paused && video.currentTime >= viewThreshold) markVideoViewed(wrapper);
       refreshForegroundVideoPriority(video);
+      const now = Date.now();
+      if (now - Number(video.dataset.lastPlaybackPositionCaptureAt || 0) >= 750) {
+        video.dataset.lastPlaybackPositionCaptureAt = String(now);
+        rememberVideoPlaybackPosition(video, wrapper);
+      }
     });
     video.addEventListener('loadedmetadata', () => {
       const metadataIndex = Number(wrapper.dataset.index || index);
@@ -5249,6 +5348,7 @@ function createVideoElements() {
     video.addEventListener('waiting', () => pongPlaybackBenchmarkOnWaiting(video, wrapper));
     video.addEventListener('stalled', () => pongPlaybackBenchmarkOnWaiting(video, wrapper));
     video.addEventListener('ended', () => {
+      rememberVideoPlaybackPosition(video, wrapper, { immediate: true });
       pongPlaybackBenchmarkCompleteVideo(video, wrapper);
       refreshForegroundVideoPriority(video, true);
       if (pongAutoScrollEnabled && wrapper.classList.contains('deck-active')) {
@@ -10546,14 +10646,31 @@ function random40ResetServerVideoCacheOnClose() {
 
 // Closing one tab releases only its client state. The shared cache is scrubbed
 // by the server after no Pong instance has sent a heartbeat for the idle window.
+window.addEventListener('pagehide', () => {
+  snapshotRenderedPlaybackPositions({ immediate: true });
+  saveSession();
+});
 window.addEventListener('pagehide', random40ResetServerVideoCacheOnClose);
 window.addEventListener('pageshow', () => {
+  document.querySelectorAll('.video-wrapper').forEach(wrapper => {
+    const video = wrapper.querySelector('video');
+    if (video?.readyState >= 1) restoreVideoPlaybackPosition(video, wrapper, { force: true });
+  });
   if (!isRandom40PlaybackActive()) return;
   random40StartServerVideoCacheTimers();
   scheduleRandom40PreloadPool(0);
 });
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'visible' || !isRandom40PlaybackActive()) return;
+  if (document.visibilityState === 'hidden') {
+    snapshotRenderedPlaybackPositions({ immediate: true });
+    saveSession();
+    return;
+  }
+  document.querySelectorAll('.video-wrapper').forEach(wrapper => {
+    const video = wrapper.querySelector('video');
+    if (video?.readyState >= 1) restoreVideoPlaybackPosition(video, wrapper, { force: true });
+  });
+  if (!isRandom40PlaybackActive()) return;
   random40StartServerVideoCacheTimers();
   scheduleRandom40PreloadPool(0);
 });
@@ -16807,7 +16924,7 @@ function normalizeSimpCityCreatorKey(value) {
 function setSimpCitySkipVisible(visible) {
   const button = document.getElementById('reject-current-artist-button');
   if (button && visible) {
-    button.title = 'Skip the current SimpCity creator for this Recall session';
+    button.title = 'Skip this SimpCity/Balbums artist for the current session';
   }
 }
 
@@ -16820,11 +16937,12 @@ async function skipCurrentSimpCityCreator(event) {
   const activeEvent = pasteEvents[visibleIndex >= 0 ? visibleIndex : currentPasteIndex] || {};
   const activeChoice = simpCityActiveCreatorChoices[0] || {};
   const creatorKey = normalizeSimpCityCreatorKey(
-    activeEvent.simpCityCreatorKey || activeChoice.key || ''
+    activeEvent.simpCityCreatorKey || activeChoice.key || activeEvent.artistDisplayName || activeEvent.bundleLabel || ''
   );
   const creatorName = String(
     activeEvent.simpCityCreatorName ||
     activeEvent.artistDisplayName ||
+    activeEvent.bundleLabel ||
     activeChoice.name ||
     ''
   ).trim();
@@ -16836,8 +16954,11 @@ async function skipCurrentSimpCityCreator(event) {
   if (key) simpCitySkippedCreatorKeys.add(key);
   const jobId = String(activeEvent.simpCityJobId || '');
   const jobIds = jobId ? [jobId] : [...simpCityActiveJobIds];
-  const endpoint = await getRandom40LocalEndpoint(true);
-  if (endpoint) {
+  const isSimpCityEvent = Boolean(
+    activeSimpCityRecallContext || activeEvent.simpCityJobId || activeEvent.simpCityCreatorKey
+  );
+  const endpoint = isSimpCityEvent ? await getRandom40LocalEndpoint(true) : '';
+  if (endpoint && isSimpCityEvent) {
     const response = await fetch(`${endpoint}/simpcity/import/skip`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -16865,7 +16986,8 @@ async function skipCurrentSimpCityCreator(event) {
     const itemKeys = [
       item?.simpCityCreatorKey,
       item?.simpCityCreatorName,
-      item?.artistDisplayName
+      item?.artistDisplayName,
+      item?.bundleLabel
     ].map(normalizeSimpCityCreatorKey).filter(Boolean);
     if (!itemKeys.some(itemKey => simpCitySkippedCreatorKeys.has(itemKey))) return;
     skippedIndexes.add(index);
@@ -16877,7 +16999,8 @@ async function skipCurrentSimpCityCreator(event) {
     paperclipHistory = paperclipHistory.filter(index => !skippedIndexes.has(index));
     paperclipHistoryPosition = Math.min(paperclipHistoryPosition, paperclipHistory.length - 1);
   }
-  showSortingIndicator(`Skipped ${creatorName || key} for this SC Recall only`);
+  scheduleSessionSave(0);
+  showSortingIndicator(`Skipped ${creatorName || key} for this session`);
   if (canNavigateToNextPasteEvent()) {
     navigateToNextPasteEvent();
   } else {
@@ -17608,6 +17731,7 @@ window.PongReceiveSimpCityNames = (rawNames, rawThreadUrl = '') => {
 async function loadBunkrAsCards(targets) {
   const loadGeneration = ++bunkrLoadGeneration;
   const resumeState = window.PongEromeResumeState || null;
+  if (!resumeState) simpCitySkippedCreatorKeys.clear();
   window.PongEromeResumeState = null;
   const resumeProgress = normalizeEromeScrapeProgress(resumeState?.scrapeProgress);
   const scrapeProgress = beginEromeScrapeProgress('bunkr', targets, resumeProgress);
@@ -17771,11 +17895,14 @@ async function loadBunkrAsCards(targets) {
   };
 
   const scrapeAlbum = async album => {
+    const albumCreatorKey = normalizeSimpCityCreatorKey(album?.title || album?.url || '');
+    if (albumCreatorKey && simpCitySkippedCreatorKeys.has(albumCreatorKey)) return;
     const acquiredSlot = await acquireAlbumSlot();
     if (!acquiredSlot) return;
     try {
       const data = await postJson('/bunkr/album', album);
       if (loadGeneration !== bunkrLoadGeneration) return;
+      if (albumCreatorKey && simpCitySkippedCreatorKeys.has(albumCreatorKey)) return;
       if (Array.isArray(data.videos) && data.videos.length) {
         publishGroup({
           url: album.url,
