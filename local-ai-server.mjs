@@ -23,7 +23,8 @@ import {
   simpCityCreatorAliases,
   isDistinctSimpCityCreatorName,
   buildBAlbumsCreatorSearchUrl,
-  bunkrAlbumsMatchingCreator
+  bunkrAlbumsMatchingCreator,
+  extractSimpCityMediaLinks
 } from './simpcity-import.mjs';
 
 const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
@@ -160,7 +161,7 @@ const MAX_LEARNED_RECORDS = 2000;
 const GATEWAY_TIMEOUT_MS = Math.max(5000, Number(process.env.PONG_GATEWAY_TIMEOUT_MS || 30000));
 const GATEWAY_MAX_REDIRECTS = 5;
 const GATEWAY_ALLOWED_HOSTS = ['coomerfans.com', 'onlyfaphouse.com'];
-const GATEWAY_MEDIA_ALLOWED_HOSTS = ['cdn.cr'];
+const GATEWAY_MEDIA_ALLOWED_HOSTS = ['cdn.cr', 'pixeldrain.com', 'gofile.io'];
 const GATEWAY_WARM_CONNECTIONS = Math.max(1, Math.min(4, Number(process.env.PONG_GATEWAY_WARM_CONNECTIONS || 2)));
 const GATEWAY_KEEP_WARM_MS = Math.max(10000, Number(process.env.PONG_GATEWAY_KEEP_WARM_MS || 20000));
 const GATEWAY_AGENT = new https.Agent({
@@ -3103,6 +3104,206 @@ async function extractSimpCityCreatorsWithAi(rawPosts, signal = null, currentThr
 }
 
 const simpCityRecallSearchLimit = createSimpCityLimiter(SIMPCITY_SEARCH_CONCURRENCY);
+const simpCityMediaResolveLimit = createSimpCityLimiter(4);
+
+function isLikelyVideoRecord(record) {
+  const mime = String(record?.mime_type || record?.mimetype || record?.type || '').toLowerCase();
+  const name = String(record?.name || record?.filename || record?.link || record?.url || '');
+  return mime.startsWith('video/') || /\.(?:mp4|m4v|mov|webm)(?:$|[?#])/i.test(name);
+}
+
+function collectHostedVideoUrls(value, output = new Set(), depth = 0) {
+  if (depth > 8 || value == null) return output;
+  if (typeof value === 'string') {
+    const decoded = decodeHtmlUrl(value).replace(/\\\//g, '/');
+    for (const match of decoded.matchAll(/https:\/\/[^\s<'"\\]+/gi)) {
+      const candidate = match[0].replace(/[),.;]+$/, '');
+      try {
+        const url = new URL(candidate);
+        const host = url.hostname.toLowerCase();
+        if (
+          /\.(?:mp4|m4v|mov|webm)(?:$|[?#])/i.test(`${url.pathname}${url.search}`) ||
+          (/(^|\.)gofile\.io$/i.test(host) && /\/download\//i.test(url.pathname))
+        ) output.add(url.toString());
+      } catch (_) {}
+    }
+    return output;
+  }
+  if (Array.isArray(value)) {
+    value.forEach(item => collectHostedVideoUrls(item, output, depth + 1));
+    return output;
+  }
+  if (typeof value === 'object') {
+    if (isLikelyVideoRecord(value)) {
+      for (const key of ['link', 'url', 'download', 'downloadUrl', 'directLink']) {
+        if (typeof value[key] === 'string') collectHostedVideoUrls(value[key], output, depth + 1);
+      }
+    }
+    Object.values(value).forEach(item => collectHostedVideoUrls(item, output, depth + 1));
+  }
+  return output;
+}
+
+async function fetchSimpCityMediaPayload(url, { json = false, signal = null, headers = {}, method = 'GET' } = {}) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(() => controller.abort(), 12000);
+  timer.unref?.();
+  try {
+    const response = await fetch(url, {
+      method,
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: {
+        Accept: json ? 'application/json' : 'text/html,application/xhtml+xml,application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36',
+        ...headers
+      }
+    });
+    if (!response.ok) throw new Error(`media host HTTP ${response.status}`);
+    const text = await response.text();
+    if (!json) return text;
+    return text ? JSON.parse(text) : {};
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
+let gofileGuestToken = '';
+let gofileGuestTokenCreatedAt = 0;
+
+async function ensureGofileGuestToken(signal = null) {
+  if (gofileGuestToken && Date.now() - gofileGuestTokenCreatedAt < 3 * 60 * 60 * 1000) {
+    return gofileGuestToken;
+  }
+  const payload = await fetchSimpCityMediaPayload('https://api.gofile.io/accounts', {
+    json: true,
+    signal,
+    method: 'POST',
+    headers: { Accept: 'application/json' }
+  });
+  const token = String(payload?.data?.token || '');
+  if (!token) throw new Error('Gofile guest session unavailable');
+  gofileGuestToken = token;
+  gofileGuestTokenCreatedAt = Date.now();
+  return token;
+}
+
+function gofileWebsiteToken(accountToken) {
+  const window = Math.floor(Date.now() / 1000 / 14400);
+  return crypto.createHash('sha256')
+    .update(`Mozilla/5.0::en-US::${accountToken}::${window}::9844d94d963d30`)
+    .digest('hex');
+}
+
+async function resolvePixeldrainVideos(rawUrl, signal = null) {
+  const url = new URL(rawUrl);
+  const [, kind, id] = url.pathname.match(/^\/(u|l|d)\/([a-z0-9_-]+)/i) || [];
+  if (!id) return [];
+  if (kind.toLowerCase() === 'u') return [`https://pixeldrain.com/api/file/${encodeURIComponent(id)}`];
+  if (kind.toLowerCase() === 'l') {
+    const payload = await fetchSimpCityMediaPayload(
+      `https://pixeldrain.com/api/list/${encodeURIComponent(id)}`,
+      { json: true, signal }
+    );
+    return [...new Set((Array.isArray(payload?.files) ? payload.files : [])
+      .filter(isLikelyVideoRecord)
+      .map(file => file?.id ? `https://pixeldrain.com/api/file/${encodeURIComponent(file.id)}` : '')
+      .filter(Boolean))];
+  }
+  const html = await fetchSimpCityMediaPayload(rawUrl, { signal });
+  const fileIds = [...html.matchAll(/(?:pixeldrain\.com)?\/u\/([a-z0-9_-]+)/gi)].map(match => match[1]);
+  return [...new Set(fileIds.map(fileId => `https://pixeldrain.com/api/file/${encodeURIComponent(fileId)}`))];
+}
+
+async function resolveGofileVideos(rawUrl, signal = null) {
+  const id = new URL(rawUrl).pathname.match(/^\/d\/([a-z0-9_-]+)/i)?.[1] || '';
+  if (!id) return [];
+  const videos = new Set();
+  // Public share pages commonly carry the resolved download data in their
+  // application state. This path needs no stored Gofile credentials.
+  const html = await fetchSimpCityMediaPayload(rawUrl, { signal });
+  collectHostedVideoUrls(html, videos);
+  try {
+    const accountToken = await ensureGofileGuestToken(signal);
+    const payload = await fetchSimpCityMediaPayload(
+      `https://api.gofile.io/contents/${encodeURIComponent(id)}?cache=true&page=1&pageSize=1000&maxdepth=5&sortField=createTime&sortDirection=1`,
+      {
+        json: true,
+        signal,
+        headers: {
+          Authorization: `Bearer ${accountToken}`,
+          'X-Website-Token': gofileWebsiteToken(accountToken),
+          'X-BL': 'en-US',
+          Cookie: `accountToken=${accountToken}`,
+          'User-Agent': 'Mozilla/5.0'
+        }
+      }
+    );
+    collectHostedVideoUrls(payload, videos);
+  } catch (_) {}
+  return [...videos];
+}
+
+async function resolveSimpCityMediaLink(link, signal = null) {
+  let videos = [];
+  if (link?.kind === 'direct') videos = [link.url];
+  else if (link?.kind === 'pixeldrain') videos = await resolvePixeldrainVideos(link.url, signal);
+  else if (link?.kind === 'gofile') videos = await resolveGofileVideos(link.url, signal);
+  return [...new Set(videos)].slice(0, 250);
+}
+
+function scheduleSimpCityMediaLinks(state, channel, suppliedId, posts, creators) {
+  if (!state.pending?.id || state.pending.id !== suppliedId) return null;
+  const knownUrls = new Set(state.pending.mediaLinksSeen || []);
+  const links = extractSimpCityMediaLinks(posts).filter(link => {
+    if (knownUrls.has(link.url)) return false;
+    knownUrls.add(link.url);
+    return true;
+  });
+  state.pending.mediaLinksSeen = [...knownUrls].slice(-2000);
+  if (!links.length) return null;
+  const signal = state.controller?.signal || null;
+  const taskKey = simpCityRecallTaskKey(channel, suppliedId);
+  state.pending.mediaLinksQueued = Number(state.pending.mediaLinksQueued || 0) + links.length;
+  const creatorByPost = new Map((creators || []).map(creator => [String(creator?.postId || ''), creator]));
+  const tasks = links.map(link => simpCityMediaResolveLimit(async () => {
+    if (signal?.aborted) return;
+    try {
+      const videos = await resolveSimpCityMediaLink(link, signal);
+      if (!videos.length || !state.pending?.id || state.pending.id !== suppliedId || signal?.aborted) return;
+      const creator = creatorByPost.get(link.postId);
+      const creatorName = String(creator?.primaryName || `SimpCity ${link.postId}`).trim();
+      const creatorKey = String(creatorName).toLowerCase().replace(/[^a-z0-9]+/g, '') || link.postId;
+      if (state.skippedCreatorKeys?.has(creatorKey)) return;
+      if (state.pending.albums.some(item => item.url === link.url)) return;
+      state.pending.albums.push({
+        url: link.url,
+        title: `${creatorName} · ${link.kind}`,
+        creatorName,
+        creatorKey,
+        sourceUrl: state.pending.threadUrl,
+        // Pixeldrain actively rejects some datacenter proxy traffic while its
+        // public API URL plays correctly as a normal browser media request.
+        source: link.kind === 'gofile' ? 'hosted' : 'direct',
+        videos
+      });
+      state.pending.albumsReady = state.pending.albums.length;
+      if (!state.pending.firstAlbumAt) state.pending.firstAlbumAt = new Date().toISOString();
+    } catch (_) {
+      state.pending.mediaLinkErrors = Number(state.pending.mediaLinkErrors || 0) + 1;
+    } finally {
+      if (state.pending?.id === suppliedId) {
+        state.pending.mediaLinksCompleted = Number(state.pending.mediaLinksCompleted || 0) + 1;
+        state.pending.updatedAt = new Date().toISOString();
+      }
+    }
+  }));
+  return trackSimpCityRecallTask(taskKey, Promise.allSettled(tasks));
+}
 
 function simpCityCreatorSearchCandidates(creators) {
   const candidates = [];
@@ -4866,6 +5067,9 @@ async function downloadVideoFileCacheRecord(record, generation) {
       if (resumeOffset > VIDEO_FILE_CACHE_MAX_FILE_BYTES) throw new Error('video cache file too large');
       record.bytes = resumeOffset;
       const target = gatewayTargetUrl(currentUrl);
+      const gofileToken = /(^|\.)gofile\.io$/i.test(target.hostname)
+        ? await ensureGofileGuestToken().catch(() => '')
+        : '';
       const response = await new Promise((resolve, reject) => {
         const headers = {
           accept: 'video/*,*/*;q=0.8',
@@ -4873,6 +5077,7 @@ async function downloadVideoFileCacheRecord(record, generation) {
           'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
           referer: `${target.protocol}//${target.host}/`
         };
+        if (gofileToken) headers.cookie = `accountToken=${gofileToken}`;
         if (resumeOffset > 0) {
           headers.range = `bytes=${resumeOffset}-`;
           const ifRange = record.etag || record.lastModified || '';
@@ -9935,6 +10140,10 @@ const server = http.createServer(async (req, res) => {
         aiBatchesSkipped: 0,
         aiPostsSkipped: 0,
         aiErrors: 0,
+        mediaLinksSeen: [],
+        mediaLinksQueued: 0,
+        mediaLinksCompleted: 0,
+        mediaLinkErrors: 0,
         albumSearchesQueued: 0,
         albumSearchesCompleted: 0,
         albumsReady: 0,
@@ -9964,6 +10173,13 @@ const server = http.createServer(async (req, res) => {
       state.pending.deterministicCreators += newCreators.length;
       state.pending.updatedAt = new Date().toISOString();
       scheduleSimpCityRecallAlbums(state, channel, suppliedId, newCreators);
+      scheduleSimpCityMediaLinks(
+        state,
+        channel,
+        suppliedId,
+        deterministic.posts,
+        [...state.pending.creators]
+      );
 
       if (
         deterministic.unresolvedPosts.length &&

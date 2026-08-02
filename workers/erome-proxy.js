@@ -37,7 +37,35 @@ function isEromeHost(hostname) {
 }
 
 function isBunkrMediaHost(hostname) {
-  return /(^|\.)cdn\.cr$/i.test(hostname);
+  return /(^|\.)(?:cdn\.cr|pixeldrain\.com|gofile\.io)$/i.test(hostname);
+}
+
+function hostedMediaHeaders(hostname) {
+  if (/(^|\.)pixeldrain\.com$/i.test(hostname)) {
+    return { 'User-Agent': BROWSER_UA };
+  }
+  if (/(^|\.)gofile\.io$/i.test(hostname)) {
+    return { Referer: 'https://gofile.io/', 'User-Agent': BROWSER_UA };
+  }
+  return { Referer: 'https://dl.bunkr.cr/', 'User-Agent': BROWSER_UA };
+}
+
+let gofileGuestToken = '';
+let gofileGuestTokenCreatedAt = 0;
+
+async function workerGofileGuestToken() {
+  if (gofileGuestToken && Date.now() - gofileGuestTokenCreatedAt < 3 * 60 * 60 * 1000) {
+    return gofileGuestToken;
+  }
+  const response = await fetch('https://api.gofile.io/accounts', {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'User-Agent': BROWSER_UA },
+  });
+  if (!response.ok) return '';
+  const payload = await response.json().catch(() => ({}));
+  gofileGuestToken = String(payload?.data?.token || '');
+  gofileGuestTokenCreatedAt = gofileGuestToken ? Date.now() : 0;
+  return gofileGuestToken;
 }
 
 function corsHeaders(extra) {
@@ -322,11 +350,12 @@ async function handleScrape(target, options = {}) {
 async function handleVideo(request, target) {
   const range = request.headers.get('Range');
   const headers = isBunkrMediaHost(target.hostname)
-    ? {
-        Referer: 'https://dl.bunkr.cr/',
-        'User-Agent': BROWSER_UA,
-      }
+    ? hostedMediaHeaders(target.hostname)
     : { ...EROME_HEADERS };
+  if (/(^|\.)gofile\.io$/i.test(target.hostname)) {
+    const token = await workerGofileGuestToken();
+    if (token) headers.Cookie = `accountToken=${token}`;
+  }
   if (range) headers.Range = range;
 
   const upstream = await fetch(target.href, { headers, redirect: 'follow' });

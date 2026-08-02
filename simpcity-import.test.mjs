@@ -8,7 +8,9 @@ import {
   simpCityCreatorAliases,
   isDistinctSimpCityCreatorName,
   buildBAlbumsCreatorSearchUrl,
-  bunkrAlbumsMatchingCreator
+  bunkrAlbumsMatchingCreator,
+  classifySimpCityMediaUrl,
+  extractSimpCityMediaLinks
 } from './simpcity-import.mjs';
 
 const THREAD = 'https://simpcity.cr/threads/lightskin-light-skin-mixed-black-white-girl-thread.210197/?order=reaction_score';
@@ -104,4 +106,27 @@ test('extracts authoritative social handles without accepting ordinary first nam
   assert.ok(!names.includes('kayce'));
   assert.ok(!names.includes('zoe'));
   assert.ok(!names.includes('forum-poster'));
+});
+
+test('extracts supported file-host and direct video links from SimpCity posts', () => {
+  const posts = [{
+    postId: 'post-77',
+    text: 'Mirror https://cdn.example.test/clips/one.mp4?download=1',
+    links: [
+      { url: 'https://gofile.io/d/AbC_123' },
+      { url: 'https://pixeldrain.com/u/Px9Z_2' },
+      { url: 'https://pixeldrain.com/l/List123' },
+      { url: 'https://example.test/not-video' }
+    ]
+  }];
+  assert.deepEqual(
+    extractSimpCityMediaLinks(posts).map(item => [item.kind, item.url, item.postId]),
+    [
+      ['gofile', 'https://gofile.io/d/AbC_123', 'post-77'],
+      ['pixeldrain', 'https://pixeldrain.com/u/Px9Z_2', 'post-77'],
+      ['pixeldrain', 'https://pixeldrain.com/l/List123', 'post-77'],
+      ['direct', 'https://cdn.example.test/clips/one.mp4?download=1', 'post-77']
+    ]
+  );
+  assert.equal(classifySimpCityMediaUrl('http://pixeldrain.com/u/nope'), null);
 });

@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.60</div>
+    <div class="version-number">25.61</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -1863,7 +1863,7 @@ function migrateBunkrSessionPlaybackUrl(rawUrl) {
   for (let depth = 0; depth < 5; depth++) {
     try {
       const parsed = new URL(candidate, window.location.href);
-      if (/(^|\.)cdn\.cr$/i.test(parsed.hostname)) {
+      if (/(^|\.)(?:cdn\.cr|pixeldrain\.com|gofile\.io)$/i.test(parsed.hostname)) {
         const playbackBase = location.protocol === 'http:' && location.port === '8787'
           ? location.origin
           : EROME_PROXY_BASE.replace(/\/+$/, '');
@@ -9450,18 +9450,21 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
     const groupSourceTitle = group.sourceTitle || artistNameFromUrl(groupSourceUrl) || 'Erome';
 
     group.videos.forEach((rawUrl, videoIndex) => {
-      const isBunkr = group.source === 'bunkr';
-      const proxiedUrl = isBunkr
+      const isHosted = group.source === 'bunkr' || group.source === 'hosted';
+      const isSimpCityMedia = isHosted || group.source === 'direct';
+      const proxiedUrl = isHosted
         ? proxyBase === EROME_PROXY_BASE.replace(/\/+$/, '')
           ? `${proxyBase}/bunkr.mp4?u=${encodeURIComponent(rawUrl)}`
           : `${proxyBase}/video-cache/stream?url=${encodeURIComponent(rawUrl)}&profile=bunkr`
-        : proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
+        : group.source === 'direct'
+          ? rawUrl
+          : proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
       const mediaKey = eromeMediaKey(rawUrl);
 
       urls.push(proxiedUrl);
       metadata.push({
         type: 'video',
-        source: isBunkr ? 'bunkr' : 'erome',
+        source: isSimpCityMedia ? 'bunkr' : 'erome',
         artistName: groupSourceTitle,
         artistDisplayName: group.title || groupSourceTitle,
         artistKey: groupSourceUrl,
@@ -9483,8 +9486,8 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         startIndex: eventStartIndex,
         count: urls.length - groupStartIndex,
         artistKey: groupSourceUrl,
-        bundleKey: `${group.source === 'bunkr' ? 'bunkr' : 'erome'}-bundle:${group.url || groupSourceUrl || groupIndex}`,
-        source: group.source === 'bunkr' ? 'bunkr' : 'erome',
+        bundleKey: `${group.source === 'erome' ? 'erome' : 'bunkr'}-bundle:${group.url || groupSourceUrl || groupIndex}`,
+        source: group.source === 'erome' ? 'erome' : 'bunkr',
         artistUrl: groupSourceUrl,
         postUrl: group.url || groupSourceUrl,
         artistDisplayName: groupSourceTitle,
@@ -17121,11 +17124,21 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   };
   const enqueueAlbums = (albums, jobId = '') => {
     (albums || []).forEach(rawAlbum => {
-      const albumUrl = normalizeEromeLaunchUrl(rawAlbum?.url || '');
+      const readyVideos = Array.isArray(rawAlbum?.videos) ? rawAlbum.videos.filter(Boolean) : [];
+      let albumUrl = normalizeEromeLaunchUrl(rawAlbum?.url || '');
+      if (!albumUrl && readyVideos.length) {
+        try {
+          const candidate = new URL(String(rawAlbum?.url || ''));
+          if (candidate.protocol === 'https:' && !candidate.username && !candidate.password) {
+            candidate.hash = '';
+            albumUrl = candidate.toString();
+          }
+        } catch (_) {}
+      }
       const creatorKey = normalizeSimpCityCreatorKey(rawAlbum?.creatorKey || rawAlbum?.creatorName);
       if (
         !albumUrl ||
-        !isBunkrImportLaunchUrl(albumUrl) ||
+        (!readyVideos.length && !isBunkrImportLaunchUrl(albumUrl)) ||
         seenAlbumUrls.has(albumUrl) ||
         (creatorKey && simpCitySkippedCreatorKeys.has(creatorKey))
       ) return;
@@ -17139,7 +17152,12 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         creatorName: String(rawAlbum?.creatorName || rawAlbum?.sourceTitle || ''),
         creatorKey,
         simpCityJobId: String(jobId || rawAlbum?.simpCityJobId || ''),
-        source: 'bunkr'
+        source: rawAlbum?.source === 'direct'
+          ? 'direct'
+          : rawAlbum?.source === 'hosted'
+            ? 'hosted'
+            : 'bunkr',
+        videos: readyVideos
       });
     });
     discoveredAlbums = seenAlbumUrls.size;
@@ -17236,7 +17254,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           creatorName: album.creatorName || album.sourceTitle || '',
           creatorKey: album.creatorKey || '',
           simpCityJobId: album.simpCityJobId || '',
-          source: 'bunkr',
+          source: album.source || 'bunkr',
           videos: data.videos
         });
       }
