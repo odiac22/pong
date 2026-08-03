@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.63</div>
+    <div class="version-number">25.64</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3257,9 +3257,16 @@ function createSaveButtons() {
     const activeEvent = pasteEvents[visibleIndex >= 0 ? visibleIndex : currentPasteIndex] || {};
     const activeGlobalIndex = getCurrentLoadedGlobalVideoIndex();
     const activeMetadata = allVideoMetadata[activeGlobalIndex] || {};
-    if (
-      activeEvent.source === 'bunkr' || activeMetadata.source === 'bunkr'
-    ) {
+    const isSimpCityOrBalbumsCard = Boolean(
+      activeSimpCityRecallContext ||
+      activeEvent.source === 'bunkr' ||
+      activeMetadata.source === 'bunkr' ||
+      activeEvent.simpCityJobId ||
+      activeEvent.simpCityCreatorKey ||
+      activeMetadata.simpCityJobId ||
+      activeMetadata.simpCityCreatorKey
+    );
+    if (isSimpCityOrBalbumsCard) {
       rejectMenu.classList.remove('open');
       void skipCurrentSimpCityCreator(e);
       return;
