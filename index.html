@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.70</div>
+    <div class="version-number">25.71</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -15952,6 +15952,8 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
   window.PongRecallRedXMode = false;
   window.PongActiveSimpCityRecallChannel = 0;
   activeSimpCityRecallContext = null;
+  delete document.documentElement.dataset.pongSimpCityActive;
+  delete document.documentElement.dataset.pongRecallChannel;
   if (random40State && !random40State.done) {
     const stoppingState = random40State;
     stoppingState.stop = true;
@@ -17047,6 +17049,10 @@ async function skipCurrentSimpCityCreator(event) {
   }
 }
 
+// pong-sync.js owns the visible top-right X. Give it one stable entry point
+// into the active SimpCity/Balbums queue instead of showing Random40 reasons.
+window.PongSkipCurrentSimpCityCreator = skipCurrentSimpCityCreator;
+
 function setSimpCityDisconnectVisible(visible) {
   ensureEromeProgressEl();
   const button = document.getElementById('simpcity-disconnect');
@@ -17394,6 +17400,8 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     );
     return true;
   };
+  document.documentElement.dataset.pongSimpCityActive = 'true';
+  document.documentElement.dataset.pongRecallChannel = String(Number(recallChannel || 0));
   const scrapeAlbum = async album => {
     if (album?.creatorKey && simpCitySkippedCreatorKeys.has(album.creatorKey)) return;
     const acquired = await acquireAlbumSlot();
@@ -17690,6 +17698,8 @@ async function startSimpCityRecall(channel = 1) {
   channel = Number(channel) === 2 ? 2 : 1;
   window.PongRecallRedXMode = true;
   window.PongActiveSimpCityRecallChannel = channel;
+  document.documentElement.dataset.pongSimpCityActive = 'true';
+  document.documentElement.dataset.pongRecallChannel = String(channel);
   const startToken = ++simpCityRecallStartToken;
   if (simpCityRecallStarting) {
     // A second press explicitly replaces the active Recall import/player queue.
@@ -17722,12 +17732,16 @@ async function startSimpCityRecall(channel = 1) {
     if (!shared.reachable) {
       window.PongRecallRedXMode = false;
       window.PongActiveSimpCityRecallChannel = 0;
+      delete document.documentElement.dataset.pongSimpCityActive;
+      delete document.documentElement.dataset.pongRecallChannel;
       alert('SC Recall could not reach the PC server. No older scrape was loaded.');
       return;
     }
     if (!payload?.names?.length && !shared.pending?.threadUrl) {
       window.PongRecallRedXMode = false;
       window.PongActiveSimpCityRecallChannel = 0;
+      delete document.documentElement.dataset.pongSimpCityActive;
+      delete document.documentElement.dataset.pongRecallChannel;
       alert(`No Recall ${channel} scrape is active. Press Pong ${channel} Scrape in the SimpCity script first.`);
       return;
     }
@@ -18025,6 +18039,8 @@ async function loadEromeAsCards() {
     return;
   }
   activeSimpCityRecallContext = null;
+  delete document.documentElement.dataset.pongSimpCityActive;
+  delete document.documentElement.dataset.pongRecallChannel;
 
   const bunkrTargets = targets.filter(isBunkrImportLaunchUrl);
   if (bunkrTargets.length) {
@@ -19124,6 +19140,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=109"></script>
+<script src="pong-sync.js?v=110"></script>
 </body>
 </html>

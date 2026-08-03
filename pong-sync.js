@@ -5069,6 +5069,18 @@
       e.preventDefault();
       e.stopPropagation();
       const menu = document.getElementById('random40-reject-reason-menu');
+      const simpCityActive =
+        document.documentElement.dataset.pongSimpCityActive === 'true' ||
+        Number(document.documentElement.dataset.pongRecallChannel || 0) > 0 ||
+        window.PongRecallRedXMode === true ||
+        Number(window.PongActiveSimpCityRecallChannel || 0) > 0;
+      if (simpCityActive && typeof window.PongSkipCurrentSimpCityCreator === 'function') {
+        if (menu) menu.dataset.open = 'false';
+        void Promise.resolve(window.PongSkipCurrentSimpCityCreator(e)).catch(error => {
+          console.warn('Could not skip the current SimpCity creator:', error);
+        });
+        return;
+      }
       if (menu) {
         menu.dataset.open = menu.dataset.open === 'true' ? 'false' : 'true';
       }
