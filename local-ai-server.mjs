@@ -4968,7 +4968,6 @@ function updateVideoFileCachePlaybackBuffer(id, bufferedSeconds, { critical = fa
 
 function protectVideoFileCacheForegroundPlayback(durationMs = 12000) {
   const protectedForMs = Math.max(3000, Math.min(30000, Number(durationMs || 12000)));
-  const wasAlreadyProtected = Date.now() < videoFileCacheGlobalPlaybackConstrainedUntil;
   videoFileCacheGlobalPlaybackConstrainedUntil = Math.max(
     videoFileCacheGlobalPlaybackConstrainedUntil,
     Date.now() + protectedForMs
@@ -4985,15 +4984,15 @@ function protectVideoFileCacheForegroundPlayback(durationMs = 12000) {
       Number(right.bytes || 0) - Number(left.bytes || 0) ||
       Number(left.order || 0) - Number(right.order || 0)
     ));
-  // Trim the wide background set once when foreground protection begins.
-  // Repeated one-second status updates only extend the lease; aborting the two
-  // permitted trickle downloads on every update prevented either from ending.
-  if (!wasAlreadyProtected) {
-    runningBackground.slice(VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY).forEach(record => {
-      record.deferWhenIdle = true;
-      record.controller?.abort();
-    });
-  }
+  // Enforce the narrow background limit on every foreground signal. Two Pong
+  // instances can keep this lease continuously alive; transition-only trimming
+  // let later multi-gigabyte background files refill every worker indefinitely.
+  // The permitted trickle downloads are retained, so repeated signals do not
+  // restart useful work.
+  runningBackground.slice(VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY).forEach(record => {
+    record.deferWhenIdle = true;
+    record.controller?.abort();
+  });
   normalizeVideoFileCachePriorities();
   rebalanceVideoFileCacheDownloads();
   pumpVideoFileCache();
@@ -5793,8 +5792,9 @@ async function serveVideoFileCacheMedia(req, res, id) {
   record.currentUntil = 0;
   if (record.status === 'idle' || record.status === 'error') enqueueVideoFileCacheRecord(record, { resetRetries: true });
   touchVideoFileCacheHeartbeat();
-  rebalanceVideoFileCacheDownloads();
-  pumpVideoFileCache();
+  // A real media reader is the strongest foreground signal. Recall/Bunkr cards
+  // do not send Random40 buffer telemetry, so reclaim their worker lanes here.
+  protectVideoFileCacheForegroundPlayback(12000);
   let tailRangeSession = null;
   try {
     const size = await waitForVideoFileCacheMetadata(record, generation);
