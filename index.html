@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.64</div>
+    <div class="version-number">25.65</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3258,6 +3258,7 @@ function createSaveButtons() {
     const activeGlobalIndex = getCurrentLoadedGlobalVideoIndex();
     const activeMetadata = allVideoMetadata[activeGlobalIndex] || {};
     const isSimpCityOrBalbumsCard = Boolean(
+      window.PongActiveSimpCityRecallChannel ||
       activeSimpCityRecallContext ||
       activeEvent.source === 'bunkr' ||
       activeMetadata.source === 'bunkr' ||
@@ -15932,6 +15933,8 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
 }
 
 async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), options = {}) {
+  window.PongActiveSimpCityRecallChannel = 0;
+  activeSimpCityRecallContext = null;
   if (random40State && !random40State.done) {
     const stoppingState = random40State;
     stoppingState.stop = true;
@@ -16942,13 +16945,18 @@ async function skipCurrentSimpCityCreator(event) {
     ? syncCurrentPasteIndexFromVisibleVideo()
     : -1;
   const activeEvent = pasteEvents[visibleIndex >= 0 ? visibleIndex : currentPasteIndex] || {};
+  const activeGlobalIndex = getCurrentLoadedGlobalVideoIndex();
+  const activeMetadata = allVideoMetadata[activeGlobalIndex] || {};
   const activeChoice = simpCityActiveCreatorChoices[0] || {};
   const creatorKey = normalizeSimpCityCreatorKey(
-    activeEvent.simpCityCreatorKey || activeChoice.key || activeEvent.artistDisplayName || activeEvent.bundleLabel || ''
+    activeEvent.simpCityCreatorKey || activeMetadata.simpCityCreatorKey || activeChoice.key ||
+    activeEvent.artistDisplayName || activeMetadata.artistDisplayName || activeEvent.bundleLabel || ''
   );
   const creatorName = String(
     activeEvent.simpCityCreatorName ||
+    activeMetadata.simpCityCreatorName ||
     activeEvent.artistDisplayName ||
+    activeMetadata.artistDisplayName ||
     activeEvent.bundleLabel ||
     activeChoice.name ||
     ''
@@ -16959,10 +16967,12 @@ async function skipCurrentSimpCityCreator(event) {
   }
   const key = creatorKey || normalizeSimpCityCreatorKey(creatorName);
   if (key) simpCitySkippedCreatorKeys.add(key);
-  const jobId = String(activeEvent.simpCityJobId || '');
+  const jobId = String(activeEvent.simpCityJobId || activeMetadata.simpCityJobId || '');
   const jobIds = jobId ? [jobId] : [...simpCityActiveJobIds];
   const isSimpCityEvent = Boolean(
-    activeSimpCityRecallContext || activeEvent.simpCityJobId || activeEvent.simpCityCreatorKey
+    window.PongActiveSimpCityRecallChannel || activeSimpCityRecallContext ||
+    activeEvent.simpCityJobId || activeEvent.simpCityCreatorKey ||
+    activeMetadata.simpCityJobId || activeMetadata.simpCityCreatorKey
   );
   const endpoint = isSimpCityEvent ? await getRandom40LocalEndpoint(true) : '';
   if (endpoint && isSimpCityEvent) {
@@ -16974,7 +16984,9 @@ async function skipCurrentSimpCityCreator(event) {
         jobIds,
         creatorKey: key,
         creatorName,
-        recallChannel: Number(activeSimpCityRecallContext?.recallChannel || 0)
+        recallChannel: Number(
+          activeSimpCityRecallContext?.recallChannel || window.PongActiveSimpCityRecallChannel || 0
+        )
       })
     }).catch(() => null);
     const data = response ? await response.json().catch(() => null) : null;
@@ -17696,6 +17708,7 @@ async function startSimpCityRecall(channel = 1) {
     const activePayload = payload || normalizeSimpCityRecallPayload(
       [], shared.pending.threadUrl, shared.pending.id, [], true, channel, true
     );
+    window.PongActiveSimpCityRecallChannel = channel;
     showSortingIndicator(
       `Recall ${channel}: ${getEromeTargetLabel(activePayload.threadUrl)} - ${activePayload.names.length} names so far`
     );
