@@ -43,14 +43,14 @@ export function normalizeSimpCityThreadUrl(rawValue) {
   try {
     const url = new URL(String(rawValue || '').trim());
     if (!SIMPCITY_HOSTS.has(url.hostname.toLowerCase())) return '';
-    if (!/^\/threads\/[^/?#]+(?:\/page-\d+)?\/?$/i.test(url.pathname)) return '';
+    if (!/^\/threads\/[^/?#]+(?:\/(?:page|post)-\d+)?\/?$/i.test(url.pathname)) return '';
     url.protocol = 'https:';
     url.hostname = 'simpcity.cr';
     url.username = '';
     url.password = '';
     url.hash = '';
     url.pathname = url.pathname
-      .replace(/\/page-\d+\/?$/i, '/')
+      .replace(/\/(?:page|post)-\d+\/?$/i, '/')
       .replace(/\/?$/, '/');
     // Ordering affects which posts appear on each page, but unrelated tracking
     // parameters must not create duplicate import jobs.
@@ -134,6 +134,7 @@ export function classifySimpCityMediaUrl(rawValue) {
     else if (host === 'pixeldrain.com' && /^\/(?:u|l|d)\/[a-z0-9_-]+$/i.test(path)) kind = 'pixeldrain';
     else if (/^(?:bunkr\.(?:cr|si|ru|su|la|fi|site|black|media)|bunkrrr\.org|xbunkr\.com)$/i.test(host) && /^\/(?:a|f|v)\/[a-z0-9_.-]+$/i.test(path)) kind = 'bunkr';
     else if (/^cyberdrop\.(?:cr|me|to)$/i.test(host) && /^\/(?:a|f)\/[a-z0-9_-]+$/i.test(path)) kind = 'cyberdrop';
+    else if (/^(?:[^.]+\.)?cyberfile\.me$/i.test(host) && path !== '/') kind = 'cyberfile';
     else if (/^(?:saint\.to|saint2\.(?:su|cr)|turbo\.cr)$/i.test(host) && /^\/(?:embed|v)\/[a-z0-9_-]+$/i.test(path)) kind = 'saint';
     else if (SIMPCITY_DIRECT_VIDEO_RE.test(`${path}${url.search}`)) kind = 'direct';
     if (!kind) return null;

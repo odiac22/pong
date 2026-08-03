@@ -163,7 +163,7 @@ const GATEWAY_MAX_REDIRECTS = 5;
 const GATEWAY_ALLOWED_HOSTS = ['coomerfans.com', 'onlyfaphouse.com'];
 const GATEWAY_MEDIA_ALLOWED_HOSTS = [
   'cdn.cr', 'pixeldrain.com', 'gofile.io',
-  'cyberdrop.cr', 'cyberdrop.me', 'cyberdrop.to',
+  'cyberdrop.cr', 'cyberdrop.me', 'cyberdrop.to', 'cyberfile.me',
   'saint.to', 'saint2.su', 'saint2.cr', 'turbo.cr', 'turbocdn.st'
 ];
 const GATEWAY_WARM_CONNECTIONS = Math.max(1, Math.min(4, Number(process.env.PONG_GATEWAY_WARM_CONNECTIONS || 2)));
@@ -3295,7 +3295,7 @@ async function resolveSimpCityMediaLink(link, signal = null) {
   else if (link?.kind === 'pixeldrain') videos = await resolvePixeldrainVideos(link.url, signal);
   else if (link?.kind === 'gofile') videos = await resolveGofileVideos(link.url, signal);
   else if (link?.kind === 'bunkr') videos = await extractBunkrVideoUrls(link.url);
-  else if (link?.kind === 'cyberdrop') videos = await extractGalleryDlVideoUrls(link.url);
+  else if (link?.kind === 'cyberdrop' || link?.kind === 'cyberfile') videos = await extractGalleryDlVideoUrls(link.url);
   else if (link?.kind === 'saint') videos = await resolveSaintVideo(link.url, signal);
   return [...new Set(videos)].slice(0, 250);
 }
@@ -3332,7 +3332,7 @@ function scheduleSimpCityMediaLinks(state, channel, suppliedId, posts, creators)
         sourceUrl: state.pending.threadUrl,
         // Pixeldrain actively rejects some datacenter proxy traffic while its
         // public API URL plays correctly as a normal browser media request.
-        source: ['gofile', 'cyberdrop', 'saint'].includes(link.kind)
+        source: ['gofile', 'cyberdrop', 'cyberfile', 'saint'].includes(link.kind)
           ? 'hosted'
           : link.kind === 'bunkr' ? 'bunkr' : 'direct',
         videos

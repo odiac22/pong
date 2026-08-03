@@ -24,6 +24,10 @@ test('normalizes SimpCity threads and preserves only ordering', () => {
     simpCityThreadPageUrl(THREAD, 3),
     'https://simpcity.cr/threads/lightskin-light-skin-mixed-black-white-girl-thread.210197/page-3?order=reaction_score'
   );
+  assert.equal(
+    normalizeSimpCityThreadUrl('https://simpcity.cr/threads/mistress-eva-oh-aka-youwillpleaseme.168161/post-21831454'),
+    'https://simpcity.cr/threads/mistress-eva-oh-aka-youwillpleaseme.168161/'
+  );
   assert.equal(normalizeSimpCityThreadUrl('https://simpcity.cr/members/not-a-thread.5/'), '');
 });
 
@@ -119,6 +123,7 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
       { url: 'https://simpcity.cr/proxy.php?link=https%3A%2F%2Fpixeldrain.com%2Fl%2FXspwPcht' },
       { url: 'https://bunkr.cr/a/kV4toiMV' },
       { url: 'https://cyberdrop.cr/a/Cyber123' },
+      { url: 'https://cyberfile.me/hsgY' },
       { url: 'https://saint.to/embed/P9kEUyTHgJd' },
       { url: 'https://bunkrrr.org/f/WIS7IyS4kQ80U' },
       { url: 'https://bunkr.cr/v/3uAUOmsOW1nvi' },
@@ -136,6 +141,7 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
       ['pixeldrain', 'https://pixeldrain.com/l/XspwPcht', 'post-77'],
       ['bunkr', 'https://bunkr.cr/a/kV4toiMV', 'post-77'],
       ['cyberdrop', 'https://cyberdrop.cr/a/Cyber123', 'post-77'],
+      ['cyberfile', 'https://cyberfile.me/hsgY', 'post-77'],
       ['saint', 'https://saint.to/embed/P9kEUyTHgJd', 'post-77'],
       ['bunkr', 'https://bunkrrr.org/f/WIS7IyS4kQ80U', 'post-77'],
       ['bunkr', 'https://bunkr.cr/v/3uAUOmsOW1nvi', 'post-77'],

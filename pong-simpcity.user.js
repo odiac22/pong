@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.7.1
+// @version      1.7.3
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -93,6 +93,22 @@
 
   const absoluteUrl = (raw, base) => {
     try { return new URL(raw, base).href; } catch (_) { return ''; }
+  };
+  const canonicalSimpCityThreadUrl = raw => {
+    try {
+      const url = new URL(raw, location.href);
+      if (!/(?:^|\.)simpcity\.cr$/i.test(url.hostname)) return '';
+      const match = url.pathname.match(/^\/threads\/([^/?#]+)/i);
+      if (!match) return '';
+      const order = url.searchParams.get('order') || '';
+      url.protocol = 'https:';
+      url.hostname = 'simpcity.cr';
+      url.pathname = `/threads/${match[1]}/`;
+      url.search = '';
+      if (order) url.searchParams.set('order', order);
+      url.hash = '';
+      return url.toString();
+    } catch (_) { return ''; }
   };
   const fileLabel = raw => {
     try { return decodeURIComponent(new URL(raw, location.href).pathname.split('/').filter(Boolean).at(-1) || ''); }
@@ -196,12 +212,9 @@
                 const target = parsed.searchParams.get(key);
                 if (target) pending.push(target);
               }
-              if (/^\/threads\/[^/?#]+(?:\/page-\d+)?\/?$/i.test(parsed.pathname)) {
-                parsed.hostname = 'simpcity.cr';
-                parsed.pathname = parsed.pathname.replace(/\/page-\d+\/?$/i, '/');
-                parsed.search = '';
-                parsed.hash = '';
-                found.push({ text, url: parsed.toString().slice(0, 1500), simpcityThread: true });
+              const linkedThreadUrl = canonicalSimpCityThreadUrl(parsed);
+              if (linkedThreadUrl) {
+                found.push({ text, url: linkedThreadUrl.slice(0, 1500), simpcityThread: true });
               }
             } else if (!/\/members\//i.test(url) && !/(?:#post-|\/page-\d+)/i.test(url)) {
               found.push({ text, url: url.slice(0, 1500) });
@@ -217,12 +230,9 @@
           const rawUrl = match[0].replace(/&(?:quot|amp);.*$/i, '').replace(/[),.;]+$/, '');
           try {
             const parsed = new URL(rawUrl);
-            if (/^(?:www\.)?simpcity\.cr$/i.test(parsed.hostname) && /^\/threads\/[^/?#]+/i.test(parsed.pathname)) {
-              parsed.hostname = 'simpcity.cr';
-              parsed.pathname = parsed.pathname.replace(/\/page-\d+\/?$/i, '/');
-              parsed.search = '';
-              parsed.hash = '';
-              links.push({ text: '', url: parsed.toString(), simpcityThread: true });
+            const linkedThreadUrl = canonicalSimpCityThreadUrl(parsed);
+            if (linkedThreadUrl) {
+              links.push({ text: '', url: linkedThreadUrl, simpcityThread: true });
             } else if (!/(?:^|\.)simpcity\.cr$/i.test(parsed.hostname)) {
               parsed.hash = '';
               links.push({ text: '', url: parsed.toString().slice(0, 1500) });
@@ -260,7 +270,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.7.1 · Host videos + linked creator threads</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.7.3 · More hosts + full linked creator threads</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -272,10 +282,7 @@
     activeRunTokens.set(channel, runToken);
     const isCurrentRun = () => activeRunTokens.get(channel) === runToken;
     try {
-      const first = new URL(location.href);
-      first.hostname = 'simpcity.cr';
-      first.searchParams.delete('page');
-      first.pathname = first.pathname.replace(/page-\d+\/?$/i, '').replace(/\/$/, '') + '/';
+      const first = new URL(canonicalSimpCityThreadUrl(location.href));
       const scrapeId = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       await sendToPong('/simpcity/recall/begin', { id: scrapeId, threadUrl: first.href, channel }, 12000);
       const names = new Map();
@@ -290,14 +297,11 @@
       };
       const normalizeLinkedThread = rawUrl => {
         try {
-          const url = new URL(rawUrl);
-          if (!/(?:^|\.)simpcity\.cr$/i.test(url.hostname) || !/^\/threads\/[^/?#]+/i.test(url.pathname)) return '';
+          const canonical = canonicalSimpCityThreadUrl(rawUrl);
+          if (!canonical) return '';
+          const url = new URL(canonical);
           const slug = decodeURIComponent(url.pathname.split('/').filter(Boolean)[1] || '');
           if (/\b(?:rules?|guidelines?|who-is-this|request|posting-etiquette|community-rules|help)\b/i.test(slug)) return '';
-          url.hostname = 'simpcity.cr';
-          url.pathname = url.pathname.replace(/\/page-\d+\/?$/i, '/').replace(/\/$/, '') + '/';
-          url.search = '';
-          url.hash = '';
           return url.toString();
         } catch (_) { return ''; }
       };
