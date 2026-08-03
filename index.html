@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.65</div>
+    <div class="version-number">25.66</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -3258,6 +3258,7 @@ function createSaveButtons() {
     const activeGlobalIndex = getCurrentLoadedGlobalVideoIndex();
     const activeMetadata = allVideoMetadata[activeGlobalIndex] || {};
     const isSimpCityOrBalbumsCard = Boolean(
+      window.PongRecallRedXMode === true ||
       window.PongActiveSimpCityRecallChannel ||
       activeSimpCityRecallContext ||
       activeEvent.source === 'bunkr' ||
@@ -15933,6 +15934,7 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
 }
 
 async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), options = {}) {
+  window.PongRecallRedXMode = false;
   window.PongActiveSimpCityRecallChannel = 0;
   activeSimpCityRecallContext = null;
   if (random40State && !random40State.done) {
@@ -17668,6 +17670,8 @@ let simpCityRecallStartToken = 0;
 
 async function startSimpCityRecall(channel = 1) {
   channel = Number(channel) === 2 ? 2 : 1;
+  window.PongRecallRedXMode = true;
+  window.PongActiveSimpCityRecallChannel = channel;
   const startToken = ++simpCityRecallStartToken;
   if (simpCityRecallStarting) {
     // A second press explicitly replaces the active Recall import/player queue.
@@ -17698,10 +17702,14 @@ async function startSimpCityRecall(channel = 1) {
     );
     const payload = shared.recall;
     if (!shared.reachable) {
+      window.PongRecallRedXMode = false;
+      window.PongActiveSimpCityRecallChannel = 0;
       alert('SC Recall could not reach the PC server. No older scrape was loaded.');
       return;
     }
     if (!payload?.names?.length && !shared.pending?.threadUrl) {
+      window.PongRecallRedXMode = false;
+      window.PongActiveSimpCityRecallChannel = 0;
       alert(`No Recall ${channel} scrape is active. Press Pong ${channel} Scrape in the SimpCity script first.`);
       return;
     }

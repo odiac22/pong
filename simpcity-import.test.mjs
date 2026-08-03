@@ -118,6 +118,8 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
       { url: 'https://pixeldrain.com/l/List123' },
       { url: 'https://simpcity.cr/proxy.php?link=https%3A%2F%2Fpixeldrain.com%2Fl%2FXspwPcht' },
       { url: 'https://bunkr.cr/a/kV4toiMV' },
+      { url: 'https://cyberdrop.cr/a/Cyber123' },
+      { url: 'https://saint.to/embed/P9kEUyTHgJd' },
       { url: 'https://example.test/not-video' }
     ]
   }];
@@ -129,6 +131,8 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
       ['pixeldrain', 'https://pixeldrain.com/l/List123', 'post-77'],
       ['pixeldrain', 'https://pixeldrain.com/l/XspwPcht', 'post-77'],
       ['bunkr', 'https://bunkr.cr/a/kV4toiMV', 'post-77'],
+      ['cyberdrop', 'https://cyberdrop.cr/a/Cyber123', 'post-77'],
+      ['saint', 'https://saint.to/embed/P9kEUyTHgJd', 'post-77'],
       ['direct', 'https://cdn.example.test/clips/one.mp4?download=1', 'post-77']
     ]
   );

@@ -37,7 +37,7 @@ function isEromeHost(hostname) {
 }
 
 function isBunkrMediaHost(hostname) {
-  return /(^|\.)(?:cdn\.cr|pixeldrain\.com|gofile\.io)$/i.test(hostname);
+  return /(^|\.)(?:cdn\.cr|pixeldrain\.com|gofile\.io|cyberdrop\.(?:cr|me|to)|saint\.to|saint2\.(?:su|cr)|turbo\.cr|turbocdn\.st)$/i.test(hostname);
 }
 
 function hostedMediaHeaders(hostname) {
@@ -46,6 +46,12 @@ function hostedMediaHeaders(hostname) {
   }
   if (/(^|\.)gofile\.io$/i.test(hostname)) {
     return { Referer: 'https://gofile.io/', 'User-Agent': BROWSER_UA };
+  }
+  if (/(^|\.)cyberdrop\.(?:cr|me|to)$/i.test(hostname)) {
+    return { Referer: 'https://cyberdrop.cr/', 'User-Agent': BROWSER_UA };
+  }
+  if (/(^|\.)(?:saint\.to|saint2\.(?:su|cr)|turbo\.cr|turbocdn\.st)$/i.test(hostname)) {
+    return { Referer: 'https://turbo.cr/', 'User-Agent': BROWSER_UA };
   }
   return { Referer: 'https://dl.bunkr.cr/', 'User-Agent': BROWSER_UA };
 }

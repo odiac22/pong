@@ -161,7 +161,11 @@ const MAX_LEARNED_RECORDS = 2000;
 const GATEWAY_TIMEOUT_MS = Math.max(5000, Number(process.env.PONG_GATEWAY_TIMEOUT_MS || 30000));
 const GATEWAY_MAX_REDIRECTS = 5;
 const GATEWAY_ALLOWED_HOSTS = ['coomerfans.com', 'onlyfaphouse.com'];
-const GATEWAY_MEDIA_ALLOWED_HOSTS = ['cdn.cr', 'pixeldrain.com', 'gofile.io'];
+const GATEWAY_MEDIA_ALLOWED_HOSTS = [
+  'cdn.cr', 'pixeldrain.com', 'gofile.io',
+  'cyberdrop.cr', 'cyberdrop.me', 'cyberdrop.to',
+  'saint.to', 'saint2.su', 'saint2.cr', 'turbo.cr', 'turbocdn.st'
+];
 const GATEWAY_WARM_CONNECTIONS = Math.max(1, Math.min(4, Number(process.env.PONG_GATEWAY_WARM_CONNECTIONS || 2)));
 const GATEWAY_KEEP_WARM_MS = Math.max(10000, Number(process.env.PONG_GATEWAY_KEEP_WARM_MS || 20000));
 const GATEWAY_AGENT = new https.Agent({
@@ -2054,10 +2058,10 @@ async function discoverBunkrAlbums(rawUrl) {
   return albums;
 }
 
-function extractBunkrVideoUrlsWithGalleryDl(albumUrl) {
+function extractGalleryDlVideoUrls(sourceUrl) {
   return new Promise((resolve, reject) => {
     const python = path.join(LOCAL_AI_DIR, 'lora-venv', 'Scripts', 'python.exe');
-    const child = spawn(python, ['-m', 'gallery_dl', '-g', '--no-download', albumUrl], {
+    const child = spawn(python, ['-m', 'gallery_dl', '-g', '--no-download', sourceUrl], {
       cwd: process.cwd(),
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
@@ -2074,7 +2078,7 @@ function extractBunkrVideoUrlsWithGalleryDl(albumUrl) {
     };
     const timer = setTimeout(() => {
       child.kill();
-      finish(new Error('Bunkr album extraction timed out'));
+      finish(new Error('hosted media extraction timed out'));
     }, 60000);
     timer.unref?.();
     child.stdout.on('data', chunk => {
@@ -2085,7 +2089,7 @@ function extractBunkrVideoUrlsWithGalleryDl(albumUrl) {
     child.once('error', error => finish(error));
     child.once('close', code => {
       if (code !== 0) {
-        finish(new Error(stderr.trim() || `Bunkr extractor exited ${code}`));
+        finish(new Error(stderr.trim() || `hosted media extractor exited ${code}`));
         return;
       }
       const seen = new Set();
@@ -2128,7 +2132,7 @@ async function extractBunkrVideoUrls(albumUrl) {
     if (id && /^video\//i.test(type)) files.push({ id, original });
     if (files.length >= 300) break;
   }
-  if (!files.length) return extractBunkrVideoUrlsWithGalleryDl(albumUrl);
+  if (!files.length) return extractGalleryDlVideoUrls(albumUrl);
 
   const headers = {
     Referer: 'https://dl.bunkr.cr/',
@@ -2889,7 +2893,7 @@ function createSimpCityLimiter(limit) {
 
 function compactSimpCityAiPost(rawPost, index = 0) {
   const text = String(rawPost?.text || '').replace(/\u0000/g, '').trim().slice(0, 14000);
-  const links = (Array.isArray(rawPost?.links) ? rawPost.links : []).slice(0, 120).map(link => ({
+  const links = (Array.isArray(rawPost?.links) ? rawPost.links : []).slice(0, 180).map(link => ({
     text: String(link?.text || '').replace(/\s+/g, ' ').trim().slice(0, 180),
     url: String(link?.url || '').trim().slice(0, 1200)
   })).filter(link => link.text || link.url);
@@ -3267,12 +3271,32 @@ async function resolveGofileVideos(rawUrl, signal = null) {
   return [...videos];
 }
 
+async function resolveSaintVideo(rawUrl, signal = null) {
+  const id = new URL(rawUrl).pathname.match(/^\/embed\/([a-z0-9_-]+)/i)?.[1] || '';
+  if (!id) return [];
+  const signUrl = `https://turbo.cr/api/sign?v=${encodeURIComponent(id)}`;
+  const payload = await fetchSimpCityMediaPayload(signUrl, {
+    json: true,
+    signal,
+    headers: { Referer: signUrl, Accept: 'application/json' }
+  });
+  const candidate = String(payload?.url || payload?.data?.url || '');
+  try {
+    const url = new URL(candidate);
+    return url.protocol === 'https:' ? [url.toString()] : [];
+  } catch (_) {
+    return [];
+  }
+}
+
 async function resolveSimpCityMediaLink(link, signal = null) {
   let videos = [];
   if (link?.kind === 'direct') videos = [link.url];
   else if (link?.kind === 'pixeldrain') videos = await resolvePixeldrainVideos(link.url, signal);
   else if (link?.kind === 'gofile') videos = await resolveGofileVideos(link.url, signal);
   else if (link?.kind === 'bunkr') videos = await extractBunkrVideoUrls(link.url);
+  else if (link?.kind === 'cyberdrop') videos = await extractGalleryDlVideoUrls(link.url);
+  else if (link?.kind === 'saint') videos = await resolveSaintVideo(link.url, signal);
   return [...new Set(videos)].slice(0, 250);
 }
 
@@ -3308,7 +3332,9 @@ function scheduleSimpCityMediaLinks(state, channel, suppliedId, posts, creators)
         sourceUrl: state.pending.threadUrl,
         // Pixeldrain actively rejects some datacenter proxy traffic while its
         // public API URL plays correctly as a normal browser media request.
-        source: link.kind === 'gofile' ? 'hosted' : link.kind === 'bunkr' ? 'bunkr' : 'direct',
+        source: ['gofile', 'cyberdrop', 'saint'].includes(link.kind)
+          ? 'hosted'
+          : link.kind === 'bunkr' ? 'bunkr' : 'direct',
         videos
       });
       state.pending.albumsReady = state.pending.albums.length;

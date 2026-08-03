@@ -125,7 +125,9 @@ export function classifySimpCityMediaUrl(rawValue) {
     let kind = '';
     if (host === 'gofile.io' && /^\/d\/[a-z0-9_-]+$/i.test(path)) kind = 'gofile';
     else if (host === 'pixeldrain.com' && /^\/(?:u|l|d)\/[a-z0-9_-]+$/i.test(path)) kind = 'pixeldrain';
-    else if (/^bunkr\.(?:cr|si|ru|su|la|fi|site|black|media)$/i.test(host) && /^\/a\/[a-z0-9_-]+$/i.test(path)) kind = 'bunkr';
+    else if (/^(?:bunkr\.(?:cr|si|ru|su|la|fi|site|black|media)|xbunkr\.com)$/i.test(host) && /^\/(?:a|f)\/[a-z0-9_.-]+$/i.test(path)) kind = 'bunkr';
+    else if (/^cyberdrop\.(?:cr|me|to)$/i.test(host) && /^\/(?:a|f)\/[a-z0-9_-]+$/i.test(path)) kind = 'cyberdrop';
+    else if (/^(?:saint\.to|saint2\.(?:su|cr)|turbo\.cr)$/i.test(host) && /^\/embed\/[a-z0-9_-]+$/i.test(path)) kind = 'saint';
     else if (SIMPCITY_DIRECT_VIDEO_RE.test(`${path}${url.search}`)) kind = 'direct';
     if (!kind) return null;
     url.hash = '';

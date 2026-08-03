@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.6.1
+// @version      1.7.0
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -22,6 +22,9 @@
   const PAGE_CONCURRENCY = 4;
   const AI_BATCH_SIZE = 10;
   const AI_CONCURRENCY = 2;
+  const MAX_LINKED_THREADS = 24;
+  const MAX_LINKED_THREAD_DEPTH = 2;
+  const MAX_LINKED_THREAD_PAGES = 40;
   const endpoints = ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
   const monthDate = /^(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\s*$/i;
 
@@ -186,6 +189,13 @@
                 const target = parsed.searchParams.get(key);
                 if (target) pending.push(target);
               }
+              if (/^\/threads\/[^/?#]+(?:\/page-\d+)?\/?$/i.test(parsed.pathname)) {
+                parsed.hostname = 'simpcity.cr';
+                parsed.pathname = parsed.pathname.replace(/\/page-\d+\/?$/i, '/');
+                parsed.search = '';
+                parsed.hash = '';
+                found.push({ text, url: parsed.toString().slice(0, 1500), simpcityThread: true });
+              }
             } else if (!/\/members\//i.test(url) && !/(?:#post-|\/page-\d+)/i.test(url)) {
               found.push({ text, url: url.slice(0, 1500) });
             }
@@ -193,6 +203,26 @@
         }
         return found;
       }).filter(Boolean);
+      const hiddenMarkupCandidates = [clone.outerHTML.replace(/&amp;/gi, '&')];
+      try { hiddenMarkupCandidates.push(decodeURIComponent(hiddenMarkupCandidates[0])); } catch (_) {}
+      for (const markup of hiddenMarkupCandidates) {
+        for (const match of markup.matchAll(/https?:\/\/[^\s<>'"\])}]+/gi)) {
+          const rawUrl = match[0].replace(/&(?:quot|amp);.*$/i, '').replace(/[),.;]+$/, '');
+          try {
+            const parsed = new URL(rawUrl);
+            if (/^(?:www\.)?simpcity\.cr$/i.test(parsed.hostname) && /^\/threads\/[^/?#]+/i.test(parsed.pathname)) {
+              parsed.hostname = 'simpcity.cr';
+              parsed.pathname = parsed.pathname.replace(/\/page-\d+\/?$/i, '/');
+              parsed.search = '';
+              parsed.hash = '';
+              links.push({ text: '', url: parsed.toString(), simpcityThread: true });
+            } else if (!/(?:^|\.)simpcity\.cr$/i.test(parsed.hostname)) {
+              parsed.hash = '';
+              links.push({ text: '', url: parsed.toString().slice(0, 1500) });
+            }
+          } catch (_) {}
+        }
+      }
       const attachments = [];
       clone.querySelectorAll('img').forEach(image => {
         [image.alt, image.title, fileLabel(image.getAttribute('src'))].forEach(value => {
@@ -213,7 +243,7 @@
       return {
         postId: String(article.id || article.dataset?.content || `page-${pageNumber}-post-${index + 1}`),
         page: pageNumber, text,
-        links: uniqueObjects(links, item => `${item.url}|${item.text}`).slice(0, 120),
+        links: uniqueObjects(links, item => item.url).slice(0, 180),
         attachments: [...new Set(attachments.filter(Boolean))].slice(0, 50)
       };
     }).filter(Boolean);
@@ -223,7 +253,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.6.1 · External videos + AI names</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.7.0 · Host videos + linked creator threads</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -236,21 +266,46 @@
     const isCurrentRun = () => activeRunTokens.get(channel) === runToken;
     try {
       const first = new URL(location.href);
+      first.hostname = 'simpcity.cr';
       first.searchParams.delete('page');
       first.pathname = first.pathname.replace(/page-\d+\/?$/i, '').replace(/\/$/, '') + '/';
       const scrapeId = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       await sendToPong('/simpcity/recall/begin', { id: scrapeId, threadUrl: first.href, channel }, 12000);
-      const pageNumbers = [...document.querySelectorAll('a[href*="/page-"]')].map(a => Number(a.href.match(/page-(\d+)/)?.[1] || 1));
-      const totalPages = Math.max(1, ...pageNumbers);
       const names = new Map();
       const albums = new Map();
       const aiSlots = Array.from({ length: AI_CONCURRENCY }, () => Promise.resolve());
       const aiTasks = [];
-      let slotIndex = 0, pagesFetched = 0, postsSent = 0;
+      const linkedThreadQueue = [];
+      const seenThreads = new Set([first.href]);
+      let slotIndex = 0, pagesFetched = 0, totalPages = 0, postsSent = 0;
       const update = () => {
-        if (isCurrentRun()) status.textContent = `Pong ${channel}: ${pagesFetched}/${totalPages} pages · ${postsSent} posts · ${names.size} creators · ${albums.size} albums`;
+        if (isCurrentRun()) status.textContent = `Pong ${channel}: ${pagesFetched}/${Math.max(totalPages, pagesFetched)} pages · ${postsSent} posts · ${names.size} creators · ${albums.size} albums · ${seenThreads.size} threads`;
       };
-      const queuePosts = posts => {
+      const normalizeLinkedThread = rawUrl => {
+        try {
+          const url = new URL(rawUrl);
+          if (!/(?:^|\.)simpcity\.cr$/i.test(url.hostname) || !/^\/threads\/[^/?#]+/i.test(url.pathname)) return '';
+          const slug = decodeURIComponent(url.pathname.split('/').filter(Boolean)[1] || '');
+          if (/\b(?:rules?|guidelines?|who-is-this|request|posting-etiquette|community-rules|help)\b/i.test(slug)) return '';
+          url.hostname = 'simpcity.cr';
+          url.pathname = url.pathname.replace(/\/page-\d+\/?$/i, '/').replace(/\/$/, '') + '/';
+          url.search = '';
+          url.hash = '';
+          return url.toString();
+        } catch (_) { return ''; }
+      };
+      const queuePosts = (posts, depth = 0) => {
+        if (depth < MAX_LINKED_THREAD_DEPTH && seenThreads.size <= MAX_LINKED_THREADS) {
+          for (const post of posts) {
+            for (const link of post?.links || []) {
+              if (!link?.simpcityThread) continue;
+              const threadUrl = normalizeLinkedThread(link.url);
+              if (!threadUrl || seenThreads.has(threadUrl) || seenThreads.size >= MAX_LINKED_THREADS + 1) continue;
+              seenThreads.add(threadUrl);
+              linkedThreadQueue.push({ url: threadUrl, depth: depth + 1 });
+            }
+          }
+        }
         for (let offset = 0; offset < posts.length; offset += AI_BATCH_SIZE) {
           const batch = posts.slice(offset, offset + AI_BATCH_SIZE);
           const slot = slotIndex++ % AI_CONCURRENCY;
@@ -270,16 +325,39 @@
           aiTasks.push(task);
         }
       };
-      queuePosts(extractPostPayloads(document.documentElement.outerHTML, 1, first.href));
-      pagesFetched = 1; update();
-      for (let start = 2; start <= totalPages; start += PAGE_CONCURRENCY) {
-        const pages = Array.from({ length: PAGE_CONCURRENCY }, (_, i) => start + i).filter(page => page <= totalPages);
-        const fetched = await Promise.all(pages.map(async page => {
-          const url = new URL(first); url.pathname = `${first.pathname.replace(/\/$/, '')}/page-${page}`;
-          return { page, url: url.href, html: await fetchSimpCityPage(url.href, page) };
-        }));
-        for (const item of fetched) { queuePosts(extractPostPayloads(item.html, item.page, item.url)); pagesFetched++; }
+      const pageCountFromHtml = html => {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const pages = [...doc.querySelectorAll('a[href*="/page-"]')]
+          .map(anchor => Number(anchor.getAttribute('href')?.match(/page-(\d+)/i)?.[1] || 1));
+        return Math.max(1, ...pages);
+      };
+      const scanThread = async ({ url: threadUrl, depth }, currentHtml = '') => {
+        if (!isCurrentRun()) throw Object.assign(new Error('This scrape was superseded'), { status: 409 });
+        const firstHtml = currentHtml || await fetchSimpCityPage(threadUrl, 1);
+        const discoveredPages = pageCountFromHtml(firstHtml);
+        const threadPages = depth ? Math.min(discoveredPages, MAX_LINKED_THREAD_PAGES) : discoveredPages;
+        totalPages += threadPages;
+        queuePosts(extractPostPayloads(firstHtml, 1, threadUrl), depth);
+        pagesFetched++;
         update();
+        for (let start = 2; start <= threadPages; start += PAGE_CONCURRENCY) {
+          const pages = Array.from({ length: PAGE_CONCURRENCY }, (_, i) => start + i).filter(page => page <= threadPages);
+          const fetched = await Promise.all(pages.map(async page => {
+            const pageUrl = new URL(threadUrl);
+            pageUrl.pathname = `${pageUrl.pathname.replace(/\/$/, '')}/page-${page}`;
+            return { page, url: pageUrl.href, html: await fetchSimpCityPage(pageUrl.href, page) };
+          }));
+          for (const item of fetched) {
+            queuePosts(extractPostPayloads(item.html, item.page, item.url), depth);
+            pagesFetched++;
+          }
+          update();
+        }
+      };
+      const currentPage = Number(location.pathname.match(/\/page-(\d+)/i)?.[1] || 1);
+      await scanThread({ url: first.href, depth: 0 }, currentPage === 1 ? document.documentElement.outerHTML : '');
+      while (linkedThreadQueue.length && isCurrentRun()) {
+        await scanThread(linkedThreadQueue.shift());
       }
       await Promise.all(aiTasks);
       await sendToPong('/simpcity/recall', {
