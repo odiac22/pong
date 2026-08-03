@@ -832,7 +832,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.69</div>
+    <div class="version-number">25.70</div>
   <div id="video-container"></div>
 
   <div class="controls-overlay">
@@ -8647,8 +8647,23 @@ function compactSavedEromeVideoGroups(groups) {
   const out = [];
 
   (groups || []).forEach(group => {
-    const url = normalizeEromeProfileSaveUrl(group?.url || group?.postUrl || '');
-    const sourceUrl = normalizeEromeProfileSaveUrl(group?.sourceUrl || group?.artistUrl || group?.artistKey || url);
+    const source = ['bunkr', 'hosted', 'direct'].includes(group?.source)
+      ? group.source
+      : 'erome';
+    const normalizeTrustedGroupUrl = rawValue => {
+      const normalized = normalizeEromeProfileSaveUrl(rawValue);
+      if (normalized || source === 'erome') return normalized;
+      try {
+        const candidate = new URL(String(rawValue || ''));
+        if (candidate.protocol !== 'https:' || candidate.username || candidate.password) return '';
+        candidate.hash = '';
+        return candidate.toString();
+      } catch (_) {
+        return '';
+      }
+    };
+    const url = normalizeTrustedGroupUrl(group?.url || group?.postUrl || '');
+    const sourceUrl = normalizeTrustedGroupUrl(group?.sourceUrl || group?.artistUrl || group?.artistKey || url);
     const videos = (Array.isArray(group?.videos) ? group.videos : [])
       .map(video => String(video || '').trim())
       .filter(Boolean);
@@ -8678,7 +8693,7 @@ function compactSavedEromeVideoGroups(groups) {
       title: String(group?.title || getEromeTargetLabel(url)).trim(),
       sourceUrl: sourceUrl || url,
       sourceTitle: String(group?.sourceTitle || getEromeTargetLabel(sourceUrl || url)).trim(),
-      source: group?.source === 'bunkr' ? 'bunkr' : 'erome',
+      source,
       creatorName: String(group?.creatorName || ''),
       creatorKey: String(group?.creatorKey || ''),
       simpCityJobId: String(group?.simpCityJobId || ''),
@@ -17347,6 +17362,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     let imported;
     if (!cardsStarted) {
       imported = cacheEromeCardImport([group], bunkrPlaybackBase);
+      if (!imported.urls.length || !imported.events.length) return false;
       closeEromeHelper();
       setEromeTwentyCardMode(true, { respectRange: true });
       window.PongEromeAutoAdvanceOnce = true;
@@ -17356,6 +17372,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       cardsStarted = true;
     } else {
       imported = appendEromeGroupsToCurrentCards([group], bunkrPlaybackBase);
+      if (!imported.urls.length || !imported.events.length) return false;
       updatePasteNavigationButton();
     }
     loadedAlbums++;
@@ -17375,6 +17392,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     showSortingIndicator(
       `SimpCity ready: ${loadedAlbums} artists, ${videoCount} videos`
     );
+    return true;
   };
   const scrapeAlbum = async album => {
     if (album?.creatorKey && simpCitySkippedCreatorKeys.has(album.creatorKey)) return;
