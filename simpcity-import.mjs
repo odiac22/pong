@@ -102,6 +102,13 @@ function simpCityUrlCandidates(rawValue) {
     let decoded = value;
     try { decoded = decodeURIComponent(value.replace(/\+/g, '%20')); } catch (_) {}
     if (decoded !== value) pending.push(decoded);
+    if (/^[a-z0-9_-]{12,}={0,2}$/i.test(value)) {
+      try {
+        const base64 = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
+        const unwrapped = Buffer.from(base64, 'base64').toString('utf8');
+        if (/^https?:\/\//i.test(unwrapped)) pending.push(unwrapped);
+      } catch (_) {}
+    }
     for (const match of value.matchAll(/https?(?::|%3a)(?:\/\/|%2f%2f)[^\s<>'"\])}]+/gi)) pending.push(match[0]);
     try {
       const url = new URL(value);
@@ -125,9 +132,9 @@ export function classifySimpCityMediaUrl(rawValue) {
     let kind = '';
     if (host === 'gofile.io' && /^\/d\/[a-z0-9_-]+$/i.test(path)) kind = 'gofile';
     else if (host === 'pixeldrain.com' && /^\/(?:u|l|d)\/[a-z0-9_-]+$/i.test(path)) kind = 'pixeldrain';
-    else if (/^(?:bunkr\.(?:cr|si|ru|su|la|fi|site|black|media)|xbunkr\.com)$/i.test(host) && /^\/(?:a|f)\/[a-z0-9_.-]+$/i.test(path)) kind = 'bunkr';
+    else if (/^(?:bunkr\.(?:cr|si|ru|su|la|fi|site|black|media)|bunkrrr\.org|xbunkr\.com)$/i.test(host) && /^\/(?:a|f|v)\/[a-z0-9_.-]+$/i.test(path)) kind = 'bunkr';
     else if (/^cyberdrop\.(?:cr|me|to)$/i.test(host) && /^\/(?:a|f)\/[a-z0-9_-]+$/i.test(path)) kind = 'cyberdrop';
-    else if (/^(?:saint\.to|saint2\.(?:su|cr)|turbo\.cr)$/i.test(host) && /^\/embed\/[a-z0-9_-]+$/i.test(path)) kind = 'saint';
+    else if (/^(?:saint\.to|saint2\.(?:su|cr)|turbo\.cr)$/i.test(host) && /^\/(?:embed|v)\/[a-z0-9_-]+$/i.test(path)) kind = 'saint';
     else if (SIMPCITY_DIRECT_VIDEO_RE.test(`${path}${url.search}`)) kind = 'direct';
     if (!kind) return null;
     url.hash = '';

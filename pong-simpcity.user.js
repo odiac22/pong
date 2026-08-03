@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.7.0
+// @version      1.7.1
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -179,6 +179,13 @@
           let decoded = raw;
           try { decoded = decodeURIComponent(raw.replace(/\+/g, '%20')); } catch (_) {}
           if (decoded !== raw) pending.push(decoded);
+          if (/^[a-z0-9_-]{12,}={0,2}$/i.test(raw)) {
+            try {
+              const base64 = raw.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(raw.length / 4) * 4, '=');
+              const unwrapped = atob(base64);
+              if (/^https?:\/\//i.test(unwrapped)) pending.push(unwrapped);
+            } catch (_) {}
+          }
           for (const match of raw.matchAll(/https?(?::|%3a)(?:\/\/|%2f%2f)[^\s<>'"\])}]+/gi)) pending.push(match[0]);
           const url = absoluteUrl(raw, pageUrl);
           if (!url) continue;
@@ -253,7 +260,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.7.0 · Host videos + linked creator threads</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.7.1 · Host videos + linked creator threads</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -355,7 +362,15 @@
         }
       };
       const currentPage = Number(location.pathname.match(/\/page-(\d+)/i)?.[1] || 1);
-      await scanThread({ url: first.href, depth: 0 }, currentPage === 1 ? document.documentElement.outerHTML : '');
+      const rootIsSinglePageThread = /\/threads\/who-is-this-identify-unknown-models-in-here\./i.test(first.pathname);
+      if (rootIsSinglePageThread) {
+        totalPages = 1;
+        queuePosts(extractPostPayloads(document.documentElement.outerHTML, currentPage, location.href), 0);
+        pagesFetched = 1;
+        update();
+      } else {
+        await scanThread({ url: first.href, depth: 0 }, currentPage === 1 ? document.documentElement.outerHTML : '');
+      }
       while (linkedThreadQueue.length && isCurrentRun()) {
         await scanThread(linkedThreadQueue.shift());
       }

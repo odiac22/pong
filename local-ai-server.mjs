@@ -3272,7 +3272,7 @@ async function resolveGofileVideos(rawUrl, signal = null) {
 }
 
 async function resolveSaintVideo(rawUrl, signal = null) {
-  const id = new URL(rawUrl).pathname.match(/^\/embed\/([a-z0-9_-]+)/i)?.[1] || '';
+  const id = new URL(rawUrl).pathname.match(/^\/(?:embed|v)\/([a-z0-9_-]+)/i)?.[1] || '';
   if (!id) return [];
   const signUrl = `https://turbo.cr/api/sign?v=${encodeURIComponent(id)}`;
   const payload = await fetchSimpCityMediaPayload(signUrl, {

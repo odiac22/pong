@@ -120,6 +120,10 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
       { url: 'https://bunkr.cr/a/kV4toiMV' },
       { url: 'https://cyberdrop.cr/a/Cyber123' },
       { url: 'https://saint.to/embed/P9kEUyTHgJd' },
+      { url: 'https://bunkrrr.org/f/WIS7IyS4kQ80U' },
+      { url: 'https://bunkr.cr/v/3uAUOmsOW1nvi' },
+      { url: 'https://simpcity.cr/redirect/?to=aHR0cHM6Ly9waXhlbGRyYWluLmNvbS9sL1JWQkJ4eGNF&e=1&m=b64' },
+      { url: 'https://turbo.cr/v/bH_17k91Ltzu2' },
       { url: 'https://example.test/not-video' }
     ]
   }];
@@ -133,6 +137,10 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
       ['bunkr', 'https://bunkr.cr/a/kV4toiMV', 'post-77'],
       ['cyberdrop', 'https://cyberdrop.cr/a/Cyber123', 'post-77'],
       ['saint', 'https://saint.to/embed/P9kEUyTHgJd', 'post-77'],
+      ['bunkr', 'https://bunkrrr.org/f/WIS7IyS4kQ80U', 'post-77'],
+      ['bunkr', 'https://bunkr.cr/v/3uAUOmsOW1nvi', 'post-77'],
+      ['pixeldrain', 'https://pixeldrain.com/l/RVBBxxcE', 'post-77'],
+      ['saint', 'https://turbo.cr/v/bH_17k91Ltzu2', 'post-77'],
       ['direct', 'https://cdn.example.test/clips/one.mp4?download=1', 'post-77']
     ]
   );
