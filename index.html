@@ -642,18 +642,18 @@
     #scroll-bar-thumb.visible { opacity: 1; }
 
     #pong-server-toggle {
-      position: fixed; right: 8px; bottom: 8px; z-index: 10050;
-      width: 42px; height: 42px; padding: 0;
-      border: 1px solid rgba(255,255,255,0.30); border-radius: 3px;
+      position: fixed; right: 8px; bottom: 48px; z-index: 10050;
+      width: 36px; height: 17px; padding: 0;
+      border: 1px solid rgba(255,255,255,0.22); border-radius: 2px;
       color: #fff; background: rgba(22,163,74,0.90);
-      box-shadow: 0 6px 16px rgba(0,0,0,0.34);
-      font: 800 9px/1 system-ui, sans-serif; letter-spacing: -0.15px;
+      box-shadow: 0 3px 8px rgba(0,0,0,0.22); opacity: 0.20;
+      font: 800 7px/1 system-ui, sans-serif; letter-spacing: -0.15px;
       cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
     }
     #pong-server-toggle[data-state="running"] { background: rgba(220,38,38,0.91); }
     #pong-server-toggle[data-state="pending"] { background: rgba(202,138,4,0.92); }
     #pong-server-toggle[data-state="unknown"] { background: rgba(71,85,105,0.90); }
-    #pong-server-toggle:disabled { cursor: wait; opacity: 0.82; }
+    #pong-server-toggle:disabled { cursor: wait; opacity: 0.20; }
 
     /* Right-side save buttons */
 /* Save / Sync buttons under paperclip */
@@ -846,7 +846,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.73</div>
+    <div class="version-number">25.74</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
