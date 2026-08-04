@@ -641,6 +641,20 @@
     }
     #scroll-bar-thumb.visible { opacity: 1; }
 
+    #pong-server-toggle {
+      position: fixed; right: 8px; bottom: 8px; z-index: 10050;
+      width: 42px; height: 42px; padding: 0;
+      border: 1px solid rgba(255,255,255,0.30); border-radius: 3px;
+      color: #fff; background: rgba(22,163,74,0.90);
+      box-shadow: 0 6px 16px rgba(0,0,0,0.34);
+      font: 800 9px/1 system-ui, sans-serif; letter-spacing: -0.15px;
+      cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+    }
+    #pong-server-toggle[data-state="running"] { background: rgba(220,38,38,0.91); }
+    #pong-server-toggle[data-state="pending"] { background: rgba(202,138,4,0.92); }
+    #pong-server-toggle[data-state="unknown"] { background: rgba(71,85,105,0.90); }
+    #pong-server-toggle:disabled { cursor: wait; opacity: 0.82; }
+
     /* Right-side save buttons */
 /* Save / Sync buttons under paperclip */
 .save-actions-panel {
@@ -832,8 +846,9 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.72</div>
+    <div class="version-number">25.73</div>
   <div id="video-container"></div>
+  <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
   <div class="controls-overlay">
     <div class="url-input">
@@ -915,6 +930,12 @@ let currentRenderBatchSize = BATCH_SIZE;
 let eromeBatchAutoAdvance = false;
 let slidingPlaybackRespectsRange = false;
 let eromeSlidingRenderPending = false;
+const PONG_CONTROL_STORAGE_KEY = 'pong_server_control_endpoint_v1';
+const PONG_CONTROL_PORT = 8788;
+let pongServerControlEndpoint = '';
+let pongServerControlRunning = null;
+let pongServerControlBusy = false;
+let pongServerControlPollTimer = null;
 const VIDEO_LOAD_RETRY_DELAYS_MS = [3000, 5000, 7000, 10000, 15000, 20000];
 const VIDEO_LOAD_RETRY_POLL_MS = 1000;
 const VIDEO_NETWORK_PROGRESS_TIMEOUT_MS = 20000;
@@ -942,6 +963,159 @@ const DECK_INITIAL_WARM_COUNT = 1;
 const FOREGROUND_VIDEO_BUFFER_TARGET_SECONDS = PONG_ADAPTIVE_PLAYBACK ? 16 : 10;
 const FOREGROUND_VIDEO_BUFFER_CRITICAL_SECONDS = 6;
 const VIDEO_PLAYABLE_BUFFER_SECONDS = PONG_ADAPTIVE_PLAYBACK ? 3 : 6;
+
+function pongControlButton() {
+  return document.getElementById('pong-server-toggle');
+}
+
+function pongControlCandidateEndpoints() {
+  const candidates = [];
+  const add = value => {
+    const endpoint = String(value || '').trim().replace(/\/+$/, '');
+    if (endpoint && !candidates.includes(endpoint)) candidates.push(endpoint);
+  };
+  try { add(localStorage.getItem(PONG_CONTROL_STORAGE_KEY)); } catch (_) {}
+  const addHost = rawHost => {
+    const host = String(rawHost || '').replace(/^\[|\]$/g, '');
+    if (!host) return;
+    add(`http://${host}:${PONG_CONTROL_PORT}`);
+  };
+  if (location.hostname && location.hostname !== 'odiac22.github.io') addHost(location.hostname);
+  try {
+    const storedLocal = localStorage.getItem('pong_random40_local_endpoint_v1');
+    if (storedLocal) addHost(new URL(storedLocal).hostname);
+  } catch (_) {}
+  addHost('192.168.1.124');
+  addHost('127.0.0.1');
+  return candidates;
+}
+
+async function pongControlFetch(endpoint, pathname, options = {}, timeoutMs = 2200) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${endpoint}${pathname}`, {
+      cache: 'no-store',
+      ...options,
+      headers: {
+        ...(options.headers || {}),
+        'X-Pong-Control': '1'
+      },
+      signal: controller.signal
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.ok === false) throw new Error(payload?.error || `Control HTTP ${response.status}`);
+    return payload;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function discoverPongControlEndpoint() {
+  const attempts = pongControlCandidateEndpoints().map(async endpoint => {
+    const payload = await pongControlFetch(endpoint, '/status');
+    return { endpoint, payload };
+  });
+  if (!attempts.length) throw new Error('No Pong controller address is configured.');
+  return Promise.any(attempts);
+}
+
+function renderPongServerControl(state, label, title) {
+  const button = pongControlButton();
+  if (!button) return;
+  button.dataset.state = state;
+  button.textContent = label;
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.disabled = state === 'pending';
+}
+
+function schedulePongServerControlPoll(delayMs = 5000) {
+  clearTimeout(pongServerControlPollTimer);
+  pongServerControlPollTimer = setTimeout(() => {
+    void refreshPongServerControl();
+  }, document.hidden ? Math.max(15000, delayMs) : delayMs);
+}
+
+async function refreshPongServerControl() {
+  if (pongServerControlBusy) return;
+  try {
+    let payload = null;
+    if (pongServerControlEndpoint) {
+      try {
+        payload = await pongControlFetch(pongServerControlEndpoint, '/status');
+      } catch (_) {
+        pongServerControlEndpoint = '';
+      }
+    }
+    if (!payload) {
+      const discovered = await discoverPongControlEndpoint();
+      pongServerControlEndpoint = discovered.endpoint;
+      payload = discovered.payload;
+      try { localStorage.setItem(PONG_CONTROL_STORAGE_KEY, pongServerControlEndpoint); } catch (_) {}
+    }
+    pongServerControlRunning = payload.running === true;
+    if (payload.action) {
+      renderPongServerControl('pending', '...', `${payload.action} Pong`);
+    } else if (pongServerControlRunning) {
+      renderPongServerControl('running', 'Stop', payload.ready ? 'Stop all Pong services' : 'Stop Pong services (AI is warming)');
+    } else {
+      renderPongServerControl('stopped', 'Start', 'Start Pong services');
+    }
+  } catch (_) {
+    pongServerControlRunning = null;
+    renderPongServerControl('unknown', '?', 'Pong controller unavailable');
+  } finally {
+    schedulePongServerControlPoll();
+  }
+}
+
+async function togglePongServerControl(event) {
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+  if (pongServerControlBusy) return;
+  if (!pongServerControlEndpoint || pongServerControlRunning === null) {
+    await refreshPongServerControl();
+    if (!pongServerControlEndpoint || pongServerControlRunning === null) return;
+  }
+  pongServerControlBusy = true;
+  const action = pongServerControlRunning ? 'stop' : 'start';
+  renderPongServerControl('pending', '...', `${action === 'start' ? 'Starting' : 'Stopping'} Pong`);
+  if (action === 'stop' && window.currentlyPlayingVideo) {
+    try { window.currentlyPlayingVideo.pause(); } catch (_) {}
+  }
+  try {
+    const payload = await pongControlFetch(
+      pongServerControlEndpoint,
+      `/${action}`,
+      { method: 'POST' },
+      50000
+    );
+    pongServerControlRunning = payload.running === true;
+    renderPongServerControl(
+      pongServerControlRunning ? 'running' : 'stopped',
+      pongServerControlRunning ? 'Stop' : 'Start',
+      pongServerControlRunning ? 'Stop all Pong services' : 'Start Pong services'
+    );
+  } catch (error) {
+    renderPongServerControl('unknown', '!', error.message || 'Pong control failed');
+  } finally {
+    pongServerControlBusy = false;
+    schedulePongServerControlPoll(1200);
+  }
+}
+
+function initializePongServerControl() {
+  const button = pongControlButton();
+  if (!button || button.dataset.bound === '1') return;
+  button.dataset.bound = '1';
+  button.addEventListener('click', togglePongServerControl);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) void refreshPongServerControl();
+  });
+  void refreshPongServerControl();
+}
+
 function pongLocal22PlaybackActive() {
   if (random40State) return ['local22', 'local2fast'].includes(random40State.playbackProfile);
   return ['local22', 'local2fast'].includes(
@@ -19001,6 +19175,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   createUnwatchedVideosButton();
   updatePasteNavigationButton();
   createSaveButtons();
+  initializePongServerControl();
   setupMobileAudioUnlock();
   setupDeckSwipeController();
   updateSimpCityRecallButton();

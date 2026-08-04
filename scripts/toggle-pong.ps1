@@ -235,9 +235,9 @@ try {
       exit 1
     }
     'Start' {
-      if (-not $wasRunning) {
-        Start-Pong
-      }
+      # Start-Pong checks every port independently, so this also repairs a
+      # partially running stack (for example 8787 up while 8791 is missing).
+      Start-Pong
       Write-Output 'Pong is starting.'
       Show-PongNotice -Message 'Pong is starting in the background.'
     }
