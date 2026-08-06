@@ -846,7 +846,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.76</div>
+    <div class="version-number">25.77</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -18060,7 +18060,7 @@ async function loadBunkrAsCards(targets) {
   }
 
   const BUNKR_READY_ALBUM_TARGET = 12;
-  const BUNKR_BACKGROUND_ALBUM_CONCURRENCY = 4;
+  const BUNKR_BACKGROUND_ALBUM_CONCURRENCY = 8;
   let reservedAlbumSlots = 0;
   let cardsStarted = Boolean(resumeState && pasteEvents.length && allVideoUrls.length);
   let loadedAlbums = completedAlbumUrls.size;
@@ -18166,9 +18166,8 @@ async function loadBunkrAsCards(targets) {
     }
   };
 
-  // Race four albums immediately. Large Balbums pages often put a huge or
-  // slow single-video album first; serially waiting for it made discovery show
-  // 100% while no other profile could enter Pong.
+  // Race several albums immediately. Large Balbums pages frequently contain
+  // long runs of image-only or unavailable albums before the next video album.
   await eromePool(
     discovered.filter(album => !completedAlbumUrls.has(normalizeEromeLaunchUrl(album?.url || ''))),
     BUNKR_BACKGROUND_ALBUM_CONCURRENCY,

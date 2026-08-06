@@ -2123,7 +2123,8 @@ async function extractBunkrVideoUrls(albumUrl) {
   const advancedUrl = new URL(albumUrl);
   advancedUrl.searchParams.set('advanced', '1');
   const html = await fetchBunkrImportHtml(advancedUrl.toString());
-  const script = html.match(/window\.albumFiles\s*=\s*\[([\s\S]*?)<\/script>/i)?.[1] || '';
+  const albumFilesMatch = html.match(/window\.albumFiles\s*=\s*\[([\s\S]*?)<\/script>/i);
+  const script = albumFilesMatch?.[1] || '';
   const files = [];
   for (const block of script.split(/\n\s*},\s*\n/)) {
     const id = block.match(/\bid:\s*(\d+)/i)?.[1];
@@ -2132,7 +2133,10 @@ async function extractBunkrVideoUrls(albumUrl) {
     if (id && /^video\//i.test(type)) files.push({ id, original });
     if (files.length >= 300) break;
   }
-  if (!files.length) return extractGalleryDlVideoUrls(albumUrl);
+  // A valid Bunkr albumFiles payload with no video entries is an image-only
+  // album. Do not hand it to gallery-dl: that fallback can wait a full minute
+  // and, on image-heavy Balbums pages, occupy every importer worker.
+  if (!files.length) return albumFilesMatch ? [] : extractGalleryDlVideoUrls(albumUrl);
 
   const headers = {
     Referer: 'https://dl.bunkr.cr/',
