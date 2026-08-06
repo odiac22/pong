@@ -846,7 +846,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.75</div>
+    <div class="version-number">25.76</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -17428,7 +17428,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     return data;
   };
 
-  const READY_ALBUM_TARGET = 5;
+  // Keep a deeper rolling queue on Android. Five unviewed albums made the
+  // visible total appear permanently stuck after a short Paperclip session.
+  const READY_ALBUM_TARGET = 12;
   const ALBUM_WORKERS = 4;
   const albumQueue = [];
   const albumWaiters = [];
@@ -18057,7 +18059,7 @@ async function loadBunkrAsCards(targets) {
     return;
   }
 
-  const BUNKR_READY_ALBUM_TARGET = 5;
+  const BUNKR_READY_ALBUM_TARGET = 12;
   const BUNKR_BACKGROUND_ALBUM_CONCURRENCY = 4;
   let reservedAlbumSlots = 0;
   let cardsStarted = Boolean(resumeState && pasteEvents.length && allVideoUrls.length);

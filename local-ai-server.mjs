@@ -182,7 +182,7 @@ const VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST = Math.max(4, Math.min(96, Number(
 )));
 const VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST = Math.max(1, Math.min(
   VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST,
-  Number(process.env.PONG_VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST || 2)
+  Number(process.env.PONG_VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST || 8)
 ));
 const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(32, Number(process.env.PONG_VIDEO_VERIFY_PER_ARTIST_CONCURRENCY || 6)));
 const VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST = Math.max(1, Math.min(
@@ -9395,7 +9395,7 @@ function local2FlashMediaProbeLimit() {
   // Foreground playback gets most of the connection budget, but never reduce
   // qualification to zero: a repeatedly buffering first card would otherwise
   // keep extending protection and permanently starve every later artist.
-  return Date.now() < local2FlashPlaybackPriorityUntil ? 1 : 4;
+  return Date.now() < local2FlashPlaybackPriorityUntil ? 2 : 4;
 }
 
 function local2FlashDrainMediaProbeWaiters() {
