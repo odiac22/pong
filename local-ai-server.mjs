@@ -3375,12 +3375,23 @@ function scheduleSimpCityMediaLinks(state, channel, suppliedId, posts, creators)
       const creatorName = String(creator?.primaryName || `SimpCity ${link.postId}`).trim();
       const creatorKey = String(creatorName).toLowerCase().replace(/[^a-z0-9]+/g, '') || link.postId;
       if (state.skippedCreatorKeys?.has(creatorKey)) return;
+      if (link.kind === 'tiktok') {
+        const existingTikTok = state.pending.albums.find(item => (
+          item?.mediaKind === 'tiktok' && item?.creatorKey === creatorKey
+        ));
+        if (existingTikTok) {
+          existingTikTok.videos = [...new Set([...(existingTikTok.videos || []), ...videos])].slice(0, 20);
+          state.pending.updatedAt = new Date().toISOString();
+          return;
+        }
+      }
       if (state.pending.albums.some(item => item.url === link.url)) return;
       state.pending.albums.push({
         url: link.url,
         title: `${creatorName} · ${link.kind}`,
         creatorName,
         creatorKey,
+        mediaKind: link.kind,
         sourceUrl: state.pending.threadUrl,
         // Pixeldrain actively rejects some datacenter proxy traffic while its
         // public API URL plays correctly as a normal browser media request.
