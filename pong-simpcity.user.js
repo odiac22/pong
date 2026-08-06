@@ -1,10 +1,14 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.7.3
+// @version      1.8.0
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
+// @match        https://simpcity.cr/tags/*
+// @match        https://www.simpcity.cr/tags/*
+// @match        https://simpcity.cr/search/*
+// @match        https://www.simpcity.cr/search/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
@@ -17,7 +21,7 @@
 
 (() => {
   'use strict';
-  if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/\/threads\//i.test(location.pathname)) return;
+  if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 4;
   const AI_BATCH_SIZE = 10;
@@ -110,6 +114,18 @@
       return url.toString();
     } catch (_) { return ''; }
   };
+  const canonicalSimpCityListingUrl = raw => {
+    try {
+      const url = new URL(raw, location.href);
+      if (!/(?:^|\.)simpcity\.cr$/i.test(url.hostname) || !/^\/(?:tags|search)\//i.test(url.pathname)) return '';
+      url.protocol = 'https:';
+      url.hostname = 'simpcity.cr';
+      url.pathname = url.pathname.replace(/\/page-\d+\/?$/i, '/');
+      url.searchParams.delete('page');
+      url.hash = '';
+      return url.toString();
+    } catch (_) { return ''; }
+  };
   const fileLabel = raw => {
     try { return decodeURIComponent(new URL(raw, location.href).pathname.split('/').filter(Boolean).at(-1) || ''); }
     catch (_) { return ''; }
@@ -173,6 +189,66 @@
     }
     throw new Error(`page ${pageNumber} failed after retries: ${lastError}`);
   }
+
+  async function fetchSimpCityListingPage(url, pageNumber) {
+    let lastError = '';
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        const response = await fetch(url, { credentials: 'include', cache: 'no-store', redirect: 'follow' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const html = await response.text();
+        if (!/href=["'][^"']*\/threads\//i.test(html)) throw new Error('page contained no thread results');
+        return html;
+      } catch (error) {
+        lastError = error?.message || String(error);
+      }
+      try {
+        const response = await userscriptRequest({
+          method: 'GET', url, timeout: 30000, anonymous: false,
+          headers: { Accept: 'text/html,application/xhtml+xml' }
+        });
+        const html = String(response.responseText || '');
+        if (!/href=["'][^"']*\/threads\//i.test(html)) throw new Error('page contained no thread results');
+        return html;
+      } catch (error) {
+        lastError = `${lastError}; ${error?.message || error}`;
+      }
+      await new Promise(resolve => setTimeout(resolve, 400 * attempt));
+    }
+    throw new Error(`search page ${pageNumber} failed: ${lastError}`);
+  }
+
+  const listingThreadUrls = (html, baseUrl) => {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const threads = [];
+    const seen = new Set();
+    for (const anchor of doc.querySelectorAll('a[href*="/threads/"]')) {
+      const threadUrl = canonicalSimpCityThreadUrl(absoluteUrl(anchor.getAttribute('href'), baseUrl));
+      if (!threadUrl || seen.has(threadUrl)) continue;
+      const slug = decodeURIComponent(new URL(threadUrl).pathname.split('/').filter(Boolean)[1] || '');
+      if (/\b(?:rules?|guidelines?|who-is-this|request|posting-etiquette|community-rules|help)\b/i.test(slug)) continue;
+      seen.add(threadUrl);
+      threads.push(threadUrl);
+    }
+    return threads;
+  };
+
+  const listingPageCount = html => {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const pages = [1];
+    for (const anchor of doc.querySelectorAll('a[href]')) {
+      const href = anchor.getAttribute('href') || '';
+      const value = Number(href.match(/\/page-(\d+)/i)?.[1] || href.match(/[?&]page=(\d+)/i)?.[1] || 0);
+      if (value > 0) pages.push(value);
+    }
+    return Math.max(...pages);
+  };
+
+  const listingPageUrl = (rootUrl, page) => {
+    const url = new URL(rootUrl);
+    if (page > 1) url.pathname = `${url.pathname.replace(/\/$/, '')}/page-${page}`;
+    return url.toString();
+  };
 
   function extractPostPayloads(html, pageNumber, pageUrl) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -270,7 +346,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.7.3 · More hosts + full linked creator threads</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.8.0 · Threads, tags + searches</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -282,7 +358,17 @@
     activeRunTokens.set(channel, runToken);
     const isCurrentRun = () => activeRunTokens.get(channel) === runToken;
     try {
-      const first = new URL(canonicalSimpCityThreadUrl(location.href));
+      const rootThreadUrl = canonicalSimpCityThreadUrl(location.href);
+      const listingRootUrl = canonicalSimpCityListingUrl(location.href);
+      if (!rootThreadUrl && !listingRootUrl) throw new Error('Open a SimpCity thread, tag, or search page');
+      let listingHtml = '';
+      let initialThreads = [];
+      if (listingRootUrl) {
+        listingHtml = document.documentElement.outerHTML;
+        initialThreads = listingThreadUrls(listingHtml, location.href);
+        if (!initialThreads.length) throw new Error('No creator threads were found in this search');
+      }
+      const first = new URL(rootThreadUrl || initialThreads[0]);
       const scrapeId = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       await sendToPong('/simpcity/recall/begin', { id: scrapeId, threadUrl: first.href, channel }, 12000);
       const names = new Map();
@@ -290,7 +376,7 @@
       const aiSlots = Array.from({ length: AI_CONCURRENCY }, () => Promise.resolve());
       const aiTasks = [];
       const linkedThreadQueue = [];
-      const seenThreads = new Set([first.href]);
+      const seenThreads = new Set(listingRootUrl ? [] : [first.href]);
       let slotIndex = 0, pagesFetched = 0, totalPages = 0, postsSent = 0;
       const update = () => {
         if (isCurrentRun()) status.textContent = `Pong ${channel}: ${pagesFetched}/${Math.max(totalPages, pagesFetched)} pages · ${postsSent} posts · ${names.size} creators · ${albums.size} albums · ${seenThreads.size} threads`;
@@ -367,7 +453,40 @@
       };
       const currentPage = Number(location.pathname.match(/\/page-(\d+)/i)?.[1] || 1);
       const rootIsSinglePageThread = /\/threads\/who-is-this-identify-unknown-models-in-here\./i.test(first.pathname);
-      if (rootIsSinglePageThread) {
+      if (listingRootUrl) {
+        const pageTotal = listingPageCount(listingHtml);
+        const queueListingThreads = threadUrls => {
+          const posts = [];
+          for (const threadUrl of threadUrls) {
+            if (seenThreads.has(threadUrl)) continue;
+            seenThreads.add(threadUrl);
+            posts.push({
+              postId: `search-thread-${seenThreads.size}`,
+              page: 1,
+              text: '',
+              links: [{ text: '', url: threadUrl, simpcityThread: true }],
+              attachments: []
+            });
+          }
+          // Search-result thread titles/slugs are already strong creator
+          // evidence. Stream them immediately without crawling every page of
+          // every result thread before Pong can begin resolving profiles.
+          if (posts.length) queuePosts(posts, MAX_LINKED_THREAD_DEPTH);
+        };
+        queueListingThreads(initialThreads);
+        for (let start = 2; start <= pageTotal; start += PAGE_CONCURRENCY) {
+          const pageNumbers = Array.from({ length: PAGE_CONCURRENCY }, (_, index) => start + index)
+            .filter(page => page <= pageTotal);
+          const pages = await Promise.all(pageNumbers.map(async page => {
+            const url = listingPageUrl(listingRootUrl, page);
+            return { url, html: await fetchSimpCityListingPage(url, page) };
+          }));
+          pages.forEach(page => queueListingThreads(listingThreadUrls(page.html, page.url)));
+          if (isCurrentRun()) {
+            status.textContent = `Pong ${channel}: ${Math.min(start + pageNumbers.length - 1, pageTotal)}/${pageTotal} search pages · ${seenThreads.size} threads`;
+          }
+        }
+      } else if (rootIsSinglePageThread) {
         totalPages = 1;
         queuePosts(extractPostPayloads(document.documentElement.outerHTML, currentPage, location.href), 0);
         pagesFetched = 1;
