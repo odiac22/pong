@@ -10495,13 +10495,18 @@ const server = http.createServer(async (req, res) => {
       state.pending.batchesReceived++;
       state.pending.deterministicCreators += newCreators.length;
       state.pending.updatedAt = new Date().toISOString();
-      scheduleSimpCityCreatorPairs(
+      const deterministicPairTask = scheduleSimpCityCreatorPairs(
         state,
         channel,
         suppliedId,
         deterministic.posts,
         simpCityPrimaryPairCreator(deterministic.creators)
       );
+      // Ordered forum scans deliberately wait for this creator's complete
+      // TikTok/artist pair before the userscript submits the following row.
+      if (payload?.orderedPair === true && deterministicPairTask) {
+        await deterministicPairTask;
+      }
 
       if (
         deterministic.unresolvedPosts.length &&

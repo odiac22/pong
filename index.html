@@ -846,7 +846,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.85</div>
+    <div class="version-number">25.86</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -7316,6 +7316,17 @@ function getRandomActiveEromePasteEventIndex(excludedIdentity = getCurrentPaperc
   return candidates[Math.floor(Math.random() * candidates.length)].index;
 }
 
+function getFirstActiveEromePasteEventIndex(excludedIdentity = getCurrentPaperclipArtistIdentity()) {
+  if (!Array.isArray(pasteEvents) || !pasteEvents.length) return -1;
+  return pasteEvents.findIndex((event, index) => (
+    isEromePasteEvent(event) &&
+    isPasteEventViewableForPaperclip(event) &&
+    !paperclipIdentityExcludesEvent(excludedIdentity, event, index) &&
+    !isPasteEventPreviouslyVisitedForPaperclip(event, index) &&
+    !isPasteEventRetiredForPaperclip(event, index)
+  ));
+}
+
 function getNextSimpCityPairEventIndex() {
   const current = pasteEvents[currentPasteIndex];
   const pairId = String(current?.simpCityPairId || '');
@@ -7420,8 +7431,11 @@ function canNavigateToNextPasteEvent() {
 
   const excludedIdentity = getCurrentPaperclipArtistIdentity();
   const eromeBundleMode = isEromePasteEvent(pasteEvents[currentPasteIndex]) || window.PongLoadedSavedMode === 'erome';
+  const pairedIndex = getNextSimpCityPairEventIndex();
   return eromeBundleMode
-    ? getRandomActiveEromePasteEventIndex(excludedIdentity) >= 0
+    ? pairedIndex >= 0 || (document.documentElement.dataset.pongSimpCityActive === 'true'
+      ? getFirstActiveEromePasteEventIndex(excludedIdentity) >= 0
+      : getRandomActiveEromePasteEventIndex(excludedIdentity) >= 0)
     : getFirstActivePasteEventIndex(excludedIdentity) >= 0;
 }
 
@@ -7450,7 +7464,9 @@ function navigateToNextPasteEvent(){
   const nextActiveIndex = eromeBundleMode
     ? pairedIndex >= 0
       ? pairedIndex
-      : getRandomActiveEromePasteEventIndex(excludedIdentity)
+      : document.documentElement.dataset.pongSimpCityActive === 'true'
+        ? getFirstActiveEromePasteEventIndex(excludedIdentity)
+        : getRandomActiveEromePasteEventIndex(excludedIdentity)
     : (() => {
         const nextLoadedIndex = getBestLoadedPasteEventIndex(excludedIdentity);
         const nextRegularIndex = getNextActivePasteEventIndex(excludedIdentity);

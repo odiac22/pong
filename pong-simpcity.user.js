@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.8.3
+// @version      1.8.4
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -224,7 +224,16 @@
     const doc = new DOMParser().parseFromString(html, 'text/html');
     const threads = [];
     const seen = new Set();
-    for (const anchor of doc.querySelectorAll('a[href*="/threads/"]')) {
+    // XenForo result titles are the authoritative visible ordering. Restrict
+    // forum/search scans to those rows so sidebar/recent-thread links cannot
+    // jump ahead of the first creator in the listing.
+    const resultAnchors = doc.querySelectorAll(
+      '.structItem-title a[href*="/threads/"], .contentRow-title a[href*="/threads/"], h3.contentRow-title a[href*="/threads/"]'
+    );
+    const anchors = resultAnchors.length
+      ? resultAnchors
+      : doc.querySelectorAll('main a[href*="/threads/"], .p-body-main a[href*="/threads/"]');
+    for (const anchor of anchors) {
       const threadUrl = canonicalSimpCityThreadUrl(absoluteUrl(anchor.getAttribute('href'), baseUrl));
       if (!threadUrl || seen.has(threadUrl)) continue;
       const slug = decodeURIComponent(new URL(threadUrl).pathname.split('/').filter(Boolean)[1] || '');
@@ -348,7 +357,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.8.3 · Playable TikTok creator pairs</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.8.4 · Ordered playable creator pairs</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -393,7 +402,7 @@
           return url.toString();
         } catch (_) { return ''; }
       };
-      const queuePosts = (posts, depth = 0, batchSize = AI_BATCH_SIZE) => {
+      const queuePosts = (posts, depth = 0, batchSize = AI_BATCH_SIZE, orderedPair = false) => {
         if (depth < MAX_LINKED_THREAD_DEPTH && seenThreads.size <= MAX_LINKED_THREADS) {
           for (const post of posts) {
             for (const link of post?.links || []) {
@@ -408,9 +417,11 @@
         const safeBatchSize = Math.max(1, Number(batchSize || AI_BATCH_SIZE));
         for (let offset = 0; offset < posts.length; offset += safeBatchSize) {
           const batch = posts.slice(offset, offset + safeBatchSize);
-          const slot = slotIndex++ % AI_CONCURRENCY;
+          const slot = orderedPair ? 0 : slotIndex++ % AI_CONCURRENCY;
           const task = aiSlots[slot] = aiSlots[slot].then(async () => {
-            const result = await sendToPong('/simpcity/extract-creators', { id: scrapeId, channel, posts: batch });
+            const result = await sendToPong('/simpcity/extract-creators', {
+              id: scrapeId, channel, posts: batch, orderedPair
+            });
             postsSent += batch.length;
             for (const creator of result.creators || []) {
               for (const raw of [creator.primaryName, ...(creator.aliases || []), ...(creator.usernames || [])]) {
@@ -466,7 +477,7 @@
           });
           // One request marks the complete creator thread. The PC can resolve
           // every host concurrently without releasing a partial pair.
-          queuePosts(collectedPosts, depth, collectedPosts.length);
+          queuePosts(collectedPosts, depth, collectedPosts.length, true);
         }
       };
       const currentPage = Number(location.pathname.match(/\/page-(\d+)/i)?.[1] || 1);
