@@ -3418,6 +3418,109 @@ function scheduleSimpCityMediaLinks(state, channel, suppliedId, posts, creators)
   return trackSimpCityRecallTask(taskKey, Promise.allSettled(tasks));
 }
 
+function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creators) {
+  if (!state.pending?.id || state.pending.id !== suppliedId) return null;
+  const signal = state.controller?.signal || null;
+  const taskKey = simpCityRecallTaskKey(channel, suppliedId);
+  state.pending.creatorPairsSeen ||= [];
+  const seenPairs = new Set(state.pending.creatorPairsSeen);
+  const postMap = new Map((posts || []).map(post => [String(post?.postId || ''), post]));
+  const tasks = (creators || []).map(creator => simpCityMediaResolveLimit(async () => {
+    const creatorName = String(creator?.primaryName || '').trim();
+    const creatorKey = creatorName.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (!creatorKey || seenPairs.has(creatorKey) || state.skippedCreatorKeys?.has(creatorKey)) return;
+    const creatorPost = postMap.get(String(creator?.postId || ''));
+    const relevantPosts = creatorPost ? [creatorPost] : [];
+    const links = extractSimpCityMediaLinks(relevantPosts);
+    // A creator cannot satisfy the pair contract without a TikTok source.
+    // Do not mark title-only search results complete; a later first-page scan
+    // may provide the actual TikTok link for the same creator.
+    if (!links.some(link => link.kind === 'tiktok')) return;
+    seenPairs.add(creatorKey);
+    state.pending.creatorPairsSeen = [...seenPairs].slice(-2000);
+    const resolved = await Promise.allSettled(links.map(async link => ({
+      link,
+      videos: await resolveSimpCityMediaLink(link, signal)
+    })));
+    if (signal?.aborted || state.pending?.id !== suppliedId) return;
+
+    const tiktokVideos = [];
+    const artistVideos = [];
+    let tiktokUrl = '';
+    let artistUrl = '';
+    for (const item of resolved) {
+      if (item.status !== 'fulfilled' || !item.value.videos?.length) continue;
+      const { link, videos } = item.value;
+      if (link.kind === 'tiktok') {
+        tiktokUrl ||= link.url;
+        tiktokVideos.push(...videos);
+      } else {
+        artistUrl ||= link.url;
+        artistVideos.push(...videos);
+      }
+    }
+
+    const balbums = await prefetchSimpCityCreatorAlbums([creator], {
+      signal,
+      maxAlbumsPerCreator: 20
+    });
+    const bunkrResults = await Promise.allSettled(balbums.map(async album => ({
+      album,
+      videos: await extractBunkrVideoUrls(album.url)
+    })));
+    for (const item of bunkrResults) {
+      if (item.status !== 'fulfilled' || !item.value.videos?.length) continue;
+      artistUrl ||= item.value.album.url;
+      artistVideos.push(...item.value.videos);
+    }
+
+    const uniqueTikTok = [...new Set(tiktokVideos)].slice(0, 20);
+    const uniqueArtist = [...new Set(artistVideos)].slice(0, 250);
+    if (!uniqueTikTok.length || !uniqueArtist.length || signal?.aborted || state.pending?.id !== suppliedId) return;
+
+    const pairId = `${suppliedId}:${creatorKey}`;
+    state.pending.albums.push({
+      url: tiktokUrl,
+      title: creatorName,
+      creatorName,
+      creatorKey,
+      pairId,
+      sourceUrl: state.pending.threadUrl,
+      source: 'paired',
+      // A paired result is one backlog item. Pong expands it atomically into
+      // two consecutive paperclip bundles only after both sides are playable.
+      videos: uniqueTikTok,
+      pairedGroups: [
+        {
+          url: tiktokUrl,
+          title: `TikTok account · ${creatorName}`,
+          creatorName,
+          creatorKey,
+          pairId,
+          mediaKind: 'tiktok',
+          source: 'hosted',
+          videos: uniqueTikTok
+        },
+        {
+          url: artistUrl,
+          title: `Artist videos · ${creatorName}`,
+          creatorName,
+          creatorKey,
+          pairId,
+          mediaKind: 'artist-unified',
+          source: 'hosted',
+          videos: uniqueArtist
+        }
+      ]
+    });
+    state.pending.albumsReady = state.pending.albums.length;
+    state.pending.creatorPairsReady = Number(state.pending.creatorPairsReady || 0) + 1;
+    state.pending.updatedAt = new Date().toISOString();
+    if (!state.pending.firstAlbumAt) state.pending.firstAlbumAt = state.pending.updatedAt;
+  }));
+  return trackSimpCityRecallTask(taskKey, Promise.allSettled(tasks));
+}
+
 function simpCityCreatorSearchCandidates(creators) {
   const candidates = [];
   const seen = new Set();
@@ -3452,7 +3555,10 @@ function simpCityCreatorSearchCandidates(creators) {
   return candidates.slice(0, 80);
 }
 
-async function prefetchSimpCityCreatorAlbums(creators, { onAlbum = null, signal = null } = {}) {
+async function prefetchSimpCityCreatorAlbums(
+  creators,
+  { onAlbum = null, signal = null, maxAlbumsPerCreator = 3 } = {}
+) {
   const candidates = simpCityCreatorSearchCandidates(creators);
   const verified = [];
   const albumUrls = new Set();
@@ -3465,7 +3571,7 @@ async function prefetchSimpCityCreatorAlbums(creators, { onAlbum = null, signal 
         const matching = bunkrAlbumsMatchingCreator(
           await discoverBunkrAlbums(searchUrl),
           { ...candidate, query }
-        ).slice(0, 3);
+        ).slice(0, Math.max(1, Number(maxAlbumsPerCreator || 3)));
         if (!matching.length) continue;
         for (const album of matching) {
           if (!album?.url || albumUrls.has(album.url)) continue;
@@ -10262,6 +10368,8 @@ const server = http.createServer(async (req, res) => {
         batchesReceived: 0,
         creators: [],
         albums: [],
+        creatorPairsSeen: [],
+        creatorPairsReady: 0,
         deterministicCreators: 0,
         aiPostsQueued: 0,
         aiBatchesQueued: 0,
@@ -10301,27 +10409,13 @@ const server = http.createServer(async (req, res) => {
       state.pending.batchesReceived++;
       state.pending.deterministicCreators += newCreators.length;
       state.pending.updatedAt = new Date().toISOString();
-      const containsTikTok = extractSimpCityMediaLinks(deterministic.posts)
-        .some(link => link.kind === 'tiktok');
-      const mediaTask = scheduleSimpCityMediaLinks(
+      scheduleSimpCityCreatorPairs(
         state,
         channel,
         suppliedId,
         deterministic.posts,
-        [...state.pending.creators]
+        deterministic.creators
       );
-      if (containsTikTok && mediaTask) {
-        // For a creator post containing TikTok, publish that account bundle
-        // before beginning the matching Balbums search. Other batches remain
-        // concurrent and are not blocked by this creator-local ordering.
-        void mediaTask.finally(() => {
-          if (state.pending?.id === suppliedId) {
-            scheduleSimpCityRecallAlbums(state, channel, suppliedId, newCreators);
-          }
-        });
-      } else {
-        scheduleSimpCityRecallAlbums(state, channel, suppliedId, newCreators);
-      }
 
       if (
         deterministic.unresolvedPosts.length &&
@@ -10342,7 +10436,13 @@ const server = http.createServer(async (req, res) => {
             const aiCreators = addSimpCityRecallCreators(state, suppliedId, extracted.creators);
             state.pending.aiBatchesCompleted++;
             state.pending.updatedAt = new Date().toISOString();
-            scheduleSimpCityRecallAlbums(state, channel, suppliedId, aiCreators);
+            scheduleSimpCityCreatorPairs(
+              state,
+              channel,
+              suppliedId,
+              deterministic.unresolvedPosts,
+              extracted.creators
+            );
           } catch (error) {
             if (state.pending?.id === suppliedId && !signal?.aborted) {
               state.pending.aiErrors++;

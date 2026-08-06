@@ -846,7 +846,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.82</div>
+    <div class="version-number">25.83</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -9771,6 +9771,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityJobId: String(group.simpCityJobId || ''),
         simpCityCreatorKey: String(group.creatorKey || ''),
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
+        simpCityPairId: String(group.pairId || ''),
         postIndex: videoIndex,
         scrapedAt,
         mediaKey
@@ -9793,6 +9794,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityJobId: String(group.simpCityJobId || ''),
         simpCityCreatorKey: String(group.creatorKey || ''),
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
+        simpCityPairId: String(group.pairId || ''),
         loadAll: false,
         ready: true,
         pending: false
@@ -17524,15 +17526,18 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     }
     return feedClosed ? null : takeAlbum();
   };
-  const unviewedAlbumCount = () => pasteEvents.reduce((count, event, index) => {
+  const unviewedAlbumCount = () => {
+    const identities = new Set();
+    pasteEvents.forEach((event, index) => {
     if (
       event?.source === 'bunkr' &&
       isPasteEventViewableForPaperclip(event) &&
       !isPasteEventRetiredForPaperclip(event, index) &&
       !isPasteEventPreviouslyVisitedForPaperclip(event, index)
-    ) return count + 1;
-    return count;
-  }, 0);
+    ) identities.add(event.simpCityPairId || `event:${index}`);
+    });
+    return identities.size;
+  };
   const acquireAlbumSlot = async () => {
     while (
       loadGeneration === bunkrLoadGeneration &&
@@ -17588,6 +17593,21 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     const acquired = await acquireAlbumSlot();
     if (!acquired) return;
     try {
+      if (Array.isArray(album?.pairedGroups) && album.pairedGroups.length === 2) {
+        for (const pairedGroup of album.pairedGroups) {
+          if (!Array.isArray(pairedGroup?.videos) || !pairedGroup.videos.length) return;
+          publishGroup({
+            ...pairedGroup,
+            sourceUrl: album.sourceUrl || sourceThreadUrl,
+            sourceTitle: pairedGroup.title,
+            creatorName: album.creatorName || pairedGroup.creatorName || '',
+            creatorKey: album.creatorKey || pairedGroup.creatorKey || '',
+            pairId: album.pairId || pairedGroup.pairId || '',
+            simpCityJobId: album.simpCityJobId || ''
+          });
+        }
+        return;
+      }
       const readyVideos = Array.isArray(album?.videos) ? album.videos.filter(Boolean) : [];
       const data = readyVideos.length
         ? { title: album.title, videos: readyVideos }
