@@ -5790,14 +5790,30 @@ async function serveVideoFileCacheMedia(req, res, id) {
   record.activeReaders = Number(record.activeReaders || 0) + 1;
   promoteVideoFileCachePlaybackRecord(record);
   record.currentUntil = 0;
-  if (record.status === 'idle' || record.status === 'error') enqueueVideoFileCacheRecord(record, { resetRetries: true });
+  const knownOversized = Number(record.totalBytes || 0) > VIDEO_FILE_CACHE_MAX_FILE_BYTES;
+  if (!knownOversized && (record.status === 'idle' || record.status === 'error')) {
+    enqueueVideoFileCacheRecord(record, { resetRetries: true });
+  }
   touchVideoFileCacheHeartbeat();
   // A real media reader is the strongest foreground signal. Recall/Bunkr cards
   // do not send Random40 buffer telemetry, so reclaim their worker lanes here.
   protectVideoFileCacheForegroundPlayback(12000);
   let tailRangeSession = null;
   try {
+    if (knownOversized) {
+      await streamGatewayResponse(req, res, record.sourceUrl);
+      return;
+    }
     const size = await waitForVideoFileCacheMetadata(record, generation);
+    if (size > VIDEO_FILE_CACHE_MAX_FILE_BYTES) {
+      // Multi-gigabyte Pixeldrain/Balbums files are valid media, but caching the
+      // complete file would exceed the per-file safety limit. Preserve Chrome's
+      // Range header and stream only the requested bytes through the gateway.
+      record.deferWhenIdle = true;
+      record.controller?.abort();
+      await streamGatewayResponse(req, res, record.sourceUrl);
+      return;
+    }
     const selectedRange = videoFileCacheRange(req.headers.range, size);
     if (!selectedRange) {
       res.writeHead(416, videoFileCacheHeaders({
