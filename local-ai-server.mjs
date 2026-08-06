@@ -3560,16 +3560,6 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
       videos: uniqueTikTok,
       pairedGroups: [
         {
-          url: tiktokUrl,
-          title: `TikTok account · ${creatorName}`,
-          creatorName,
-          creatorKey,
-          pairId,
-          mediaKind: 'tiktok',
-          source: 'hosted',
-          videos: uniqueTikTok
-        },
-        {
           url: artistUrl,
           title: `Artist videos · ${creatorName}`,
           creatorName,
@@ -3578,6 +3568,16 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
           mediaKind: 'artist-unified',
           source: 'hosted',
           videos: uniqueArtist
+        },
+        {
+          url: tiktokUrl,
+          title: `TikTok account · ${creatorName}`,
+          creatorName,
+          creatorKey,
+          pairId,
+          mediaKind: 'tiktok',
+          source: 'hosted',
+          videos: uniqueTikTok
         }
       ]
     });

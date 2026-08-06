@@ -26,7 +26,7 @@ test('normalizes SimpCity threads and preserves only ordering', () => {
   );
   assert.equal(
     normalizeSimpCityThreadUrl('https://simpcity.cr/threads/mistress-eva-oh-aka-youwillpleaseme.168161/post-21831454'),
-    'https://simpcity.cr/threads/mistress-eva-oh-aka-youwillpleaseme.168161/'
+    'https://simpcity.cr/threads/mistress-eva-oh-aka-youwillpleaseme.168161/?order=reaction_score'
   );
   assert.equal(normalizeSimpCityThreadUrl('https://simpcity.cr/members/not-a-thread.5/'), '');
 });

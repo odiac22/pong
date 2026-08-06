@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.8.4
+// @version      1.8.5
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -25,7 +25,8 @@
   'use strict';
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
-  const PAGE_CONCURRENCY = 4;
+  const PAGE_CONCURRENCY = 6;
+  const FORUM_CREATOR_CONCURRENCY = 3;
   const AI_BATCH_SIZE = 10;
   const AI_CONCURRENCY = 2;
   const MAX_LINKED_THREADS = 24;
@@ -106,12 +107,11 @@
       if (!/(?:^|\.)simpcity\.cr$/i.test(url.hostname)) return '';
       const match = url.pathname.match(/^\/threads\/([^/?#]+)/i);
       if (!match) return '';
-      const order = url.searchParams.get('order') || '';
       url.protocol = 'https:';
       url.hostname = 'simpcity.cr';
       url.pathname = `/threads/${match[1]}/`;
       url.search = '';
-      if (order) url.searchParams.set('order', order);
+      url.searchParams.set('order', 'reaction_score');
       url.hash = '';
       return url.toString();
     } catch (_) { return ''; }
@@ -157,26 +157,10 @@
     let lastError = '';
     for (let attempt = 1; attempt <= 6; attempt++) {
       try {
-        const response = await fetch(url, {
-          credentials: 'include',
-          cache: 'no-store',
-          redirect: 'follow'
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const html = await response.text();
-        if (!/<(?:article|div)\b[^>]*class=["'][^"']*\bmessage\b/i.test(html)) {
-          throw new Error('page contained no posts');
-        }
-        return html;
-      } catch (nativeError) {
-        lastError = nativeError?.message || String(nativeError);
-      }
-      try {
+        // Tampermonkey owns this request outside the page lifecycle, so work
+        // is much less likely to stall when Firefox is backgrounded on Android.
         const response = await userscriptRequest({
-          method: 'GET',
-          url,
-          timeout: 30000,
-          anonymous: false,
+          method: 'GET', url, timeout: 30000, anonymous: false,
           headers: { Accept: 'text/html,application/xhtml+xml' }
         });
         const html = String(response.responseText || '');
@@ -185,7 +169,20 @@
         }
         return html;
       } catch (userscriptError) {
-        lastError = `${lastError}; ${userscriptError?.message || userscriptError}`;
+        lastError = userscriptError?.message || String(userscriptError);
+      }
+      try {
+        const response = await fetch(url, {
+          credentials: 'include', cache: 'no-store', redirect: 'follow'
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const html = await response.text();
+        if (!/<(?:article|div)\b[^>]*class=["'][^"']*\bmessage\b/i.test(html)) {
+          throw new Error('page contained no posts');
+        }
+        return html;
+      } catch (nativeError) {
+        lastError = `${lastError}; ${nativeError?.message || nativeError}`;
       }
       await new Promise(resolve => setTimeout(resolve, 500 * attempt));
     }
@@ -196,20 +193,20 @@
     let lastError = '';
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
-        const response = await fetch(url, { credentials: 'include', cache: 'no-store', redirect: 'follow' });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const html = await response.text();
+        const response = await userscriptRequest({
+          method: 'GET', url, timeout: 30000, anonymous: false,
+          headers: { Accept: 'text/html,application/xhtml+xml' }
+        });
+        const html = String(response.responseText || '');
         if (!/href=["'][^"']*\/threads\//i.test(html)) throw new Error('page contained no thread results');
         return html;
       } catch (error) {
         lastError = error?.message || String(error);
       }
       try {
-        const response = await userscriptRequest({
-          method: 'GET', url, timeout: 30000, anonymous: false,
-          headers: { Accept: 'text/html,application/xhtml+xml' }
-        });
-        const html = String(response.responseText || '');
+        const response = await fetch(url, { credentials: 'include', cache: 'no-store', redirect: 'follow' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const html = await response.text();
         if (!/href=["'][^"']*\/threads\//i.test(html)) throw new Error('page contained no thread results');
         return html;
       } catch (error) {
@@ -357,7 +354,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.8.4 · Ordered playable creator pairs</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.8.5 · Background reaction-score pairs</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -442,7 +439,7 @@
           .map(anchor => Number(anchor.getAttribute('href')?.match(/page-(\d+)/i)?.[1] || 1));
         return Math.max(1, ...pages);
       };
-      const scanThread = async ({ url: threadUrl, depth, maxPages = 0, atomic = false }, currentHtml = '') => {
+      const scanThread = async ({ url: threadUrl, depth, maxPages = 0, atomic = false, deferSubmit = false }, currentHtml = '') => {
         if (!isCurrentRun()) throw Object.assign(new Error('This scrape was superseded'), { status: 409 });
         const firstHtml = currentHtml || await fetchSimpCityPage(threadUrl, 1);
         const discoveredPages = pageCountFromHtml(firstHtml);
@@ -477,8 +474,10 @@
           });
           // One request marks the complete creator thread. The PC can resolve
           // every host concurrently without releasing a partial pair.
+          if (deferSubmit) return collectedPosts;
           queuePosts(collectedPosts, depth, collectedPosts.length, true);
         }
+        return collectedPosts;
       };
       const currentPage = Number(location.pathname.match(/\/page-(\d+)/i)?.[1] || 1);
       const rootIsSinglePageThread = /\/threads\/who-is-this-identify-unknown-models-in-here\./i.test(first.pathname);
@@ -523,14 +522,32 @@
         // result thread in bounded parallel batches while creator searches
         // are already streaming from the thread slugs above.
         if (listingIsForum) {
-          for (let index = 0; index < listingContentThreads.length; index++) {
-            if (isCurrentRun()) status.textContent = `Pong ${channel}: creator ${index + 1}/${listingContentThreads.length}`;
-            await scanThread({
-              url: listingContentThreads[index],
-              depth: MAX_LINKED_THREAD_DEPTH,
-              atomic: true
-            });
-          }
+          const completedThreads = new Array(listingContentThreads.length);
+          let creatorCursor = 0;
+          let nextCreatorToSubmit = 0;
+          const flushCompletedCreators = () => {
+            while (completedThreads[nextCreatorToSubmit]) {
+              const posts = completedThreads[nextCreatorToSubmit];
+              completedThreads[nextCreatorToSubmit] = null;
+              queuePosts(posts, MAX_LINKED_THREAD_DEPTH, posts.length, true);
+              nextCreatorToSubmit++;
+            }
+          };
+          await Promise.all(Array.from({
+            length: Math.min(FORUM_CREATOR_CONCURRENCY, listingContentThreads.length)
+          }, async () => {
+            while (creatorCursor < listingContentThreads.length) {
+              const index = creatorCursor++;
+              if (isCurrentRun()) status.textContent = `Pong ${channel}: creator ${index + 1}/${listingContentThreads.length}`;
+              completedThreads[index] = await scanThread({
+                url: listingContentThreads[index],
+                depth: MAX_LINKED_THREAD_DEPTH,
+                atomic: true,
+                deferSubmit: true
+              });
+              flushCompletedCreators();
+            }
+          }));
         }
       } else if (rootIsSinglePageThread) {
         totalPages = 1;

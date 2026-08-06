@@ -54,9 +54,10 @@ export function normalizeSimpCityThreadUrl(rawValue) {
       .replace(/\/?$/, '/');
     // Ordering affects which posts appear on each page, but unrelated tracking
     // parameters must not create duplicate import jobs.
-    const order = url.searchParams.get('order') || '';
     url.search = '';
-    if (order) url.searchParams.set('order', order);
+    // Every SimpCity workflow starts with the community's highest-reaction
+    // posts, where the strongest creator links and working mirrors usually are.
+    url.searchParams.set('order', 'reaction_score');
     return url.toString();
   } catch (_) {
     return '';
