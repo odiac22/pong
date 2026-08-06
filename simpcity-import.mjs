@@ -136,6 +136,7 @@ export function classifySimpCityMediaUrl(rawValue) {
     else if (/^cyberdrop\.(?:cr|me|to)$/i.test(host) && /^\/(?:a|f)\/[a-z0-9_-]+$/i.test(path)) kind = 'cyberdrop';
     else if (/^(?:[^.]+\.)?cyberfile\.me$/i.test(host) && path !== '/') kind = 'cyberfile';
     else if (/^(?:saint\.to|saint2\.(?:su|cr)|turbo\.cr)$/i.test(host) && /^\/(?:embed|v)\/[a-z0-9_-]+$/i.test(path)) kind = 'saint';
+    else if (host === 'tiktok.com' && /^\/@[a-z0-9_.-]+(?:\/(?:video|photo)\/\d+)?$/i.test(path)) kind = 'tiktok';
     else if (SIMPCITY_DIRECT_VIDEO_RE.test(`${path}${url.search}`)) kind = 'direct';
     if (!kind) return null;
     url.hash = '';

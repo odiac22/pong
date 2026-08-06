@@ -129,6 +129,8 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
       { url: 'https://bunkr.cr/v/3uAUOmsOW1nvi' },
       { url: 'https://simpcity.cr/redirect/?to=aHR0cHM6Ly9waXhlbGRyYWluLmNvbS9sL1JWQkJ4eGNF&e=1&m=b64' },
       { url: 'https://turbo.cr/v/bH_17k91Ltzu2' },
+      { url: 'https://www.tiktok.com/@heymissteacher' },
+      { url: 'https://www.tiktok.com/@heymissteacher/video/7533519786490000000' },
       { url: 'https://example.test/not-video' }
     ]
   }];
@@ -147,6 +149,8 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
       ['bunkr', 'https://bunkr.cr/v/3uAUOmsOW1nvi', 'post-77'],
       ['pixeldrain', 'https://pixeldrain.com/l/RVBBxxcE', 'post-77'],
       ['saint', 'https://turbo.cr/v/bH_17k91Ltzu2', 'post-77'],
+      ['tiktok', 'https://www.tiktok.com/@heymissteacher', 'post-77'],
+      ['tiktok', 'https://www.tiktok.com/@heymissteacher/video/7533519786490000000', 'post-77'],
       ['direct', 'https://cdn.example.test/clips/one.mp4?download=1', 'post-77']
     ]
   );

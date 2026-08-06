@@ -2107,6 +2107,53 @@ function extractGalleryDlVideoUrls(sourceUrl) {
   });
 }
 
+function extractTikTokVideoUrls(sourceUrl, signal = null) {
+  return new Promise((resolve, reject) => {
+    const python = path.join(LOCAL_AI_DIR, 'lora-venv', 'Scripts', 'python.exe');
+    const child = spawn(python, [
+      '-m', 'yt_dlp', '--no-warnings', '--playlist-end', '20', '-g', sourceUrl
+    ], {
+      cwd: process.cwd(),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (error, urls = []) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      if (error) reject(error);
+      else resolve(urls);
+    };
+    const abort = () => {
+      child.kill();
+      finish(new DOMException('TikTok extraction aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(new Error('TikTok extraction timed out'));
+    }, 30000);
+    timer.unref?.();
+    signal?.addEventListener('abort', abort, { once: true });
+    child.stdout.on('data', chunk => {
+      stdout += chunk.toString();
+      if (stdout.length > 8 * 1024 * 1024) child.kill();
+    });
+    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    child.on('error', finish);
+    child.on('close', code => {
+      const urls = stdout.split(/\r?\n/).map(value => value.trim()).filter(value => {
+        try { return new URL(value).protocol === 'https:'; } catch (_) { return false; }
+      });
+      if (urls.length) finish(null, [...new Set(urls)].slice(0, 20));
+      else finish(new Error(stderr.trim() || `TikTok extractor exited ${code}`));
+    });
+  });
+}
+
 async function mapWithConcurrency(items, limit, mapper) {
   const results = new Array(items.length);
   let cursor = 0;
@@ -3301,6 +3348,7 @@ async function resolveSimpCityMediaLink(link, signal = null) {
   else if (link?.kind === 'bunkr') videos = await extractBunkrVideoUrls(link.url);
   else if (link?.kind === 'cyberdrop' || link?.kind === 'cyberfile') videos = await extractGalleryDlVideoUrls(link.url);
   else if (link?.kind === 'saint') videos = await resolveSaintVideo(link.url, signal);
+  else if (link?.kind === 'tiktok') videos = await extractTikTokVideoUrls(link.url, signal);
   return [...new Set(videos)].slice(0, 250);
 }
 
@@ -3336,7 +3384,7 @@ function scheduleSimpCityMediaLinks(state, channel, suppliedId, posts, creators)
         sourceUrl: state.pending.threadUrl,
         // Pixeldrain actively rejects some datacenter proxy traffic while its
         // public API URL plays correctly as a normal browser media request.
-        source: ['gofile', 'cyberdrop', 'cyberfile', 'saint'].includes(link.kind)
+        source: ['gofile', 'cyberdrop', 'cyberfile', 'saint', 'tiktok'].includes(link.kind)
           ? 'hosted'
           : link.kind === 'bunkr' ? 'bunkr' : 'direct',
         videos

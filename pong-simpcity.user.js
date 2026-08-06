@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.8.0
+// @version      1.8.1
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -9,6 +9,8 @@
 // @match        https://www.simpcity.cr/tags/*
 // @match        https://simpcity.cr/search/*
 // @match        https://www.simpcity.cr/search/*
+// @match        https://simpcity.cr/forums/*
+// @match        https://www.simpcity.cr/forums/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
@@ -21,7 +23,7 @@
 
 (() => {
   'use strict';
-  if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search)\//i.test(location.pathname)) return;
+  if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 4;
   const AI_BATCH_SIZE = 10;
@@ -117,7 +119,7 @@
   const canonicalSimpCityListingUrl = raw => {
     try {
       const url = new URL(raw, location.href);
-      if (!/(?:^|\.)simpcity\.cr$/i.test(url.hostname) || !/^\/(?:tags|search)\//i.test(url.pathname)) return '';
+      if (!/(?:^|\.)simpcity\.cr$/i.test(url.hostname) || !/^\/(?:tags|search|forums)\//i.test(url.pathname)) return '';
       url.protocol = 'https:';
       url.hostname = 'simpcity.cr';
       url.pathname = url.pathname.replace(/\/page-\d+\/?$/i, '/');
@@ -346,7 +348,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.8.0 · Threads, tags + searches</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.8.1 · Threads, tags, searches + forums</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -428,11 +430,12 @@
           .map(anchor => Number(anchor.getAttribute('href')?.match(/page-(\d+)/i)?.[1] || 1));
         return Math.max(1, ...pages);
       };
-      const scanThread = async ({ url: threadUrl, depth }, currentHtml = '') => {
+      const scanThread = async ({ url: threadUrl, depth, maxPages = 0 }, currentHtml = '') => {
         if (!isCurrentRun()) throw Object.assign(new Error('This scrape was superseded'), { status: 409 });
         const firstHtml = currentHtml || await fetchSimpCityPage(threadUrl, 1);
         const discoveredPages = pageCountFromHtml(firstHtml);
-        const threadPages = depth ? Math.min(discoveredPages, MAX_LINKED_THREAD_PAGES) : discoveredPages;
+        const depthLimitedPages = depth ? Math.min(discoveredPages, MAX_LINKED_THREAD_PAGES) : discoveredPages;
+        const threadPages = maxPages > 0 ? Math.min(depthLimitedPages, maxPages) : depthLimitedPages;
         totalPages += threadPages;
         queuePosts(extractPostPayloads(firstHtml, 1, threadUrl), depth);
         pagesFetched++;
@@ -455,11 +458,13 @@
       const rootIsSinglePageThread = /\/threads\/who-is-this-identify-unknown-models-in-here\./i.test(first.pathname);
       if (listingRootUrl) {
         const pageTotal = listingPageCount(listingHtml);
+        const listingContentThreads = [];
         const queueListingThreads = threadUrls => {
           const posts = [];
           for (const threadUrl of threadUrls) {
             if (seenThreads.has(threadUrl)) continue;
             seenThreads.add(threadUrl);
+            listingContentThreads.push(threadUrl);
             posts.push({
               postId: `search-thread-${seenThreads.size}`,
               page: 1,
@@ -484,6 +489,17 @@
           pages.forEach(page => queueListingThreads(listingThreadUrls(page.html, page.url)));
           if (isCurrentRun()) {
             status.textContent = `Pong ${channel}: ${Math.min(start + pageNumbers.length - 1, pageTotal)}/${pageTotal} search pages · ${seenThreads.size} threads`;
+          }
+        }
+        // Forum filters often contain direct Bunkr, Pixeldrain, Saint and
+        // TikTok links inside the first post. Read the first page of each
+        // result thread in bounded parallel batches while creator searches
+        // are already streaming from the thread slugs above.
+        if (/^\/forums\//i.test(new URL(listingRootUrl).pathname)) {
+          for (let start = 0; start < listingContentThreads.length; start += PAGE_CONCURRENCY) {
+            await Promise.all(listingContentThreads.slice(start, start + PAGE_CONCURRENCY).map(threadUrl => (
+              scanThread({ url: threadUrl, depth: MAX_LINKED_THREAD_DEPTH, maxPages: 1 })
+            )));
           }
         }
       } else if (rootIsSinglePageThread) {
