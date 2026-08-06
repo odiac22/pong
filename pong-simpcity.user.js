@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.8.1
+// @version      1.8.2
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -348,7 +348,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.8.1 · Threads, tags, searches + forums</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.8.2 · Ordered forum creator pairs</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -393,7 +393,7 @@
           return url.toString();
         } catch (_) { return ''; }
       };
-      const queuePosts = (posts, depth = 0) => {
+      const queuePosts = (posts, depth = 0, batchSize = AI_BATCH_SIZE) => {
         if (depth < MAX_LINKED_THREAD_DEPTH && seenThreads.size <= MAX_LINKED_THREADS) {
           for (const post of posts) {
             for (const link of post?.links || []) {
@@ -405,8 +405,9 @@
             }
           }
         }
-        for (let offset = 0; offset < posts.length; offset += AI_BATCH_SIZE) {
-          const batch = posts.slice(offset, offset + AI_BATCH_SIZE);
+        const safeBatchSize = Math.max(1, Number(batchSize || AI_BATCH_SIZE));
+        for (let offset = 0; offset < posts.length; offset += safeBatchSize) {
+          const batch = posts.slice(offset, offset + safeBatchSize);
           const slot = slotIndex++ % AI_CONCURRENCY;
           const task = aiSlots[slot] = aiSlots[slot].then(async () => {
             const result = await sendToPong('/simpcity/extract-creators', { id: scrapeId, channel, posts: batch });
@@ -430,14 +431,16 @@
           .map(anchor => Number(anchor.getAttribute('href')?.match(/page-(\d+)/i)?.[1] || 1));
         return Math.max(1, ...pages);
       };
-      const scanThread = async ({ url: threadUrl, depth, maxPages = 0 }, currentHtml = '') => {
+      const scanThread = async ({ url: threadUrl, depth, maxPages = 0, atomic = false }, currentHtml = '') => {
         if (!isCurrentRun()) throw Object.assign(new Error('This scrape was superseded'), { status: 409 });
         const firstHtml = currentHtml || await fetchSimpCityPage(threadUrl, 1);
         const discoveredPages = pageCountFromHtml(firstHtml);
         const depthLimitedPages = depth ? Math.min(discoveredPages, MAX_LINKED_THREAD_PAGES) : discoveredPages;
         const threadPages = maxPages > 0 ? Math.min(depthLimitedPages, maxPages) : depthLimitedPages;
         totalPages += threadPages;
-        queuePosts(extractPostPayloads(firstHtml, 1, threadUrl), depth);
+        const collectedPosts = [];
+        const submitPosts = posts => atomic ? collectedPosts.push(...posts) : queuePosts(posts, depth);
+        submitPosts(extractPostPayloads(firstHtml, 1, threadUrl));
         pagesFetched++;
         update();
         for (let start = 2; start <= threadPages; start += PAGE_CONCURRENCY) {
@@ -448,16 +451,29 @@
             return { page, url: pageUrl.href, html: await fetchSimpCityPage(pageUrl.href, page) };
           }));
           for (const item of fetched) {
-            queuePosts(extractPostPayloads(item.html, item.page, item.url), depth);
+            submitPosts(extractPostPayloads(item.html, item.page, item.url));
             pagesFetched++;
           }
           update();
+        }
+        if (atomic && collectedPosts.length) {
+          collectedPosts.unshift({
+            postId: `thread-title-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            page: 1,
+            text: '',
+            links: [{ text: '', url: threadUrl, simpcityThread: true }],
+            attachments: []
+          });
+          // One request marks the complete creator thread. The PC can resolve
+          // every host concurrently without releasing a partial pair.
+          queuePosts(collectedPosts, depth, collectedPosts.length);
         }
       };
       const currentPage = Number(location.pathname.match(/\/page-(\d+)/i)?.[1] || 1);
       const rootIsSinglePageThread = /\/threads\/who-is-this-identify-unknown-models-in-here\./i.test(first.pathname);
       if (listingRootUrl) {
         const pageTotal = listingPageCount(listingHtml);
+        const listingIsForum = /^\/forums\//i.test(new URL(listingRootUrl).pathname);
         const listingContentThreads = [];
         const queueListingThreads = threadUrls => {
           const posts = [];
@@ -476,7 +492,7 @@
           // Search-result thread titles/slugs are already strong creator
           // evidence. Stream them immediately without crawling every page of
           // every result thread before Pong can begin resolving profiles.
-          if (posts.length) queuePosts(posts, MAX_LINKED_THREAD_DEPTH);
+          if (posts.length && !listingIsForum) queuePosts(posts, MAX_LINKED_THREAD_DEPTH);
         };
         queueListingThreads(initialThreads);
         for (let start = 2; start <= pageTotal; start += PAGE_CONCURRENCY) {
@@ -495,11 +511,14 @@
         // TikTok links inside the first post. Read the first page of each
         // result thread in bounded parallel batches while creator searches
         // are already streaming from the thread slugs above.
-        if (/^\/forums\//i.test(new URL(listingRootUrl).pathname)) {
-          for (let start = 0; start < listingContentThreads.length; start += PAGE_CONCURRENCY) {
-            await Promise.all(listingContentThreads.slice(start, start + PAGE_CONCURRENCY).map(threadUrl => (
-              scanThread({ url: threadUrl, depth: MAX_LINKED_THREAD_DEPTH, maxPages: 1 })
-            )));
+        if (listingIsForum) {
+          for (let index = 0; index < listingContentThreads.length; index++) {
+            if (isCurrentRun()) status.textContent = `Pong ${channel}: creator ${index + 1}/${listingContentThreads.length}`;
+            await scanThread({
+              url: listingContentThreads[index],
+              depth: MAX_LINKED_THREAD_DEPTH,
+              atomic: true
+            });
           }
         }
       } else if (rootIsSinglePageThread) {

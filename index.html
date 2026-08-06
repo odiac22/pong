@@ -846,7 +846,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.83</div>
+    <div class="version-number">25.84</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -7316,6 +7316,19 @@ function getRandomActiveEromePasteEventIndex(excludedIdentity = getCurrentPaperc
   return candidates[Math.floor(Math.random() * candidates.length)].index;
 }
 
+function getNextSimpCityPairEventIndex() {
+  const current = pasteEvents[currentPasteIndex];
+  const pairId = String(current?.simpCityPairId || '');
+  if (!pairId) return -1;
+  return pasteEvents.findIndex((event, index) => (
+    index !== currentPasteIndex &&
+    String(event?.simpCityPairId || '') === pairId &&
+    isPasteEventViewableForPaperclip(event) &&
+    !isPasteEventPreviouslyVisitedForPaperclip(event, index) &&
+    !isPasteEventRetiredForPaperclip(event, index)
+  ));
+}
+
 function retireCurrentPasteEventForPaperclip() {
   const indexes = new Set();
   const visibleIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
@@ -7433,8 +7446,11 @@ function navigateToNextPasteEvent(){
 
   const excludedIdentity = getCurrentPaperclipArtistIdentity();
   const eromeBundleMode = isEromePasteEvent(pasteEvents[currentPasteIndex]) || window.PongLoadedSavedMode === 'erome';
+  const pairedIndex = getNextSimpCityPairEventIndex();
   const nextActiveIndex = eromeBundleMode
-    ? getRandomActiveEromePasteEventIndex(excludedIdentity)
+    ? pairedIndex >= 0
+      ? pairedIndex
+      : getRandomActiveEromePasteEventIndex(excludedIdentity)
     : (() => {
         const nextLoadedIndex = getBestLoadedPasteEventIndex(excludedIdentity);
         const nextRegularIndex = getNextActivePasteEventIndex(excludedIdentity);

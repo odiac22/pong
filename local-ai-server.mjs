@@ -3042,7 +3042,7 @@ function simpCityExplicitUrlCreators(post, currentThreadUrl = '') {
 
 function extractSimpCityCreatorsDeterministically(rawPosts, currentThreadUrl = '') {
   const posts = (Array.isArray(rawPosts) ? rawPosts : [])
-    .slice(0, 10)
+    .slice(0, 250)
     .map(compactSimpCityAiPost)
     .filter(Boolean);
   const creators = [];
@@ -3430,7 +3430,9 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
     const creatorKey = creatorName.toLowerCase().replace(/[^a-z0-9]+/g, '');
     if (!creatorKey || seenPairs.has(creatorKey) || state.skippedCreatorKeys?.has(creatorKey)) return;
     const creatorPost = postMap.get(String(creator?.postId || ''));
-    const relevantPosts = creatorPost ? [creatorPost] : [];
+    // Ordered forum scans arrive as one complete creator thread. Use every
+    // post so TikTok and all other host links become the same two-part pair.
+    const relevantPosts = creatorPost ? [...postMap.values()] : [];
     const links = extractSimpCityMediaLinks(relevantPosts);
     // A creator cannot satisfy the pair contract without a TikTok source.
     // Do not mark title-only search results complete; a later first-page scan
@@ -3519,6 +3521,22 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
     if (!state.pending.firstAlbumAt) state.pending.firstAlbumAt = state.pending.updatedAt;
   }));
   return trackSimpCityRecallTask(taskKey, Promise.allSettled(tasks));
+}
+
+function simpCityPrimaryPairCreator(creators) {
+  const candidates = Array.isArray(creators) ? creators.filter(Boolean) : [];
+  if (!candidates.length) return [];
+  const primary = candidates.find(creator => /(?:^|\.)tiktok\.com\//i.test(String(creator?.evidence || '')))
+    || candidates[0];
+  const displayName = String(
+    candidates.find(creator => creator?.threadUrl)?.primaryName || primary?.primaryName || ''
+  ).trim();
+  const aliases = [...new Set(candidates.flatMap(creator => [
+    creator?.primaryName,
+    ...(creator?.aliases || []),
+    ...(creator?.usernames || [])
+  ]).map(value => String(value || '').trim()).filter(Boolean))];
+  return [{ ...primary, primaryName: displayName, aliases, usernames: aliases }];
 }
 
 function simpCityCreatorSearchCandidates(creators) {
@@ -10414,7 +10432,7 @@ const server = http.createServer(async (req, res) => {
         channel,
         suppliedId,
         deterministic.posts,
-        deterministic.creators
+        simpCityPrimaryPairCreator(deterministic.creators)
       );
 
       if (
@@ -10441,7 +10459,7 @@ const server = http.createServer(async (req, res) => {
               channel,
               suppliedId,
               deterministic.unresolvedPosts,
-              extracted.creators
+              simpCityPrimaryPairCreator(extracted.creators)
             );
           } catch (error) {
             if (state.pending?.id === suppliedId && !signal?.aborted) {
