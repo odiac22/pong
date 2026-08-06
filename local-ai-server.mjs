@@ -3386,9 +3386,11 @@ function scheduleSimpCityMediaLinks(state, channel, suppliedId, posts, creators)
         }
       }
       if (state.pending.albums.some(item => item.url === link.url)) return;
-      state.pending.albums.push({
+      const resolvedAlbum = {
         url: link.url,
-        title: `${creatorName} · ${link.kind}`,
+        title: link.kind === 'tiktok'
+          ? `TikTok account · ${creatorName}`
+          : `${creatorName} · ${link.kind}`,
         creatorName,
         creatorKey,
         mediaKind: link.kind,
@@ -3399,7 +3401,9 @@ function scheduleSimpCityMediaLinks(state, channel, suppliedId, posts, creators)
           ? 'hosted'
           : link.kind === 'bunkr' ? 'bunkr' : 'direct',
         videos
-      });
+      };
+      if (link.kind === 'tiktok') state.pending.albums.unshift(resolvedAlbum);
+      else state.pending.albums.push(resolvedAlbum);
       state.pending.albumsReady = state.pending.albums.length;
       if (!state.pending.firstAlbumAt) state.pending.firstAlbumAt = new Date().toISOString();
     } catch (_) {
@@ -10297,14 +10301,27 @@ const server = http.createServer(async (req, res) => {
       state.pending.batchesReceived++;
       state.pending.deterministicCreators += newCreators.length;
       state.pending.updatedAt = new Date().toISOString();
-      scheduleSimpCityRecallAlbums(state, channel, suppliedId, newCreators);
-      scheduleSimpCityMediaLinks(
+      const containsTikTok = extractSimpCityMediaLinks(deterministic.posts)
+        .some(link => link.kind === 'tiktok');
+      const mediaTask = scheduleSimpCityMediaLinks(
         state,
         channel,
         suppliedId,
         deterministic.posts,
         [...state.pending.creators]
       );
+      if (containsTikTok && mediaTask) {
+        // For a creator post containing TikTok, publish that account bundle
+        // before beginning the matching Balbums search. Other batches remain
+        // concurrent and are not blocked by this creator-local ordering.
+        void mediaTask.finally(() => {
+          if (state.pending?.id === suppliedId) {
+            scheduleSimpCityRecallAlbums(state, channel, suppliedId, newCreators);
+          }
+        });
+      } else {
+        scheduleSimpCityRecallAlbums(state, channel, suppliedId, newCreators);
+      }
 
       if (
         deterministic.unresolvedPosts.length &&

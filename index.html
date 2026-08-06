@@ -846,7 +846,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.81</div>
+    <div class="version-number">25.82</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -17464,7 +17464,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     while (albumWaiters.length) albumWaiters.shift()();
   };
   const enqueueAlbums = (albums, jobId = '') => {
-    (albums || []).forEach(rawAlbum => {
+    [...(albums || [])]
+      .sort((left, right) => Number(right?.mediaKind === 'tiktok') - Number(left?.mediaKind === 'tiktok'))
+      .forEach(rawAlbum => {
       const readyVideos = Array.isArray(rawAlbum?.videos) ? rawAlbum.videos.filter(Boolean) : [];
       let albumUrl = normalizeEromeLaunchUrl(rawAlbum?.url || '');
       if (!albumUrl && readyVideos.length) {
@@ -17484,7 +17486,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         (creatorKey && simpCitySkippedCreatorKeys.has(creatorKey))
       ) return;
       seenAlbumUrls.add(albumUrl);
-      albumQueue.push({
+      const queuedAlbum = {
         ...rawAlbum,
         url: albumUrl,
         title: String(rawAlbum?.title || rawAlbum?.creatorName || 'Bunkr album'),
@@ -17498,8 +17500,11 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           : rawAlbum?.source === 'hosted'
             ? 'hosted'
             : 'bunkr',
+        mediaKind: String(rawAlbum?.mediaKind || ''),
         videos: readyVideos
-      });
+      };
+      if (queuedAlbum.mediaKind === 'tiktok') albumQueue.unshift(queuedAlbum);
+      else albumQueue.push(queuedAlbum);
     });
     discoveredAlbums = seenAlbumUrls.size;
     wakeAlbumWorkers();
@@ -17592,13 +17597,16 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       if (Array.isArray(data.videos) && data.videos.length) {
         publishGroup({
           url: album.url,
-          title: album.creatorName
+          title: album.mediaKind === 'tiktok'
+            ? `TikTok account · ${album.creatorName || album.sourceTitle || 'TikTok'}`
+            : album.creatorName
             ? `${album.creatorName} - ${album.title || data.title || 'Bunkr album'}`
             : album.title || data.title || 'Bunkr album',
           sourceUrl: album.sourceUrl || sourceThreadUrl,
           sourceTitle: album.creatorName || album.sourceTitle || album.title || 'SimpCity creator',
           creatorName: album.creatorName || album.sourceTitle || '',
           creatorKey: album.creatorKey || '',
+          mediaKind: album.mediaKind || '',
           simpCityJobId: album.simpCityJobId || '',
           source: album.source || 'bunkr',
           videos: data.videos
