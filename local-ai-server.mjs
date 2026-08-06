@@ -164,7 +164,8 @@ const GATEWAY_ALLOWED_HOSTS = ['coomerfans.com', 'onlyfaphouse.com'];
 const GATEWAY_MEDIA_ALLOWED_HOSTS = [
   'cdn.cr', 'pixeldrain.com', 'gofile.io',
   'cyberdrop.cr', 'cyberdrop.me', 'cyberdrop.to', 'cyberfile.me',
-  'saint.to', 'saint2.su', 'saint2.cr', 'turbo.cr', 'turbocdn.st'
+  'saint.to', 'saint2.su', 'saint2.cr', 'turbo.cr', 'turbocdn.st',
+  'tiktok.com'
 ];
 const GATEWAY_WARM_CONNECTIONS = Math.max(1, Math.min(4, Number(process.env.PONG_GATEWAY_WARM_CONNECTIONS || 2)));
 const GATEWAY_KEEP_WARM_MS = Math.max(10000, Number(process.env.PONG_GATEWAY_KEEP_WARM_MS || 20000));
@@ -2111,7 +2112,8 @@ function extractTikTokVideoUrls(sourceUrl, signal = null) {
   return new Promise((resolve, reject) => {
     const python = path.join(LOCAL_AI_DIR, 'lora-venv', 'Scripts', 'python.exe');
     const child = spawn(python, [
-      '-m', 'yt_dlp', '--no-warnings', '--playlist-end', '20', '-g', sourceUrl
+      '-m', 'yt_dlp', '--no-warnings', '--impersonate', 'chrome',
+      '--flat-playlist', '--playlist-end', '20', '--print', 'webpage_url', sourceUrl
     ], {
       cwd: process.cwd(),
       windowsHide: true,
@@ -3416,6 +3418,70 @@ function scheduleSimpCityMediaLinks(state, channel, suppliedId, posts, creators)
     }
   }));
   return trackSimpCityRecallTask(taskKey, Promise.allSettled(tasks));
+}
+
+function isTikTokVideoPageUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    return /(^|\.)tiktok\.com$/i.test(url.hostname) && /\/@[^/]+\/video\/\d+/i.test(url.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function downloadTikTokVideoFile(record, partPath, controller) {
+  const python = path.join(LOCAL_AI_DIR, 'lora-venv', 'Scripts', 'python.exe');
+  await fs.rm(partPath, { force: true }).catch(() => {});
+  await new Promise((resolve, reject) => {
+    const child = spawn(python, [
+      '-m', 'yt_dlp', '--no-warnings', '--impersonate', 'chrome',
+      '--no-playlist', '-f', 'best[ext=mp4]/best', '-o', '-', record.sourceUrl
+    ], {
+      cwd: process.cwd(),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    const output = createWriteStream(partPath, { flags: 'w' });
+    let stderr = '';
+    let settled = false;
+    const finish = error => {
+      if (settled) return;
+      settled = true;
+      controller.signal.removeEventListener('abort', abort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const abort = () => {
+      child.kill();
+      output.destroy();
+      finish(new Error('TikTok cache download aborted'));
+    };
+    controller.signal.addEventListener('abort', abort, { once: true });
+    child.stderr.on('data', chunk => { stderr += chunk.toString().slice(0, 65536); });
+    child.stdout.on('data', chunk => {
+      record.bytes = Number(record.bytes || 0) + chunk.length;
+      record.updatedAt = Date.now();
+      if (record.bytes > VIDEO_FILE_CACHE_MAX_FILE_BYTES) abort();
+    });
+    child.once('error', finish);
+    output.once('error', finish);
+    child.once('close', code => {
+      if (code !== 0) {
+        output.destroy();
+        finish(new Error(stderr.trim() || `TikTok downloader exited ${code}`));
+        return;
+      }
+      output.end();
+    });
+    output.once('finish', () => finish());
+    child.stdout.pipe(output, { end: false });
+  });
+  const bytes = Number((await fs.stat(partPath)).size || 0);
+  if (!bytes) throw new Error('TikTok downloader returned an empty video');
+  record.bytes = bytes;
+  record.totalBytes = bytes;
+  record.contentType = 'video/mp4';
+  record.headersReadyAt = Date.now();
 }
 
 function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creators) {
@@ -5295,7 +5361,9 @@ async function downloadVideoFileCacheRecord(record, generation) {
     let currentUrl = record.sourceUrl;
     let redirects = 0;
     let freshRestarts = 0;
-    while (redirects <= GATEWAY_MAX_REDIRECTS && freshRestarts <= 2) {
+    if (isTikTokVideoPageUrl(record.sourceUrl)) {
+      await downloadTikTokVideoFile(record, partPath, controller);
+    } else while (redirects <= GATEWAY_MAX_REDIRECTS && freshRestarts <= 2) {
       let resumeOffset = 0;
       try {
         resumeOffset = Math.max(0, Number((await fs.stat(partPath)).size || 0));
