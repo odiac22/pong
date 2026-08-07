@@ -2228,6 +2228,7 @@ const SIMPCITY_MEDIA_BLOCK_PATTERNS = [
 const SIMPCITY_JOB_RETENTION_MS = 30 * 60 * 1000;
 let simpCitySessionCache;
 let simpCityLoginState = null;
+const simpCityBackgroundRuns = new Map();
 const simpCityImportJobs = new Map();
 const simpCityRecallChannels = new Map([
   [1, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set() }],
@@ -2346,6 +2347,10 @@ function compactSimpCityCookie(rawCookie) {
 async function saveSimpCitySession(cookies, userAgent = SIMPCITY_USER_AGENT) {
   const compact = (Array.isArray(cookies) ? cookies : []).map(compactSimpCityCookie).filter(Boolean);
   if (!compact.length) throw new Error('SimpCity did not expose an authenticated session');
+  const hasAuthenticatedCookie = compact.some(cookie => (
+    /(?:^|_)(?:user|member)$/i.test(cookie.name) && cookie.value && cookie.value !== '0'
+  ));
+  if (!hasAuthenticatedCookie) throw new Error('SimpCity authentication cookie was not available');
   const session = {
     schema: 'pong-simpcity-session-v1',
     savedAt: new Date().toISOString(),
@@ -2629,6 +2634,112 @@ async function startSimpCityBrowser({ headless, hidden = false, targetUrl, cooki
     await removeSimpCityTempProfile(profile).catch(() => {});
     throw error;
   }
+}
+
+function normalizeSimpCityBackgroundUrl(rawValue) {
+  try {
+    const url = new URL(String(rawValue || '').trim());
+    if (!/(^|\.)simpcity\.cr$/i.test(url.hostname)) return '';
+    if (!/^\/(?:threads|tags|search|forums)\//i.test(url.pathname)) return '';
+    url.protocol = 'https:';
+    url.hostname = 'simpcity.cr';
+    url.username = '';
+    url.password = '';
+    url.hash = '';
+    if (/^\/threads\//i.test(url.pathname)) url.searchParams.set('order', 'reaction_score');
+    return url.toString();
+  } catch (_) {
+    return '';
+  }
+}
+
+async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
+  const targetUrl = normalizeSimpCityBackgroundUrl(rawUrl);
+  if (!targetUrl) throw new Error('A valid SimpCity thread, tag, search, or forum URL is required');
+  const channel = simpCityRecallChannel(rawChannel);
+  const session = await loadSimpCitySession();
+  if (!session?.cookies?.length) throw new Error('SimpCity session handoff is required');
+  const previous = simpCityBackgroundRuns.get(channel);
+  previous?.controller?.abort();
+  await stopSimpCityBrowser(previous?.browser).catch(() => {});
+  const controller = new AbortController();
+  const run = {
+    id: crypto.randomUUID(), channel, targetUrl, controller, browser: null,
+    state: 'starting', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: ''
+  };
+  simpCityBackgroundRuns.set(channel, run);
+  void (async () => {
+    try {
+      const browser = await startSimpCityBrowser({
+        headless: true,
+        hidden: true,
+        targetUrl,
+        cookies: session.cookies,
+        userAgent: session.userAgent
+      });
+      run.browser = browser;
+      if (controller.signal.aborted) return;
+      const auth = await simpCityBrowserAuthState(browser);
+      if (!auth?.authenticated) throw new Error('Transferred SimpCity session is not authenticated');
+      const userscript = await fs.readFile(path.join(process.cwd(), 'pong-simpcity.user.js'), 'utf8');
+      const shim = `(() => {
+        globalThis.PONG_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787'];
+        const request = options => {
+          const timer = setTimeout(() => options.ontimeout?.(), Number(options.timeout || 90000));
+          fetch(options.url, {
+            method: options.method || 'GET',
+            headers: options.headers || {},
+            body: options.data,
+            cache: 'no-store'
+          }).then(async response => {
+            clearTimeout(timer);
+            options.onload?.({ status: response.status, responseText: await response.text() });
+          }).catch(error => {
+            clearTimeout(timer);
+            options.onerror?.({ error: String(error?.message || error) });
+          });
+        };
+        globalThis.GM_xmlhttpRequest = request;
+        globalThis.GM = { xmlHttpRequest: request };
+      })();`;
+      await browser.cdp.evaluate(`${shim}\n${userscript}`, 30_000);
+      const clicked = await browser.cdp.evaluate(`(() => {
+        const button = document.querySelector('[data-scrape="${channel}"]');
+        if (!button) return false;
+        button.click();
+        return true;
+      })()`);
+      if (!clicked) throw new Error('SimpCity background scrape button was not initialized');
+      run.state = 'running';
+      run.updatedAt = new Date().toISOString();
+      const deadline = Date.now() + 6 * 60 * 60_000;
+      while (!controller.signal.aborted && Date.now() < deadline) {
+        await simpCityDelay(1500);
+        const status = await browser.cdp.evaluate(
+          `String(document.querySelector('#pong-simpcity-scraper [data-status]')?.textContent || '')`
+        ).catch(() => '');
+        run.status = status;
+        run.updatedAt = new Date().toISOString();
+        if (/remaining AI streams to Recall/i.test(status)) {
+          run.state = 'complete';
+          break;
+        }
+        if (/failed:/i.test(status)) throw new Error(status);
+      }
+      if (!controller.signal.aborted && run.state !== 'complete') throw new Error('SimpCity background scrape timed out');
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        run.state = 'error';
+        run.error = String(error?.message || error).slice(0, 500);
+      }
+    } finally {
+      await stopSimpCityBrowser(run.browser).catch(() => {});
+      run.browser = null;
+      run.updatedAt = new Date().toISOString();
+      if (controller.signal.aborted) run.state = 'cancelled';
+    }
+  })();
+  return { id: run.id, channel, targetUrl, state: run.state };
 }
 
 async function simpCityBrowserAuthState(browser) {
@@ -3500,12 +3611,6 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
     // post so TikTok and all other host links become the same two-part pair.
     const relevantPosts = creatorPost ? [...postMap.values()] : [];
     const links = extractSimpCityMediaLinks(relevantPosts);
-    // A creator cannot satisfy the pair contract without a TikTok source.
-    // Do not mark title-only search results complete; a later first-page scan
-    // may provide the actual TikTok link for the same creator.
-    if (!links.some(link => link.kind === 'tiktok')) return;
-    seenPairs.add(creatorKey);
-    state.pending.creatorPairsSeen = [...seenPairs].slice(-2000);
     const resolved = await Promise.allSettled(links.map(async link => ({
       link,
       videos: await resolveSimpCityMediaLink(link, signal)
@@ -3544,42 +3649,45 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
 
     const uniqueTikTok = [...new Set(tiktokVideos)].slice(0, 20);
     const uniqueArtist = [...new Set(artistVideos)].slice(0, 250);
-    if (!uniqueTikTok.length || !uniqueArtist.length || signal?.aborted || state.pending?.id !== suppliedId) return;
+    if ((!uniqueTikTok.length && !uniqueArtist.length) || signal?.aborted || state.pending?.id !== suppliedId) return;
 
     const pairId = `${suppliedId}:${creatorKey}`;
-    state.pending.albums.push({
+    const pairedGroups = [];
+    if (uniqueArtist.length) pairedGroups.push({
+      url: artistUrl,
+      title: `Artist videos · ${creatorName}`,
+      creatorName,
+      creatorKey,
+      pairId,
+      mediaKind: 'artist-unified',
+      source: 'hosted',
+      videos: uniqueArtist
+    });
+    if (uniqueTikTok.length) pairedGroups.push({
       url: tiktokUrl,
+      title: `TikTok account · ${creatorName}`,
+      creatorName,
+      creatorKey,
+      pairId,
+      mediaKind: 'tiktok',
+      source: 'hosted',
+      videos: uniqueTikTok
+    });
+    const firstGroup = pairedGroups[0];
+    seenPairs.add(creatorKey);
+    state.pending.creatorPairsSeen = [...seenPairs].slice(-2000);
+    state.pending.albums.push({
+      url: firstGroup.url,
       title: creatorName,
       creatorName,
       creatorKey,
       pairId,
       sourceUrl: state.pending.threadUrl,
       source: 'paired',
-      // A paired result is one backlog item. Pong expands it atomically into
-      // two consecutive paperclip bundles only after both sides are playable.
-      videos: uniqueTikTok,
-      pairedGroups: [
-        {
-          url: artistUrl,
-          title: `Artist videos · ${creatorName}`,
-          creatorName,
-          creatorKey,
-          pairId,
-          mediaKind: 'artist-unified',
-          source: 'hosted',
-          videos: uniqueArtist
-        },
-        {
-          url: tiktokUrl,
-          title: `TikTok account · ${creatorName}`,
-          creatorName,
-          creatorKey,
-          pairId,
-          mediaKind: 'tiktok',
-          source: 'hosted',
-          videos: uniqueTikTok
-        }
-      ]
+      // One backlog item expands into one or two adjacent paperclip bundles:
+      // unified hosted videos first when present, followed by TikTok.
+      videos: firstGroup.videos,
+      pairedGroups
     });
     state.pending.albumsReady = state.pending.albums.length;
     state.pending.creatorPairsReady = Number(state.pending.creatorPairsReady || 0) + 1;
@@ -4168,6 +4276,9 @@ function simpCityRecallFingerprint(threadUrl, names) {
 
 process.once('exit', () => {
   try { simpCityLoginState?.browser?.child?.kill(); } catch (_) {}
+  for (const run of simpCityBackgroundRuns.values()) {
+    try { run?.browser?.child?.kill(); } catch (_) {}
+  }
 });
 
 function extractVideoUrlsFromHtml(html, postUrl) {
@@ -10388,6 +10499,26 @@ const server = http.createServer(async (req, res) => {
         windowOpen: Boolean(simpCityLoginState?.browser),
         error: simpCityLoginState?.error || ''
       });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/session/handoff') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const session = await saveSimpCitySession(payload?.cookies, payload?.userAgent);
+      json(res, 200, { ok: true, connected: true, savedAt: session.savedAt });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/background/start') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      json(res, 200, { ok: true, ...(await startSimpCityBackgroundRecall(payload?.url, payload?.channel)) });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/simpcity/background/status') {
+      const channel = simpCityRecallChannel(url.searchParams.get('channel'));
+      const run = simpCityBackgroundRuns.get(channel);
+      json(res, 200, { ok: true, channel, run: run ? {
+        id: run.id, state: run.state, targetUrl: run.targetUrl, status: run.status || '',
+        error: run.error || '', startedAt: run.startedAt, updatedAt: run.updatedAt
+      } : null });
       return;
     }
 
