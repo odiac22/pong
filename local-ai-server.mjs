@@ -2344,17 +2344,30 @@ function compactSimpCityCookie(rawCookie) {
   return cookie;
 }
 
-async function saveSimpCitySession(cookies, userAgent = SIMPCITY_USER_AGENT) {
-  const compact = (Array.isArray(cookies) ? cookies : []).map(compactSimpCityCookie).filter(Boolean);
-  if (!compact.length) throw new Error('SimpCity did not expose an authenticated session');
-  const hasAuthenticatedCookie = compact.some(cookie => (
-    /(?:^|_)(?:user|member)$/i.test(cookie.name) && cookie.value && cookie.value !== '0'
+function simpCityHasAuthenticatedCookie(cookies) {
+  return (Array.isArray(cookies) ? cookies : []).some(cookie => (
+    /(?:^|_)(?:user|member)$/i.test(String(cookie?.name || '')) &&
+    cookie?.value &&
+    cookie.value !== '0'
   ));
-  if (!hasAuthenticatedCookie) throw new Error('SimpCity authentication cookie was not available');
+}
+
+async function saveSimpCitySession(
+  cookies,
+  userAgent = SIMPCITY_USER_AGENT,
+  { requireAuthenticated = true } = {}
+) {
+  const compact = (Array.isArray(cookies) ? cookies : []).map(compactSimpCityCookie).filter(Boolean);
+  if (!compact.length) throw new Error('SimpCity did not expose any transferable cookies');
+  const authenticated = simpCityHasAuthenticatedCookie(compact);
+  if (requireAuthenticated && !authenticated) {
+    throw new Error('SimpCity authentication cookie was not available');
+  }
   const session = {
     schema: 'pong-simpcity-session-v1',
     savedAt: new Date().toISOString(),
     userAgent: String(userAgent || SIMPCITY_USER_AGENT),
+    authenticated,
     cookies: compact
   };
   const plaintext = Buffer.from(JSON.stringify(session), 'utf8').toString('base64');
@@ -2668,50 +2681,65 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
     state: 'starting', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: ''
   };
   simpCityBackgroundRuns.set(channel, run);
+  let browser = null;
+  try {
+    browser = await startSimpCityBrowser({
+      headless: true,
+      hidden: true,
+      targetUrl,
+      cookies: session.cookies,
+      userAgent: session.userAgent
+    });
+    run.browser = browser;
+    if (controller.signal.aborted) throw new Error('The previous Recall run was replaced');
+    const auth = await simpCityBrowserAuthState(browser);
+    if (auth?.blocked) {
+      throw new Error('Transferred browser cookies did not pass the SimpCity access check');
+    }
+    if (auth?.hasLoginForm || auth?.loginPath) {
+      throw new Error('Transferred SimpCity session reached the login page');
+    }
+    const userscript = await fs.readFile(path.join(process.cwd(), 'pong-simpcity.user.js'), 'utf8');
+    const shim = `(() => {
+      globalThis.PONG_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787'];
+      const request = options => {
+        const timer = setTimeout(() => options.ontimeout?.(), Number(options.timeout || 90000));
+        fetch(options.url, {
+          method: options.method || 'GET',
+          headers: options.headers || {},
+          body: options.data,
+          cache: 'no-store'
+        }).then(async response => {
+          clearTimeout(timer);
+          options.onload?.({ status: response.status, responseText: await response.text() });
+        }).catch(error => {
+          clearTimeout(timer);
+          options.onerror?.({ error: String(error?.message || error) });
+        });
+      };
+      globalThis.GM_xmlhttpRequest = request;
+      globalThis.GM = { xmlHttpRequest: request };
+    })();`;
+    await browser.cdp.evaluate(`${shim}\n${userscript}`, 30_000);
+    const clicked = await browser.cdp.evaluate(`(() => {
+      const button = document.querySelector('[data-scrape="${channel}"]');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`);
+    if (!clicked) throw new Error('SimpCity background scrape button was not initialized');
+    run.state = 'running';
+    run.updatedAt = new Date().toISOString();
+  } catch (error) {
+    run.state = controller.signal.aborted ? 'cancelled' : 'error';
+    run.error = String(error?.message || error).slice(0, 500);
+    await stopSimpCityBrowser(browser).catch(() => {});
+    run.browser = null;
+    run.updatedAt = new Date().toISOString();
+    throw error;
+  }
   void (async () => {
     try {
-      const browser = await startSimpCityBrowser({
-        headless: true,
-        hidden: true,
-        targetUrl,
-        cookies: session.cookies,
-        userAgent: session.userAgent
-      });
-      run.browser = browser;
-      if (controller.signal.aborted) return;
-      const auth = await simpCityBrowserAuthState(browser);
-      if (!auth?.authenticated) throw new Error('Transferred SimpCity session is not authenticated');
-      const userscript = await fs.readFile(path.join(process.cwd(), 'pong-simpcity.user.js'), 'utf8');
-      const shim = `(() => {
-        globalThis.PONG_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787'];
-        const request = options => {
-          const timer = setTimeout(() => options.ontimeout?.(), Number(options.timeout || 90000));
-          fetch(options.url, {
-            method: options.method || 'GET',
-            headers: options.headers || {},
-            body: options.data,
-            cache: 'no-store'
-          }).then(async response => {
-            clearTimeout(timer);
-            options.onload?.({ status: response.status, responseText: await response.text() });
-          }).catch(error => {
-            clearTimeout(timer);
-            options.onerror?.({ error: String(error?.message || error) });
-          });
-        };
-        globalThis.GM_xmlhttpRequest = request;
-        globalThis.GM = { xmlHttpRequest: request };
-      })();`;
-      await browser.cdp.evaluate(`${shim}\n${userscript}`, 30_000);
-      const clicked = await browser.cdp.evaluate(`(() => {
-        const button = document.querySelector('[data-scrape="${channel}"]');
-        if (!button) return false;
-        button.click();
-        return true;
-      })()`);
-      if (!clicked) throw new Error('SimpCity background scrape button was not initialized');
-      run.state = 'running';
-      run.updatedAt = new Date().toISOString();
       const deadline = Date.now() + 6 * 60 * 60_000;
       while (!controller.signal.aborted && Date.now() < deadline) {
         await simpCityDelay(1500);
@@ -10494,6 +10522,7 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         connected: Boolean(session?.cookies?.length),
         stored: Boolean(session?.cookies?.length),
+        authenticated: simpCityHasAuthenticatedCookie(session?.cookies),
         savedAt: session?.savedAt || '',
         status: simpCityLoginState?.status || (session?.cookies?.length ? 'connected' : 'disconnected'),
         windowOpen: Boolean(simpCityLoginState?.browser),
@@ -10503,8 +10532,18 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/session/handoff') {
       const payload = JSON.parse(await readBody(req) || '{}');
-      const session = await saveSimpCitySession(payload?.cookies, payload?.userAgent);
-      json(res, 200, { ok: true, connected: true, savedAt: session.savedAt });
+      // Android Tampermonkey may intentionally hide HttpOnly login cookies.
+      // Its DDoS-Guard cookies are still useful: the PC can open the same
+      // public page and keep scraping after Firefox is minimized or closed.
+      const session = await saveSimpCitySession(payload?.cookies, payload?.userAgent, {
+        requireAuthenticated: false
+      });
+      json(res, 200, {
+        ok: true,
+        connected: true,
+        authenticated: simpCityHasAuthenticatedCookie(session.cookies),
+        savedAt: session.savedAt
+      });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/background/start') {

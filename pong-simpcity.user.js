@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.8.6
+// @version      1.8.7
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -374,7 +374,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.8.6 · PC background handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.8.7 · PC background handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -389,28 +389,28 @@
       const rootThreadUrl = canonicalSimpCityThreadUrl(location.href);
       const listingRootUrl = canonicalSimpCityListingUrl(location.href);
       if (!rootThreadUrl && !listingRootUrl) throw new Error('Open a SimpCity thread, tag, or search page');
-      // A one-time authenticated handoff lets the PC run this exact userscript
+      // A one-time browser-cookie handoff lets the PC run this exact userscript
       // in a hidden, muted browser. Firefox can be minimized or closed after
       // this succeeds. Fall back to the in-tab workflow when cookie access is
       // unavailable (notably some older Tampermonkey Android builds).
       if (!globalThis.PONG_LOCAL_ENDPOINTS) {
         const cookies = await readSimpCitySessionCookies();
-        if (cookies.length) {
-          try {
-            status.textContent = `Pong ${channel}: handing scrape to PC…`;
+        try {
+          status.textContent = `Pong ${channel}: handing scrape to PC…`;
+          if (cookies.length) {
             await sendToPong('/simpcity/session/handoff', {
               cookies,
               userAgent: navigator.userAgent
             }, 20000);
-            const background = await sendToPong('/simpcity/background/start', {
-              url: location.href,
-              channel
-            }, 30000);
-            status.textContent = `Pong ${channel}: PC running in background · ${background.id}`;
-            return;
-          } catch (_) {
-            status.textContent = `Pong ${channel}: PC handoff unavailable · continuing in Firefox`;
           }
+          const background = await sendToPong('/simpcity/background/start', {
+            url: location.href,
+            channel
+          }, 30000);
+          status.textContent = `Pong ${channel}: PC running in background · ${background.id}`;
+          return;
+        } catch (error) {
+          status.textContent = `Pong ${channel}: PC handoff unavailable (${error?.message || error}) · continuing in Firefox`;
         }
       }
       let listingHtml = '';
