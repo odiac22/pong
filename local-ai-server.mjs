@@ -2352,6 +2352,15 @@ function simpCityHasAuthenticatedCookie(cookies) {
   ));
 }
 
+function isSimpCityBrowserOrigin(rawOrigin) {
+  try {
+    const origin = new URL(String(rawOrigin || ''));
+    return origin.protocol === 'https:' && /(?:^|\.)simpcity\.cr$/i.test(origin.hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
 async function saveSimpCitySession(
   cookies,
   userAgent = SIMPCITY_USER_AGENT,
@@ -10461,11 +10470,19 @@ const server = http.createServer(async (req, res) => {
       requestUrl.pathname === '/simpcity/extract-creators'
     ) &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
+  const simpCityControllerLanWrite =
+    req.method === 'POST' &&
+    (
+      requestUrl.pathname === '/simpcity/background/start' ||
+      requestUrl.pathname === '/simpcity/session/handoff'
+    ) &&
+    isSimpCityBrowserOrigin(req.headers.origin) &&
+    (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
   const pcSavedLinksLanWrite =
     req.method === 'POST' &&
     requestUrl.pathname === '/saved-links/save' &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
-  if (!anonymousLanMediaRead && !simpCityRecallLanWrite && !pcSavedLinksLanWrite && !sameOriginLanBrowser && !authenticatedLanBrowser && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
+  if (!anonymousLanMediaRead && !simpCityRecallLanWrite && !simpCityControllerLanWrite && !pcSavedLinksLanWrite && !sameOriginLanBrowser && !authenticatedLanBrowser && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
     json(res, 403, { ok: false, error: 'browser origin is not allowed' });
     return;
   }
