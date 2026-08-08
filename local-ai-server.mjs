@@ -359,7 +359,7 @@ function json(res, status, payload) {
   res.writeHead(status, {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type,X-Pong-SimpCity-Controller',
     'Content-Type': 'application/json',
     'Cache-Control': 'no-store'
   });
@@ -370,7 +370,7 @@ function gatewayCorsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,HEAD,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type,Range,If-None-Match,If-Modified-Since',
+    'Access-Control-Allow-Headers': 'Content-Type,Range,If-None-Match,If-Modified-Since,X-Pong-SimpCity-Controller',
     'Access-Control-Expose-Headers': 'Accept-Ranges,Content-Length,Content-Range,Content-Type,ETag,Last-Modified',
     'Cache-Control': 'no-store'
   };
@@ -10476,7 +10476,7 @@ const server = http.createServer(async (req, res) => {
       requestUrl.pathname === '/simpcity/background/start' ||
       requestUrl.pathname === '/simpcity/session/handoff'
     ) &&
-    isSimpCityBrowserOrigin(req.headers.origin) &&
+    req.headers['x-pong-simpcity-controller'] === '1' &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
   const pcSavedLinksLanWrite =
     req.method === 'POST' &&

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.9.1
+// @version      1.9.2
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -79,7 +79,10 @@
         return await new Promise((resolve, reject) => {
           request({
             method: 'POST', url: `${endpoint}${pathname}`,
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Pong-SimpCity-Controller': '1'
+            },
             data: JSON.stringify(payload), timeout,
             onload: response => {
               let data = {};
@@ -111,7 +114,10 @@
         diagnostic('Browser fetch fallback attempt', `${endpoint}${pathname}; attempt ${attempt}/4`);
         const response = await fetch(`${endpoint}${pathname}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Pong-SimpCity-Controller': '1'
+          },
           body: JSON.stringify(payload),
           cache: 'no-store'
         });
@@ -420,7 +426,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;background:#10141ef5;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1;min-width:180px">v1.9.1 · PC-only paced handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button><textarea data-log readonly rows="8" style="display:block;box-sizing:border-box;width:100%;min-height:130px;resize:vertical;padding:8px;background:#070a10;color:#b8d7ff;border:1px solid #334866;border-radius:7px;font:12px/1.4 ui-monospace,monospace;white-space:pre"></textarea>';
+  panel.innerHTML = '<span data-status style="flex:1;min-width:180px">v1.9.2 · PC-only paced handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button><textarea data-log readonly rows="8" style="display:block;box-sizing:border-box;width:100%;min-height:130px;resize:vertical;padding:8px;background:#070a10;color:#b8d7ff;border:1px solid #334866;border-radius:7px;font:12px/1.4 ui-monospace,monospace;white-space:pre"></textarea>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -448,7 +454,7 @@
   };
   const buttons = [...panel.querySelectorAll('[data-scrape]')];
   const activeRunTokens = new Map();
-  diagnostic('Script initialized', `version=1.9.1; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}; pageConcurrency=${PAGE_CONCURRENCY}; creatorConcurrency=${FORUM_CREATOR_CONCURRENCY}; requestGap=${SIMPCITY_REQUEST_GAP_MS}ms`);
+  diagnostic('Script initialized', `version=1.9.2; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}; pageConcurrency=${PAGE_CONCURRENCY}; creatorConcurrency=${FORUM_CREATOR_CONCURRENCY}; requestGap=${SIMPCITY_REQUEST_GAP_MS}ms`);
 
   const runScrape = async channel => {
     const runToken = `${Date.now()}-${Math.random()}`;
