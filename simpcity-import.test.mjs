@@ -10,7 +10,9 @@ import {
   buildBAlbumsCreatorSearchUrl,
   bunkrAlbumsMatchingCreator,
   classifySimpCityMediaUrl,
-  extractSimpCityMediaLinks
+  extractSimpCityMediaLinks,
+  distinctSimpCityProfileCreators,
+  extractSimpCityMediaLinksForCreator
 } from './simpcity-import.mjs';
 
 const THREAD = 'https://simpcity.cr/threads/lightskin-light-skin-mixed-black-white-girl-thread.210197/?order=reaction_score';
@@ -155,4 +157,45 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
     ]
   );
   assert.equal(classifySimpCityMediaUrl('http://pixeldrain.com/u/nope'), null);
+});
+
+test('keeps every linked creator profile as a separate bundle candidate', () => {
+  const creators = distinctSimpCityProfileCreators([
+    {
+      postId: 'post-1', primaryName: 'kinsley wyatt', aliases: ['kinsleywyatt1'],
+      usernames: ['kinsleywyatt'], evidence: 'https://simpcity.cr/threads/kinsley-wyatt.115082/',
+      threadUrl: 'https://simpcity.cr/threads/kinsley-wyatt.115082/'
+    },
+    {
+      postId: 'post-1', primaryName: 'soogsx', aliases: [], usernames: ['soogsx'],
+      evidence: 'https://simpcity.cr/threads/soogsx.13222/',
+      threadUrl: 'https://simpcity.cr/threads/soogsx.13222/'
+    }
+  ]);
+  assert.deepEqual(creators.map(creator => creator.primaryName), ['kinsley wyatt', 'soogsx']);
+});
+
+test('assigns attached post videos to the nearest matching creator profile', () => {
+  const kinsleyUrl = 'https://simpcity.cr/threads/kinsley-wyatt.115082/';
+  const soogsUrl = 'https://simpcity.cr/threads/soogsx.13222/';
+  const post = {
+    postId: 'post-2', text: '', attachments: [], links: [
+      { text: 'Kinsley Wyatt', url: kinsleyUrl },
+      { text: 'Kinsley clip', url: 'https://cdn.example.test/kinsley.mp4' },
+      { text: 'Soogsx', url: soogsUrl },
+      { text: 'Soogsx clip', url: 'https://cdn.example.test/soogs.mp4' }
+    ]
+  };
+  const creators = [
+    { postId: 'post-2', primaryName: 'kinsley wyatt', evidence: kinsleyUrl, threadUrl: kinsleyUrl },
+    { postId: 'post-2', primaryName: 'soogsx', evidence: soogsUrl, threadUrl: soogsUrl }
+  ];
+  assert.deepEqual(
+    extractSimpCityMediaLinksForCreator([post], creators, creators[0]).map(link => link.url),
+    ['https://cdn.example.test/kinsley.mp4']
+  );
+  assert.deepEqual(
+    extractSimpCityMediaLinksForCreator([post], creators, creators[1]).map(link => link.url),
+    ['https://cdn.example.test/soogs.mp4']
+  );
 });

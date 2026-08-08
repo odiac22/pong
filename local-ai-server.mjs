@@ -24,7 +24,9 @@ import {
   isDistinctSimpCityCreatorName,
   buildBAlbumsCreatorSearchUrl,
   bunkrAlbumsMatchingCreator,
-  extractSimpCityMediaLinks
+  extractSimpCityMediaLinks,
+  distinctSimpCityProfileCreators,
+  extractSimpCityMediaLinksForCreator
 } from './simpcity-import.mjs';
 
 const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
@@ -3833,7 +3835,7 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
       const relevantPosts = options?.includeAllPosts === true
         ? [...postMap.values()]
         : creatorPost ? [creatorPost] : [];
-      const links = extractSimpCityMediaLinks(relevantPosts);
+      const links = extractSimpCityMediaLinksForCreator(relevantPosts, creators, creator);
       const artistVideos = new Set();
       const tiktokVideos = new Set();
       const pairId = `${suppliedId}:${creatorKey}`;
@@ -3986,6 +3988,10 @@ function simpCityPrimaryPairCreator(creators) {
     ...(creator?.usernames || [])
   ]).map(value => String(value || '').trim()).filter(Boolean))];
   return [{ ...primary, primaryName: displayName, aliases, usernames: aliases }];
+}
+
+function simpCityProfilePairCreators(creators) {
+  return distinctSimpCityProfileCreators(creators);
 }
 
 function simpCityCreatorSearchCandidates(creators) {
@@ -11025,7 +11031,9 @@ const server = http.createServer(async (req, res) => {
         channel,
         suppliedId,
         deterministic.posts,
-        simpCityPrimaryPairCreator(deterministic.creators),
+        payload?.orderedPair === true
+          ? simpCityPrimaryPairCreator(deterministic.creators)
+          : simpCityProfilePairCreators(deterministic.creators),
         { includeAllPosts: payload?.orderedPair === true }
       );
       // Ordered forum scans deliberately wait for this creator's complete
@@ -11058,7 +11066,9 @@ const server = http.createServer(async (req, res) => {
               channel,
               suppliedId,
               deterministic.unresolvedPosts,
-              simpCityPrimaryPairCreator(extracted.creators),
+              payload?.orderedPair === true
+                ? simpCityPrimaryPairCreator(extracted.creators)
+                : simpCityProfilePairCreators(extracted.creators),
               { includeAllPosts: payload?.orderedPair === true }
             );
           } catch (error) {

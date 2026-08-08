@@ -169,6 +169,89 @@ export function extractSimpCityMediaLinks(rawPosts) {
   return results;
 }
 
+export function distinctSimpCityProfileCreators(rawCreators) {
+  const creators = [];
+  const byIdentity = new Map();
+  for (const rawCreator of Array.isArray(rawCreators) ? rawCreators : []) {
+    if (!rawCreator) continue;
+    const threadUrl = normalizeSimpCityThreadUrl(rawCreator.threadUrl || '');
+    const primaryName = String(rawCreator.primaryName || '').trim();
+    const identity = threadUrl || simpCityCreatorKey(primaryName);
+    if (!identity) continue;
+    const existing = byIdentity.get(identity);
+    if (!existing) {
+      const creator = {
+        ...rawCreator,
+        primaryName,
+        threadUrl,
+        aliases: [...new Set((rawCreator.aliases || []).map(String).filter(Boolean))],
+        usernames: [...new Set((rawCreator.usernames || []).map(String).filter(Boolean))]
+      };
+      byIdentity.set(identity, creator);
+      creators.push(creator);
+      continue;
+    }
+    existing.aliases = [...new Set([
+      ...(existing.aliases || []), primaryName, ...(rawCreator.aliases || [])
+    ].map(String).filter(Boolean))];
+    existing.usernames = [...new Set([
+      ...(existing.usernames || []), ...(rawCreator.usernames || [])
+    ].map(String).filter(Boolean))];
+  }
+  return creators;
+}
+
+function simpCityCreatorEvidenceLinkIndex(post, creator) {
+  const links = Array.isArray(post?.links) ? post.links : [];
+  const evidence = String(creator?.evidence || '');
+  const threadUrl = normalizeSimpCityThreadUrl(creator?.threadUrl || '');
+  return links.findIndex(link => {
+    const rawUrl = String(link?.url || '');
+    if (evidence && rawUrl === evidence) return true;
+    return Boolean(threadUrl && normalizeSimpCityThreadUrl(rawUrl) === threadUrl);
+  });
+}
+
+function simpCityMediaLinkIndex(post, mediaLink) {
+  const links = Array.isArray(post?.links) ? post.links : [];
+  return links.findIndex(link => classifySimpCityMediaUrl(link?.url)?.url === mediaLink?.url);
+}
+
+export function extractSimpCityMediaLinksForCreator(rawPosts, rawCreators, targetCreator) {
+  const posts = Array.isArray(rawPosts) ? rawPosts : [];
+  const creators = distinctSimpCityProfileCreators(rawCreators);
+  const targetIdentity = normalizeSimpCityThreadUrl(targetCreator?.threadUrl || '') ||
+    simpCityCreatorKey(targetCreator?.primaryName);
+  return extractSimpCityMediaLinks(posts).filter(mediaLink => {
+    const post = posts.find(item => String(item?.postId || '') === String(mediaLink.postId || ''));
+    const postCreators = creators.filter(creator => String(creator?.postId || '') === String(mediaLink.postId || ''));
+    if (postCreators.length <= 1) return postCreators.length === 0 ||
+      (normalizeSimpCityThreadUrl(postCreators[0]?.threadUrl || '') || simpCityCreatorKey(postCreators[0]?.primaryName)) === targetIdentity;
+
+    const mediaIndex = simpCityMediaLinkIndex(post, mediaLink);
+    const mediaAnchor = mediaIndex >= 0 ? post?.links?.[mediaIndex] : null;
+    const mediaLabel = simpCityCreatorKey(mediaAnchor?.text || '');
+    let best = null;
+    let bestScore = -Infinity;
+    for (const [order, creator] of postCreators.entries()) {
+      const creatorIdentity = normalizeSimpCityThreadUrl(creator?.threadUrl || '') || simpCityCreatorKey(creator?.primaryName);
+      const identityValues = [
+        creator?.primaryName, ...(creator?.aliases || []), ...(creator?.usernames || [])
+      ].map(simpCityCreatorKey).filter(value => value.length >= 3);
+      const evidenceIndex = simpCityCreatorEvidenceLinkIndex(post, creator);
+      let score = creator?.threadUrl ? 20 : 0;
+      if (mediaLabel && identityValues.some(value => mediaLabel.includes(value) || value.includes(mediaLabel))) score += 1000;
+      if (mediaIndex >= 0 && evidenceIndex >= 0) score += 200 - Math.min(199, Math.abs(mediaIndex - evidenceIndex));
+      score -= order / 100;
+      if (score > bestScore) {
+        bestScore = score;
+        best = creatorIdentity;
+      }
+    }
+    return best === targetIdentity;
+  });
+}
+
 export function simpCityCreatorKey(value) {
   return String(value || '')
     .normalize('NFKD')
