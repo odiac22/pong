@@ -868,7 +868,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.02</div>
+    <div class="version-number">26.03</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -3370,7 +3370,23 @@ function rejectCurrentRandom40Artist(reason) {
 }
 
 function createSaveButtons() {
-  if (document.getElementById('save-actions-panel')) {
+  const existingPanel = document.getElementById('save-actions-panel');
+  if (existingPanel) {
+    if (!document.getElementById('skip-played-filter-button')) {
+      const playedSkipBtn = document.createElement('button');
+      playedSkipBtn.id = 'skip-played-filter-button';
+      playedSkipBtn.className = 'side-save-button played-skip-toggle';
+      playedSkipBtn.type = 'button';
+      playedSkipBtn.textContent = 'SKIP';
+      playedSkipBtn.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        void setPongSkipPlayedEnabled(!pongSkipPlayedEnabled, { prune: true, announce: true });
+      });
+      const rejectControl = existingPanel.querySelector('.random40-reject-wrap, #reject-current-artist-button');
+      existingPanel.insertBefore(playedSkipBtn, rejectControl || null);
+    }
+    updatePongSkipPlayedButton();
     updateSaveCounters();
     return;
   }
