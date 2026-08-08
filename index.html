@@ -868,7 +868,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.03</div>
+    <div class="version-number">26.04</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -3890,6 +3890,12 @@ async function setPongSkipPlayedEnabled(enabled, { prune = false, announce = fal
     ? `Skip played on${removed ? ` · removed ${removed}` : ''}`
     : 'Skip played off');
 }
+
+window.PongToggleSkipPlayed = () => setPongSkipPlayedEnabled(
+  !pongSkipPlayedEnabled,
+  { prune: true, announce: true }
+);
+window.PongUpdateSkipPlayedButton = updatePongSkipPlayedButton;
 
 function getCurrentPongPlayedHistorySourceUrl() {
   const record = pongPlayedRecordForGlobalIndex(getCurrentLoadedGlobalVideoIndex());
@@ -20037,6 +20043,6 @@ window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
 </script>
-<script src="pong-sync.js?v=110"></script>
+<script src="pong-sync.js?v=111"></script>
 </body>
 </html>

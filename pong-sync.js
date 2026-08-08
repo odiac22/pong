@@ -110,6 +110,24 @@
         transform: scale(1.05) !important;
       }
 
+      .side-save-button.played-skip-toggle {
+        width: 28px !important;
+        min-height: 28px !important;
+        height: 28px !important;
+        border-radius: 50% !important;
+        border-color: rgba(96,165,250,0.48) !important;
+        background: rgba(30,64,175,0.34) !important;
+        color: #bfdbfe !important;
+        font: 900 7px/1 system-ui, sans-serif !important;
+      }
+
+      .side-save-button.played-skip-toggle.active {
+        opacity: 0.92 !important;
+        background: rgba(37,99,235,0.82) !important;
+        border-color: rgba(147,197,253,0.92) !important;
+        color: #fff !important;
+      }
+
       .side-save-icon {
         font-size: 12px !important;
         line-height: 1 !important;
@@ -5345,13 +5363,27 @@
     videoBtn.addEventListener('mouseup', endVideoHold);
     videoBtn.addEventListener('mouseleave', () => clearTimeout(videoHoldTimer));
 
+    const playedSkipBtn = document.createElement('button');
+    playedSkipBtn.id = 'skip-played-filter-button';
+    playedSkipBtn.className = 'side-save-button played-skip-toggle';
+    playedSkipBtn.type = 'button';
+    playedSkipBtn.textContent = 'SKIP';
+    playedSkipBtn.title = 'Skip items already played from this source';
+    playedSkipBtn.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      window.PongToggleSkipPlayed?.();
+    });
+
     panel.appendChild(tokenBtn);
     panel.appendChild(repairBtn);
     panel.appendChild(artistBtn);
     panel.appendChild(videoBtn);
+    panel.appendChild(playedSkipBtn);
     panel.appendChild(accuracyText);
     document.body.appendChild(panel);
 
+    window.PongUpdateSkipPlayedButton?.();
     updateSaveCountersOverride();
     ensureCurrentArtistSaveLabelUpdater();
   }
