@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.9.0
+// @version      1.9.1
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -27,8 +27,10 @@
   'use strict';
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
-  const PAGE_CONCURRENCY = 6;
-  const FORUM_CREATOR_CONCURRENCY = 3;
+  const PAGE_CONCURRENCY = 2;
+  const FORUM_CREATOR_CONCURRENCY = 2;
+  const SIMPCITY_REQUEST_GAP_MS = 650;
+  const SIMPCITY_RATE_LIMIT_PAUSE_MS = 60_000;
   const AI_BATCH_SIZE = 10;
   const AI_CONCURRENCY = 2;
   const MAX_LINKED_THREADS = 24;
@@ -39,8 +41,24 @@
     : ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
   const monthDate = /^(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\s*$/i;
   let diagnosticSink = () => {};
+  let simpCityNextRequestAt = 0;
+  let simpCityRateLimitUntil = 0;
   const diagnostic = (message, details = '') => {
     try { diagnosticSink(message, details); } catch (_) {}
+  };
+  const delay = ms => new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
+  const paceSimpCityRequest = async () => {
+    const now = Date.now();
+    const slot = Math.max(now, simpCityNextRequestAt, simpCityRateLimitUntil);
+    simpCityNextRequestAt = slot + SIMPCITY_REQUEST_GAP_MS + Math.floor(Math.random() * 200);
+    if (slot > now) await delay(slot - now);
+  };
+  const noteSimpCityRateLimit = error => {
+    const message = error?.message || String(error || '');
+    if (!/HTTP\s*(?:403|429)|rate.?limit|too many requests/i.test(message)) return false;
+    simpCityRateLimitUntil = Math.max(simpCityRateLimitUntil, Date.now() + SIMPCITY_RATE_LIMIT_PAUSE_MS);
+    diagnostic('SimpCity rate limit detected', `pause=${SIMPCITY_RATE_LIMIT_PAUSE_MS}ms; ${message}`);
+    return true;
   };
 
   const sendToPong = async (pathname, payload, timeout = 90000) => {
@@ -199,6 +217,7 @@
       try {
         // Tampermonkey owns this request outside the page lifecycle, so work
         // is much less likely to stall when Firefox is backgrounded on Android.
+        await paceSimpCityRequest();
         const response = await userscriptRequest({
           method: 'GET', url, timeout: 30000, anonymous: false,
           headers: { Accept: 'text/html,application/xhtml+xml' }
@@ -210,8 +229,10 @@
         return html;
       } catch (userscriptError) {
         lastError = userscriptError?.message || String(userscriptError);
+        if (noteSimpCityRateLimit(userscriptError)) continue;
       }
       try {
+        await paceSimpCityRequest();
         const response = await fetch(url, {
           credentials: 'include', cache: 'no-store', redirect: 'follow'
         });
@@ -223,8 +244,9 @@
         return html;
       } catch (nativeError) {
         lastError = `${lastError}; ${nativeError?.message || nativeError}`;
+        noteSimpCityRateLimit(nativeError);
       }
-      await new Promise(resolve => setTimeout(resolve, 500 * attempt));
+      await delay(1000 * attempt);
     }
     throw new Error(`page ${pageNumber} failed after retries: ${lastError}`);
   }
@@ -233,6 +255,7 @@
     let lastError = '';
     for (let attempt = 1; attempt <= 4; attempt++) {
       try {
+        await paceSimpCityRequest();
         const response = await userscriptRequest({
           method: 'GET', url, timeout: 30000, anonymous: false,
           headers: { Accept: 'text/html,application/xhtml+xml' }
@@ -242,8 +265,10 @@
         return html;
       } catch (error) {
         lastError = error?.message || String(error);
+        if (noteSimpCityRateLimit(error)) continue;
       }
       try {
+        await paceSimpCityRequest();
         const response = await fetch(url, { credentials: 'include', cache: 'no-store', redirect: 'follow' });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const html = await response.text();
@@ -251,8 +276,9 @@
         return html;
       } catch (error) {
         lastError = `${lastError}; ${error?.message || error}`;
+        noteSimpCityRateLimit(error);
       }
-      await new Promise(resolve => setTimeout(resolve, 400 * attempt));
+      await delay(1000 * attempt);
     }
     throw new Error(`search page ${pageNumber} failed: ${lastError}`);
   }
@@ -394,7 +420,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;background:#10141ef5;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1;min-width:180px">v1.9.0 · PC-only background handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button><textarea data-log readonly rows="8" style="display:block;box-sizing:border-box;width:100%;min-height:130px;resize:vertical;padding:8px;background:#070a10;color:#b8d7ff;border:1px solid #334866;border-radius:7px;font:12px/1.4 ui-monospace,monospace;white-space:pre"></textarea>';
+  panel.innerHTML = '<span data-status style="flex:1;min-width:180px">v1.9.1 · PC-only paced handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button><textarea data-log readonly rows="8" style="display:block;box-sizing:border-box;width:100%;min-height:130px;resize:vertical;padding:8px;background:#070a10;color:#b8d7ff;border:1px solid #334866;border-radius:7px;font:12px/1.4 ui-monospace,monospace;white-space:pre"></textarea>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -422,7 +448,7 @@
   };
   const buttons = [...panel.querySelectorAll('[data-scrape]')];
   const activeRunTokens = new Map();
-  diagnostic('Script initialized', `version=1.9.0; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}`);
+  diagnostic('Script initialized', `version=1.9.1; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}; pageConcurrency=${PAGE_CONCURRENCY}; creatorConcurrency=${FORUM_CREATOR_CONCURRENCY}; requestGap=${SIMPCITY_REQUEST_GAP_MS}ms`);
 
   const runScrape = async channel => {
     const runToken = `${Date.now()}-${Math.random()}`;
