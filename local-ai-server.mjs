@@ -2706,6 +2706,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
     }
     const userscript = await fs.readFile(path.join(process.cwd(), 'pong-simpcity.user.js'), 'utf8');
     const shim = `(() => {
+      globalThis.PONG_PC_BACKGROUND_CONTEXT = true;
       globalThis.PONG_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787'];
       const request = options => {
         const timer = setTimeout(() => options.ontimeout?.(), Number(options.timeout || 90000));
