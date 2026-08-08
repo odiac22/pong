@@ -2282,6 +2282,7 @@ let pongPlayedHistoryLoaded = false;
 let pongPlayedHistoryLoadPromise = null;
 let pongPlayedHistoryWrite = Promise.resolve();
 const pongPlayedHistoryHashes = new Set();
+const pongPlayedHistoryScopes = new Map();
 
 function pongOpaqueHash(value) {
   const input = String(value || '');
@@ -2321,11 +2322,25 @@ function pongPlayedHistoryHash(kind, sourceUrl, itemId) {
   return pongOpaqueHash(payload);
 }
 
+function pongPlayedHistoryScopeHash(sourceUrl) {
+  return pongOpaqueHash([
+    'pong-played-scope-v1',
+    pongPlayedCanonicalValue(sourceUrl)
+  ].join('\u0000'));
+}
+
 async function loadPongPlayedHistory() {
   if (pongPlayedHistoryLoaded) return pongPlayedHistoryHashes;
   if (!pongPlayedHistoryLoadPromise) pongPlayedHistoryLoadPromise = (async () => {
     try {
       const payload = JSON.parse(await fs.readFile(PONG_PLAYED_HISTORY_PATH, 'utf8'));
+      for (const entry of Array.isArray(payload?.entries) ? payload.entries : []) {
+        const hash = String(entry?.hash || '').toLowerCase();
+        const scopeHash = String(entry?.scopeHash || '').toLowerCase();
+        if (!/^[a-f0-9]{32}$/.test(hash)) continue;
+        pongPlayedHistoryHashes.add(hash);
+        if (/^[a-f0-9]{32}$/.test(scopeHash)) pongPlayedHistoryScopes.set(hash, scopeHash);
+      }
       for (const hash of Array.isArray(payload?.hashes) ? payload.hashes : []) {
         if (/^[a-f0-9]{32}$/i.test(String(hash || ''))) pongPlayedHistoryHashes.add(String(hash).toLowerCase());
       }
@@ -2340,9 +2355,13 @@ function savePongPlayedHistory() {
   pongPlayedHistoryWrite = pongPlayedHistoryWrite.then(async () => {
     await fs.mkdir(LOCAL_AI_DIR, { recursive: true });
     const temporaryPath = `${PONG_PLAYED_HISTORY_PATH}.tmp`;
+    const retainedHashes = [...pongPlayedHistoryHashes].slice(-100000);
     const payload = {
-      schema: 'pong-played-history-v1',
-      hashes: [...pongPlayedHistoryHashes].slice(-100000)
+      schema: 'pong-played-history-v2',
+      entries: retainedHashes.map(hash => ({
+        hash,
+        scopeHash: pongPlayedHistoryScopes.get(hash) || ''
+      }))
     };
     await fs.writeFile(temporaryPath, JSON.stringify(payload), 'utf8');
     await fs.rename(temporaryPath, PONG_PLAYED_HISTORY_PATH);
@@ -10823,12 +10842,40 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/played-history/mark') {
       const payload = JSON.parse(await readBody(req) || '{}');
       const hash = String(payload?.hash || '').trim().toLowerCase();
+      const scopeHash = String(payload?.scopeHash || '').trim().toLowerCase();
       if (!/^[a-f0-9]{32}$/.test(hash)) throw new Error('A valid opaque played-history ID is required');
+      if (scopeHash && !/^[a-f0-9]{32}$/.test(scopeHash)) throw new Error('A valid opaque played-history scope is required');
       await loadPongPlayedHistory();
       const added = !pongPlayedHistoryHashes.has(hash);
+      const scopeChanged = Boolean(scopeHash && pongPlayedHistoryScopes.get(hash) !== scopeHash);
       pongPlayedHistoryHashes.add(hash);
-      if (added) await savePongPlayedHistory();
+      if (scopeHash) pongPlayedHistoryScopes.set(hash, scopeHash);
+      if (added || scopeChanged) await savePongPlayedHistory();
       json(res, 200, { ok: true, added, count: pongPlayedHistoryHashes.size });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/played-history/clear') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const scopeHash = String(payload?.scopeHash || '').trim().toLowerCase();
+      if (!/^[a-f0-9]{32}$/.test(scopeHash)) throw new Error('A valid opaque played-history scope is required');
+      await loadPongPlayedHistory();
+      const requestedHashes = new Set((Array.isArray(payload?.hashes) ? payload.hashes : [])
+        .map(value => String(value || '').trim().toLowerCase())
+        .filter(value => /^[a-f0-9]{32}$/.test(value)));
+      let removed = 0;
+      for (const hash of [...pongPlayedHistoryHashes]) {
+        if (pongPlayedHistoryScopes.get(hash) !== scopeHash && !requestedHashes.has(hash)) continue;
+        pongPlayedHistoryHashes.delete(hash);
+        pongPlayedHistoryScopes.delete(hash);
+        removed++;
+      }
+      if (removed) await savePongPlayedHistory();
+      json(res, 200, {
+        ok: true,
+        removed,
+        hashes: [...pongPlayedHistoryHashes],
+        count: pongPlayedHistoryHashes.size
+      });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/played-history/filter') {

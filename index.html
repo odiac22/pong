@@ -300,6 +300,7 @@
     .auto-scroll-button.on { background: rgba(34,197,94,0.30) !important; opacity: 0.78 !important; }
     .erome-checkpoint-button { left: 222px; font-size: 6px; font-weight: 900; letter-spacing: 0; background: rgba(37,99,235,0.34) !important; opacity: 0.68; }
     .reset-ai-stats-button { left: 252px; font-size: 9px; font-weight: 900; letter-spacing: 0; background: rgba(127,29,29,0.32) !important; }
+    .clear-played-history-button { left: 282px; font-size: 6px; font-weight: 900; letter-spacing: 0; background: rgba(37,99,235,0.34) !important; opacity: 0.68; }
     .next-batch-button {
       position: fixed; left: 46px; top: 50%; transform: translateY(-50%);
       width: 30px; height: 30px; background: var(--ui-bg); opacity: 0.44;
@@ -867,7 +868,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.00</div>
+    <div class="version-number">26.01</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -3643,6 +3644,14 @@ function pongPlayedHistoryHash(record) {
   ].join('\u0000'));
 }
 
+function pongPlayedHistoryScopeHash(sourceUrl) {
+  if (!sourceUrl) return '';
+  return pongOpaquePlayedHash([
+    'pong-played-scope-v1',
+    pongCanonicalPlayedValue(sourceUrl)
+  ].join('\u0000'));
+}
+
 function pongPlayedRecordForGroup(group, rawVideoUrl = '') {
   const creatorKey = String(group?.creatorKey || group?.simpCityCreatorKey || '').trim();
   const sourceUrl = String(group?.sourceUrl || group?.artistUrl || group?.url || '').trim();
@@ -3733,7 +3742,9 @@ async function recordPongPlayedHistory(wrapper) {
     wrapper.dataset.playedHistoryPending === 'true'
   ) return false;
   const globalIndex = getVideoGlobalIndexForLocalIndex(Number(wrapper.dataset.index));
-  const hash = pongPlayedHistoryHash(pongPlayedRecordForGlobalIndex(globalIndex));
+  const record = pongPlayedRecordForGlobalIndex(globalIndex);
+  const hash = pongPlayedHistoryHash(record);
+  const scopeHash = pongPlayedHistoryScopeHash(record?.sourceUrl);
   if (!hash) return false;
   wrapper.dataset.playedHistoryPending = 'true';
   pongPlayedHistoryHashes.add(hash);
@@ -3746,7 +3757,7 @@ async function recordPongPlayedHistory(wrapper) {
       const response = await fetch(`${endpoint}/played-history/mark`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hash })
+        body: JSON.stringify({ hash, scopeHash })
       }).catch(() => null);
       if (response?.ok) {
         wrapper.dataset.playedHistoryRecorded = 'true';
@@ -3841,6 +3852,97 @@ async function setPongSkipPlayedEnabled(enabled, { prune = false, announce = fal
   if (announce) showSortingIndicator(pongSkipPlayedEnabled
     ? `Skip played on${removed ? ` · removed ${removed}` : ''}`
     : 'Skip played off');
+}
+
+function getCurrentPongPlayedHistorySourceUrl() {
+  const record = pongPlayedRecordForGlobalIndex(getCurrentLoadedGlobalVideoIndex());
+  if (record?.sourceUrl) return record.sourceUrl;
+  const simpCityTarget = activeSimpCityRecallContext?.targets?.[0];
+  if (simpCityTarget) return simpCityTarget;
+  return activeEromeScrapeTargets?.[0] || '';
+}
+
+function getCurrentPongPlayedHistoryHashes(sourceUrl) {
+  const canonicalSource = pongCanonicalPlayedValue(sourceUrl);
+  const hashes = new Set();
+  if (!canonicalSource) return [];
+  for (let index = 0; index < allVideoUrls.length; index++) {
+    const record = pongPlayedRecordForGlobalIndex(index);
+    if (pongCanonicalPlayedValue(record?.sourceUrl) !== canonicalSource) continue;
+    const hash = pongPlayedHistoryHash(record);
+    if (hash) hashes.add(hash);
+  }
+  return [...hashes];
+}
+
+async function restoreCurrentPongPlayedSource(sourceUrl, simpCityContext) {
+  if (simpCityContext?.targets?.length) {
+    await loadSimpCityAsCards(
+      simpCityContext.targets,
+      simpCityContext.suppliedCreatorNames,
+      simpCityContext.suppliedAlbums,
+      simpCityContext.aiExtracted,
+      simpCityContext.recallChannel,
+      { resumeExisting: false }
+    );
+    return true;
+  }
+  const normalizedSource = normalizeEromeLaunchUrl(sourceUrl);
+  if (!normalizedSource || !eromeUrlInput) return false;
+  eromeUrlInput.value = normalizedSource;
+  window.PongEromeResumeState = null;
+  await loadEromeAsCards();
+  return true;
+}
+
+async function clearCurrentPongPlayedHistory() {
+  const button = document.querySelector('.clear-played-history-button');
+  if (button?.dataset.busy === 'true') return;
+  const sourceUrl = getCurrentPongPlayedHistorySourceUrl();
+  const scopeHash = pongPlayedHistoryScopeHash(sourceUrl);
+  if (!sourceUrl || !scopeHash) {
+    showSortingIndicator('Load a source link first');
+    return;
+  }
+  const simpCityContext = activeSimpCityRecallContext ? {
+    targets: activeSimpCityRecallContext.targets.slice(),
+    suppliedCreatorNames: activeSimpCityRecallContext.suppliedCreatorNames.slice(),
+    suppliedAlbums: activeSimpCityRecallContext.suppliedAlbums.slice(),
+    aiExtracted: activeSimpCityRecallContext.aiExtracted === true,
+    recallChannel: Number(activeSimpCityRecallContext.recallChannel || 0)
+  } : null;
+  if (button) {
+    button.dataset.busy = 'true';
+    button.style.pointerEvents = 'none';
+  }
+  try {
+    const endpoint = await getRandom40LocalEndpoint(true);
+    if (!endpoint) throw new Error('PC server unavailable');
+    const response = await fetch(`${endpoint}/played-history/clear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scopeHash,
+        hashes: getCurrentPongPlayedHistoryHashes(sourceUrl)
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || `Local HTTP ${response.status}`);
+    pongPlayedHistoryHashes = new Set((data.hashes || []).map(value => String(value).toLowerCase()));
+    pongPlayedHistoryLoaded = true;
+    document.querySelectorAll('[data-played-history-recorded]').forEach(wrapper => {
+      delete wrapper.dataset.playedHistoryRecorded;
+    });
+    showSortingIndicator(`Cleared this link${data.removed ? ` - ${data.removed} restored` : ''}`);
+    await restoreCurrentPongPlayedSource(sourceUrl, simpCityContext);
+  } catch (error) {
+    showSortingIndicator(`Clear failed: ${error?.message || error}`);
+  } finally {
+    if (button) {
+      button.dataset.busy = 'false';
+      button.style.pointerEvents = 'auto';
+    }
+  }
 }
 
 function shuffleLoadedVideosForPlayback(urls, metadata, events) {
@@ -8099,6 +8201,18 @@ function createGearButton(){
     resetRandom40AiStatsBaseline();
   });
   document.body.appendChild(resetAiStatsBtn);
+
+  const clearPlayedHistoryBtn = document.createElement('div');
+  clearPlayedHistoryBtn.className = 'control-button clear-played-history-button';
+  clearPlayedHistoryBtn.innerHTML = 'CLR';
+  clearPlayedHistoryBtn.title = 'Clear played history for this source link';
+  clearPlayedHistoryBtn.setAttribute('aria-label', 'Clear played history for this source link');
+  clearPlayedHistoryBtn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    void clearCurrentPongPlayedHistory();
+  });
+  document.body.appendChild(clearPlayedHistoryBtn);
 }
 
 // ─── Load videos ──────────────────────────────────────────────────────────────
