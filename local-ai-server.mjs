@@ -2553,7 +2553,7 @@ async function startSimpCityBrowser({ headless, hidden = false, targetUrl, cooki
     '--disable-sync',
     '--disable-extensions',
     '--disable-notifications',
-    '--disable-features=MediaRouter,Translate',
+    '--disable-features=MediaRouter,Translate,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults',
     '--autoplay-policy=document-user-activation-required',
     '--mute-audio',
     '--disable-audio-output',
@@ -2563,7 +2563,12 @@ async function startSimpCityBrowser({ headless, hidden = false, targetUrl, cooki
   ];
   if (hidden) args.push('--window-position=-32000,-32000');
   if (userAgent) args.push(`--user-agent=${userAgent}`);
-  if (headless) args.push('--headless=new');
+  if (headless) {
+    // This is an isolated, disposable profile that only opens SimpCity. The
+    // injected userscript must be able to POST its Recall batches from HTTPS
+    // to Pong's loopback HTTP API, exactly as Tampermonkey does on Android.
+    args.push('--disable-web-security', '--allow-running-insecure-content', '--headless=new');
+  }
   args.push('about:blank');
   const child = spawn(SIMPCITY_CHROME_PATH, args, {
     stdio: 'ignore',
