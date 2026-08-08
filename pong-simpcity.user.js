@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.8.8
+// @version      1.8.9
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -374,7 +374,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.8.8 · PC background handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1">v1.8.9 · PC background handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -396,17 +396,28 @@
       if (!globalThis.PONG_PC_BACKGROUND_CONTEXT) {
         const cookies = await readSimpCitySessionCookies();
         try {
-          status.textContent = `Pong ${channel}: handing scrape to PC…`;
-          if (cookies.length) {
+          status.textContent = `Pong ${channel}: starting PC scrape…`;
+          let background;
+          try {
+            // Prefer the PC's already-authenticated encrypted session. Android
+            // Tampermonkey often exposes only a partial cookie set, and must
+            // not overwrite a healthy PC session on every scrape.
+            background = await sendToPong('/simpcity/background/start', {
+              url: location.href,
+              channel
+            }, 30000);
+          } catch (firstError) {
+            if (!cookies.length) throw firstError;
+            status.textContent = `Pong ${channel}: refreshing PC session…`;
             await sendToPong('/simpcity/session/handoff', {
               cookies,
               userAgent: navigator.userAgent
             }, 20000);
+            background = await sendToPong('/simpcity/background/start', {
+              url: location.href,
+              channel
+            }, 30000);
           }
-          const background = await sendToPong('/simpcity/background/start', {
-            url: location.href,
-            channel
-          }, 30000);
           status.textContent = `Pong ${channel}: PC running in background · ${background.id}`;
           return;
         } catch (error) {
