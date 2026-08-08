@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.8.9
+// @version      1.9.0
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -15,6 +15,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
 // @grant        GM_cookie
+// @grant        GM_setClipboard
 // @connect      127.0.0.1
 // @connect      192.168.1.124
 // @connect      *
@@ -37,9 +38,14 @@
     ? globalThis.PONG_LOCAL_ENDPOINTS
     : ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
   const monthDate = /^(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\s*$/i;
+  let diagnosticSink = () => {};
+  const diagnostic = (message, details = '') => {
+    try { diagnosticSink(message, details); } catch (_) {}
+  };
 
   const sendToPong = async (pathname, payload, timeout = 90000) => {
     let lastError = '';
+    diagnostic('API request started', `POST ${pathname}; timeout=${timeout}ms; endpoints=${endpoints.join(', ')}`);
     for (const endpoint of endpoints) {
       for (let attempt = 1; attempt <= 4; attempt++) {
       try {
@@ -51,6 +57,7 @@
             ? legacyRequest
             : null;
         if (!request) throw new Error('Tampermonkey network permission is unavailable');
+        diagnostic('Tampermonkey request attempt', `${endpoint}${pathname}; attempt ${attempt}/4`);
         return await new Promise((resolve, reject) => {
           request({
             method: 'POST', url: `${endpoint}${pathname}`,
@@ -59,6 +66,7 @@
             onload: response => {
               let data = {};
               try { data = JSON.parse(response.responseText || '{}'); } catch (_) {}
+              diagnostic('Tampermonkey response', `${endpoint}${pathname}; HTTP ${response.status}; ok=${data.ok !== false}`);
               if (response.status >= 200 && response.status < 300 && data.ok !== false) resolve(data);
               else {
                 const error = new Error(data.error || `HTTP ${response.status}`);
@@ -66,17 +74,23 @@
                 reject(error);
               }
             },
-            onerror: response => reject(new Error(
-              `connection failed${response?.error ? `: ${response.error}` : ''}`
-            )),
-            ontimeout: () => reject(new Error('connection timed out'))
+            onerror: response => {
+              diagnostic('Tampermonkey connection error', `${endpoint}${pathname}; ${response?.error || 'no detail'}`);
+              reject(new Error(`connection failed${response?.error ? `: ${response.error}` : ''}`));
+            },
+            ontimeout: () => {
+              diagnostic('Tampermonkey timeout', `${endpoint}${pathname}; ${timeout}ms`);
+              reject(new Error('connection timed out'));
+            }
           });
         });
       } catch (error) {
         if (error?.status === 409) throw error;
         lastError = error?.message || String(error);
+        diagnostic('Tampermonkey attempt failed', `${endpoint}${pathname}; ${lastError}`);
       }
       try {
+        diagnostic('Browser fetch fallback attempt', `${endpoint}${pathname}; attempt ${attempt}/4`);
         const response = await fetch(`${endpoint}${pathname}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -84,6 +98,7 @@
           cache: 'no-store'
         });
         const data = await response.json().catch(() => ({}));
+        diagnostic('Browser fetch response', `${endpoint}${pathname}; HTTP ${response.status}; ok=${data.ok !== false}`);
         if (response.ok && data.ok !== false) return data;
         if (response.status === 409) {
           const error = new Error(data.error || 'This scrape was superseded');
@@ -94,10 +109,15 @@
       } catch (error) {
         if (error?.status === 409) throw error;
         lastError = `${lastError}; fetch ${error?.message || error}`;
+        diagnostic('Browser fetch failed', `${endpoint}${pathname}; ${error?.message || error}`);
       }
-      if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 600 * attempt));
+      if (attempt < 4) {
+        diagnostic('Retry scheduled', `${endpoint}${pathname}; wait=${600 * attempt}ms`);
+        await new Promise(resolve => setTimeout(resolve, 600 * attempt));
+      }
       }
     }
+    diagnostic('API request exhausted', `${pathname}; ${lastError || 'server not reachable'}`);
     throw new Error(`PC AI unavailable: ${lastError || 'server not reachable'}`);
   };
 
@@ -373,28 +393,54 @@
   document.getElementById('pong-simpcity-scraper')?.remove();
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
-  panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;gap:8px;align-items:center;padding:10px;background:#10141eee;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1">v1.8.9 · PC background handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;background:#10141ef5;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
+  panel.innerHTML = '<span data-status style="flex:1;min-width:180px">v1.9.0 · PC-only background handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button><textarea data-log readonly rows="8" style="display:block;box-sizing:border-box;width:100%;min-height:130px;resize:vertical;padding:8px;background:#070a10;color:#b8d7ff;border:1px solid #334866;border-radius:7px;font:12px/1.4 ui-monospace,monospace;white-space:pre"></textarea>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
+  const logBox = panel.querySelector('[data-log]');
+  const logLines = [];
+  diagnosticSink = (message, details = '') => {
+    const stamp = new Date().toISOString();
+    const line = `[${stamp}] ${message}${details ? ` | ${details}` : ''}`;
+    logLines.push(line);
+    if (logLines.length > 500) logLines.splice(0, logLines.length - 500);
+    logBox.value = logLines.join('\n');
+    logBox.scrollTop = logBox.scrollHeight;
+  };
+  panel.querySelector('[data-copy]').onclick = async event => {
+    const text = logLines.join('\n');
+    try {
+      if (typeof GM_setClipboard === 'function') GM_setClipboard(text, 'text');
+      else await navigator.clipboard.writeText(text);
+      event.currentTarget.textContent = 'Copied';
+      setTimeout(() => { event.currentTarget.textContent = 'Copy Log'; }, 1200);
+    } catch (error) {
+      diagnostic('Copy failed', error?.message || String(error));
+      event.currentTarget.textContent = 'Copy Failed';
+    }
+  };
   const buttons = [...panel.querySelectorAll('[data-scrape]')];
   const activeRunTokens = new Map();
+  diagnostic('Script initialized', `version=1.9.0; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}`);
 
   const runScrape = async channel => {
     const runToken = `${Date.now()}-${Math.random()}`;
     activeRunTokens.set(channel, runToken);
     const isCurrentRun = () => activeRunTokens.get(channel) === runToken;
+    diagnostic('Scrape button pressed', `channel=${channel}; runToken=${runToken}`);
     try {
       const rootThreadUrl = canonicalSimpCityThreadUrl(location.href);
       const listingRootUrl = canonicalSimpCityListingUrl(location.href);
+      diagnostic('Source URL classified', `thread=${rootThreadUrl || 'none'}; listing=${listingRootUrl || 'none'}`);
       if (!rootThreadUrl && !listingRootUrl) throw new Error('Open a SimpCity thread, tag, or search page');
       // A one-time browser-cookie handoff lets the PC run this exact userscript
       // in a hidden, muted browser. Firefox can be minimized or closed after
-      // this succeeds. Fall back to the in-tab workflow when cookie access is
-      // unavailable (notably some older Tampermonkey Android builds).
+      // this succeeds. Android deliberately stops and exposes a diagnostic log
+      // if PC startup fails; only the injected PC worker runs the scraper.
       if (!globalThis.PONG_PC_BACKGROUND_CONTEXT) {
         const cookies = await readSimpCitySessionCookies();
+        diagnostic('Android cookie inspection complete', `count=${cookies.length}; names=${cookies.map(cookie => cookie?.name || '?').join(',') || 'none'}; values omitted`);
         try {
           status.textContent = `Pong ${channel}: starting PC scrape…`;
           let background;
@@ -402,26 +448,34 @@
             // Prefer the PC's already-authenticated encrypted session. Android
             // Tampermonkey often exposes only a partial cookie set, and must
             // not overwrite a healthy PC session on every scrape.
+            diagnostic('Starting PC worker with stored session', `channel=${channel}`);
             background = await sendToPong('/simpcity/background/start', {
               url: location.href,
               channel
             }, 30000);
           } catch (firstError) {
+            diagnostic('Stored-session PC start failed', firstError?.message || String(firstError));
             if (!cookies.length) throw firstError;
             status.textContent = `Pong ${channel}: refreshing PC session…`;
+            diagnostic('Sending Android cookies to PC', `count=${cookies.length}; values omitted`);
             await sendToPong('/simpcity/session/handoff', {
               cookies,
               userAgent: navigator.userAgent
             }, 20000);
+            diagnostic('Cookie handoff accepted; retrying PC worker', `channel=${channel}`);
             background = await sendToPong('/simpcity/background/start', {
               url: location.href,
               channel
             }, 30000);
           }
           status.textContent = `Pong ${channel}: PC running in background · ${background.id}`;
+          diagnostic('PC worker started successfully', `channel=${channel}; id=${background.id}; target=${background.targetUrl || location.href}; state=${background.state || 'running'}`);
           return;
         } catch (error) {
-          status.textContent = `Pong ${channel}: PC handoff unavailable (${error?.message || error}) · continuing in Firefox`;
+          const message = error?.message || String(error);
+          status.textContent = `Pong ${channel}: PC handoff failed · tap Copy Log`;
+          diagnostic('PC-only scrape stopped', `channel=${channel}; error=${message}; Firefox fallback disabled`);
+          return;
         }
       }
       let listingHtml = '';
