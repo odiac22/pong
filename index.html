@@ -754,6 +754,27 @@
   font-weight: 900;
 }
 
+.played-skip-toggle {
+  width: 28px;
+  min-height: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border-color: rgba(96,165,250,0.48);
+  background: rgba(30,64,175,0.34);
+  color: #bfdbfe;
+  font-size: 7px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.played-skip-toggle.active {
+  opacity: 0.92;
+  background: rgba(37,99,235,0.82);
+  border-color: rgba(147,197,253,0.92);
+  color: #fff;
+  box-shadow: 0 0 0 2px rgba(59,130,246,0.18), 0 8px 24px rgba(0,0,0,0.28);
+}
+
 .random40-reject-menu {
   position: absolute;
   left: 36px;
@@ -846,7 +867,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">25.99</div>
+    <div class="version-number">26.00</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -1173,6 +1194,16 @@ let pongPlaybackBenchmarkState = {
   totalBufferMs: 0
 };
 let viewedVideoKeys = new Set();
+const PONG_SKIP_PLAYED_SESSION_KEY = 'pong_skip_played_enabled_v1';
+let pongSkipPlayedEnabled = (() => {
+  try { return sessionStorage.getItem(PONG_SKIP_PLAYED_SESSION_KEY) === '1'; }
+  catch (_) { return false; }
+})();
+let pongPlayedHistoryHashes = new Set();
+let pongPlayedHistoryLoaded = false;
+let pongPlayedHistoryLoadPromise = null;
+let pongCollectionArtistSequence = [];
+let pongCollectionStoppedIdentities = new Set();
 let random40PreloadTimer = null;
 let random40PreloadContainer = null;
 let random40PreloadMap = new Map();
@@ -2498,6 +2529,8 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
 
   delete wrapper.dataset.viewed;
   delete wrapper.dataset.everPlayed;
+  delete wrapper.dataset.playedHistoryRecorded;
+  delete wrapper.dataset.playedHistoryPending;
   delete wrapper.dataset.playIntent;
   delete wrapper.dataset.userPaused;
   delete wrapper.dataset.userAudioIntent;
@@ -3241,7 +3274,7 @@ function loadSavedArtistsForRandomPlayback() {
   const urls = [];
   const metadata = [];
   const events = [];
-  groups.forEach((group, groupIndex) => {
+  filterPongPlayedGroups(groups).forEach((group, groupIndex) => {
     const startIndex = urls.length;
     group.videos.forEach((url, videoIndex) => {
       urls.push(url);
@@ -3396,6 +3429,17 @@ function createSaveButtons() {
   const rejectWrap = document.createElement('div');
   rejectWrap.className = 'random40-reject-wrap';
 
+  const playedSkipBtn = document.createElement('button');
+  playedSkipBtn.id = 'skip-played-filter-button';
+  playedSkipBtn.className = 'side-save-button played-skip-toggle';
+  playedSkipBtn.type = 'button';
+  playedSkipBtn.textContent = 'SKIP';
+  playedSkipBtn.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    void setPongSkipPlayedEnabled(!pongSkipPlayedEnabled, { prune: true, announce: true });
+  });
+
   const rejectBtn = document.createElement('button');
   rejectBtn.id = 'reject-current-artist-button';
   rejectBtn.className = 'side-save-button random40-reject-button';
@@ -3455,6 +3499,7 @@ function createSaveButtons() {
 
   panel.appendChild(videoBtn);
   panel.appendChild(artistBtn);
+  panel.appendChild(playedSkipBtn);
   panel.appendChild(rejectWrap);
   document.body.appendChild(panel);
 
@@ -3463,6 +3508,7 @@ function createSaveButtons() {
   installSavedPlaybackHold(videoBtn, loadSavedVideosForRandomPlayback);
   installSavedPlaybackHold(artistBtn, loadSavedArtistsForRandomPlayback);
 
+  updatePongSkipPlayedButton();
   updateSaveCounters();
 }
 
@@ -3558,6 +3604,243 @@ function eromeMediaKey(rawUrl) {
   } catch (e) {
     return `erome:${String(rawUrl || '').trim()}`;
   }
+}
+
+function pongCanonicalPlayedValue(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw, location.href);
+    url.hash = '';
+    url.hostname = url.hostname.toLowerCase();
+    url.searchParams.sort();
+    if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, '');
+    return url.toString();
+  } catch (_) {
+    return raw.toLowerCase().replace(/\s+/g, ' ');
+  }
+}
+
+function pongOpaquePlayedHash(value) {
+  const input = String(value || '');
+  return [0x811c9dc5, 0x9e3779b1, 0x85ebca6b, 0xc2b2ae35].map(seed => {
+    let hash = seed >>> 0;
+    for (let index = 0; index < input.length; index++) {
+      hash ^= input.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash.toString(16).padStart(8, '0');
+  }).join('');
+}
+
+function pongPlayedHistoryHash(record) {
+  if (!record?.kind || !record?.sourceUrl || !record?.itemId) return '';
+  return pongOpaquePlayedHash([
+    'pong-played-v1',
+    String(record.kind).trim().toLowerCase(),
+    pongCanonicalPlayedValue(record.sourceUrl),
+    pongCanonicalPlayedValue(record.itemId)
+  ].join('\u0000'));
+}
+
+function pongPlayedRecordForGroup(group, rawVideoUrl = '') {
+  const creatorKey = String(group?.creatorKey || group?.simpCityCreatorKey || '').trim();
+  const sourceUrl = String(group?.sourceUrl || group?.artistUrl || group?.url || '').trim();
+  if (creatorKey) return { kind: 'simpcity-profile', sourceUrl, itemId: creatorKey };
+  const source = String(group?.source || '').toLowerCase();
+  if (source === 'erome' || (!['bunkr', 'hosted', 'direct', 'paired'].includes(source) && /(^|\.)erome\.com/i.test(sourceUrl))) {
+    return { kind: 'erome-video', sourceUrl, itemId: eromeMediaKey(rawVideoUrl) };
+  }
+  return {
+    kind: 'balbums-album',
+    sourceUrl,
+    itemId: String(group?.url || group?.postUrl || sourceUrl).trim()
+  };
+}
+
+function pongPlayedRecordForGlobalIndex(globalIndex) {
+  const index = Number(globalIndex);
+  if (!Number.isInteger(index) || index < 0) return null;
+  const meta = allVideoMetadata[index] || {};
+  const eventIndex = getPasteEventIndexForGlobalVideo(index);
+  const event = pasteEvents[eventIndex] || {};
+  const creatorKey = String(meta.simpCityCreatorKey || event.simpCityCreatorKey || '').trim();
+  const sourceUrl = String(meta.artistUrl || event.artistUrl || event.sourceUrl || '').trim();
+  if (creatorKey) return { kind: 'simpcity-profile', sourceUrl, itemId: creatorKey };
+  const source = String(meta.source || event.source || '').toLowerCase();
+  if (source === 'erome') {
+    return {
+      kind: 'erome-video',
+      sourceUrl,
+      itemId: String(meta.mediaKey || eromeMediaKey(allVideoUrls[index] || '')).trim()
+    };
+  }
+  if (source === 'bunkr') {
+    return {
+      kind: 'balbums-album',
+      sourceUrl,
+      itemId: String(meta.postUrl || event.postUrl || event.bundleKey || sourceUrl).trim()
+    };
+  }
+  return null;
+}
+
+function updatePongSkipPlayedButton() {
+  const button = document.getElementById('skip-played-filter-button');
+  if (!button) return;
+  button.classList.toggle('active', pongSkipPlayedEnabled);
+  button.setAttribute('aria-pressed', pongSkipPlayedEnabled ? 'true' : 'false');
+  button.title = pongSkipPlayedEnabled
+    ? 'Previously played items are being skipped'
+    : 'Previously played items are allowed';
+  button.textContent = pongSkipPlayedEnabled ? 'SKIP✓' : 'SKIP';
+}
+
+async function refreshPongPlayedHistory(endpoint = '') {
+  if (pongPlayedHistoryLoadPromise) return pongPlayedHistoryLoadPromise;
+  pongPlayedHistoryLoadPromise = (async () => {
+    const localEndpoint = endpoint || await getRandom40LocalEndpoint(true);
+    if (!localEndpoint) return false;
+    const response = await fetch(`${localEndpoint}/played-history?t=${Date.now()}`, { cache: 'no-store' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || `Local HTTP ${response.status}`);
+    pongPlayedHistoryHashes = new Set((data.hashes || []).map(value => String(value).toLowerCase()));
+    pongPlayedHistoryLoaded = true;
+    return true;
+  })().catch(error => {
+    console.warn('Played history unavailable:', error);
+    return false;
+  }).finally(() => { pongPlayedHistoryLoadPromise = null; });
+  return pongPlayedHistoryLoadPromise;
+}
+
+async function syncPongSkipPlayedFilter(endpoint = '') {
+  const localEndpoint = endpoint || await getRandom40LocalEndpoint(true);
+  if (!localEndpoint) return false;
+  const channel = Number(activeSimpCityRecallContext?.recallChannel || window.PongActiveSimpCityRecallChannel || 1) === 2 ? 2 : 1;
+  const response = await fetch(`${localEndpoint}/played-history/filter`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel, enabled: pongSkipPlayedEnabled })
+  });
+  return response.ok;
+}
+
+async function recordPongPlayedHistory(wrapper) {
+  if (
+    !wrapper ||
+    wrapper.dataset.playedHistoryRecorded === 'true' ||
+    wrapper.dataset.playedHistoryPending === 'true'
+  ) return false;
+  const globalIndex = getVideoGlobalIndexForLocalIndex(Number(wrapper.dataset.index));
+  const hash = pongPlayedHistoryHash(pongPlayedRecordForGlobalIndex(globalIndex));
+  if (!hash) return false;
+  wrapper.dataset.playedHistoryPending = 'true';
+  pongPlayedHistoryHashes.add(hash);
+  pongPlayedHistoryLoaded = true;
+  try {
+    for (const delay of [0, 1200, 3500]) {
+      if (delay) await sleep(delay);
+      const endpoint = await getRandom40LocalEndpoint(true);
+      if (!endpoint) continue;
+      const response = await fetch(`${endpoint}/played-history/mark`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hash })
+      }).catch(() => null);
+      if (response?.ok) {
+        wrapper.dataset.playedHistoryRecorded = 'true';
+        return true;
+      }
+    }
+    return false;
+  } finally {
+    delete wrapper.dataset.playedHistoryPending;
+  }
+}
+
+function filterPongPlayedGroups(groups) {
+  if (!pongSkipPlayedEnabled || !pongPlayedHistoryLoaded) return groups || [];
+  return (groups || []).map(group => {
+    const videos = Array.isArray(group?.videos) ? group.videos.filter(Boolean) : [];
+    if (!videos.length) return null;
+    const groupRecord = pongPlayedRecordForGroup(group, videos[0]);
+    if (groupRecord?.kind !== 'erome-video') {
+      const hash = pongPlayedHistoryHash(groupRecord);
+      return hash && pongPlayedHistoryHashes.has(hash) ? null : group;
+    }
+    const unseenVideos = videos.filter(video => {
+      const hash = pongPlayedHistoryHash(pongPlayedRecordForGroup(group, video));
+      return !hash || !pongPlayedHistoryHashes.has(hash);
+    });
+    return unseenVideos.length ? { ...group, videos: unseenVideos } : null;
+  }).filter(Boolean);
+}
+
+async function prunePongPlayedCards() {
+  if (!pongSkipPlayedEnabled || !allVideoUrls.length) return 0;
+  await refreshPongPlayedHistory();
+  const nextUrls = [];
+  const nextMetadata = [];
+  const nextEvents = [];
+  let removed = 0;
+  const currentEvent = pasteEvents[currentPasteIndex] || null;
+  const currentKey = currentEvent ? getPasteEventPaperclipKey(currentEvent, currentPasteIndex) : '';
+  for (const event of pasteEvents) {
+    const bounds = getPasteEventVideoBounds(event);
+    if (!bounds) continue;
+    const eventStart = nextUrls.length;
+    for (let index = bounds.start; index < bounds.end; index++) {
+      const hash = pongPlayedHistoryHash(pongPlayedRecordForGlobalIndex(index));
+      if (hash && pongPlayedHistoryHashes.has(hash)) {
+        removed++;
+        continue;
+      }
+      nextUrls.push(allVideoUrls[index]);
+      nextMetadata.push(allVideoMetadata[index]);
+    }
+    if (nextUrls.length > eventStart) nextEvents.push({
+      ...event,
+      startIndex: eventStart,
+      count: nextUrls.length - eventStart
+    });
+  }
+  if (!removed) return 0;
+  document.querySelectorAll('video').forEach(video => { try { video.pause(); } catch (_) {} });
+  allVideoUrls = nextUrls;
+  allVideoMetadata = nextMetadata;
+  pasteEvents = nextEvents;
+  videoUrls = [];
+  videoMetadata = [];
+  viewedVideoKeys = new Set();
+  paperclipHistory = [];
+  paperclipHistoryPosition = -1;
+  paperclipVisitedArtistTokens = new Set();
+  paperclipRetiredBundleKeys = new Set();
+  const targetIndex = Math.max(0, nextEvents.findIndex((event, index) => getPasteEventPaperclipKey(event, index) === currentKey));
+  if (!nextEvents.length) {
+    activePlaybackRange = null;
+    videoContainer.innerHTML = '<div class="loading-message">All previously played items were skipped.</div>';
+  } else {
+    setActivePlaybackRangeForPasteEvent(targetIndex, { recordHistory: false });
+    videoContainer.innerHTML = '<div class="loading-message">Skipping previously played items...</div>';
+    loadNextBatch(0);
+  }
+  updatePasteNavigationButton();
+  scheduleSessionSave(500);
+  return removed;
+}
+
+async function setPongSkipPlayedEnabled(enabled, { prune = false, announce = false } = {}) {
+  pongSkipPlayedEnabled = enabled === true;
+  try { sessionStorage.setItem(PONG_SKIP_PLAYED_SESSION_KEY, pongSkipPlayedEnabled ? '1' : '0'); } catch (_) {}
+  updatePongSkipPlayedButton();
+  if (pongSkipPlayedEnabled) await refreshPongPlayedHistory();
+  await syncPongSkipPlayedFilter().catch(() => false);
+  const removed = prune && pongSkipPlayedEnabled ? await prunePongPlayedCards() : 0;
+  if (announce) showSortingIndicator(pongSkipPlayedEnabled
+    ? `Skip played on${removed ? ` · removed ${removed}` : ''}`
+    : 'Skip played off');
 }
 
 function shuffleLoadedVideosForPlayback(urls, metadata, events) {
@@ -5485,6 +5768,7 @@ function createVideoElements() {
     });
     video.addEventListener('playing', () => {
       video.dataset.hasPlayedFrame = 'true';
+      void recordPongPlayedHistory(wrapper);
       wrapper.dataset.readyOverlayDismissed = 'true';
       readyLoader.style.display = 'none';
       pongPlaybackBenchmarkOnPlaying(video, wrapper);
@@ -6134,6 +6418,7 @@ function setActivePlaybackRangeForPasteEvent(index, { recordHistory = true } = {
   currentVideoIndex = 0;
   markPasteEventVisitedForPaperclip(target, safeIndex);
   if (recordHistory) recordPaperclipHistoryIndex(safeIndex);
+  notePongActiveCollectionArtist(target, safeIndex);
 
   return target;
 }
@@ -9804,6 +10089,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityCreatorKey: String(group.creatorKey || ''),
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         simpCityPairId: String(group.pairId || ''),
+        simpCityMediaKind: String(group.mediaKind || ''),
         postIndex: videoIndex,
         scrapedAt,
         mediaKey
@@ -9827,6 +10113,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityCreatorKey: String(group.creatorKey || ''),
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         simpCityPairId: String(group.pairId || ''),
+        simpCityMediaKind: String(group.mediaKind || ''),
         loadAll: false,
         ready: true,
         pending: false
@@ -9874,6 +10161,113 @@ function appendEromeGroupsToCurrentCards(groups, proxyBase) {
   scheduleSessionSave(700);
   scheduleEromeCheckpointAutosave();
 
+  return payload;
+}
+
+function pongCollectionIdentityForEvent(event, index = -1) {
+  if (!event) return '';
+  if (event.simpCityPairId) return `simpcity:${event.simpCityPairId}`;
+  const source = String(event.source || '').toLowerCase();
+  if (source === 'erome') {
+    return `erome:${pongCanonicalPlayedValue(event.artistUrl || event.sourceUrl || event.artistKey)}`;
+  }
+  if (source === 'bunkr') {
+    return `bunkr:${pongCanonicalPlayedValue(event.postUrl || event.bundleKey || event.artistUrl)}`;
+  }
+  return '';
+}
+
+function pongCollectionWasStoppedForEvent(event, index = -1) {
+  const identity = pongCollectionIdentityForEvent(event, index);
+  return Boolean(identity && pongCollectionStoppedIdentities.has(identity));
+}
+
+async function stopPongCollectionForEvent(event, index = -1) {
+  const identity = pongCollectionIdentityForEvent(event, index);
+  if (!identity || pongCollectionStoppedIdentities.has(identity)) return false;
+  pongCollectionStoppedIdentities.add(identity);
+  const creatorKey = normalizeSimpCityCreatorKey(event?.simpCityCreatorKey || '');
+  if (creatorKey) {
+    const endpoint = await getRandom40LocalEndpoint(true);
+    if (endpoint) {
+      await fetch(`${endpoint}/simpcity/collect/stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: Number(activeSimpCityRecallContext?.recallChannel || window.PongActiveSimpCityRecallChannel || 1),
+          creatorKey
+        })
+      }).catch(() => null);
+    }
+  }
+  return true;
+}
+
+function notePongActiveCollectionArtist(event, index = -1) {
+  const identity = pongCollectionIdentityForEvent(event, index);
+  if (!identity) return;
+  if (!pongCollectionArtistSequence.some(item => item.identity === identity)) {
+    pongCollectionArtistSequence.push({ identity, event: { ...event }, index });
+  }
+  const currentPosition = pongCollectionArtistSequence.findIndex(item => item.identity === identity);
+  const stopThrough = currentPosition - 4;
+  if (stopThrough < 0) return;
+  for (let position = 0; position <= stopThrough; position++) {
+    const prior = pongCollectionArtistSequence[position];
+    if (!prior || pongCollectionStoppedIdentities.has(prior.identity)) continue;
+    void stopPongCollectionForEvent(prior.event, prior.index);
+  }
+}
+
+function mergeProgressiveSimpCityGroup(group, proxyBase) {
+  const pairId = String(group?.pairId || '');
+  const mediaKind = String(group?.mediaKind || '');
+  if (!pairId || !mediaKind || !Array.isArray(group?.videos)) {
+    return appendEromeGroupsToCurrentCards([group], proxyBase);
+  }
+  const eventIndex = pasteEvents.findIndex(event => (
+    String(event?.simpCityPairId || '') === pairId &&
+    String(event?.simpCityMediaKind || '') === mediaKind
+  ));
+  if (eventIndex < 0) return appendEromeGroupsToCurrentCards([group], proxyBase);
+  const event = pasteEvents[eventIndex];
+  const bounds = getPasteEventVideoBounds(event);
+  if (!bounds) return { urls: [], metadata: [], events: [] };
+  const existingKeys = new Set();
+  for (let index = bounds.start; index < bounds.end; index++) {
+    existingKeys.add(String(allVideoMetadata[index]?.mediaKey || allVideoUrls[index] || ''));
+  }
+  const newVideos = group.videos.filter(video => !existingKeys.has(eromeMediaKey(video)));
+  if (!newVideos.length) return { urls: [], metadata: [], events: [] };
+  const payload = buildEromeCardImportPayload([{ ...group, videos: newVideos }], proxyBase, 0);
+  if (!payload.urls.length) return payload;
+  const insertionIndex = bounds.end;
+  allVideoUrls.splice(insertionIndex, 0, ...payload.urls);
+  allVideoMetadata.splice(insertionIndex, 0, ...payload.metadata);
+  event.count = Number(event.count || 0) + payload.urls.length;
+  pasteEvents.forEach((candidate, index) => {
+    if (index !== eventIndex && Number(candidate.startIndex || 0) >= insertionIndex) {
+      candidate.startIndex = Number(candidate.startIndex || 0) + payload.urls.length;
+    }
+  });
+  if (hasActivePlaybackRange()) {
+    if (currentPasteIndex === eventIndex) activePlaybackRange.end += payload.urls.length;
+    else if (insertionIndex <= activePlaybackRange.start) {
+      activePlaybackRange.start += payload.urls.length;
+      activePlaybackRange.end += payload.urls.length;
+    }
+  }
+  if (insertionIndex <= currentLoadedRangeStart) {
+    currentLoadedRangeStart += payload.urls.length;
+    currentLoadedRangeEnd += payload.urls.length;
+    videoMetadata = videoMetadata.map(meta => ({
+      ...meta,
+      globalIndex: Number(meta?.globalIndex || 0) + payload.urls.length
+    }));
+  }
+  updatePasteNavigationButton();
+  scheduleSessionSave(700);
+  scheduleEromeCheckpointAutosave();
   return payload;
 }
 
@@ -17409,6 +17803,10 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     return;
   }
   const resumeExisting = options?.resumeExisting === true;
+  if (!resumeExisting) {
+    pongCollectionArtistSequence = [];
+    pongCollectionStoppedIdentities = new Set();
+  }
   const loadGeneration = ++bunkrLoadGeneration;
   activeSimpCityRecallContext = {
     targets: targets.slice(),
@@ -17426,6 +17824,8 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     alert('SimpCity imports need the Pong PC server to be running and reachable.');
     return;
   }
+  if (pongSkipPlayedEnabled) await refreshPongPlayedHistory(endpoint);
+  await syncPongSkipPlayedFilter(endpoint).catch(() => false);
   // SimpCity uses the hidden PC media cache too. Keep its liveness heartbeat
   // running during long recall sessions, even though Random40 is not active.
   random40StartServerVideoCacheTimers();
@@ -17473,6 +17873,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       ? pasteEvents.map(event => normalizeEromeLaunchUrl(event?.postUrl || '')).filter(Boolean)
       : []
   );
+  const seenAlbumVersions = new Map();
   let feedClosed = false;
   let reservedAlbumSlots = 0;
   let cardsStarted = resumeExisting && pasteEvents.some(isEromePasteEvent);
@@ -17513,6 +17914,43 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         } catch (_) {}
       }
       const creatorKey = normalizeSimpCityCreatorKey(rawAlbum?.creatorKey || rawAlbum?.creatorName);
+      const progressiveKey = String(rawAlbum?.pairId || `${creatorKey}:${albumUrl}`);
+      const progressiveGroups = Array.isArray(rawAlbum?.pairedGroups) && rawAlbum.pairedGroups.length
+        ? rawAlbum.pairedGroups
+        : [rawAlbum];
+      const progressiveVersion = progressiveGroups.reduce(
+        (sum, group) => sum + (Array.isArray(group?.videos) ? group.videos.length : 0),
+        0
+      );
+      const previousVersion = Number(seenAlbumVersions.get(progressiveKey) || 0);
+      if (previousVersion >= progressiveVersion && previousVersion > 0) return;
+      seenAlbumVersions.set(progressiveKey, progressiveVersion);
+      if (previousVersion > 0) {
+        const queuedExisting = albumQueue.find(item => String(item?.pairId || '') === String(rawAlbum?.pairId || ''));
+        if (queuedExisting) {
+          queuedExisting.videos = readyVideos;
+          queuedExisting.pairedGroups = progressiveGroups;
+          queuedExisting.collecting = rawAlbum?.collecting === true;
+          return;
+        }
+        if (cardsStarted) {
+          let added = 0;
+          progressiveGroups.forEach(group => {
+            const imported = mergeProgressiveSimpCityGroup({
+              ...group,
+              sourceUrl: rawAlbum?.sourceUrl || sourceThreadUrl,
+              sourceTitle: group?.title,
+              creatorName: rawAlbum?.creatorName || group?.creatorName || '',
+              creatorKey: creatorKey || group?.creatorKey || '',
+              pairId: rawAlbum?.pairId || group?.pairId || '',
+              simpCityJobId: String(jobId || rawAlbum?.simpCityJobId || '')
+            }, bunkrPlaybackBase);
+            added += Number(imported?.urls?.length || 0);
+          });
+          videoCount += added;
+          return;
+        }
+      }
       if (
         !albumUrl ||
         (!readyVideos.length && !isBunkrImportLaunchUrl(albumUrl)) ||
@@ -18043,6 +18481,7 @@ async function loadBunkrAsCards(targets) {
     alert('Bunkr imports need the Pong PC server to be running and reachable.');
     return;
   }
+  if (pongSkipPlayedEnabled) await refreshPongPlayedHistory(endpoint);
 
   const postJson = async (pathname, payload) => {
     const response = await fetch(`${endpoint}${pathname}`, {
@@ -18192,18 +18631,26 @@ async function loadBunkrAsCards(targets) {
 
   const scrapeAlbum = async album => {
     const albumCreatorKey = normalizeSimpCityCreatorKey(album?.title || album?.url || '');
+    const collectionEvent = {
+      source: 'bunkr',
+      postUrl: album?.url || '',
+      artistUrl: album?.sourceUrl || album?.url || '',
+      bundleKey: `bunkr-bundle:${album?.url || ''}`
+    };
+    if (pongCollectionWasStoppedForEvent(collectionEvent)) return;
     if (albumCreatorKey && simpCitySkippedCreatorKeys.has(albumCreatorKey)) return;
     const acquiredSlot = await acquireAlbumSlot();
     if (!acquiredSlot) return;
     try {
       const data = await postJson('/bunkr/album', album);
       if (loadGeneration !== bunkrLoadGeneration) return;
+      if (pongCollectionWasStoppedForEvent(collectionEvent)) return;
       if (albumCreatorKey && simpCitySkippedCreatorKeys.has(albumCreatorKey)) return;
       if (Array.isArray(data.videos) && data.videos.length) {
         publishGroup({
           url: album.url,
           title: album.title || data.title || 'Bunkr album',
-          sourceUrl: album.url,
+          sourceUrl: album.sourceUrl || album.url,
           sourceTitle: album.title || data.title || 'Bunkr album',
           source: 'bunkr',
           videos: data.videos
@@ -18262,7 +18709,13 @@ async function loadEromeAsCards() {
     alert('Paste one or more Erome, Bunkr, Balbums, or SimpCity thread URLs first.');
     return;
   }
+  if (!window.PongEromeResumeState) {
+    pongCollectionArtistSequence = [];
+    pongCollectionStoppedIdentities = new Set();
+  }
   activeEromeScrapeTargets = targets.slice();
+
+  if (pongSkipPlayedEnabled) await refreshPongPlayedHistory();
 
   const simpCityTargets = targets.filter(isSimpCityImportLaunchUrl);
   if (simpCityTargets.length) {
@@ -18589,6 +19042,12 @@ async function loadEromeAsCards() {
   const failedAlbums = [];
 
   async function scrapeEromeAlbumOnce(album, note) {
+    const collectionEvent = {
+      source: 'erome',
+      artistUrl: album?.sourceUrl || album?.url || '',
+      sourceUrl: album?.sourceUrl || album?.url || ''
+    };
+    if (pongCollectionWasStoppedForEvent(collectionEvent)) return true;
     try {
       updateAlbumProgress(album, note || 'loading');
 
@@ -18597,6 +19056,7 @@ async function loadEromeAsCards() {
         timeoutMs: note === 'final retry' ? EROME_FINAL_RETRY_TIMEOUT_MS : EROME_FETCH_TIMEOUT_MS,
         fast: note !== 'final retry'
       });
+      if (pongCollectionWasStoppedForEvent(collectionEvent)) return true;
       const groups = buildEromeImportGroups(data, album.url).map(group => ({
         ...group,
         url: group.url || album.url,

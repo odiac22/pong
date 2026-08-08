@@ -59,6 +59,7 @@ const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const PONG_INDEX_PATH = path.join(process.cwd(), 'index.html');
 const PONG_SYNC_PATH = path.join(process.cwd(), 'pong-sync.js');
 const PC_SAVED_LINKS_PATH = path.join(LOCAL_AI_DIR, 'shared-saved-links-v1.json');
+const PONG_PLAYED_HISTORY_PATH = path.join(LOCAL_AI_DIR, 'played-history-v1.json');
 const SIMPCITY_SESSION_PATH = path.join(LOCAL_AI_DIR, 'simpcity-session-v1.dpapi');
 const SIMPCITY_CREDENTIALS_PATH = path.join(LOCAL_AI_DIR, 'simpcity-credentials-v1.dpapi');
 const SIMPCITY_CHROME_PATH = process.env.PONG_SIMPCITY_CHROME || path.join(
@@ -92,6 +93,7 @@ const SIMPCITY_RECALL_AI_BATCH_LIMIT = Math.max(
   0,
   Math.min(20, Number(process.env.PONG_SIMPCITY_RECALL_AI_BATCH_LIMIT || 6))
 );
+const SIMPCITY_EARLY_ARTIST_VIDEO_COUNT = 40;
 const VIDEO_FILE_CACHE_DIR = path.resolve(
   process.env.PONG_VIDEO_FILE_CACHE_DIR ||
   (process.platform === 'win32' && existsSync('F:\\')
@@ -2172,7 +2174,7 @@ async function mapWithConcurrency(items, limit, mapper) {
   return results;
 }
 
-async function extractBunkrVideoUrls(albumUrl) {
+async function extractBunkrVideoUrls(albumUrl, { signal = null, onVideo = null } = {}) {
   const advancedUrl = new URL(albumUrl);
   advancedUrl.searchParams.set('advanced', '1');
   const html = await fetchBunkrImportHtml(advancedUrl.toString());
@@ -2197,24 +2199,33 @@ async function extractBunkrVideoUrls(albumUrl) {
     'Content-Type': 'application/json'
   };
   const resolved = await mapWithConcurrency(files, 50, async file => {
+    if (signal?.aborted) return '';
     try {
+      const fileSignal = signal && typeof AbortSignal.any === 'function'
+        ? AbortSignal.any([signal, AbortSignal.timeout(8000)])
+        : AbortSignal.timeout(8000);
       const fileResponse = await fetch('https://dl.bunkr.cr/api/_001_v2', {
         method: 'POST',
         headers,
-        signal: AbortSignal.timeout(8000),
+        signal: fileSignal,
         body: JSON.stringify({ id: file.id })
       });
       if (!fileResponse.ok) return '';
       const data = await fileResponse.json();
       const signUrl = new URL('https://glb-apisign.cdn.cr/sign');
       signUrl.searchParams.set('path', data.path);
-      const signResponse = await fetch(signUrl, { headers, signal: AbortSignal.timeout(8000) });
+      const signSignal = signal && typeof AbortSignal.any === 'function'
+        ? AbortSignal.any([signal, AbortSignal.timeout(8000)])
+        : AbortSignal.timeout(8000);
+      const signResponse = await fetch(signUrl, { headers, signal: signSignal });
       if (!signResponse.ok) return '';
       const sign = await signResponse.json();
       if (file.original) sign.n = file.original;
       const mediaUrl = new URL(`${data.mediafiles}${data.path}`);
       Object.entries(sign).forEach(([key, value]) => mediaUrl.searchParams.set(key, String(value)));
-      return mediaUrl.toString();
+      const resolvedUrl = mediaUrl.toString();
+      if (typeof onVideo === 'function') onVideo(resolvedUrl);
+      return resolvedUrl;
     } catch (_) {
       return '';
     }
@@ -2256,8 +2267,8 @@ function pauseSimpCitySourceRequests(rawDurationMs = 60_000) {
 }
 const simpCityImportJobs = new Map();
 const simpCityRecallChannels = new Map([
-  [1, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set() }],
-  [2, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set() }]
+  [1, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), skipSeenEnabled: false }],
+  [2, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), skipSeenEnabled: false }]
 ]);
 const simpCityRecallAlbumTasks = new Map();
 function simpCityRecallChannel(rawChannel) {
@@ -2265,6 +2276,93 @@ function simpCityRecallChannel(rawChannel) {
 }
 function simpCityRecallState(rawChannel) {
   return simpCityRecallChannels.get(simpCityRecallChannel(rawChannel));
+}
+
+let pongPlayedHistoryLoaded = false;
+let pongPlayedHistoryLoadPromise = null;
+let pongPlayedHistoryWrite = Promise.resolve();
+const pongPlayedHistoryHashes = new Set();
+
+function pongOpaqueHash(value) {
+  const input = String(value || '');
+  const seeds = [0x811c9dc5, 0x9e3779b1, 0x85ebca6b, 0xc2b2ae35];
+  return seeds.map(seed => {
+    let hash = seed >>> 0;
+    for (let index = 0; index < input.length; index++) {
+      hash ^= input.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash.toString(16).padStart(8, '0');
+  }).join('');
+}
+
+function pongPlayedCanonicalValue(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    url.hash = '';
+    url.hostname = url.hostname.toLowerCase();
+    url.searchParams.sort();
+    if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, '');
+    return url.toString();
+  } catch (_) {
+    return raw.toLowerCase().replace(/\s+/g, ' ');
+  }
+}
+
+function pongPlayedHistoryHash(kind, sourceUrl, itemId) {
+  const payload = [
+    'pong-played-v1',
+    String(kind || '').trim().toLowerCase(),
+    pongPlayedCanonicalValue(sourceUrl),
+    pongPlayedCanonicalValue(itemId)
+  ].join('\u0000');
+  return pongOpaqueHash(payload);
+}
+
+async function loadPongPlayedHistory() {
+  if (pongPlayedHistoryLoaded) return pongPlayedHistoryHashes;
+  if (!pongPlayedHistoryLoadPromise) pongPlayedHistoryLoadPromise = (async () => {
+    try {
+      const payload = JSON.parse(await fs.readFile(PONG_PLAYED_HISTORY_PATH, 'utf8'));
+      for (const hash of Array.isArray(payload?.hashes) ? payload.hashes : []) {
+        if (/^[a-f0-9]{32}$/i.test(String(hash || ''))) pongPlayedHistoryHashes.add(String(hash).toLowerCase());
+      }
+    } catch (_) {}
+    pongPlayedHistoryLoaded = true;
+    return pongPlayedHistoryHashes;
+  })().finally(() => { pongPlayedHistoryLoadPromise = null; });
+  return pongPlayedHistoryLoadPromise;
+}
+
+function savePongPlayedHistory() {
+  pongPlayedHistoryWrite = pongPlayedHistoryWrite.then(async () => {
+    await fs.mkdir(LOCAL_AI_DIR, { recursive: true });
+    const temporaryPath = `${PONG_PLAYED_HISTORY_PATH}.tmp`;
+    const payload = {
+      schema: 'pong-played-history-v1',
+      hashes: [...pongPlayedHistoryHashes].slice(-100000)
+    };
+    await fs.writeFile(temporaryPath, JSON.stringify(payload), 'utf8');
+    await fs.rename(temporaryPath, PONG_PLAYED_HISTORY_PATH);
+  }).catch(() => {});
+  return pongPlayedHistoryWrite;
+}
+
+async function pongPlayedHistoryHas(kind, sourceUrl, itemId) {
+  await loadPongPlayedHistory();
+  return pongPlayedHistoryHashes.has(pongPlayedHistoryHash(kind, sourceUrl, itemId));
+}
+
+function simpCityAlbumPlayedHistoryHash(album, fallbackSourceUrl = '') {
+  const creatorKey = String(album?.creatorKey || album?.creatorName || '').trim();
+  if (!creatorKey) return '';
+  return pongPlayedHistoryHash(
+    'simpcity-profile',
+    album?.sourceUrl || fallbackSourceUrl,
+    creatorKey
+  );
 }
 
 function simpCityDelay(ms) {
@@ -3521,12 +3619,15 @@ async function resolveSaintVideo(rawUrl, signal = null) {
   }
 }
 
-async function resolveSimpCityMediaLink(link, signal = null) {
+async function resolveSimpCityMediaLink(link, signal = null, options = {}) {
   let videos = [];
   if (link?.kind === 'direct') videos = [link.url];
   else if (link?.kind === 'pixeldrain') videos = await resolvePixeldrainVideos(link.url, signal);
   else if (link?.kind === 'gofile') videos = await resolveGofileVideos(link.url, signal);
-  else if (link?.kind === 'bunkr') videos = await extractBunkrVideoUrls(link.url);
+  else if (link?.kind === 'bunkr') videos = await extractBunkrVideoUrls(link.url, {
+    signal,
+    onVideo: options?.onVideo
+  });
   else if (link?.kind === 'cyberdrop' || link?.kind === 'cyberfile') videos = await extractGalleryDlVideoUrls(link.url);
   else if (link?.kind === 'saint') videos = await resolveSaintVideo(link.url, signal);
   else if (link?.kind === 'tiktok') videos = await extractTikTokVideoUrls(link.url, signal);
@@ -3665,105 +3766,186 @@ async function downloadTikTokVideoFile(record, partPath, controller) {
 
 function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creators) {
   if (!state.pending?.id || state.pending.id !== suppliedId) return null;
-  const signal = state.controller?.signal || null;
+  const recallSignal = state.controller?.signal || null;
   const taskKey = simpCityRecallTaskKey(channel, suppliedId);
   state.pending.creatorPairsSeen ||= [];
   const seenPairs = new Set(state.pending.creatorPairsSeen);
   const postMap = new Map((posts || []).map(post => [String(post?.postId || ''), post]));
-  const tasks = (creators || []).map(creator => simpCityMediaResolveLimit(async () => {
+  const readyTasks = (creators || []).map(creator => {
     const creatorName = String(creator?.primaryName || '').trim();
     const creatorKey = creatorName.toLowerCase().replace(/[^a-z0-9]+/g, '');
-    if (!creatorKey || seenPairs.has(creatorKey) || state.skippedCreatorKeys?.has(creatorKey)) return;
-    const creatorPost = postMap.get(String(creator?.postId || ''));
-    // Ordered forum scans arrive as one complete creator thread. Use every
-    // post so TikTok and all other host links become the same two-part pair.
-    const relevantPosts = creatorPost ? [...postMap.values()] : [];
-    const links = extractSimpCityMediaLinks(relevantPosts);
-    const hostedResolution = Promise.allSettled(links.map(async link => ({
-      link,
-      videos: await resolveSimpCityMediaLink(link, signal)
-    })));
-    const balbumsResolution = prefetchSimpCityCreatorAlbums([creator], {
-      signal,
-      maxAlbumsPerCreator: 20
-    });
-    const [resolved, balbums] = await Promise.all([hostedResolution, balbumsResolution]);
-    if (signal?.aborted || state.pending?.id !== suppliedId) return;
+    if (!creatorKey || seenPairs.has(creatorKey) || state.skippedCreatorKeys?.has(creatorKey)) {
+      return Promise.resolve();
+    }
 
-    const tiktokVideos = [];
-    const artistVideos = [];
-    let tiktokUrl = '';
-    let artistUrl = '';
-    for (const item of resolved) {
-      if (item.status !== 'fulfilled' || !item.value.videos?.length) continue;
-      const { link, videos } = item.value;
-      if (link.kind === 'tiktok') {
-        tiktokUrl ||= link.url;
-        tiktokVideos.push(...videos);
-      } else {
-        artistUrl ||= link.url;
-        artistVideos.push(...videos);
+    let resolveReady;
+    let readySettled = false;
+    const readyPromise = new Promise(resolve => { resolveReady = resolve; });
+    const settleReady = () => {
+      if (readySettled) return;
+      readySettled = true;
+      resolveReady();
+    };
+    const collectionController = new AbortController();
+    const abortCollection = () => collectionController.abort();
+    if (recallSignal?.aborted) collectionController.abort();
+    else recallSignal?.addEventListener('abort', abortCollection, { once: true });
+    state.collectionControllers ||= new Map();
+    state.collectionStoppedCreatorKeys ||= new Set();
+    state.collectionControllers.get(creatorKey)?.abort?.();
+    state.collectionControllers.set(creatorKey, collectionController);
+
+    let publishedRecord = null;
+    const backgroundTask = simpCityMediaResolveLimit(async () => {
+      const signal = collectionController.signal;
+      if (
+        state.collectionStoppedCreatorKeys.has(creatorKey) ||
+        state.skippedCreatorKeys?.has(creatorKey) ||
+        (state.skipSeenEnabled && await pongPlayedHistoryHas('simpcity-profile', state.pending?.threadUrl, creatorKey))
+      ) {
+        settleReady();
+        return;
       }
-    }
 
-    const bunkrResults = await Promise.allSettled(balbums.map(async album => ({
-      album,
-      videos: await extractBunkrVideoUrls(album.url)
-    })));
-    for (const item of bunkrResults) {
-      if (item.status !== 'fulfilled' || !item.value.videos?.length) continue;
-      artistUrl ||= item.value.album.url;
-      artistVideos.push(...item.value.videos);
-    }
+      const creatorPost = postMap.get(String(creator?.postId || ''));
+      const relevantPosts = creatorPost ? [...postMap.values()] : [];
+      const links = extractSimpCityMediaLinks(relevantPosts);
+      const artistVideos = new Set();
+      const tiktokVideos = new Set();
+      const pairId = `${suppliedId}:${creatorKey}`;
+      let artistGroup = null;
+      let tiktokGroup = null;
+      let tiktokUrl = '';
+      let artistUrl = '';
 
-    const uniqueTikTok = [...new Set(tiktokVideos)].slice(0, 20);
-    const uniqueArtist = [...new Set(artistVideos)].slice(0, 250);
-    if ((!uniqueTikTok.length && !uniqueArtist.length) || signal?.aborted || state.pending?.id !== suppliedId) return;
+      const publishOrUpdate = ({ final = false } = {}) => {
+        if (signal.aborted || state.pending?.id !== suppliedId) return false;
+        const artistReady = artistVideos.size >= SIMPCITY_EARLY_ARTIST_VIDEO_COUNT;
+        if (!publishedRecord && !artistReady && !final) return false;
+        if (
+          publishedRecord && !final &&
+          artistVideos.size % 5 !== 0 &&
+          (tiktokVideos.size === 0 || tiktokVideos.size % 5 !== 0)
+        ) return false;
+        if (!artistVideos.size && !tiktokVideos.size) {
+          if (final) settleReady();
+          return false;
+        }
+        if (!artistGroup && artistVideos.size) artistGroup = {
+          url: artistUrl || state.pending.threadUrl,
+          title: `Artist videos · ${creatorName}`,
+          creatorName,
+          creatorKey,
+          pairId,
+          mediaKind: 'artist-unified',
+          source: 'hosted',
+          videos: []
+        };
+        if (!tiktokGroup && tiktokVideos.size) tiktokGroup = {
+          url: tiktokUrl || state.pending.threadUrl,
+          title: `TikTok account · ${creatorName}`,
+          creatorName,
+          creatorKey,
+          pairId,
+          mediaKind: 'tiktok',
+          source: 'hosted',
+          videos: []
+        };
+        if (artistGroup) artistGroup.videos = [...artistVideos];
+        if (tiktokGroup) tiktokGroup.videos = [...tiktokVideos].slice(0, 20);
+        const pairedGroups = [artistGroup, tiktokGroup].filter(group => group?.videos?.length);
 
-    const pairId = `${suppliedId}:${creatorKey}`;
-    const pairedGroups = [];
-    if (uniqueArtist.length) pairedGroups.push({
-      url: artistUrl,
-      title: `Artist videos · ${creatorName}`,
-      creatorName,
-      creatorKey,
-      pairId,
-      mediaKind: 'artist-unified',
-      source: 'hosted',
-      videos: uniqueArtist
+        if (!publishedRecord) {
+          const firstGroup = pairedGroups[0];
+          publishedRecord = {
+            url: firstGroup.url,
+            title: creatorName,
+            creatorName,
+            creatorKey,
+            pairId,
+            sourceUrl: state.pending.threadUrl,
+            source: 'paired',
+            videos: firstGroup.videos,
+            pairedGroups,
+            collecting: !final,
+            earlyPublishedAt: artistReady ? new Date().toISOString() : ''
+          };
+          state.pending.albums.push(publishedRecord);
+          seenPairs.add(creatorKey);
+          state.pending.creatorPairsSeen = [...seenPairs].slice(-2000);
+          state.pending.creatorPairsReady = Number(state.pending.creatorPairsReady || 0) + 1;
+          state.pending.albumsReady = state.pending.albums.length;
+          state.pending.updatedAt = new Date().toISOString();
+          if (!state.pending.firstAlbumAt) state.pending.firstAlbumAt = state.pending.updatedAt;
+          settleReady();
+        } else {
+          publishedRecord.url = pairedGroups[0]?.url || publishedRecord.url;
+          publishedRecord.videos = pairedGroups[0]?.videos || publishedRecord.videos;
+          publishedRecord.pairedGroups = pairedGroups;
+          publishedRecord.collecting = !final;
+          publishedRecord.updatedAt = new Date().toISOString();
+          state.pending.updatedAt = publishedRecord.updatedAt;
+        }
+        return true;
+      };
+
+      const addResolved = (link, videos) => {
+        if (signal.aborted || !Array.isArray(videos) || !videos.length) return;
+        if (link?.kind === 'tiktok') {
+          tiktokUrl ||= link.url;
+          videos.forEach(video => tiktokVideos.add(video));
+        } else {
+          artistUrl ||= link?.url || '';
+          videos.forEach(video => artistVideos.add(video));
+        }
+        publishOrUpdate();
+      };
+
+      const hostedTasks = links.map(async link => {
+        if (signal.aborted) return;
+        try {
+          addResolved(link, await resolveSimpCityMediaLink(link, signal, {
+            onVideo: video => addResolved(link, [video])
+          }));
+        } catch (_) {}
+      });
+      const balbumsTask = (async () => {
+        const balbums = await prefetchSimpCityCreatorAlbums([creator], {
+          signal,
+          maxAlbumsPerCreator: 20
+        });
+        await Promise.allSettled(balbums.map(async album => {
+          if (signal.aborted) return;
+          try {
+            const link = { kind: 'bunkr', url: album.url };
+            addResolved(link, await extractBunkrVideoUrls(album.url, {
+              signal,
+              onVideo: video => addResolved(link, [video])
+            }));
+          } catch (_) {}
+        }));
+      })();
+
+      await Promise.allSettled([...hostedTasks, balbumsTask]);
+      publishOrUpdate({ final: true });
+      settleReady();
+    }).catch(() => {
+      settleReady();
+    }).finally(() => {
+      recallSignal?.removeEventListener('abort', abortCollection);
+      if (state.collectionControllers?.get(creatorKey) === collectionController) {
+        state.collectionControllers.delete(creatorKey);
+      }
+      if (publishedRecord) {
+        publishedRecord.collecting = false;
+        publishedRecord.updatedAt = new Date().toISOString();
+      }
     });
-    if (uniqueTikTok.length) pairedGroups.push({
-      url: tiktokUrl,
-      title: `TikTok account · ${creatorName}`,
-      creatorName,
-      creatorKey,
-      pairId,
-      mediaKind: 'tiktok',
-      source: 'hosted',
-      videos: uniqueTikTok
-    });
-    const firstGroup = pairedGroups[0];
-    seenPairs.add(creatorKey);
-    state.pending.creatorPairsSeen = [...seenPairs].slice(-2000);
-    state.pending.albums.push({
-      url: firstGroup.url,
-      title: creatorName,
-      creatorName,
-      creatorKey,
-      pairId,
-      sourceUrl: state.pending.threadUrl,
-      source: 'paired',
-      // One backlog item expands into one or two adjacent paperclip bundles:
-      // unified hosted videos first when present, followed by TikTok.
-      videos: firstGroup.videos,
-      pairedGroups
-    });
-    state.pending.albumsReady = state.pending.albums.length;
-    state.pending.creatorPairsReady = Number(state.pending.creatorPairsReady || 0) + 1;
-    state.pending.updatedAt = new Date().toISOString();
-    if (!state.pending.firstAlbumAt) state.pending.firstAlbumAt = state.pending.updatedAt;
-  }));
-  return trackSimpCityRecallTask(taskKey, Promise.allSettled(tasks));
+
+    trackSimpCityRecallTask(taskKey, backgroundTask);
+    return readyPromise;
+  });
+  return Promise.allSettled(readyTasks);
 }
 
 function simpCityPrimaryPairCreator(creators) {
@@ -10633,6 +10815,48 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { ok: true, ...(await getSimpCityLoginFrame()) });
       return;
     }
+    if (req.method === 'GET' && url.pathname === '/played-history') {
+      await loadPongPlayedHistory();
+      json(res, 200, { ok: true, hashes: [...pongPlayedHistoryHashes], count: pongPlayedHistoryHashes.size });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/played-history/mark') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const hash = String(payload?.hash || '').trim().toLowerCase();
+      if (!/^[a-f0-9]{32}$/.test(hash)) throw new Error('A valid opaque played-history ID is required');
+      await loadPongPlayedHistory();
+      const added = !pongPlayedHistoryHashes.has(hash);
+      pongPlayedHistoryHashes.add(hash);
+      if (added) await savePongPlayedHistory();
+      json(res, 200, { ok: true, added, count: pongPlayedHistoryHashes.size });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/played-history/filter') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const channel = simpCityRecallChannel(payload?.channel);
+      const state = simpCityRecallState(channel);
+      state.skipSeenEnabled = payload?.enabled === true;
+      json(res, 200, { ok: true, channel, enabled: state.skipSeenEnabled });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/collect/stop') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const channel = simpCityRecallChannel(payload?.channel);
+      const state = simpCityRecallState(channel);
+      const creatorKey = String(payload?.creatorKey || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+      if (!creatorKey) throw new Error('A SimpCity creator key is required');
+      state.collectionStoppedCreatorKeys ||= new Set();
+      state.collectionStoppedCreatorKeys.add(creatorKey);
+      state.collectionControllers?.get(creatorKey)?.abort?.();
+      state.collectionControllers?.delete?.(creatorKey);
+      const album = state.pending?.albums?.find?.(item => String(item?.creatorKey || '') === creatorKey);
+      if (album) {
+        album.collecting = false;
+        album.collectionStoppedAt = new Date().toISOString();
+      }
+      json(res, 200, { ok: true, channel, creatorKey, stopped: true });
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/simpcity/recall') {
       const channel = simpCityRecallChannel(url.searchParams.get('channel'));
       const state = simpCityRecallState(channel);
@@ -10647,11 +10871,19 @@ const server = http.createServer(async (req, res) => {
             ...(creator?.usernames || [])
           ]).map(String).filter(Boolean))]
         : [];
-      const recall = state.pending && (pendingNames.length || state.pending.albums.length)
+      let visibleAlbums = state.pending?.albums || [];
+      if (state.skipSeenEnabled && visibleAlbums.length) {
+        await loadPongPlayedHistory();
+        visibleAlbums = visibleAlbums.filter(album => {
+          const hash = simpCityAlbumPlayedHistoryHash(album, state.pending?.threadUrl || '');
+          return !hash || !pongPlayedHistoryHashes.has(hash);
+        });
+      }
+      const recall = state.pending && (pendingNames.length || visibleAlbums.length)
         ? {
             id: state.pending.id,
             names: pendingNames,
-            albums: state.pending.albums,
+            albums: visibleAlbums,
             aiExtracted: true,
             threadUrl: state.pending.threadUrl,
             savedAt: state.pending.startedAt,
@@ -10678,10 +10910,13 @@ const server = http.createServer(async (req, res) => {
         throw new Error('A valid SimpCity scrape ID and thread URL are required');
       }
       state.controller?.abort();
+      for (const controller of state.collectionControllers?.values?.() || []) controller.abort();
       state.controller = new AbortController();
       state.finalizingId = '';
       state.payload = null;
       state.skippedCreatorKeys = new Set();
+      state.collectionStoppedCreatorKeys = new Set();
+      state.collectionControllers = new Map();
       state.pending = {
         id: suppliedId,
         channel,
