@@ -2870,7 +2870,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
           cache: 'no-store'
         }).then(async response => {
           clearTimeout(timer);
-          options.onload?.({ status: response.status, responseText: await response.text() });
+          options.onload?.({ status: response.status, responseText: await response.text(), finalUrl: response.url });
         }).catch(error => {
           clearTimeout(timer);
           options.onerror?.({ error: String(error?.message || error) });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.9.8
+// @version      1.9.9
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -315,7 +315,7 @@
         });
         const html = String(response.responseText || '');
         if (!/href=["'][^"']*\/threads\//i.test(html)) throw new Error('page contained no thread results');
-        return html;
+        return { html, url: String(response.finalUrl || url) };
       } catch (error) {
         lastError = error?.message || String(error);
         if (noteSimpCityRateLimit(error)) continue;
@@ -326,7 +326,7 @@
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const html = await response.text();
         if (!/href=["'][^"']*\/threads\//i.test(html)) throw new Error('page contained no thread results');
-        return html;
+        return { html, url: String(response.url || url) };
       } catch (error) {
         lastError = `${lastError}; ${error?.message || error}`;
         noteSimpCityRateLimit(error);
@@ -530,7 +530,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;background:#10141ef5;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1;min-width:180px">v1.9.8 · streaming PC handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button>';
+  panel.innerHTML = '<span data-status style="flex:1;min-width:180px">v1.9.9 · streaming PC handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -555,7 +555,7 @@
   };
   const buttons = [...panel.querySelectorAll('[data-scrape]')];
   const activeRunTokens = new Map();
-  diagnostic('Script initialized', `version=1.9.8; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}; pageConcurrency=${PAGE_CONCURRENCY}; creatorConcurrency=${FORUM_CREATOR_CONCURRENCY}; requestGap=${SIMPCITY_REQUEST_GAP_MS}ms`);
+  diagnostic('Script initialized', `version=1.9.9; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}; pageConcurrency=${PAGE_CONCURRENCY}; creatorConcurrency=${FORUM_CREATOR_CONCURRENCY}; requestGap=${SIMPCITY_REQUEST_GAP_MS}ms`);
 
   const monitorPcWorker = async (channel, workerId, runToken) => {
     let consecutiveConnectionFailures = 0;
@@ -849,10 +849,10 @@
           while (pendingListingPages.length && isCurrentRun()) {
             const batchUrls = pendingListingPages.splice(0, PAGE_CONCURRENCY);
             batchUrls.forEach(pageUrl => seenListingPages.add(listingPageIdentity(pageUrl)));
-            const pages = await Promise.all(batchUrls.map(async pageUrl => ({
-              url: pageUrl,
-              html: await fetchSimpCityListingPage(pageUrl, listingPageNumber(pageUrl))
-            })));
+            const pages = await Promise.all(batchUrls.map(async pageUrl => {
+              const fetched = await fetchSimpCityListingPage(pageUrl, listingPageNumber(pageUrl));
+              return { url: fetched.url || pageUrl, html: fetched.html };
+            }));
             listingPagesFetched += pages.length;
             for (const page of pages) {
               queueListingThreads(listingThreadUrls(page.html, page.url));
@@ -873,7 +873,8 @@
               .filter(page => page <= pageTotal);
             const pages = await Promise.all(pageNumbers.map(async page => {
               const url = listingPageUrl(listingRootUrl, page);
-              return { url, html: await fetchSimpCityListingPage(url, page) };
+              const fetched = await fetchSimpCityListingPage(url, page);
+              return { url: fetched.url || url, html: fetched.html };
             }));
             listingPagesFetched += pages.length;
             pages.forEach(page => queueListingThreads(listingThreadUrls(page.html, page.url)));
