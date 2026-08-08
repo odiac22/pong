@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.9.3
+// @version      1.9.4
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -29,7 +29,7 @@
 
   const PAGE_CONCURRENCY = 2;
   const FORUM_CREATOR_CONCURRENCY = 2;
-  const SIMPCITY_REQUEST_GAP_MS = 650;
+  const SIMPCITY_REQUEST_GAP_MS = 500;
   const SIMPCITY_RATE_LIMIT_PAUSE_MS = 60_000;
   const AI_BATCH_SIZE = 10;
   const AI_CONCURRENCY = 2;
@@ -157,6 +157,39 @@
     }
     diagnostic('API request exhausted', `${pathname}; ${lastError || 'server not reachable'}`);
     throw new Error(`PC AI unavailable: ${lastError || 'server not reachable'}`);
+  };
+
+  const getFromPong = async (pathname, timeout = 12000) => {
+    let lastError = '';
+    for (const endpoint of endpoints) {
+      try {
+        const modernRequest = globalThis.GM?.xmlHttpRequest;
+        const legacyRequest = globalThis.GM_xmlhttpRequest;
+        const request = typeof modernRequest === 'function'
+          ? modernRequest.bind(globalThis.GM)
+          : typeof legacyRequest === 'function'
+            ? legacyRequest
+            : null;
+        if (!request) throw new Error('Tampermonkey network permission is unavailable');
+        return await new Promise((resolve, reject) => request({
+          method: 'GET',
+          url: `${endpoint}${pathname}`,
+          headers: { 'X-Pong-SimpCity-Controller': '1' },
+          timeout,
+          onload: response => {
+            let data = {};
+            try { data = JSON.parse(response.responseText || '{}'); } catch (_) {}
+            if (response.status >= 200 && response.status < 300 && data.ok !== false) resolve(data);
+            else reject(new Error(data.error || `HTTP ${response.status}`));
+          },
+          onerror: response => reject(new Error(response?.error || 'connection failed')),
+          ontimeout: () => reject(new Error('connection timed out'))
+        }));
+      } catch (error) {
+        lastError = error?.message || String(error);
+      }
+    }
+    throw new Error(lastError || 'PC server not reachable');
   };
 
   const absoluteUrl = (raw, base) => {
@@ -440,19 +473,16 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;background:#10141ef5;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1;min-width:180px">v1.9.3 · streaming PC handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button><textarea data-log readonly rows="8" style="display:block;box-sizing:border-box;width:100%;min-height:130px;resize:vertical;padding:8px;background:#070a10;color:#b8d7ff;border:1px solid #334866;border-radius:7px;font:12px/1.4 ui-monospace,monospace;white-space:pre"></textarea>';
+  panel.innerHTML = '<span data-status style="flex:1;min-width:180px">v1.9.4 · streaming PC handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
-  const logBox = panel.querySelector('[data-log]');
   const logLines = [];
   diagnosticSink = (message, details = '') => {
     const stamp = new Date().toISOString();
     const line = `[${stamp}] ${message}${details ? ` | ${details}` : ''}`;
     logLines.push(line);
     if (logLines.length > 500) logLines.splice(0, logLines.length - 500);
-    logBox.value = logLines.join('\n');
-    logBox.scrollTop = logBox.scrollHeight;
   };
   panel.querySelector('[data-copy]').onclick = async event => {
     const text = logLines.join('\n');
@@ -468,7 +498,50 @@
   };
   const buttons = [...panel.querySelectorAll('[data-scrape]')];
   const activeRunTokens = new Map();
-  diagnostic('Script initialized', `version=1.9.3; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}; pageConcurrency=${PAGE_CONCURRENCY}; creatorConcurrency=${FORUM_CREATOR_CONCURRENCY}; requestGap=${SIMPCITY_REQUEST_GAP_MS}ms`);
+  diagnostic('Script initialized', `version=1.9.4; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}; pageConcurrency=${PAGE_CONCURRENCY}; creatorConcurrency=${FORUM_CREATOR_CONCURRENCY}; requestGap=${SIMPCITY_REQUEST_GAP_MS}ms`);
+
+  const monitorPcWorker = async (channel, workerId, runToken) => {
+    let consecutiveConnectionFailures = 0;
+    let lastSummary = '';
+    while (activeRunTokens.get(channel) === runToken) {
+      await delay(3000);
+      try {
+        const response = await getFromPong(`/simpcity/background/status?channel=${channel}`);
+        consecutiveConnectionFailures = 0;
+        const run = response?.run;
+        if (!run || run.id !== workerId) {
+          const message = run ? `worker replaced by ${run.id}` : 'worker record is missing';
+          status.textContent = `Pong ${channel}: PC worker unavailable · tap Copy Log`;
+          diagnostic('PC worker unavailable', `channel=${channel}; expected=${workerId}; ${message}`);
+          return;
+        }
+        const summary = `${run.state || 'unknown'}; ${run.status || 'no progress text'}; ${run.error || 'no error'}`;
+        if (summary !== lastSummary) {
+          diagnostic('PC worker status', `channel=${channel}; id=${workerId}; ${summary}`);
+          lastSummary = summary;
+        }
+        if (run.state === 'error' || run.error) {
+          status.textContent = `Pong ${channel}: PC error · tap Copy Log`;
+          return;
+        }
+        if (run.state === 'complete') {
+          status.textContent = `Pong ${channel}: PC scrape complete`;
+          return;
+        }
+        if (run.state === 'cancelled') {
+          status.textContent = `Pong ${channel}: PC scrape cancelled · tap Copy Log`;
+          return;
+        }
+        status.textContent = run.status || `Pong ${channel}: PC running in background`;
+      } catch (error) {
+        consecutiveConnectionFailures++;
+        diagnostic('PC status connection failed', `channel=${channel}; attempt=${consecutiveConnectionFailures}; ${error?.message || error}`);
+        if (consecutiveConnectionFailures >= 2) {
+          status.textContent = `Pong ${channel}: PC connection lost · tap Copy Log`;
+        }
+      }
+    }
+  };
 
   const runScrape = async channel => {
     const runToken = `${Date.now()}-${Math.random()}`;
@@ -516,6 +589,7 @@
           }
           status.textContent = `Pong ${channel}: PC running in background · ${background.id}`;
           diagnostic('PC worker started successfully', `channel=${channel}; id=${background.id}; target=${background.targetUrl || location.href}; state=${background.state || 'running'}`);
+          void monitorPcWorker(channel, background.id, runToken);
           return;
         } catch (error) {
           const message = error?.message || String(error);

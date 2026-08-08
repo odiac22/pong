@@ -86,7 +86,7 @@ const SIMPCITY_SEARCH_CONCURRENCY = Math.max(
 );
 const SIMPCITY_BROWSER_REQUEST_GAP_MS = Math.max(
   250,
-  Math.min(5000, Number(process.env.PONG_SIMPCITY_BROWSER_REQUEST_GAP_MS || 700))
+  Math.min(5000, Number(process.env.PONG_SIMPCITY_BROWSER_REQUEST_GAP_MS || 500))
 );
 const SIMPCITY_RECALL_AI_BATCH_LIMIT = Math.max(
   0,
@@ -10497,12 +10497,17 @@ const server = http.createServer(async (req, res) => {
     ) &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
   const simpCityControllerLanWrite =
-    req.method === 'POST' &&
     (
-      requestUrl.pathname === '/simpcity/background/start' ||
-      requestUrl.pathname === '/simpcity/session/handoff' ||
-      requestUrl.pathname === '/simpcity/source/permit' ||
-      requestUrl.pathname === '/simpcity/source/rate-limit'
+      (
+        req.method === 'POST' &&
+        (
+          requestUrl.pathname === '/simpcity/background/start' ||
+          requestUrl.pathname === '/simpcity/session/handoff' ||
+          requestUrl.pathname === '/simpcity/source/permit' ||
+          requestUrl.pathname === '/simpcity/source/rate-limit'
+        )
+      ) ||
+      (req.method === 'GET' && requestUrl.pathname === '/simpcity/background/status')
     ) &&
     req.headers['x-pong-simpcity-controller'] === '1' &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
