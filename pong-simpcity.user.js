@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.9.4
+// @version      1.9.5
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -810,7 +810,16 @@
         await scanThread({ url: first.href, depth: 0 }, currentPage === 1 ? document.documentElement.outerHTML : '');
       }
       while (linkedThreadQueue.length && isCurrentRun()) {
-        await scanThread(linkedThreadQueue.shift());
+        const linked = linkedThreadQueue.shift();
+        try {
+          // A linked creator profile is one artist unit. Collect its pages as
+          // one ordered batch so its own media stays attached to its title.
+          await scanThread({ ...linked, atomic: true });
+        } catch (error) {
+          // Deleted/moved utility or creator threads are normal in old
+          // megathreads. One 404 must not abort every remaining artist.
+          diagnostic('Linked creator thread skipped', `url=${linked?.url || 'unknown'}; ${error?.message || error}`);
+        }
       }
       await Promise.all(aiTasks);
       await sendToPong('/simpcity/recall', {

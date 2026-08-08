@@ -3783,7 +3783,7 @@ async function downloadTikTokVideoFile(record, partPath, controller) {
   record.headersReadyAt = Date.now();
 }
 
-function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creators) {
+function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creators, options = {}) {
   if (!state.pending?.id || state.pending.id !== suppliedId) return null;
   const recallSignal = state.controller?.signal || null;
   const taskKey = simpCityRecallTaskKey(channel, suppliedId);
@@ -3827,10 +3827,12 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
       }
 
       const creatorPost = postMap.get(String(creator?.postId || ''));
-      // A creator may only inherit media from the post that identified them.
-      // Feeding every post in the thread into every creator duplicates the
-      // entire thread hundreds of times and overwhelms playback/cache readers.
-      const relevantPosts = creatorPost ? [creatorPost] : [];
+      // Normal megathread extraction is scoped to the one post that identified
+      // the creator. An explicitly ordered creator-profile scan is different:
+      // every collected post belongs to that one linked profile.
+      const relevantPosts = options?.includeAllPosts === true
+        ? [...postMap.values()]
+        : creatorPost ? [creatorPost] : [];
       const links = extractSimpCityMediaLinks(relevantPosts);
       const artistVideos = new Set();
       const tiktokVideos = new Set();
@@ -11023,7 +11025,8 @@ const server = http.createServer(async (req, res) => {
         channel,
         suppliedId,
         deterministic.posts,
-        simpCityPrimaryPairCreator(deterministic.creators)
+        simpCityPrimaryPairCreator(deterministic.creators),
+        { includeAllPosts: payload?.orderedPair === true }
       );
       // Ordered forum scans deliberately wait for this creator's complete
       // TikTok/artist pair before the userscript submits the following row.
@@ -11055,7 +11058,8 @@ const server = http.createServer(async (req, res) => {
               channel,
               suppliedId,
               deterministic.unresolvedPosts,
-              simpCityPrimaryPairCreator(extracted.creators)
+              simpCityPrimaryPairCreator(extracted.creators),
+              { includeAllPosts: payload?.orderedPair === true }
             );
           } catch (error) {
             if (state.pending?.id === suppliedId && !signal?.aborted) {
