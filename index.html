@@ -868,7 +868,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.10</div>
+    <div class="version-number">26.11</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -4271,7 +4271,14 @@ function scheduleForegroundNoLoadRetry(video) {
   if (!video || !document.body.contains(video)) return;
   const wrapper = video.closest('.video-wrapper');
   if (!wrapper) return;
-  const retryDelay = pongLocal2FastPlaybackActive() ? 2200 : VIDEO_FOREGROUND_NO_LOAD_RETRY_MS;
+  const retriesAtSchedule = Number(video.dataset.foregroundNoLoadRetries || 0);
+  const baseRetryDelay = pongLocal2FastPlaybackActive() ? 2200 : VIDEO_FOREGROUND_NO_LOAD_RETRY_MS;
+  // Three retries used to be a terminal state. Keep recovering the active
+  // card at a calm interval instead; a foreground video must never remain
+  // permanently inert because its first three routes failed.
+  const retryDelay = retriesAtSchedule >= VIDEO_FOREGROUND_NO_LOAD_MAX_RETRIES
+    ? Math.max(8000, baseRetryDelay)
+    : baseRetryDelay;
   const token = `${Date.now()}-${Math.random()}`;
   video.dataset.foregroundLoadWatch = token;
 
@@ -4287,7 +4294,6 @@ function scheduleForegroundNoLoadRetry(video) {
     // completely empty active card: no metadata and no buffered media at all.
     if (video.readyState >= 1 || getVideoBufferedAheadSeconds(video) > 0) return;
     const retries = Number(video.dataset.foregroundNoLoadRetries || 0);
-    if (retries >= VIDEO_FOREGROUND_NO_LOAD_MAX_RETRIES) return;
 
     video.dataset.foregroundNoLoadRetries = String(retries + 1);
     video.dataset.lastNetworkAttemptAt = String(Date.now());
@@ -4306,6 +4312,47 @@ function scheduleForegroundNoLoadRetry(video) {
     refreshForegroundVideoPriority(video, true);
     scheduleForegroundNoLoadRetry(video);
   }, retryDelay);
+}
+
+function scheduleForegroundPlaybackStallRecovery(video) {
+  if (!video || !document.body.contains(video)) return;
+  const wrapper = video.closest('.video-wrapper');
+  if (!wrapper || !wrapper.classList.contains('deck-active')) return;
+  const token = `${Date.now()}-${Math.random()}`;
+  const startedTime = Math.max(0, Number(video.currentTime || 0));
+  video.dataset.foregroundStallWatch = token;
+  setTimeout(() => {
+    if (
+      video.dataset.foregroundStallWatch !== token ||
+      foregroundPriorityVideo !== video ||
+      !wrapper.classList.contains('deck-active') ||
+      !document.body.contains(video) ||
+      video.ended
+    ) return;
+    const wantsPlayback = wrapper.dataset.playIntent === 'true' || !video.paused;
+    const advanced = Math.max(0, Number(video.currentTime || 0)) > startedTime + 0.15;
+    if (!wantsPlayback || advanced || getVideoBufferedAheadSeconds(video) >= 2) return;
+
+    const attempts = Number(video.dataset.foregroundStallRetries || 0) + 1;
+    video.dataset.foregroundStallRetries = String(attempts);
+    rememberVideoPlaybackPosition(video, wrapper, { immediate: true });
+    wrapper.dataset.serverCacheRecoveryRequested = 'true';
+    random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
+    random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
+    rotateVideoRetrySource(wrapper, video);
+    video.dataset.lastNetworkAttemptAt = String(Date.now());
+    delete video.dataset.lastNetworkProgressAt;
+    video.preload = 'auto';
+    video.addEventListener('canplay', () => {
+      if (wrapper.classList.contains('deck-active') && wrapper.dataset.playIntent === 'true') {
+        void playVideoCleanly(video);
+      }
+    }, { once: true });
+    try { video.load(); } catch (_) {}
+    refreshForegroundVideoPriority(video, true);
+    // Continue at a bounded interval until frames genuinely advance.
+    scheduleForegroundPlaybackStallRecovery(video);
+  }, 5000);
 }
 
 function transferForegroundVideoPriority(video) {
@@ -5947,6 +5994,7 @@ function createVideoElements() {
       random40PumpPostFetchQueue();
       loadingIndicator.style.display='none';
       updateVideoReadyLoader(video);
+      scheduleForegroundPlaybackStallRecovery(video);
     });
     video.addEventListener('stalled', () => {
       if (!wrapper.classList.contains('deck-active')) return;
@@ -5955,6 +6003,7 @@ function createVideoElements() {
       random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
       random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
       random40PauseHiddenPreloadsForPlayback();
+      scheduleForegroundPlaybackStallRecovery(video);
     });
     video.addEventListener('progress', () => {
       video.dataset.lastNetworkProgressAt = String(Date.now());
@@ -5973,6 +6022,8 @@ function createVideoElements() {
     });
     video.addEventListener('playing', () => {
       video.dataset.hasPlayedFrame = 'true';
+      delete video.dataset.foregroundStallWatch;
+      video.dataset.foregroundStallRetries = '0';
       void recordPongPlayedHistory(wrapper);
       wrapper.dataset.readyOverlayDismissed = 'true';
       readyLoader.style.display = 'none';

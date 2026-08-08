@@ -6436,9 +6436,17 @@ async function serveVideoFileCacheMedia(req, res, id) {
     return;
   }
   const reader = registerVideoFileCacheReader(res);
+  let readerReleased = false;
+  const releaseReader = () => {
+    if (readerReleased) return;
+    readerReleased = true;
+    reader.finish();
+    record.activeReaders = Math.max(0, Number(record.activeReaders || 0) - 1);
+  };
   const generation = videoFileCacheGeneration;
   record.lastAccessedAt = Date.now();
   record.activeReaders = Number(record.activeReaders || 0) + 1;
+  res.once('close', releaseReader);
   promoteVideoFileCachePlaybackRecord(record);
   record.currentUntil = 0;
   const knownOversized = Number(record.totalBytes || 0) > VIDEO_FILE_CACHE_MAX_FILE_BYTES;
@@ -6525,8 +6533,8 @@ async function serveVideoFileCacheMedia(req, res, id) {
   } finally {
     tailRangeSession?.response?.destroy();
     tailRangeSession?.finalize('canceled');
-    reader.finish();
-    record.activeReaders = Math.max(0, Number(record.activeReaders || 0) - 1);
+    res.off('close', releaseReader);
+    releaseReader();
     if (
       record.deferWhenIdle &&
       record.status === 'downloading' &&
