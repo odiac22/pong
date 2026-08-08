@@ -3827,7 +3827,10 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
       }
 
       const creatorPost = postMap.get(String(creator?.postId || ''));
-      const relevantPosts = creatorPost ? [...postMap.values()] : [];
+      // A creator may only inherit media from the post that identified them.
+      // Feeding every post in the thread into every creator duplicates the
+      // entire thread hundreds of times and overwhelms playback/cache readers.
+      const relevantPosts = creatorPost ? [creatorPost] : [];
       const links = extractSimpCityMediaLinks(relevantPosts);
       const artistVideos = new Set();
       const tiktokVideos = new Set();

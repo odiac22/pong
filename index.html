@@ -868,7 +868,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.04</div>
+    <div class="version-number">26.05</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -5630,6 +5630,16 @@ function pongPlaybackBenchmarkOnTimeUpdate(video, wrapper) {
 function createVideoElements() {
   stopVisibleBatchAutoRetry();
   transferForegroundVideoPriority(null);
+  // Paperclip navigation replaces the rendered deck. Explicitly detach every
+  // prior media source first so Android closes its old HTTP range readers
+  // instead of leaving hundreds of invisible cache streams alive.
+  videoContainer.querySelectorAll('video').forEach(video => {
+    try {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    } catch (_) {}
+  });
   videoContainer.innerHTML = '';
   videoContainer.classList.toggle('deck-mode', DECK_MODE_ENABLED);
   deckOrder = [];
