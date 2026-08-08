@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.9.2
+// @version      1.9.3
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -48,6 +48,15 @@
   };
   const delay = ms => new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
   const paceSimpCityRequest = async () => {
+    if (globalThis.PONG_PC_BACKGROUND_CONTEXT) {
+      try {
+        const permit = await sendToPong('/simpcity/source/permit', {}, 10000);
+        if (Number(permit?.waitMs) > 0) await delay(Number(permit.waitMs));
+        return;
+      } catch (error) {
+        diagnostic('Shared PC pacing unavailable; using local pacing', error?.message || String(error));
+      }
+    }
     const now = Date.now();
     const slot = Math.max(now, simpCityNextRequestAt, simpCityRateLimitUntil);
     simpCityNextRequestAt = slot + SIMPCITY_REQUEST_GAP_MS + Math.floor(Math.random() * 200);
@@ -58,6 +67,11 @@
     if (!/HTTP\s*(?:403|429)|rate.?limit|too many requests/i.test(message)) return false;
     simpCityRateLimitUntil = Math.max(simpCityRateLimitUntil, Date.now() + SIMPCITY_RATE_LIMIT_PAUSE_MS);
     diagnostic('SimpCity rate limit detected', `pause=${SIMPCITY_RATE_LIMIT_PAUSE_MS}ms; ${message}`);
+    if (globalThis.PONG_PC_BACKGROUND_CONTEXT) {
+      void sendToPong('/simpcity/source/rate-limit', {
+        durationMs: SIMPCITY_RATE_LIMIT_PAUSE_MS
+      }, 10000).catch(() => {});
+    }
     return true;
   };
 
@@ -426,7 +440,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;background:#10141ef5;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = '<span data-status style="flex:1;min-width:180px">v1.9.2 · PC-only paced handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button><textarea data-log readonly rows="8" style="display:block;box-sizing:border-box;width:100%;min-height:130px;resize:vertical;padding:8px;background:#070a10;color:#b8d7ff;border:1px solid #334866;border-radius:7px;font:12px/1.4 ui-monospace,monospace;white-space:pre"></textarea>';
+  panel.innerHTML = '<span data-status style="flex:1;min-width:180px">v1.9.3 · streaming PC handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button><textarea data-log readonly rows="8" style="display:block;box-sizing:border-box;width:100%;min-height:130px;resize:vertical;padding:8px;background:#070a10;color:#b8d7ff;border:1px solid #334866;border-radius:7px;font:12px/1.4 ui-monospace,monospace;white-space:pre"></textarea>';
   document.body.appendChild(panel);
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
@@ -454,7 +468,7 @@
   };
   const buttons = [...panel.querySelectorAll('[data-scrape]')];
   const activeRunTokens = new Map();
-  diagnostic('Script initialized', `version=1.9.2; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}; pageConcurrency=${PAGE_CONCURRENCY}; creatorConcurrency=${FORUM_CREATOR_CONCURRENCY}; requestGap=${SIMPCITY_REQUEST_GAP_MS}ms`);
+  diagnostic('Script initialized', `version=1.9.3; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}; pageConcurrency=${PAGE_CONCURRENCY}; creatorConcurrency=${FORUM_CREATOR_CONCURRENCY}; requestGap=${SIMPCITY_REQUEST_GAP_MS}ms`);
 
   const runScrape = async channel => {
     const runToken = `${Date.now()}-${Math.random()}`;
@@ -626,6 +640,26 @@
         const pageTotal = listingPageCount(listingHtml);
         const listingIsForum = /^\/forums\//i.test(new URL(listingRootUrl).pathname);
         const listingContentThreads = [];
+        const completedThreads = [];
+        const creatorWaiters = [];
+        let creatorCursor = 0;
+        let nextCreatorToSubmit = 0;
+        let listingDiscoveryComplete = !listingIsForum;
+        const wakeCreatorWorkers = () => {
+          while (creatorWaiters.length) creatorWaiters.shift()();
+        };
+        const waitForCreatorWork = () => new Promise(resolve => creatorWaiters.push(resolve));
+        const flushCompletedCreators = () => {
+          while (completedThreads[nextCreatorToSubmit]) {
+            const posts = completedThreads[nextCreatorToSubmit];
+            completedThreads[nextCreatorToSubmit] = null;
+            // A complete profile becomes one ordered server job. The server
+            // resolves SimpCity hosts, TikTok and Balbums concurrently and
+            // publishes Videos then TikTok as adjacent Pong bundles.
+            queuePosts(posts, MAX_LINKED_THREAD_DEPTH, posts.length, true);
+            nextCreatorToSubmit++;
+          }
+        };
         const queueListingThreads = threadUrls => {
           const posts = [];
           for (const threadUrl of threadUrls) {
@@ -640,12 +674,41 @@
               attachments: []
             });
           }
+          if (listingIsForum && posts.length) wakeCreatorWorkers();
           // Search-result thread titles/slugs are already strong creator
           // evidence. Stream them immediately without crawling every page of
           // every result thread before Pong can begin resolving profiles.
           if (posts.length && !listingIsForum) queuePosts(posts, MAX_LINKED_THREAD_DEPTH);
         };
         queueListingThreads(initialThreads);
+        const creatorWorkers = listingIsForum
+          ? Array.from({ length: FORUM_CREATOR_CONCURRENCY }, async () => {
+            while (isCurrentRun()) {
+              if (creatorCursor >= listingContentThreads.length) {
+                if (listingDiscoveryComplete) return;
+                await waitForCreatorWork();
+                continue;
+              }
+              const index = creatorCursor++;
+              const threadUrl = listingContentThreads[index];
+              if (isCurrentRun()) {
+                status.textContent = `Pong ${channel}: creator ${index + 1}/${Math.max(index + 1, listingContentThreads.length)} · discovering more listings`;
+              }
+              try {
+                completedThreads[index] = await scanThread({
+                  url: threadUrl,
+                  depth: 0,
+                  atomic: true,
+                  deferSubmit: true
+                });
+              } catch (error) {
+                diagnostic('Creator thread failed', `index=${index + 1}; url=${threadUrl}; ${error?.message || error}`);
+                completedThreads[index] = [];
+              }
+              flushCompletedCreators();
+            }
+          })
+          : [];
         for (let start = 2; start <= pageTotal; start += PAGE_CONCURRENCY) {
           const pageNumbers = Array.from({ length: PAGE_CONCURRENCY }, (_, index) => start + index)
             .filter(page => page <= pageTotal);
@@ -658,37 +721,11 @@
             status.textContent = `Pong ${channel}: ${Math.min(start + pageNumbers.length - 1, pageTotal)}/${pageTotal} search pages · ${seenThreads.size} threads`;
           }
         }
-        // Forum filters often contain direct Bunkr, Pixeldrain, Saint and
-        // TikTok links inside the first post. Read the first page of each
-        // result thread in bounded parallel batches while creator searches
-        // are already streaming from the thread slugs above.
         if (listingIsForum) {
-          const completedThreads = new Array(listingContentThreads.length);
-          let creatorCursor = 0;
-          let nextCreatorToSubmit = 0;
-          const flushCompletedCreators = () => {
-            while (completedThreads[nextCreatorToSubmit]) {
-              const posts = completedThreads[nextCreatorToSubmit];
-              completedThreads[nextCreatorToSubmit] = null;
-              queuePosts(posts, MAX_LINKED_THREAD_DEPTH, posts.length, true);
-              nextCreatorToSubmit++;
-            }
-          };
-          await Promise.all(Array.from({
-            length: Math.min(FORUM_CREATOR_CONCURRENCY, listingContentThreads.length)
-          }, async () => {
-            while (creatorCursor < listingContentThreads.length) {
-              const index = creatorCursor++;
-              if (isCurrentRun()) status.textContent = `Pong ${channel}: creator ${index + 1}/${listingContentThreads.length}`;
-              completedThreads[index] = await scanThread({
-                url: listingContentThreads[index],
-                depth: MAX_LINKED_THREAD_DEPTH,
-                atomic: true,
-                deferSubmit: true
-              });
-              flushCompletedCreators();
-            }
-          }));
+          listingDiscoveryComplete = true;
+          wakeCreatorWorkers();
+          await Promise.all(creatorWorkers);
+          flushCompletedCreators();
         }
       } else if (rootIsSinglePageThread) {
         totalPages = 1;

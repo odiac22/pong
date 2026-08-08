@@ -84,6 +84,10 @@ const SIMPCITY_SEARCH_CONCURRENCY = Math.max(
   1,
   Math.min(8, Number(process.env.PONG_SIMPCITY_SEARCH_CONCURRENCY || 6))
 );
+const SIMPCITY_BROWSER_REQUEST_GAP_MS = Math.max(
+  250,
+  Math.min(5000, Number(process.env.PONG_SIMPCITY_BROWSER_REQUEST_GAP_MS || 700))
+);
 const SIMPCITY_RECALL_AI_BATCH_LIMIT = Math.max(
   0,
   Math.min(20, Number(process.env.PONG_SIMPCITY_RECALL_AI_BATCH_LIMIT || 6))
@@ -2229,6 +2233,27 @@ const SIMPCITY_JOB_RETENTION_MS = 30 * 60 * 1000;
 let simpCitySessionCache;
 let simpCityLoginState = null;
 const simpCityBackgroundRuns = new Map();
+let simpCitySourceNextRequestAt = 0;
+let simpCitySourcePauseUntil = 0;
+
+function reserveSimpCitySourceRequest() {
+  const now = Date.now();
+  const slot = Math.max(now, simpCitySourceNextRequestAt, simpCitySourcePauseUntil);
+  simpCitySourceNextRequestAt = slot + SIMPCITY_BROWSER_REQUEST_GAP_MS + Math.floor(Math.random() * 200);
+  return {
+    waitMs: Math.max(0, slot - now),
+    gapMs: SIMPCITY_BROWSER_REQUEST_GAP_MS,
+    pausedUntil: simpCitySourcePauseUntil > now
+      ? new Date(simpCitySourcePauseUntil).toISOString()
+      : ''
+  };
+}
+
+function pauseSimpCitySourceRequests(rawDurationMs = 60_000) {
+  const durationMs = Math.max(10_000, Math.min(5 * 60_000, Number(rawDurationMs || 60_000)));
+  simpCitySourcePauseUntil = Math.max(simpCitySourcePauseUntil, Date.now() + durationMs);
+  return { durationMs, pausedUntil: new Date(simpCitySourcePauseUntil).toISOString() };
+}
 const simpCityImportJobs = new Map();
 const simpCityRecallChannels = new Map([
   [1, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set() }],
@@ -3654,10 +3679,15 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
     // post so TikTok and all other host links become the same two-part pair.
     const relevantPosts = creatorPost ? [...postMap.values()] : [];
     const links = extractSimpCityMediaLinks(relevantPosts);
-    const resolved = await Promise.allSettled(links.map(async link => ({
+    const hostedResolution = Promise.allSettled(links.map(async link => ({
       link,
       videos: await resolveSimpCityMediaLink(link, signal)
     })));
+    const balbumsResolution = prefetchSimpCityCreatorAlbums([creator], {
+      signal,
+      maxAlbumsPerCreator: 20
+    });
+    const [resolved, balbums] = await Promise.all([hostedResolution, balbumsResolution]);
     if (signal?.aborted || state.pending?.id !== suppliedId) return;
 
     const tiktokVideos = [];
@@ -3676,10 +3706,6 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
       }
     }
 
-    const balbums = await prefetchSimpCityCreatorAlbums([creator], {
-      signal,
-      maxAlbumsPerCreator: 20
-    });
     const bunkrResults = await Promise.allSettled(balbums.map(async album => ({
       album,
       videos: await extractBunkrVideoUrls(album.url)
@@ -10474,7 +10500,9 @@ const server = http.createServer(async (req, res) => {
     req.method === 'POST' &&
     (
       requestUrl.pathname === '/simpcity/background/start' ||
-      requestUrl.pathname === '/simpcity/session/handoff'
+      requestUrl.pathname === '/simpcity/session/handoff' ||
+      requestUrl.pathname === '/simpcity/source/permit' ||
+      requestUrl.pathname === '/simpcity/source/rate-limit'
     ) &&
     req.headers['x-pong-simpcity-controller'] === '1' &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
@@ -10572,6 +10600,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/simpcity/background/start') {
       const payload = JSON.parse(await readBody(req) || '{}');
       json(res, 200, { ok: true, ...(await startSimpCityBackgroundRecall(payload?.url, payload?.channel)) });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/source/permit') {
+      json(res, 200, { ok: true, ...reserveSimpCitySourceRequest() });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/source/rate-limit') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      json(res, 200, {
+        ok: true,
+        ...pauseSimpCitySourceRequests(payload?.durationMs)
+      });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/simpcity/background/status') {
