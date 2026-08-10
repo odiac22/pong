@@ -2969,7 +2969,13 @@ async function simpCityBrowserAuthState(browser) {
     const hasLoginForm = Boolean(document.querySelector(
       'form[action*="/login"], input[name="login"], input[name="password"]'
     ));
-    const blocked = /(?:http\\s*403|access denied|just a moment|checking your browser)/i.test(title + ' ' + text);
+    const threadPage = /^\\/threads\\//i.test(path);
+    const hasPosts = Boolean(document.querySelector('article.message,.message--post'));
+    const accessError = /(?:http\\s*403|403\\s*forbidden|access denied|just a moment|checking your browser|oops!\\s*we ran into some problems|you do not have permission|temporarily unavailable|too many requests|rate limit)/i.test(title + ' ' + text);
+    // Error templates can return ordinary HTML (and occasionally HTTP 200).
+    // A real XenForo thread has post messages; do not misclassify an access
+    // page as a valid scrape containing zero creators.
+    const blocked = accessError || (threadPage && !hasPosts);
     return {
       url: location.href,
       title,
@@ -2977,6 +2983,8 @@ async function simpCityBrowserAuthState(browser) {
       hasAccountUi,
       hasLoginForm,
       blocked,
+      hasPosts,
+      accessError,
       loginPath: /\\/login\\/?$/i.test(path)
     };
   })()`);
