@@ -868,7 +868,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.11</div>
+    <div class="version-number">26.12</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -18575,12 +18575,12 @@ async function fetchSharedSimpCityRecall(endpoint, { consume = false, channel = 
       `${endpoint}/simpcity/recall?channel=${Number(channel) === 2 ? 2 : 1}&consume=${consume ? '1' : '0'}&t=${Date.now()}`,
       { cache: 'no-store' }
     );
-    if (!response.ok) return { reachable: false, recall: null, pending: null, queueCount: 0 };
+    if (!response.ok) return { reachable: false, recall: null, pending: null, background: null, queueCount: 0 };
     const data = await response.json();
     const recall = data?.recall;
     return {
       reachable: true,
-      recall: Array.isArray(recall?.names) && recall.names.length
+      recall: (Array.isArray(recall?.names) && recall.names.length) || (Array.isArray(recall?.albums) && recall.albums.length)
         ? {
             ...normalizeSimpCityRecallPayload(recall.names, recall.threadUrl, recall.id, recall.albums, recall.aiExtracted, recall.channel || channel, recall.live)
           }
@@ -18592,11 +18592,38 @@ async function fetchSharedSimpCityRecall(endpoint, { consume = false, channel = 
             startedAt: String(data.pending.startedAt || '')
           }
         : null,
+      background: data?.background && data.background.id
+        ? {
+            id: String(data.background.id || ''),
+            state: String(data.background.state || ''),
+            targetUrl: normalizeEromeLaunchUrl(data.background.targetUrl) || String(data.background.targetUrl || ''),
+            status: String(data.background.status || ''),
+            error: String(data.background.error || '')
+          }
+        : null,
       queueCount: Math.max(0, Number(data?.queueCount || 0))
     };
   } catch (_) {
-    return { reachable: false, recall: null, pending: null, queueCount: 0 };
+    return { reachable: false, recall: null, pending: null, background: null, queueCount: 0 };
   }
+}
+
+function clearActiveSimpCityRecallDeck(message = 'Checking latest SC Recall...') {
+  bunkrLoadGeneration++;
+  document.querySelectorAll('video').forEach(video => {
+    try { video.pause(); } catch (_) {}
+    video.removeAttribute('src');
+  });
+  allVideoUrls = [];
+  allVideoMetadata = [];
+  videoUrls = [];
+  videoMetadata = [];
+  currentBatch = 0;
+  currentVideoIndex = 0;
+  activePlaybackRange = null;
+  resetPasteEvents();
+  clearSession();
+  videoContainer.innerHTML = `<div class="loading-message">${escapeHtmlText(message)}</div>`;
 }
 
 function loadSimpCityRecall() {
@@ -18666,10 +18693,19 @@ async function startSimpCityRecall(channel = 1) {
     simpCityRecallMemory = null;
     try { localStorage.removeItem(SIMPCITY_RECALL_STORAGE_KEY); } catch (_) {}
     updateSimpCityRecallButton();
-    const shared = await fetchSharedSimpCityRecall(
-      location.port === '8787' ? location.origin : endpoint,
-      { channel }
-    );
+    clearActiveSimpCityRecallDeck(`Checking latest Recall ${channel}...`);
+    const recallEndpoint = location.port === '8787' ? location.origin : endpoint;
+    let shared = await fetchSharedSimpCityRecall(recallEndpoint, { channel });
+    // A user can press Recall during the short gap between starting the PC
+    // worker and /recall/begin. Wait for the new generation instead of
+    // declaring it missing or falling back to anything cached locally.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (shared.recall || shared.pending) break;
+      if (!['starting', 'running'].includes(shared.background?.state)) break;
+      videoContainer.innerHTML = `<div class="loading-message">Recall ${channel} is starting... waiting for its first result</div>`;
+      await sleep(750);
+      shared = await fetchSharedSimpCityRecall(recallEndpoint, { channel });
+    }
     const payload = shared.recall;
     if (!shared.reachable) {
       window.PongRecallRedXMode = false;
@@ -18679,12 +18715,17 @@ async function startSimpCityRecall(channel = 1) {
       alert('SC Recall could not reach the PC server. No older scrape was loaded.');
       return;
     }
-    if (!payload?.names?.length && !shared.pending?.threadUrl) {
+    if (!payload?.names?.length && !payload?.albums?.length && !shared.pending?.threadUrl) {
       window.PongRecallRedXMode = false;
       window.PongActiveSimpCityRecallChannel = 0;
       delete document.documentElement.dataset.pongSimpCityActive;
       delete document.documentElement.dataset.pongRecallChannel;
-      alert(`No Recall ${channel} scrape is active. Press Pong ${channel} Scrape in the SimpCity script first.`);
+      const latestWasEmpty = shared.background?.state === 'empty';
+      const message = latestWasEmpty
+        ? `Recall ${channel} finished but found no creator names or playable media. The previous videos were cleared.`
+        : `No Recall ${channel} scrape is active. Press Pong ${channel} Scrape in the SimpCity script first.`;
+      videoContainer.innerHTML = `<div class="loading-message">${escapeHtmlText(message)}</div>`;
+      alert(message);
       return;
     }
     const activePayload = payload || normalizeSimpCityRecallPayload(

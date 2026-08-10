@@ -2280,6 +2280,18 @@ function simpCityRecallState(rawChannel) {
   return simpCityRecallChannels.get(simpCityRecallChannel(rawChannel));
 }
 
+function resetSimpCityRecallState(state) {
+  state.controller?.abort?.();
+  for (const controller of state.collectionControllers?.values?.() || []) controller.abort?.();
+  state.controller = null;
+  state.finalizingId = '';
+  state.payload = null;
+  state.pending = null;
+  state.skippedCreatorKeys = new Set();
+  state.collectionStoppedCreatorKeys = new Set();
+  state.collectionControllers = new Map();
+}
+
 let pongPlayedHistoryLoaded = false;
 let pongPlayedHistoryLoadPromise = null;
 let pongPlayedHistoryWrite = Promise.resolve();
@@ -2830,6 +2842,10 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
   const channel = simpCityRecallChannel(rawChannel);
   const session = await loadSimpCitySession();
   if (!session?.cookies?.length) throw new Error('SimpCity session handoff is required');
+  // A scrape-button press is a new generation. Invalidate the previous
+  // channel immediately, before the hidden browser has time to call
+  // /recall/begin, so Pong can never retrieve yesterday's payload.
+  resetSimpCityRecallState(simpCityRecallState(channel));
   const previous = simpCityBackgroundRuns.get(channel);
   previous?.controller?.abort();
   await stopSimpCityBrowser(previous?.browser).catch(() => {});
@@ -2908,12 +2924,25 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
         run.status = status;
         run.updatedAt = new Date().toISOString();
         if (/remaining AI streams to Recall/i.test(status)) {
-          run.state = 'complete';
+          const recallState = simpCityRecallState(channel);
+          // The userscript has finished submitting, but server-side AI/media
+          // tasks may still be finalizing. Do not call the run complete until
+          // that exact generation has produced a payload or finalized empty.
+          if (recallState.pending) continue;
+          const hasResults = Boolean(
+            recallState.payload?.names?.length || recallState.payload?.albums?.length
+          );
+          run.state = hasResults ? 'complete' : 'empty';
+          if (!hasResults) {
+            run.status = `Pong ${channel}: finished - no creators or playable media found`;
+          }
           break;
         }
         if (/failed:/i.test(status)) throw new Error(status);
       }
-      if (!controller.signal.aborted && run.state !== 'complete') throw new Error('SimpCity background scrape timed out');
+      if (!controller.signal.aborted && !['complete', 'empty'].includes(run.state)) {
+        throw new Error('SimpCity background scrape timed out');
+      }
     } catch (error) {
       if (!controller.signal.aborted) {
         run.state = 'error';
@@ -4157,7 +4186,7 @@ function finalizeSimpCityRecallWhenReady(state, channel, suppliedId) {
     if (!state.pending?.id || state.pending.id !== suppliedId || !state.pending.inputComplete) return;
     const names = simpCityRecallNames(state.pending.creators);
     const threadUrl = state.pending.threadUrl;
-    state.payload = names.length ? {
+    state.payload = names.length || state.pending.albums.length ? {
       id: suppliedId,
       fingerprint: simpCityRecallFingerprint(threadUrl, names),
       names,
@@ -10926,6 +10955,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/simpcity/recall') {
       const channel = simpCityRecallChannel(url.searchParams.get('channel'));
       const state = simpCityRecallState(channel);
+      const backgroundRun = simpCityBackgroundRuns.get(channel);
       if (
         state.pending &&
         Date.now() - Date.parse(state.pending.startedAt || 0) > 60 * 60_000
@@ -10962,7 +10992,16 @@ const server = http.createServer(async (req, res) => {
         recall,
         pending: state.pending,
         channel,
-        queueCount: recall ? 1 : 0
+        queueCount: recall ? 1 : 0,
+        background: backgroundRun ? {
+          id: backgroundRun.id,
+          state: backgroundRun.state,
+          targetUrl: backgroundRun.targetUrl,
+          status: backgroundRun.status || '',
+          error: backgroundRun.error || '',
+          startedAt: backgroundRun.startedAt,
+          updatedAt: backgroundRun.updatedAt
+        } : null
       });
       return;
     }
