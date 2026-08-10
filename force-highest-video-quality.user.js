@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Force Highest Video Quality
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.0.0
+// @version      1.2.0
 // @description  Select the highest video quality exposed by HTML5, Playerjs, Video.js, Plyr, HLS, and common web players.
 // @match        *://*/*
 // @run-at       document-start
@@ -29,12 +29,41 @@
     return height;
   };
 
-  const playerJsHighestLabel = file => {
-    const variants = String(file || '').split(',').map(part => {
+  // Unlike a scene ID or timestamp, a resolution must have a quality suffix,
+  // dimensions, or a recognized quality name. This prevents paths such as
+  // /19127/video.mp4 from outranking 720p/HD.
+  const explicitQualityScore = value => {
+    const text = String(value || '').toLowerCase().trim();
+    const heights = [...text.matchAll(/(?:^|[^0-9])(\d{3,4})\s*(?:p|px)\b/g)]
+      .map(match => Number(match[1] || 0));
+    for (const match of text.matchAll(/(?:^|[^0-9])(\d{3,4})\s*(?:x|\u00d7)\s*(\d{3,4})(?:[^0-9]|$)/g)) {
+      heights.push(Math.min(Number(match[1] || 0), Number(match[2] || 0)));
+    }
+    const height = Math.max(0, ...heights);
+    if (/\b(?:8k|4320p?)\b/.test(text)) return Math.max(height, 4320);
+    if (/\b(?:4k|uhd|2160p?)\b/.test(text)) return Math.max(height, 2160);
+    if (/\b(?:2k|qhd|1440p?)\b/.test(text)) return Math.max(height, 1440);
+    if (/\b(?:full\s*hd|fhd|1080p?)\b/.test(text)) return Math.max(height, 1080);
+    if (/\bhd\b/.test(text)) return Math.max(height, 720);
+    return height;
+  };
+
+  const playerJsVariants = file => String(file || '').split(',').map(part => {
       const match = part.trim().match(/^\[([^\]]+)]\s*(.+)$/);
       return match ? { label: match[1].trim(), url: match[2].trim() } : null;
-    }).filter(Boolean);
-    return variants.sort((a, b) => qualityScore(b.label + ' ' + b.url) - qualityScore(a.label + ' ' + a.url))[0]?.label || '';
+    }).filter(Boolean).sort((a, b) => explicitQualityScore(b.label) - explicitQualityScore(a.label));
+
+  const playerJsHighestLabel = file => playerJsVariants(file)[0]?.label || '';
+
+  const highestPlayerJsUrlFromMarkup = () => {
+    for (const script of document.scripts || []) {
+      const text = String(script.textContent || '');
+      if (!/new\s+Playerjs\s*\(/i.test(text)) continue;
+      const file = text.match(/\bfile\s*:\s*(["'`])([\s\S]*?)\1/i)?.[2] || '';
+      const highest = playerJsVariants(file)[0];
+      if (highest?.url) return { ...highest, url: new URL(highest.url, location.href).href };
+    }
+    return null;
   };
 
   const wrapConstructor = (Original, mutate) => {
@@ -120,7 +149,7 @@
       source.getAttribute?.('size'),
       source.getAttribute?.('res')
     ].filter(Boolean).join(' ');
-    return Math.max(height, width > 0 ? Math.round(width * 9 / 16) : 0, qualityScore(text)) * 1e9 + bitrate;
+    return Math.max(height, width > 0 ? Math.round(width * 9 / 16) : 0, explicitQualityScore(text)) * 1e9 + bitrate;
   };
 
   const forceNativeSources = video => {
@@ -141,6 +170,50 @@
       if (Number.isFinite(time) && time > 0 && time < video.duration) video.currentTime = time;
       if (shouldPlay) video.play().catch(() => {});
     }, { once: true });
+  };
+
+  // Runtime fallback for pages that create Playerjs in an isolated page
+  // world before a userscript manager can intercept the constructor. Read the
+  // same public configuration the page gives Playerjs, then replace its video
+  // source with the highest declared rendition.
+  const forcePlayerJsMarkup = () => {
+    const highest = highestPlayerJsUrlFromMarkup();
+    if (!highest?.url) return;
+    let videos = [...document.querySelectorAll('#player video, [id*="player" i] video, video')];
+    // Some Playerjs pages publish all renditions but their custom player never
+    // initializes (common after mobile/desktop redirects or blocked ads). Once
+    // the document is fully loaded, provide a native player using the highest
+    // published source instead of leaving an empty player box.
+    if (!videos.length && document.readyState === 'complete') {
+      const host = document.querySelector('#player,[id*="player" i]');
+      if (host && !host.dataset.forceHighestNativePlayer) {
+        const video = document.createElement('video');
+        video.controls = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        video.src = highest.url;
+        video.dataset.forceHighestPlayerJs = highest.url;
+        video.style.cssText = 'display:block;width:100%;height:100%;max-width:100%;background:#000';
+        host.dataset.forceHighestNativePlayer = 'true';
+        host.replaceChildren(video);
+        video.load();
+        videos = [video];
+      }
+    }
+    videos.forEach(video => {
+      if (!(video instanceof HTMLVideoElement)) return;
+      if (video.dataset.forceHighestPlayerJs === highest.url || video.currentSrc === highest.url || video.src === highest.url) return;
+      const time = Number(video.currentTime || 0);
+      const shouldPlay = !video.paused || video.autoplay;
+      video.dataset.forceHighestPlayerJs = highest.url;
+      video.src = highest.url;
+      video.querySelectorAll('source').forEach(source => source.remove());
+      video.load();
+      video.addEventListener('loadedmetadata', () => {
+        if (Number.isFinite(time) && time > 0 && time < video.duration) video.currentTime = time;
+        if (shouldPlay) video.play().catch(() => {});
+      }, { once: true });
+    });
   };
 
   const forceVideoJs = () => {
@@ -175,7 +248,7 @@
     ) || [];
     containers.forEach(container => {
       const choices = [...container.querySelectorAll('button,[role="menuitemradio"],[data-quality],li,a')]
-        .map(element => ({ element, score: qualityScore(`${element.textContent} ${element.title} ${element.dataset?.quality || ''}`) }))
+        .map(element => ({ element, score: explicitQualityScore(`${element.textContent} ${element.title} ${element.dataset?.quality || ''}`) }))
         .filter(item => item.score > 0 && !item.element.disabled)
         .sort((a, b) => b.score - a.score);
       const best = choices[0];
@@ -185,7 +258,9 @@
   };
 
   const forceEverything = (root = document) => {
+    if (root instanceof HTMLVideoElement) forceNativeSources(root);
     root.querySelectorAll?.('video').forEach(forceNativeSources);
+    forcePlayerJsMarkup();
     forceVideoJs();
     forcePlyr();
     clickHighestQuality(root);
