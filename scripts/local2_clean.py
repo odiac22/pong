@@ -194,8 +194,8 @@ class Local2Thresholds:
     anatomy_review: float = 0.60
     feet_vote: float = 0.72
     feet_review: float = 0.62
-    body_mismatch_vote: float = 0.66
-    body_mismatch_review: float = 0.58
+    body_mismatch_vote: float = 0.63
+    body_mismatch_review: float = 0.55
     body_preferred_vote: float = 0.58
     over_60_vote: float = 0.74
     over_60_strong: float = 0.97
@@ -212,7 +212,7 @@ class Local2Thresholds:
     required_clear_body_images: int = 2
     # Broaden discovery on personalized taste only. Every hard veto above is
     # evaluated independently before this score can produce an acceptance.
-    preference_accept: float = 0.48
+    preference_accept: float = 0.50
 
 
 @dataclass(frozen=True, slots=True)

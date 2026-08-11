@@ -868,7 +868,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.16</div>
+    <div class="version-number">26.17</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -18696,6 +18696,31 @@ async function startSimpCityRecall(channel = 1) {
     clearActiveSimpCityRecallDeck(`Checking latest Recall ${channel}...`);
     const recallEndpoint = location.port === '8787' ? location.origin : endpoint;
     let shared = await fetchSharedSimpCityRecall(recallEndpoint, { channel });
+    if (shared.background?.state === 'waiting_for_login') {
+      videoContainer.innerHTML = `<div class="loading-message">Finish SimpCity login here; the PC scrape will resume automatically</div>`;
+      openSimpCityLoginOverlay(recallEndpoint);
+      let connected = false;
+      for (let attempt = 0; attempt < 900; attempt++) {
+        const response = await fetch(`${recallEndpoint}/simpcity/session/status`, { cache: 'no-store' });
+        const login = await response.json();
+        if (login.authenticated || login.status === 'connected') {
+          connected = true;
+          closeSimpCityLoginOverlay();
+          break;
+        }
+        if (login.status === 'error') throw new Error(login.error || 'SimpCity login failed');
+        await sleep(650);
+      }
+      if (!connected) throw new Error('SimpCity login timed out');
+      const resume = await fetch(`${recallEndpoint}/simpcity/background/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Pong-SimpCity-Controller': '1' },
+        body: JSON.stringify({ url: shared.background.targetUrl, channel })
+      });
+      const resumed = await resume.json();
+      if (!resume.ok || resumed?.ok === false) throw new Error(resumed?.error || `SimpCity resume HTTP ${resume.status}`);
+      shared = await fetchSharedSimpCityRecall(recallEndpoint, { channel });
+    }
     // A user can press Recall during the short gap between starting the PC
     // worker and /recall/begin. Wait for the new generation instead of
     // declaring it missing or falling back to anything cached locally.

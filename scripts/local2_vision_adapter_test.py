@@ -145,7 +145,7 @@ class Local2VisionAdapterTests(unittest.TestCase):
         self.assertEqual((1, 1), (runtime.view_calls, runtime.dino_calls))
         self.assertFalse(result["taste_prefilter"]["siglip_ran"])
         self.assertTrue(result["terminal_personal_reject"])
-        self.assertEqual(0.48, result["preference_threshold"])
+        self.assertEqual(0.50, result["preference_threshold"])
 
     def test_borderline_taste_runs_grouped_siglip_then_final_threshold_rejects(self) -> None:
         grouped = FakeGroupedScorer()
@@ -160,7 +160,7 @@ class Local2VisionAdapterTests(unittest.TestCase):
         self.assertEqual(1, grouped.calls)
         self.assertEqual((1, 1), (runtime.view_calls, runtime.dino_calls))
         self.assertTrue(result["taste_prefilter"]["siglip_ran"])
-        self.assertEqual(0.48, result["preference_threshold"])
+        self.assertEqual(0.50, result["preference_threshold"])
         self.assertEqual(("reject", "personal_preference_mismatch"), (
             result["decision"], result["reason_code"]
         ))

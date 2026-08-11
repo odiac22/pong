@@ -2841,9 +2841,25 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
   if (!targetUrl) throw new Error('A valid SimpCity thread, tag, search, or forum URL is required');
   const channel = simpCityRecallChannel(rawChannel);
   const session = await loadSimpCitySession();
-  if (!session?.cookies?.length) throw new Error('SimpCity session handoff is required');
-  if (!simpCityHasAuthenticatedCookie(session.cookies)) {
-    throw new Error('SimpCity login cookie is missing. Refresh the authenticated Firefox cookie handoff');
+  if (!simpCityHasAuthenticatedCookie(session?.cookies)) {
+    resetSimpCityRecallState(simpCityRecallState(channel));
+    const previous = simpCityBackgroundRuns.get(channel);
+    previous?.controller?.abort();
+    await stopSimpCityBrowser(previous?.browser).catch(() => {});
+    const login = await startSimpCityInteractiveLogin(targetUrl);
+    const run = {
+      id: crypto.randomUUID(), channel, targetUrl, controller: new AbortController(), browser: null,
+      state: 'waiting_for_login', status: 'Open Pong and press Recall to finish SimpCity login',
+      startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: ''
+    };
+    simpCityBackgroundRuns.set(channel, run);
+    login.promise.catch(error => {
+      if (simpCityBackgroundRuns.get(channel) !== run) return;
+      run.state = 'error';
+      run.error = String(error?.message || error).slice(0, 500);
+      run.updatedAt = new Date().toISOString();
+    });
+    return { id: run.id, channel, targetUrl, state: run.state, loginRequired: true };
   }
   // A scrape-button press is a new generation. Invalidate the previous
   // channel immediately, before the hidden browser has time to call
@@ -3036,8 +3052,8 @@ async function autofillSimpCityLogin(browser) {
 }
 
 async function startSimpCityInteractiveLogin(rawThreadUrl) {
-  const targetUrl = normalizeSimpCityThreadUrl(rawThreadUrl);
-  if (!targetUrl) throw new Error('A valid SimpCity thread URL is required');
+  const targetUrl = normalizeSimpCityBackgroundUrl(rawThreadUrl) || normalizeSimpCityThreadUrl(rawThreadUrl);
+  if (!targetUrl) throw new Error('A valid SimpCity URL is required');
   if (simpCityLoginState?.promise && ['opening', 'awaiting_login'].includes(simpCityLoginState.status)) {
     return simpCityLoginState;
   }

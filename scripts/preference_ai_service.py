@@ -2543,7 +2543,7 @@ def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
                 # Flash Local2 uses the complete learned reference head as a
                 # broad ranking/admission signal while preserving every hard
                 # semantic threshold. Local2.2 keeps its calibrated defaults.
-                preference_accept=0.34 if broad_hard_safe else None,
+                preference_accept=0.36 if broad_hard_safe else None,
                 prefilter_reject=0.30 if broad_hard_safe else None,
                 conservative_ambiguity=not broad_hard_safe,
             )
