@@ -3080,7 +3080,10 @@ async function startSimpCityInteractiveLogin(rawThreadUrl) {
       state.browser = await startSimpCityBrowser({
         headless: false,
         hidden: true,
-        targetUrl,
+        // Protected threads return HTTP 403 to a logged-out browser. Always
+        // establish the encrypted PC session on the public login page first;
+        // the background worker navigates to the requested target afterward.
+        targetUrl: 'https://simpcity.cr/login/',
         cookies: []
       });
       state.status = 'awaiting_login';
