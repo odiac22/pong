@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.10.3
+// @version      1.10.4
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -29,7 +29,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.10.3';
+  const SCRIPT_VERSION = '1.10.4';
   const FORUM_CREATOR_CONCURRENCY = 2;
   const SIMPCITY_REQUEST_GAP_MS = 500;
   const SIMPCITY_RATE_LIMIT_PAUSE_MS = 60_000;
@@ -660,16 +660,20 @@
               channel
             }, 30000);
           }
-          status.textContent = `Pong ${channel}: PC running in background · ${background.id}`;
-          diagnostic('PC worker started successfully', `channel=${channel}; id=${background.id}; target=${background.targetUrl || location.href}; state=${background.state || 'running'}`);
-          void monitorPcWorker(channel, background.id, runToken);
-          return;
+          if (!background?.sourceCaptureRequired) {
+            status.textContent = `Pong ${channel}: PC running in background · ${background.id}`;
+            diagnostic('PC worker started successfully', `channel=${channel}; id=${background.id}; target=${background.targetUrl || location.href}; state=${background.state || 'running'}`);
+            void monitorPcWorker(channel, background.id, runToken);
+            return;
+          }
+          status.textContent = `Pong ${channel}: transferring authenticated pages to PC…`;
+          diagnostic('PC requested authenticated source capture', `channel=${channel}; id=${background.id}; Firefox fetches pages; PC performs downstream processing`);
         } catch (error) {
           const message = error?.message || String(error);
           status.textContent = /login|access check|403|forbidden/i.test(message)
             ? `Pong ${channel}: SimpCity PC login failed · tap Copy Log`
             : `Pong ${channel}: PC handoff failed · tap Copy Log`;
-          diagnostic('PC-only scrape stopped', `channel=${channel}; error=${message}; Android scraping disabled`);
+          diagnostic('Authenticated source capture could not start', `channel=${channel}; error=${message}`);
           return;
         }
       }

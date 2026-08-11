@@ -2846,20 +2846,13 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
     const previous = simpCityBackgroundRuns.get(channel);
     previous?.controller?.abort();
     await stopSimpCityBrowser(previous?.browser).catch(() => {});
-    const login = await startSimpCityInteractiveLogin(targetUrl);
     const run = {
       id: crypto.randomUUID(), channel, targetUrl, controller: new AbortController(), browser: null,
-      state: 'waiting_for_login', status: 'Open Pong and press Recall to finish SimpCity login',
+      state: 'awaiting_source_capture', status: 'Firefox is transferring authenticated SimpCity pages to the PC',
       startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: ''
     };
     simpCityBackgroundRuns.set(channel, run);
-    login.promise.catch(error => {
-      if (simpCityBackgroundRuns.get(channel) !== run) return;
-      run.state = 'error';
-      run.error = String(error?.message || error).slice(0, 500);
-      run.updatedAt = new Date().toISOString();
-    });
-    return { id: run.id, channel, targetUrl, state: run.state, loginRequired: true };
+    return { id: run.id, channel, targetUrl, state: run.state, sourceCaptureRequired: true };
   }
   // A scrape-button press is a new generation. Invalidate the previous
   // channel immediately, before the hidden browser has time to call
