@@ -2703,15 +2703,28 @@ async function stopSimpCityBrowser(browser) {
   await removeSimpCityTempProfile(browser.profile).catch(() => {});
 }
 
-async function startSimpCityBrowser({ headless, hidden = false, targetUrl, cookies = [], userAgent = '' }) {
+async function reserveSimpCityDebugPort() {
+  const probe = http.createServer();
+  await new Promise((resolve, reject) => {
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', resolve);
+  });
+  const port = Number(probe.address()?.port || 0);
+  await new Promise(resolve => probe.close(resolve));
+  if (!port) throw new Error('Could not reserve a private SimpCity browser port');
+  return port;
+}
+
+async function startSimpCityBrowser({ headless, hidden = false, allowLoopback = false, targetUrl, cookies = [], userAgent = '' }) {
   try {
     await fs.access(SIMPCITY_CHROME_PATH);
   } catch (_) {
     throw new Error(`Google Chrome was not found at ${SIMPCITY_CHROME_PATH}`);
   }
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'pong-simpcity-'));
+  const debugPort = await reserveSimpCityDebugPort();
   const args = [
-    '--remote-debugging-port=0',
+    `--remote-debugging-port=${debugPort}`,
     `--user-data-dir=${profile}`,
     '--no-first-run',
     '--no-default-browser-check',
@@ -2726,6 +2739,7 @@ async function startSimpCityBrowser({ headless, hidden = false, targetUrl, cooki
     '--media-cache-size=1',
     '--window-size=1100,800'
   ];
+  if (allowLoopback) args.push('--disable-web-security', '--allow-running-insecure-content');
   if (hidden) args.push('--window-position=-32000,-32000');
   if (userAgent) args.push(`--user-agent=${userAgent}`);
   if (headless) {
@@ -2743,14 +2757,16 @@ async function startSimpCityBrowser({ headless, hidden = false, targetUrl, cooki
   child.once('error', error => { spawnError = error; });
   let cdp = null;
   try {
-    const port = await simpCityWaitFor(async () => {
+    await simpCityWaitFor(async () => {
       if (spawnError) throw spawnError;
       if (child.exitCode !== null) throw new Error('Chrome exited before login opened');
-      const raw = await fs.readFile(path.join(profile, 'DevToolsActivePort'), 'utf8');
-      return Number(raw.split(/\r?\n/)[0]) || 0;
+      const response = await fetch(`http://127.0.0.1:${debugPort}/json/version`, {
+        signal: AbortSignal.timeout(1000)
+      }).catch(() => null);
+      return response?.ok === true;
     }, 15_000, 'SimpCity Chrome DevTools');
     const debuggerUrl = await simpCityWaitFor(async () => {
-      const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+      const response = await fetch(`http://127.0.0.1:${debugPort}/json/list`, {
         signal: AbortSignal.timeout(2000)
       });
       if (!response.ok) return '';
@@ -2809,7 +2825,8 @@ async function startSimpCityBrowser({ headless, hidden = false, targetUrl, cooki
       profile,
       cdp,
       userAgent: effectiveUserAgent,
-      headless: headless === true
+      headless: headless === true,
+      debugPort
     };
   } catch (error) {
     cdp?.close();
@@ -2846,13 +2863,20 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
     const previous = simpCityBackgroundRuns.get(channel);
     previous?.controller?.abort();
     await stopSimpCityBrowser(previous?.browser).catch(() => {});
+    const login = await startSimpCityInteractiveLogin(targetUrl);
     const run = {
       id: crypto.randomUUID(), channel, targetUrl, controller: new AbortController(), browser: null,
-      state: 'awaiting_source_capture', status: 'Firefox is transferring authenticated SimpCity pages to the PC',
+      state: 'waiting_for_login', status: 'Open Pong and press Recall to finish the one-time PC login',
       startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: ''
     };
     simpCityBackgroundRuns.set(channel, run);
-    return { id: run.id, channel, targetUrl, state: run.state, sourceCaptureRequired: true };
+    login.promise.catch(error => {
+      if (simpCityBackgroundRuns.get(channel) !== run) return;
+      run.state = 'error';
+      run.error = String(error?.message || error).slice(0, 500);
+      run.updatedAt = new Date().toISOString();
+    });
+    return { id: run.id, channel, targetUrl, state: run.state, loginRequired: true };
   }
   // A scrape-button press is a new generation. Invalidate the previous
   // channel immediately, before the hidden browser has time to call
@@ -2870,8 +2894,9 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
   let browser = null;
   try {
     browser = await startSimpCityBrowser({
-      headless: true,
+      headless: false,
       hidden: true,
+      allowLoopback: true,
       targetUrl,
       cookies: session.cookies,
       userAgent: session.userAgent
@@ -4341,7 +4366,8 @@ async function runSimpCityImportJob(job) {
     let browser = null;
     try {
       browser = await startSimpCityBrowser({
-        headless: true,
+        headless: false,
+        hidden: true,
         targetUrl: job.threadUrl,
         cookies: session.cookies,
         userAgent: session.userAgent
@@ -4404,7 +4430,8 @@ async function runSimpCityImportJob(job) {
       session = await getSimpCitySessionOrLogin(job.threadUrl);
       if (job.cancelled) return;
       browser = await startSimpCityBrowser({
-        headless: true,
+        headless: false,
+        hidden: true,
         targetUrl: job.threadUrl,
         cookies: session.cookies,
         userAgent: session.userAgent
@@ -10653,7 +10680,10 @@ const local2FlashEngine = new Local2FlashEngine({
   pageConcurrency: 1,
   candidateConcurrency: 32,
   maximumPendingCandidates: 64,
-  maximumPages: 120
+  // A low-yield random batch previously ended permanently after 120 pages,
+  // which could strand the player at three artists. Keep scanning the full
+  // configured source range until the accepted target is filled or stopped.
+  maximumPages: 3500
 });
 
 const local22TurboEngine = new Local2FlashEngine({
@@ -10668,7 +10698,7 @@ const local22TurboEngine = new Local2FlashEngine({
   pageConcurrency: 1,
   candidateConcurrency: 40,
   maximumPendingCandidates: 80,
-  maximumPages: 120,
+  maximumPages: 3500,
   variant: 'local22-turbo'
 });
 
