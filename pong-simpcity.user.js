@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.10.4
+// @version      1.10.5
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -29,7 +29,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.10.4';
+  const SCRIPT_VERSION = '1.10.5';
   const FORUM_CREATOR_CONCURRENCY = 2;
   const SIMPCITY_REQUEST_GAP_MS = 500;
   const SIMPCITY_RATE_LIMIT_PAUSE_MS = 60_000;
@@ -799,7 +799,8 @@
         const creatorWaiters = [];
         let creatorCursor = 0;
         let nextCreatorToSubmit = 0;
-        let listingDiscoveryComplete = !listingIsForum;
+        const listingNeedsCreatorScan = listingIsForum || listingIsSearch;
+        let listingDiscoveryComplete = !listingNeedsCreatorScan;
         const wakeCreatorWorkers = () => {
           while (creatorWaiters.length) creatorWaiters.shift()();
         };
@@ -829,14 +830,11 @@
               attachments: []
             });
           }
-          if (listingIsForum && posts.length) wakeCreatorWorkers();
-          // Search-result thread titles/slugs are already strong creator
-          // evidence. Stream them immediately without crawling every page of
-          // every result thread before Pong can begin resolving profiles.
-          if (posts.length && !listingIsForum) queuePosts(posts, MAX_LINKED_THREAD_DEPTH);
+          if (listingNeedsCreatorScan && posts.length) wakeCreatorWorkers();
+          if (posts.length && !listingNeedsCreatorScan) queuePosts(posts, MAX_LINKED_THREAD_DEPTH);
         };
         queueListingThreads(initialThreads);
-        const creatorWorkers = listingIsForum
+        const creatorWorkers = listingNeedsCreatorScan
           ? Array.from({ length: FORUM_CREATOR_CONCURRENCY }, async () => {
             while (isCurrentRun()) {
               if (creatorCursor >= listingContentThreads.length) {
@@ -905,7 +903,7 @@
             }
           }
         }
-        if (listingIsForum) {
+        if (listingNeedsCreatorScan) {
           listingDiscoveryComplete = true;
           wakeCreatorWorkers();
           await Promise.all(creatorWorkers);
