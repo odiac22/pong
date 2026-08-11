@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.10.1
+// @version      1.10.2
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -15,6 +15,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
 // @grant        GM_cookie
+// @grant        GM.cookie
 // @grant        GM_setClipboard
 // @connect      127.0.0.1
 // @connect      192.168.1.124
@@ -28,7 +29,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.10.1';
+  const SCRIPT_VERSION = '1.10.2';
   const FORUM_CREATOR_CONCURRENCY = 2;
   const SIMPCITY_REQUEST_GAP_MS = 500;
   const SIMPCITY_RATE_LIMIT_PAUSE_MS = 60_000;
@@ -220,6 +221,9 @@
     } catch (_) {}
     return [];
   };
+  const hasSimpCityLoginCookie = cookies => (cookies || []).some(cookie =>
+    /(?:^|_)(?:user|member)$/i.test(String(cookie?.name || ''))
+  );
   const canonicalSimpCityThreadUrl = raw => {
     try {
       const url = new URL(raw, location.href);
@@ -624,7 +628,8 @@
       // if PC startup fails; only the injected PC worker runs the scraper.
       if (!globalThis.PONG_PC_BACKGROUND_CONTEXT) {
         const cookies = await readSimpCitySessionCookies();
-        diagnostic('Android cookie inspection complete', `count=${cookies.length}; names=${cookies.map(cookie => cookie?.name || '?').join(',') || 'none'}; values omitted`);
+        const hasLoginCookie = hasSimpCityLoginCookie(cookies);
+        diagnostic('Android cookie inspection complete', `count=${cookies.length}; loginCookie=${hasLoginCookie}; names=${cookies.map(cookie => cookie?.name || '?').join(',') || 'none'}; values omitted`);
         try {
           status.textContent = `Pong ${channel}: starting PC scrape…`;
           let background;
@@ -640,6 +645,9 @@
           } catch (firstError) {
             diagnostic('Stored-session PC start failed', firstError?.message || String(firstError));
             if (!cookies.length) throw firstError;
+            if (/login cookie is missing/i.test(firstError?.message || '') && !hasLoginCookie) {
+              throw new Error('Firefox did not expose the HttpOnly SimpCity login cookie. Enable Tampermonkey HttpOnly cookie access, then retry');
+            }
             status.textContent = `Pong ${channel}: refreshing PC session…`;
             diagnostic('Sending Android cookies to PC', `count=${cookies.length}; values omitted`);
             await sendToPong('/simpcity/session/handoff', {
