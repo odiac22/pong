@@ -2842,6 +2842,9 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
   const channel = simpCityRecallChannel(rawChannel);
   const session = await loadSimpCitySession();
   if (!session?.cookies?.length) throw new Error('SimpCity session handoff is required');
+  if (!simpCityHasAuthenticatedCookie(session.cookies)) {
+    throw new Error('SimpCity login cookie is missing. Log in to SimpCity, then press Pong Scrape again');
+  }
   // A scrape-button press is a new generation. Invalidate the previous
   // channel immediately, before the hidden browser has time to call
   // /recall/begin, so Pong can never retrieve yesterday's payload.
@@ -10848,7 +10851,20 @@ const server = http.createServer(async (req, res) => {
       // Android Tampermonkey may intentionally hide HttpOnly login cookies.
       // Its DDoS-Guard cookies are still useful: the PC can open the same
       // public page and keep scraping after Firefox is minimized or closed.
-      const session = await saveSimpCitySession(payload?.cookies, payload?.userAgent, {
+      // Android often cannot expose Firefox's HttpOnly login cookie. Merge its
+      // freshly rotated DDoS/CSRF cookies into the encrypted PC session instead
+      // of replacing (and silently destroying) the authenticated cookie.
+      const existing = await loadSimpCitySession();
+      const mergedCookies = new Map();
+      for (const rawCookie of [
+        ...(Array.isArray(existing?.cookies) ? existing.cookies : []),
+        ...(Array.isArray(payload?.cookies) ? payload.cookies : [])
+      ]) {
+        const cookie = compactSimpCityCookie(rawCookie);
+        if (!cookie) continue;
+        mergedCookies.set(`${cookie.domain}|${cookie.path}|${cookie.name}`, cookie);
+      }
+      const session = await saveSimpCitySession([...mergedCookies.values()], payload?.userAgent || existing?.userAgent, {
         requireAuthenticated: false
       });
       json(res, 200, {

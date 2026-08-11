@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.9.9
+// @version      1.10.0
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -75,6 +75,12 @@
     return true;
   };
 
+  const terminalPongServerError = error => {
+    if (error?.status === 409) return true;
+    if (!error?.serverResponse) return false;
+    return ![408, 429, 502, 503, 504].includes(Number(error.status || 0));
+  };
+
   const sendToPong = async (pathname, payload, timeout = 90000) => {
     let lastError = '';
     diagnostic('API request started', `POST ${pathname}; timeout=${timeout}ms; endpoints=${endpoints.join(', ')}`);
@@ -101,11 +107,13 @@
             onload: response => {
               let data = {};
               try { data = JSON.parse(response.responseText || '{}'); } catch (_) {}
-              diagnostic('Tampermonkey response', `${endpoint}${pathname}; HTTP ${response.status}; ok=${data.ok !== false}`);
-              if (response.status >= 200 && response.status < 300 && data.ok !== false) resolve(data);
+              const successful = response.status >= 200 && response.status < 300 && data.ok !== false;
+              diagnostic('Tampermonkey response', `${endpoint}${pathname}; HTTP ${response.status}; ok=${successful}`);
+              if (successful) resolve(data);
               else {
                 const error = new Error(data.error || `HTTP ${response.status}`);
                 error.status = response.status;
+                error.serverResponse = Boolean(data.error);
                 reject(error);
               }
             },
@@ -120,7 +128,7 @@
           });
         });
       } catch (error) {
-        if (error?.status === 409) throw error;
+        if (terminalPongServerError(error)) throw error;
         lastError = error?.message || String(error);
         diagnostic('Tampermonkey attempt failed', `${endpoint}${pathname}; ${lastError}`);
       }
@@ -138,14 +146,13 @@
         const data = await response.json().catch(() => ({}));
         diagnostic('Browser fetch response', `${endpoint}${pathname}; HTTP ${response.status}; ok=${data.ok !== false}`);
         if (response.ok && data.ok !== false) return data;
-        if (response.status === 409) {
-          const error = new Error(data.error || 'This scrape was superseded');
-          error.status = 409;
-          throw error;
-        }
-        lastError = data.error || `HTTP ${response.status}`;
+        const responseError = new Error(data.error || `HTTP ${response.status}`);
+        responseError.status = response.status;
+        responseError.serverResponse = Boolean(data.error);
+        if (terminalPongServerError(responseError)) throw responseError;
+        lastError = responseError.message;
       } catch (error) {
-        if (error?.status === 409) throw error;
+        if (terminalPongServerError(error)) throw error;
         lastError = `${lastError}; fetch ${error?.message || error}`;
         diagnostic('Browser fetch failed', `${endpoint}${pathname}; ${error?.message || error}`);
       }
@@ -650,7 +657,9 @@
           return;
         } catch (error) {
           const message = error?.message || String(error);
-          status.textContent = `Pong ${channel}: PC handoff failed · tap Copy Log`;
+          status.textContent = /login cookie|login|access check|403|forbidden/i.test(message)
+            ? `Pong ${channel}: SimpCity login/access failed · tap Copy Log`
+            : `Pong ${channel}: PC handoff failed · tap Copy Log`;
           diagnostic('PC-only scrape stopped', `channel=${channel}; error=${message}; Firefox fallback disabled`);
           return;
         }
