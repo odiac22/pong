@@ -658,17 +658,11 @@
           return;
         } catch (error) {
           const message = error?.message || String(error);
-          const canUseFirefoxSession = /login cookie is missing|access check/i.test(message);
-          if (canUseFirefoxSession) {
-            status.textContent = `Pong ${channel}: using Firefox login session…`;
-            diagnostic('PC login handoff unavailable; continuing in Firefox', `channel=${channel}; ${message}`);
-          } else {
-            status.textContent = /login|403|forbidden/i.test(message)
-              ? `Pong ${channel}: SimpCity login/access failed · tap Copy Log`
-              : `Pong ${channel}: PC handoff failed · tap Copy Log`;
-            diagnostic('PC-only scrape stopped', `channel=${channel}; error=${message}; Firefox fallback disabled`);
-            return;
-          }
+          status.textContent = /login|access check|403|forbidden/i.test(message)
+            ? `Pong ${channel}: SimpCity PC login failed · tap Copy Log`
+            : `Pong ${channel}: PC handoff failed · tap Copy Log`;
+          diagnostic('PC-only scrape stopped', `channel=${channel}; error=${message}; Android scraping disabled`);
+          return;
         }
       }
       let listingHtml = '';

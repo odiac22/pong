@@ -2840,10 +2840,12 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
   const targetUrl = normalizeSimpCityBackgroundUrl(rawUrl);
   if (!targetUrl) throw new Error('A valid SimpCity thread, tag, search, or forum URL is required');
   const channel = simpCityRecallChannel(rawChannel);
-  const session = await loadSimpCitySession();
+  let session = await loadSimpCitySession();
   if (!session?.cookies?.length) throw new Error('SimpCity session handoff is required');
   if (!simpCityHasAuthenticatedCookie(session.cookies)) {
-    throw new Error('SimpCity login cookie is missing. Log in to SimpCity, then press Pong Scrape again');
+    session = await refreshSimpCitySessionHeadlessly(session).catch(error => {
+      throw new Error(`SimpCity PC login refresh failed: ${error?.message || error}`);
+    });
   }
   // A scrape-button press is a new generation. Invalidate the previous
   // channel immediately, before the hidden browser has time to call
@@ -3033,6 +3035,42 @@ async function autofillSimpCityLogin(browser) {
     return { filled: true, needsVerification, submitted: false };
   })()`);
   return { configured: true, ...(result || {}) };
+}
+
+async function refreshSimpCitySessionHeadlessly(session) {
+  const credentials = await loadSimpCityCredentials();
+  if (!credentials) throw new Error('encrypted SimpCity credentials are not configured');
+  let browser = null;
+  try {
+    browser = await startSimpCityBrowser({
+      headless: true,
+      hidden: true,
+      targetUrl: 'https://simpcity.cr/login/',
+      cookies: session?.cookies || [],
+      userAgent: session?.userAgent || SIMPCITY_USER_AGENT
+    });
+    let auth = await simpCityBrowserAuthState(browser).catch(() => null);
+    if (auth?.authenticated) return saveSimpCitySession(auth.cookies, browser.userAgent);
+    if (auth?.blocked) throw new Error('SimpCity blocked the temporary PC login page');
+    const filled = await autofillSimpCityLogin(browser);
+    if (!filled?.filled) throw new Error('SimpCity login form was not available');
+    if (filled?.needsVerification) throw new Error('SimpCity requires a new CAPTCHA verification');
+    const submitted = await browser.cdp.evaluate(`(() => {
+      const form = document.querySelector('form[action*="/login"]');
+      const button = form?.querySelector('button[type="submit"],input[type="submit"]');
+      if (button) { button.click(); return true; }
+      if (form?.requestSubmit) { form.requestSubmit(); return true; }
+      return false;
+    })()`);
+    if (!submitted) throw new Error('SimpCity login button was not available');
+    auth = await simpCityWaitFor(async () => {
+      const state = await simpCityBrowserAuthState(browser).catch(() => null);
+      return state?.authenticated ? state : null;
+    }, 25_000, 'SimpCity headless login', 500);
+    return saveSimpCitySession(auth.cookies, browser.userAgent);
+  } finally {
+    await stopSimpCityBrowser(browser).catch(() => {});
+  }
 }
 
 async function startSimpCityInteractiveLogin(rawThreadUrl) {
