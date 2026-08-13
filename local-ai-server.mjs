@@ -3813,7 +3813,14 @@ async function downloadTikTokVideoFile(record, partPath, controller) {
   await new Promise((resolve, reject) => {
     const child = spawn(python, [
       '-m', 'yt_dlp', '--no-warnings', '--impersonate', 'chrome',
-      '--no-playlist', '-f', 'best[ext=mp4]/best', '-o', '-', record.sourceUrl
+      '--no-playlist', '-f',
+      // TikTok frequently ranks a smaller H.265/HEVC rendition above its
+      // H.264 rendition. Android Chrome then reports the card as playable but
+      // renders only black frames. Prefer the highest H.264 MP4; the later
+      // cache validator still rejects audio-only or genuinely incompatible
+      // fallbacks instead of presenting them as video.
+      'best[vcodec^=h264][ext=mp4]/best[vcodec^=avc1][ext=mp4]/download/best[ext=mp4]/best',
+      '-o', '-', record.sourceUrl
     ], {
       cwd: process.cwd(),
       windowsHide: true,
