@@ -551,6 +551,11 @@
       display: flex; justify-content: space-between; gap: 10px;
       font-size: 10px; font-weight: 750; margin-bottom: 3px;
     }
+    #simpcity-recall-channel-label {
+      display: none; align-self: center; margin-left: -5px; margin-right: auto;
+      color: rgba(191,219,254,0.68); font-size: 6px; font-weight: 850;
+      line-height: 1; letter-spacing: 0.15px; white-space: nowrap;
+    }
     #simpcity-disconnect {
       display: none; margin-left: auto; padding: 2px 6px; border-radius: 5px;
       border: 1px solid rgba(248,113,113,0.42); background: rgba(127,29,29,0.34);
@@ -868,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.22</div>
+    <div class="version-number">26.23</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -8862,6 +8867,7 @@ function ensureEromeProgressEl() {
   el.innerHTML = `
     <div class="erome-progress-title">
       <span id="erome-progress-title">Scraping Erome</span>
+      <span id="simpcity-recall-channel-label" aria-live="polite"></span>
       <button id="simpcity-disconnect" type="button">Disconnect</button>
       <span id="erome-progress-percent">0%</span>
     </div>
@@ -8873,6 +8879,15 @@ function ensureEromeProgressEl() {
   document.body.appendChild(el);
   document.getElementById('simpcity-disconnect')?.addEventListener('click', disconnectSimpCity);
   return el;
+}
+
+function setSimpCityRecallChannelLabel(channel = 0) {
+  ensureEromeProgressEl();
+  const label = document.getElementById('simpcity-recall-channel-label');
+  if (!label) return;
+  const normalized = Number(channel) === 2 ? 2 : Number(channel) === 1 ? 1 : 0;
+  label.textContent = normalized ? `using Recall ${normalized}` : '';
+  label.style.display = normalized ? 'inline-block' : 'none';
 }
 
 function updateEromeProgress({ title, detail, completed, total, videos, force }) {
@@ -18669,6 +18684,7 @@ async function startSimpCityRecall(channel = 1) {
   window.PongActiveSimpCityRecallChannel = channel;
   document.documentElement.dataset.pongSimpCityActive = 'true';
   document.documentElement.dataset.pongRecallChannel = String(channel);
+  setSimpCityRecallChannelLabel(channel);
   const startToken = ++simpCityRecallStartToken;
   if (simpCityRecallStarting) {
     // A second press explicitly replaces the active Recall import/player queue.
