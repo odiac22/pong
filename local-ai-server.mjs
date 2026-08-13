@@ -5105,6 +5105,10 @@ async function probePlayableMediaUrl(rawUrl, signal = null, timeoutMs = 8000) {
       if (!latin.includes('ftyp')) return remember(false);
       if (/hvc1|hev1/.test(latin) && !/avc1/.test(latin)) return remember(false);
       fastStart = latin.includes('moov');
+      // Some hosts label M4A/audio-only objects as video/mp4. When the moov
+      // metadata is already in this probe window, require an actual video
+      // track instead of treating duration + MIME as playable video.
+      if (fastStart && !mp4MetadataHasVideoTrack(signature)) return remember(false);
       container = 'mp4';
     } else if (webmLike) {
       if (!(signature[0] === 0x1a && signature[1] === 0x45 && signature[2] === 0xdf && signature[3] === 0xa3)) return remember(false);
@@ -5117,6 +5121,48 @@ async function probePlayableMediaUrl(rawUrl, signal = null, timeoutMs = 8000) {
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', abort);
+  }
+}
+
+function mp4MetadataHasVideoTrack(buffer) {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) return false;
+  const marker = Buffer.from('hdlr');
+  let offset = -1;
+  while ((offset = buffer.indexOf(marker, offset + 1)) >= 0) {
+    if (offset + 16 <= buffer.length && buffer.subarray(offset + 12, offset + 16).toString('latin1') === 'vide') {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function validateCompletedVideoCacheFile(filePath, record) {
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const stat = await handle.stat();
+    const windowBytes = Math.min(8 * 1024 * 1024, Number(stat.size || 0));
+    if (!windowBytes) throw new Error('cached media file is empty');
+    const head = Buffer.allocUnsafe(windowBytes);
+    const headRead = await handle.read(head, 0, windowBytes, 0);
+    let metadata = head.subarray(0, headRead.bytesRead);
+    if (stat.size > windowBytes) {
+      const tail = Buffer.allocUnsafe(windowBytes);
+      const tailRead = await handle.read(tail, 0, windowBytes, stat.size - windowBytes);
+      metadata = Buffer.concat([metadata, tail.subarray(0, tailRead.bytesRead)]);
+    }
+    const latin = metadata.toString('latin1');
+    const mp4Like = latin.includes('ftyp') || /video\/(?:mp4|quicktime)/i.test(String(record?.contentType || '')) ||
+      /\.(?:mp4|m4v|mov)(?:$|\?)/i.test(String(record?.sourceUrl || ''));
+    if (!mp4Like) return true;
+    if (!mp4MetadataHasVideoTrack(metadata)) {
+      throw new Error('cached media is audio-only and has no video track');
+    }
+    if (/(?:hvc1|hev1)/.test(latin) && !/avc1|avc3/.test(latin)) {
+      throw new Error('cached media uses unsupported HEVC video');
+    }
+    return true;
+  } finally {
+    await handle.close().catch(() => {});
   }
 }
 
@@ -5984,6 +6030,7 @@ async function downloadVideoFileCacheRecord(record, generation) {
     if (!bytes || (Number(record.totalBytes || 0) > 0 && bytes !== Number(record.totalBytes))) {
       throw new Error('video cache download did not complete');
     }
+    await validateCompletedVideoCacheFile(partPath, record);
     await evictVideoFileCacheIfNeeded(bytes);
     let renameError = null;
     for (let attempt = 0; attempt < 8; attempt++) {
