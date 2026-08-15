@@ -350,6 +350,12 @@ function isAllowedBrowserOrigin(rawOrigin, remoteAddress = '') {
   // browsers must present the deployed Pong origin, preventing arbitrary LAN
   // clients from silently poisoning learning data or resetting workloads.
   if (!rawOrigin) return isLoopbackAddress(remoteAddress);
+  // Android standalone/webview copies of Pong can serialize their sandboxed
+  // document origin as the literal string "null". Permit that case only when
+  // the caller itself is on the private LAN; public callers remain rejected.
+  if (String(rawOrigin).trim().toLowerCase() === 'null') {
+    return isPrivateLanAddress(remoteAddress) || isLoopbackAddress(remoteAddress);
+  }
   try {
     const origin = new URL(rawOrigin);
     if (origin.origin === 'https://odiac22.github.io') return true;
