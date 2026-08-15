@@ -95,7 +95,7 @@ const SIMPCITY_RECALL_AI_BATCH_LIMIT = Math.max(
   0,
   Math.min(20, Number(process.env.PONG_SIMPCITY_RECALL_AI_BATCH_LIMIT || 6))
 );
-const SIMPCITY_EARLY_ARTIST_VIDEO_COUNT = 40;
+const SIMPCITY_EARLY_ARTIST_VIDEO_COUNT = 20;
 const VIDEO_FILE_CACHE_DIR = path.resolve(
   process.env.PONG_VIDEO_FILE_CACHE_DIR ||
   (process.platform === 'win32' && existsSync('F:\\')
@@ -2248,14 +2248,29 @@ let simpCityLoginState = null;
 const simpCityBackgroundRuns = new Map();
 let simpCitySourceNextRequestAt = 0;
 let simpCitySourcePauseUntil = 0;
+let simpCitySourceAdaptiveGapMs = SIMPCITY_BROWSER_REQUEST_GAP_MS;
+let simpCitySourceLastRateLimitAt = 0;
+let simpCitySourceLastChannel = 0;
 
-function reserveSimpCitySourceRequest() {
+function reserveSimpCitySourceRequest(rawChannel = 1) {
   const now = Date.now();
+  const channel = simpCityRecallChannel(rawChannel);
+  if (simpCitySourceLastRateLimitAt && now - simpCitySourceLastRateLimitAt > 120_000) {
+    simpCitySourceAdaptiveGapMs = Math.max(
+      SIMPCITY_BROWSER_REQUEST_GAP_MS,
+      Math.floor(simpCitySourceAdaptiveGapMs * 0.9)
+    );
+  }
   const slot = Math.max(now, simpCitySourceNextRequestAt, simpCitySourcePauseUntil);
-  simpCitySourceNextRequestAt = slot + SIMPCITY_BROWSER_REQUEST_GAP_MS + Math.floor(Math.random() * 200);
+  const bothChannelsRunning = [1, 2].every(value => simpCityBackgroundRuns.get(value)?.state === 'running');
+  const fairnessDelay = bothChannelsRunning && simpCitySourceLastChannel === channel
+    ? Math.floor(simpCitySourceAdaptiveGapMs * 0.5)
+    : 0;
+  simpCitySourceNextRequestAt = slot + simpCitySourceAdaptiveGapMs + fairnessDelay + Math.floor(Math.random() * 200);
+  simpCitySourceLastChannel = channel;
   return {
     waitMs: Math.max(0, slot - now),
-    gapMs: SIMPCITY_BROWSER_REQUEST_GAP_MS,
+    gapMs: simpCitySourceAdaptiveGapMs,
     pausedUntil: simpCitySourcePauseUntil > now
       ? new Date(simpCitySourcePauseUntil).toISOString()
       : ''
@@ -2265,7 +2280,12 @@ function reserveSimpCitySourceRequest() {
 function pauseSimpCitySourceRequests(rawDurationMs = 60_000) {
   const durationMs = Math.max(10_000, Math.min(5 * 60_000, Number(rawDurationMs || 60_000)));
   simpCitySourcePauseUntil = Math.max(simpCitySourcePauseUntil, Date.now() + durationMs);
-  return { durationMs, pausedUntil: new Date(simpCitySourcePauseUntil).toISOString() };
+  simpCitySourceLastRateLimitAt = Date.now();
+  simpCitySourceAdaptiveGapMs = Math.min(5000, Math.max(
+    simpCitySourceAdaptiveGapMs + 250,
+    Math.ceil(simpCitySourceAdaptiveGapMs * 1.5)
+  ));
+  return { durationMs, gapMs: simpCitySourceAdaptiveGapMs, pausedUntil: new Date(simpCitySourcePauseUntil).toISOString() };
 }
 const simpCityImportJobs = new Map();
 const simpCityRecallChannels = new Map([
@@ -2913,6 +2933,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
     const userscript = await fs.readFile(path.join(process.cwd(), 'pong-simpcity.user.js'), 'utf8');
     const shim = `(() => {
       globalThis.PONG_PC_BACKGROUND_CONTEXT = true;
+      globalThis.PONG_SIMPCITY_CHANNEL = ${channel};
       globalThis.PONG_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787'];
       const request = options => {
         const timer = setTimeout(() => options.ontimeout?.(), Number(options.timeout || 90000));
@@ -10860,7 +10881,9 @@ const server = http.createServer(async (req, res) => {
           requestUrl.pathname === '/simpcity/background/start' ||
           requestUrl.pathname === '/simpcity/session/handoff' ||
           requestUrl.pathname === '/simpcity/source/permit' ||
-          requestUrl.pathname === '/simpcity/source/rate-limit'
+          requestUrl.pathname === '/simpcity/source/rate-limit' ||
+          requestUrl.pathname === '/simpcity/discovery/backlog' ||
+          requestUrl.pathname === '/simpcity/discovery/permit'
         )
       ) ||
       (req.method === 'GET' && requestUrl.pathname === '/simpcity/background/status')
@@ -10977,7 +11000,8 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/source/permit') {
-      json(res, 200, { ok: true, ...reserveSimpCitySourceRequest() });
+      const payload = JSON.parse(await readBody(req) || '{}');
+      json(res, 200, { ok: true, ...reserveSimpCitySourceRequest(payload?.channel) });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/source/rate-limit') {
@@ -10986,6 +11010,26 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         ...pauseSimpCitySourceRequests(payload?.durationMs)
       });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/discovery/backlog') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const channel = simpCityRecallChannel(payload?.channel);
+      const state = simpCityRecallState(channel);
+      if (state.pending) {
+        state.pending.playerUnseenProfiles = Math.max(0, Math.min(100, Number(payload?.unseen || 0)));
+        state.pending.playerBacklogAt = new Date().toISOString();
+      }
+      json(res, 200, { ok: true, channel });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/discovery/permit') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const channel = simpCityRecallChannel(payload?.channel);
+      const state = simpCityRecallState(channel);
+      const fresh = Date.now() - Date.parse(state.pending?.playerBacklogAt || 0) < 5000;
+      const unseen = fresh ? Number(state.pending?.playerUnseenProfiles || 0) : 0;
+      json(res, 200, { ok: true, channel, paused: unseen >= 5, unseen, waitMs: unseen >= 5 ? 1000 : 0 });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/simpcity/background/status') {
@@ -11193,7 +11237,7 @@ const server = http.createServer(async (req, res) => {
       state.pending.batchesReceived++;
       state.pending.deterministicCreators += newCreators.length;
       state.pending.updatedAt = new Date().toISOString();
-      const deterministicPairTask = scheduleSimpCityCreatorPairs(
+      scheduleSimpCityCreatorPairs(
         state,
         channel,
         suppliedId,
@@ -11203,11 +11247,8 @@ const server = http.createServer(async (req, res) => {
           : simpCityProfilePairCreators(deterministic.creators),
         { includeAllPosts: payload?.orderedPair === true }
       );
-      // Ordered forum scans deliberately wait for this creator's complete
-      // TikTok/artist pair before the userscript submits the following row.
-      if (payload?.orderedPair === true && deterministicPairTask) {
-        await deterministicPairTask;
-      }
+      // Creator media resolution continues independently. Completed creators
+      // can publish at 20 videos while later host/Balbums/TikTok work continues.
 
       if (
         deterministic.unresolvedPosts.length &&

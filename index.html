@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.24</div>
+    <div class="version-number">26.25</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -18425,6 +18425,10 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       while (loadGeneration === bunkrLoadGeneration) {
         const shared = await fetchSharedSimpCityRecall(endpoint, { channel: recallChannel });
         if (!shared.reachable) throw new Error(`Recall ${recallChannel} lost contact with the PC server`);
+        void postJson('/simpcity/discovery/backlog', {
+          channel: recallChannel,
+          unseen: unviewedAlbumCount() + reservedAlbumSlots
+        }).catch(() => {});
         if (shared.recall) {
           discoveredCreators = Math.max(discoveredCreators, shared.recall.names.length);
           enqueueAlbums(shared.recall.albums);

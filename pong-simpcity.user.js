@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.10.5
+// @version      1.10.6
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -29,7 +29,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.10.5';
+  const SCRIPT_VERSION = '1.10.6';
   const FORUM_CREATOR_CONCURRENCY = 2;
   const SIMPCITY_REQUEST_GAP_MS = 500;
   const SIMPCITY_RATE_LIMIT_PAUSE_MS = 60_000;
@@ -52,7 +52,9 @@
   const paceSimpCityRequest = async () => {
     if (globalThis.PONG_PC_BACKGROUND_CONTEXT) {
       try {
-        const permit = await sendToPong('/simpcity/source/permit', {}, 10000);
+        const permit = await sendToPong('/simpcity/source/permit', {
+          channel: Number(globalThis.PONG_SIMPCITY_CHANNEL || 1)
+        }, 10000);
         if (Number(permit?.waitMs) > 0) await delay(Number(permit.waitMs));
         return;
       } catch (error) {
@@ -63,6 +65,15 @@
     const slot = Math.max(now, simpCityNextRequestAt, simpCityRateLimitUntil);
     simpCityNextRequestAt = slot + SIMPCITY_REQUEST_GAP_MS + Math.floor(Math.random() * 200);
     if (slot > now) await delay(slot - now);
+  };
+  const waitForDiscoveryCapacity = async channel => {
+    if (!globalThis.PONG_PC_BACKGROUND_CONTEXT) return;
+    while (true) {
+      const permit = await sendToPong('/simpcity/discovery/permit', { channel }, 10000);
+      if (!permit?.paused) return;
+      diagnostic('Discovery paused', `${permit.unseen} unseen profiles ready in Pong ${channel}`);
+      await delay(Math.max(500, Number(permit.waitMs || 1000)));
+    }
   };
   const noteSimpCityRateLimit = error => {
     const message = error?.message || String(error || '');
@@ -867,6 +878,7 @@
           const pendingListingPages = listingContinuationUrls(listingHtml, location.href, listingRootUrl)
             .filter(pageUrl => !seenListingPages.has(listingPageIdentity(pageUrl)));
           while (pendingListingPages.length && isCurrentRun()) {
+            await waitForDiscoveryCapacity(channel);
             const batchUrls = pendingListingPages.splice(0, PAGE_CONCURRENCY);
             batchUrls.forEach(pageUrl => seenListingPages.add(listingPageIdentity(pageUrl)));
             const pages = await Promise.all(batchUrls.map(async pageUrl => {
@@ -889,6 +901,7 @@
           }
         } else {
           for (let start = 2; start <= pageTotal; start += PAGE_CONCURRENCY) {
+            await waitForDiscoveryCapacity(channel);
             const pageNumbers = Array.from({ length: PAGE_CONCURRENCY }, (_, index) => start + index)
               .filter(page => page <= pageTotal);
             const pages = await Promise.all(pageNumbers.map(async page => {
