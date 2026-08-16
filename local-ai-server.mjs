@@ -173,7 +173,7 @@ const GATEWAY_MEDIA_ALLOWED_HOSTS = [
   'cdn.cr', 'pixeldrain.com', 'gofile.io',
   'cyberdrop.cr', 'cyberdrop.me', 'cyberdrop.to', 'cyberfile.me',
   'saint.to', 'saint2.su', 'saint2.cr', 'turbo.cr', 'turbocdn.st',
-  'tiktok.com'
+  'tiktok.com', 'fileditchfiles.st', 'fileditch.com'
 ];
 const GATEWAY_WARM_CONNECTIONS = Math.max(1, Math.min(4, Number(process.env.PONG_GATEWAY_WARM_CONNECTIONS || 2)));
 const GATEWAY_KEEP_WARM_MS = Math.max(10000, Number(process.env.PONG_GATEWAY_KEEP_WARM_MS || 20000));
