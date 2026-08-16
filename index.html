@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.26</div>
+    <div class="version-number">26.27</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -18323,10 +18323,13 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     loadedAlbums++;
     videoCount += imported.urls.length;
     scheduleEromeCheckpointAutosave();
-    if (location.protocol !== 'https:' && Array.isArray(group.videos)) {
+    if (Array.isArray(group.videos) && group.videos.length) {
       postJson('/video-cache/warm', {
         playbackProfile: 'bunkr',
-        items: group.videos.slice(0, 1).map(url => ({
+        // The server scheduler is bounded and buffer-aware: submit the entire
+        // bundle here, then let it keep the visible video in the foreground
+        // while filling every later card in the background.
+        items: group.videos.map(url => ({
           url,
           artistKey: group.sourceUrl || group.url || ''
         })),
