@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.28</div>
+    <div class="version-number">26.29</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -4393,7 +4393,11 @@ function transferForegroundVideoPriority(video) {
   if (nextWrapper) {
     random40PromoteWrapperToServerCache(nextWrapper, { forceActive: false });
     restoreDeckVideoNetwork(nextWrapper, nextVideo);
-    if (isPongServerCachedPlaybackActive()) random40WarmServerVideoCacheForActiveWrapper(nextWrapper);
+    if (isPongServerCachedPlaybackActive()) {
+      // An artist transition is real foreground demand. Do not wait for the
+      // five-second empty-card watchdog before promoting the visible file.
+      random40WarmServerVideoCacheForActiveWrapper(nextWrapper, { urgent: true });
+    }
   }
   nextVideo.preload = 'auto';
 
@@ -11524,9 +11528,11 @@ function random40WarmServerVideoCacheForActiveWrapper(
   const event = eventIndex >= 0 ? pasteEvents[eventIndex] : null;
   const bounds = getPasteEventVideoBounds(event);
   if (bounds) {
-    const reserve = pongLocal2FastPlaybackActive()
-      ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
-      : RANDOM40_PRELOAD_CURRENT_RESERVE;
+    const reserve = !isRandom40PlaybackActive() && isPongServerCachedPlaybackActive()
+      ? Math.max(1, bounds.end - bounds.start)
+      : pongLocal2FastPlaybackActive()
+        ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
+        : RANDOM40_PRELOAD_CURRENT_RESERVE;
     for (let index = bounds.start; index < Math.min(bounds.end, bounds.start + reserve); index++) {
       if (
         allVideoUrls[index] &&
@@ -18337,12 +18343,12 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     if (Array.isArray(group.videos) && group.videos.length) {
       postJson('/video-cache/warm', {
         playbackProfile: 'bunkr',
-        // The server scheduler is bounded and buffer-aware: submit the entire
-        // bundle here, then let it keep the visible video in the foreground
-        // while filling every later card in the background.
-        items: group.videos.map(url => ({
+        // Future artists need one prepared entry card. Their complete bundle
+        // is submitted only when Paperclip makes that artist active, avoiding
+        // hundreds of speculative downloads ahead of the viewer.
+        items: group.videos.slice(0, 1).map(url => ({
           url,
-          artistKey: group.sourceUrl || group.url || ''
+          artistKey: group.creatorKey || group.sourceUrl || group.url || ''
         })),
         urgent: false,
         authoritative: false

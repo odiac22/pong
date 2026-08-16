@@ -11119,7 +11119,30 @@ const server = http.createServer(async (req, res) => {
         album.collecting = false;
         album.collectionStoppedAt = new Date().toISOString();
       }
-      json(res, 200, { ok: true, channel, creatorKey, stopped: true });
+      // A creator that is four Paperclips behind must also release cache
+      // bandwidth. Previously this stopped only scraping; its queued and
+      // partial video downloads continued competing with the visible artist.
+      let cacheDownloadsStopped = 0;
+      for (const record of videoFileCacheRecords.values()) {
+        const recordCreatorKey = String(record.artistKey || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+        if (!recordCreatorKey || recordCreatorKey !== creatorKey) continue;
+        if (record.status === 'queued') {
+          videoFileCacheQueue = videoFileCacheQueue.filter(candidate => candidate !== record);
+          record.status = 'idle';
+          record.retryNotBefore = 0;
+          cacheDownloadsStopped++;
+        } else if (record.status === 'downloading' && Number(record.activeReaders || 0) === 0) {
+          record.deferWhenIdle = true;
+          record.controller?.abort();
+          cacheDownloadsStopped++;
+        }
+      }
+      if (cacheDownloadsStopped) {
+        normalizeVideoFileCachePriorities();
+        rebalanceVideoFileCacheDownloads();
+        pumpVideoFileCache();
+      }
+      json(res, 200, { ok: true, channel, creatorKey, stopped: true, cacheDownloadsStopped });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/simpcity/recall') {
