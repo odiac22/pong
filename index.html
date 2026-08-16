@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.33</div>
+    <div class="version-number">26.34</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -9085,67 +9085,87 @@ async function writeEromeCheckpoint(record) {
 
 async function restoreSavedEromeMenuFromDb() {
   let restored = 0;
+  const saved = loadSavedEromeArtists();
   try {
     const db = await openSavedEromeDb();
     const tx = db.transaction(SAVED_EROME_DB_STORE, 'readonly');
     const records = await idbRequestToPromise(tx.objectStore(SAVED_EROME_DB_STORE).getAll());
     db.close();
-    const saved = loadSavedEromeArtists();
     (Array.isArray(records) ? records : []).forEach(record => {
       const item = summarizeSavedEromeRecord(record);
       if (!item.url || saved[item.url]) return;
       saved[item.url] = item;
       restored++;
     });
-    // Recover Erome profiles that were saved through the normal video/artist
-    // buttons too. This committed backup survives app-origin and browser-cache
-    // changes that can hide the local Saved Erome menu.
-    try {
-      const response = await fetch('pong-data/saved-links-v2.json', { cache: 'no-store' });
-      const payload = response.ok ? await response.json() : {};
-      const recovered = new Map();
-      Object.values(payload?.savedVideos || {}).forEach(video => {
-        if (String(video?.source || '').toLowerCase() !== 'erome') return;
-        const artistUrl = normalizeEromeProfileSaveUrl(video?.artistUrl || '');
-        const videoUrl = String(video?.url || '').trim();
-        if (!artistUrl || !videoUrl) return;
-        if (!recovered.has(artistUrl)) recovered.set(artistUrl, new Map());
-        const albumUrl = normalizeEromeLaunchUrl(video?.postUrl || '') || artistUrl;
-        const albums = recovered.get(artistUrl);
-        if (!albums.has(albumUrl)) albums.set(albumUrl, []);
-        if (!albums.get(albumUrl).includes(videoUrl)) albums.get(albumUrl).push(videoUrl);
-      });
-      for (const [artistUrl, albums] of recovered) {
-        if (saved[artistUrl]) continue;
-        const videoGroups = [...albums].map(([albumUrl, videos]) => ({
-          url: albumUrl,
-          title: getEromeTargetLabel(albumUrl),
-          sourceUrl: artistUrl,
-          sourceTitle: getEromeTargetLabel(artistUrl),
-          source: 'erome',
-          videos
-        }));
-        const record = {
-          url: artistUrl,
-          label: artistUrl,
-          albums: [...albums.keys()].map(url => ({ url, title: getEromeTargetLabel(url), source: 'erome' })),
-          videoGroups,
-          savedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        };
-        saved[artistUrl] = summarizeSavedEromeRecord(record);
-        await putSavedEromeFullRecord(record);
-        restored++;
-      }
-    } catch (error) {
-      console.warn('Saved Erome committed-backup recovery failed:', error);
-    }
-    if (restored) saveSavedEromeArtists(saved);
-    return restored;
   } catch (error) {
-    console.warn('Saved Erome menu recovery failed:', error);
-    return 0;
+    // The committed backup below must still restore the menu when Android has
+    // cleared or disabled IndexedDB for this app origin.
+    console.warn('Saved Erome IndexedDB recovery unavailable:', error);
   }
+
+  try {
+    let response = await fetch('pong-data/saved-links-v2.json', { cache: 'no-store' });
+    if (!response.ok) response = await fetch('pong-data/saved-links.json', { cache: 'no-store' });
+    const payload = response.ok ? await response.json() : {};
+    const recovered = new Map();
+    const ensureProfile = rawUrl => {
+      const artistUrl = normalizeEromeProfileSaveUrl(rawUrl || '');
+      if (!artistUrl) return null;
+      try {
+        if (new URL(artistUrl).hostname.replace(/^www\./, '').toLowerCase() !== 'erome.com') return null;
+      } catch (_) { return null; }
+      if (!recovered.has(artistUrl)) recovered.set(artistUrl, new Map());
+      return { artistUrl, albums: recovered.get(artistUrl) };
+    };
+
+    Object.values(payload?.savedArtists || {}).forEach(artist => {
+      const profile = ensureProfile(artist?.artistUrl || artist?.url);
+      if (!profile) return;
+      const albumUrl = normalizeEromeLaunchUrl(artist?.postUrl || '');
+      if (albumUrl && isEromeAlbumLaunchUrl(albumUrl) && !profile.albums.has(albumUrl)) {
+        profile.albums.set(albumUrl, []);
+      }
+    });
+    Object.values(payload?.savedVideos || {}).forEach(video => {
+      const sourceIsErome = String(video?.source || '').toLowerCase() === 'erome' ||
+        /(?:^|\.)erome\.com$/i.test((() => { try { return new URL(video?.artistUrl || '').hostname; } catch (_) { return ''; } })());
+      if (!sourceIsErome) return;
+      const profile = ensureProfile(video?.artistUrl);
+      const videoUrl = String(video?.url || '').trim();
+      if (!profile || !videoUrl) return;
+      const albumUrl = normalizeEromeLaunchUrl(video?.postUrl || '') || profile.artistUrl;
+      if (!profile.albums.has(albumUrl)) profile.albums.set(albumUrl, []);
+      if (!profile.albums.get(albumUrl).includes(videoUrl)) profile.albums.get(albumUrl).push(videoUrl);
+    });
+
+    for (const [artistUrl, albums] of recovered) {
+      if (saved[artistUrl]) continue;
+      const videoGroups = [...albums].filter(([, videos]) => videos.length).map(([albumUrl, videos]) => ({
+        url: albumUrl,
+        title: getEromeTargetLabel(albumUrl),
+        sourceUrl: artistUrl,
+        sourceTitle: getEromeTargetLabel(artistUrl),
+        source: 'erome',
+        videos
+      }));
+      const now = new Date().toISOString();
+      const record = {
+        url: artistUrl,
+        label: artistUrl,
+        albums: [...albums.keys()].map(url => ({ url, title: getEromeTargetLabel(url), source: 'erome' })),
+        videoGroups,
+        savedAt: now,
+        updatedAt: now
+      };
+      saved[artistUrl] = summarizeSavedEromeRecord(record);
+      if (videoGroups.length) await putSavedEromeFullRecord(record);
+      restored++;
+    }
+  } catch (error) {
+    console.warn('Saved Erome committed-backup recovery failed:', error);
+  }
+  if (restored) saveSavedEromeArtists(saved);
+  return restored;
 }
 
 function updateEromeCheckpointButton() {
