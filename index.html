@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.27</div>
+    <div class="version-number">26.28</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -2724,6 +2724,17 @@ function isRandom40PlaybackActive() {
   return meta?.source === 'random40' || !!meta?.random40Mode;
 }
 
+function isPongServerCachedPlaybackActive() {
+  if (isRandom40PlaybackActive()) return true;
+  if (window.PongActiveSimpCityRecallChannel || document.documentElement.dataset.pongSimpCityActive === 'true') return true;
+  if (!Array.isArray(pasteEvents) || !pasteEvents.length) return false;
+  const visibleEventIndex = typeof syncCurrentPasteIndexFromVisibleVideo === 'function'
+    ? syncCurrentPasteIndexFromVisibleVideo()
+    : -1;
+  const eventIndex = visibleEventIndex >= 0 ? visibleEventIndex : currentPasteIndex;
+  return isBunkrPasteEvent(pasteEvents[eventIndex]);
+}
+
 function getPaperclipCounterText() {
   const pending = typeof getPendingPasteBundleCount === 'function' ? getPendingPasteBundleCount() : 0;
   if (pending) return `${pending}p`;
@@ -4382,7 +4393,7 @@ function transferForegroundVideoPriority(video) {
   if (nextWrapper) {
     random40PromoteWrapperToServerCache(nextWrapper, { forceActive: false });
     restoreDeckVideoNetwork(nextWrapper, nextVideo);
-    if (isRandom40PlaybackActive()) random40WarmServerVideoCacheForActiveWrapper(nextWrapper);
+    if (isPongServerCachedPlaybackActive()) random40WarmServerVideoCacheForActiveWrapper(nextWrapper);
   }
   nextVideo.preload = 'auto';
 
@@ -11497,7 +11508,7 @@ function random40WarmServerVideoCacheForActiveWrapper(
   wrapper = document.querySelector('.video-wrapper.deck-active'),
   { urgent = false } = {}
 ) {
-  if (!wrapper || !isRandom40PlaybackActive()) return;
+  if (!wrapper || !isPongServerCachedPlaybackActive()) return;
   const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
   if (!originalUrl) return;
   const video = wrapper.querySelector('video');
@@ -11565,7 +11576,7 @@ window.addEventListener('pageshow', () => {
     const video = wrapper.querySelector('video');
     if (video?.readyState >= 1) restoreVideoPlaybackPosition(video, wrapper, { force: true });
   });
-  if (!isRandom40PlaybackActive()) return;
+  if (!isPongServerCachedPlaybackActive()) return;
   random40StartServerVideoCacheTimers();
   scheduleRandom40PreloadPool(0);
 });
@@ -11579,7 +11590,7 @@ document.addEventListener('visibilitychange', () => {
     const video = wrapper.querySelector('video');
     if (video?.readyState >= 1) restoreVideoPlaybackPosition(video, wrapper, { force: true });
   });
-  if (!isRandom40PlaybackActive()) return;
+  if (!isPongServerCachedPlaybackActive()) return;
   random40StartServerVideoCacheTimers();
   scheduleRandom40PreloadPool(0);
 });
