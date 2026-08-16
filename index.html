@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.32</div>
+    <div class="version-number">26.33</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -8497,8 +8497,9 @@ function normalizeEromeLaunchUrl(rawValue) {
 
   if (!raw) return '';
 
-  const embedded = raw.match(/(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*|(?:www\.)?simpcity\.cr\/threads\/[^\s"'<>]*)/i);
-  const candidate = embedded ? embedded[0] : raw;
+  const completeEromeUrl = /^https?:\/\/(?:www\.)?erome\.com\/[^\s"'<>]*$/i.test(raw);
+  const embedded = raw.match(/(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:search\?[^\s"'<>]+|a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*|(?:www\.)?simpcity\.cr\/threads\/[^\s"'<>]*)/i);
+  const candidate = completeEromeUrl ? raw : embedded ? embedded[0] : raw;
   const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)
     ? candidate
     : /^[\w.-]+$/i.test(candidate)
@@ -8543,7 +8544,7 @@ function collectEromeLaunchUrls(rawValue, allowBareNames = true) {
     found.push(url);
   }
 
-  const linkRe = /(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*|(?:www\.)?simpcity\.cr\/threads\/[^\s"'<>]*)/gi;
+  const linkRe = /(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:search\?[^\s"'<>]+|a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*|(?:www\.)?simpcity\.cr\/threads\/[^\s"'<>]*)/gi;
   let match;
 
   while ((match = linkRe.exec(raw)) !== null) {
@@ -8597,6 +8598,17 @@ function isEromeAlbumLaunchUrl(rawUrl) {
     const url = new URL(rawUrl, window.location.href);
     return /^\/a\/[\w-]+\/?$/i.test(url.pathname);
   } catch (e) {
+    return false;
+  }
+}
+
+function isEromeSearchLaunchUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl, window.location.href);
+    return url.hostname.replace(/^www\./, '').toLowerCase() === 'erome.com' &&
+      /^\/search\/?$/i.test(url.pathname) &&
+      Boolean(url.searchParams.get('q'));
+  } catch (_) {
     return false;
   }
 }
@@ -17721,6 +17733,7 @@ const EROME_BACKGROUND_PLAYING_LOW_BUFFER_DELAY_MS = 1100;
 const EROME_BACKGROUND_READY_BUFFER_DELAY_MS = 3600;
 const EROME_PROFILE_PAGE_CONCURRENCY = 4;
 const EROME_BACKGROUND_PROFILE_CONCURRENCY = 1;
+const EROME_SEARCH_MAX_PAGES = 250;
 const EROME_FETCH_TIMEOUT_MS = 8000;
 const EROME_FINAL_RETRY_TIMEOUT_MS = 16000;
 
@@ -19146,6 +19159,8 @@ async function loadEromeAsCards() {
   const seenAlbumUrls = new Set();
   const seenGroupUrls = new Set();
   const seenVideoUrls = new Set();
+  const completedAlbumUrls = new Set(resumeCompletedAlbumUrls);
+  const failedAlbums = [];
   let completedPages = completedDiscoveryPageKeys.size;
   let totalPages = targets.reduce((sum, target) => (
     sum + Math.max(1, Number(scrapeProgress.targetPageCounts[normalizeEromeLaunchUrl(target)] || 1))
@@ -19365,39 +19380,102 @@ async function loadEromeAsCards() {
         updateDiscoveryProgress(i, target, 1, pageCount);
       }
 
-      const remainingPages = Array.from(
-        { length: Math.max(0, pageCount - 1) },
-        (_, pageIndex) => pageIndex + 2
-      ).filter(page => !completedDiscoveryPageKeys.has(discoveryPageKey(target, page)));
-
-      await eromePool(remainingPages, EROME_PROFILE_PAGE_CONCURRENCY, async page => {
-        const pageUrl = eromeProfilePageUrl(target, page);
-
-        updateDiscoveryProgress(i, target, page, pageCount, 'loading');
-
-        try {
-          const pageData = await fetchEromeAlbumListData(base, pageUrl, {
-            attempts: 1,
-            timeoutMs: EROME_FETCH_TIMEOUT_MS,
-            fast: true
-          });
-
-          (pageData.albums || []).forEach(album => addAlbumToQueue(album, target, sourceTitle));
-          markDiscoveryPageCompleted(target, page);
-          updateDiscoveryProgress(i, target, page, pageCount);
-          return true;
-        } catch (pageErr) {
-          discoveryRetryQueue.push({
-            targetIndex: i,
-            target,
-            page,
-            pageCount,
-            sourceTitle
-          });
-          console.warn('Erome album discovery page failed:', pageUrl, pageErr);
-          return false;
+      if (isEromeSearchLaunchUrl(target)) {
+        // Erome search uses progressive pagination: page N often reveals only
+        // page N+1. Follow that moving edge until the last advertised page.
+        // A fixed page count from page 1 otherwise stops after two pages.
+        let searchAlbumCursor = albumsBeforeTarget;
+        const publishDiscoveredSearchAlbums = async () => {
+          const readyAlbums = albumQueue.slice(searchAlbumCursor);
+          searchAlbumCursor = albumQueue.length;
+          if (!readyAlbums.length) return;
+          rememberEromeArtistRecordsFromAlbums(readyAlbums);
+          await eromePool(
+            readyAlbums,
+            Math.min(EROME_ALBUM_SCRAPE_CONCURRENCY, readyAlbums.length),
+            async album => {
+              if (completedAlbumUrls.has(album.url)) return;
+              const ok = await scrapeEromeAlbumOnce(album, 'search background');
+              if (!ok) failedAlbums.push(album);
+            }
+          );
+        };
+        await publishDiscoveredSearchAlbums();
+        let page = 2;
+        while (page <= pageCount && page <= EROME_SEARCH_MAX_PAGES) {
+          const pageKey = discoveryPageKey(target, page);
+          if (completedDiscoveryPageKeys.has(pageKey) && page < pageCount) {
+            page++;
+            continue;
+          }
+          const pageUrl = eromeProfilePageUrl(target, page);
+          updateDiscoveryProgress(i, target, page, pageCount, 'loading search');
+          try {
+            const pageData = await fetchEromeAlbumListData(base, pageUrl, {
+              attempts: 1,
+              timeoutMs: EROME_FETCH_TIMEOUT_MS,
+              fast: true
+            });
+            const pageAlbums = Array.isArray(pageData?.albums) ? pageData.albums : [];
+            pageAlbums.forEach(album => addAlbumToQueue(album, target, sourceTitle));
+            const revealedPageCount = Math.min(
+              EROME_SEARCH_MAX_PAGES,
+              Math.max(pageCount, Number(pageData?.profilePageCount || page))
+            );
+            if (revealedPageCount > pageCount) {
+              pageCount = revealedPageCount;
+              rememberTargetPageCount(target, pageCount);
+            }
+            markDiscoveryPageCompleted(target, page);
+            updateDiscoveryProgress(i, target, page, pageCount);
+            await publishDiscoveredSearchAlbums();
+          } catch (pageErr) {
+            discoveryRetryQueue.push({
+              targetIndex: i,
+              target,
+              page,
+              pageCount,
+              sourceTitle
+            });
+            console.warn('Erome search discovery page failed:', pageUrl, pageErr);
+          }
+          page++;
         }
-      });
+      } else {
+        const remainingPages = Array.from(
+          { length: Math.max(0, pageCount - 1) },
+          (_, pageIndex) => pageIndex + 2
+        ).filter(page => !completedDiscoveryPageKeys.has(discoveryPageKey(target, page)));
+
+        await eromePool(remainingPages, EROME_PROFILE_PAGE_CONCURRENCY, async page => {
+          const pageUrl = eromeProfilePageUrl(target, page);
+
+          updateDiscoveryProgress(i, target, page, pageCount, 'loading');
+
+          try {
+            const pageData = await fetchEromeAlbumListData(base, pageUrl, {
+              attempts: 1,
+              timeoutMs: EROME_FETCH_TIMEOUT_MS,
+              fast: true
+            });
+
+            (pageData.albums || []).forEach(album => addAlbumToQueue(album, target, sourceTitle));
+            markDiscoveryPageCompleted(target, page);
+            updateDiscoveryProgress(i, target, page, pageCount);
+            return true;
+          } catch (pageErr) {
+            discoveryRetryQueue.push({
+              targetIndex: i,
+              target,
+              page,
+              pageCount,
+              sourceTitle
+            });
+            console.warn('Erome album discovery page failed:', pageUrl, pageErr);
+            return false;
+          }
+        });
+      }
 
       const targetHasSavedAlbums = albumQueue.some(album => (
         normalizeEromeLaunchUrl(album?.sourceUrl || '') === normalizeEromeLaunchUrl(target)
@@ -19414,9 +19492,6 @@ async function loadEromeAsCards() {
       console.warn('Erome scrape failed:', target, err);
     }
   }
-
-  const completedAlbumUrls = new Set(resumeCompletedAlbumUrls);
-  const failedAlbums = [];
 
   async function scrapeEromeAlbumOnce(album, note) {
     const collectionEvent = {
@@ -19465,10 +19540,11 @@ async function loadEromeAsCards() {
     showSortingIndicator(`Found ${albumQueue.length} Erome albums. Scraping videos...`);
     updateAlbumProgress(albumQueue[0], 'starting');
 
+    const pendingAlbums = albumQueue.filter(album => !completedAlbumUrls.has(album.url));
     let nextAlbumIndex = 0;
 
-    while (nextAlbumIndex < albumQueue.length && !eromeCardsStarted) {
-      const batch = albumQueue.slice(nextAlbumIndex, nextAlbumIndex + EROME_INITIAL_ALBUM_BATCH_SIZE);
+    while (nextAlbumIndex < pendingAlbums.length && !eromeCardsStarted) {
+      const batch = pendingAlbums.slice(nextAlbumIndex, nextAlbumIndex + EROME_INITIAL_ALBUM_BATCH_SIZE);
 
       nextAlbumIndex += batch.length;
 
@@ -19479,9 +19555,9 @@ async function loadEromeAsCards() {
       });
     }
 
-    const backgroundAlbums = albumQueue
+    const backgroundAlbums = pendingAlbums
       .slice(nextAlbumIndex)
-      .filter(album => !resumeCompletedAlbumUrls.has(normalizeEromeLaunchUrl(album?.url || '')));
+      .filter(album => !completedAlbumUrls.has(normalizeEromeLaunchUrl(album?.url || '')));
 
     if (backgroundAlbums.length) {
       updateEromeProgress({
