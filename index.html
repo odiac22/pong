@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.29</div>
+    <div class="version-number">26.30</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -6207,7 +6207,7 @@ function createVideoElements() {
   setupVisibilityObserver();
   warmCurrentBatchVideos();
   startVisibleBatchAutoRetry();
-  if (document.querySelector('.video-wrapper[data-random40-card="true"]')) {
+  if (isPongServerCachedPlaybackActive()) {
     [0, 500, 1500].forEach(delay => setTimeout(random40StartServerVideoCacheTimers, delay));
   }
 }
@@ -11244,7 +11244,7 @@ function random40ForegroundPlaybackUrl(rawUrl) {
 }
 
 function random40KeepReadyCacheCardAttached(wrapper) {
-  if (!wrapper || !isRandom40PlaybackActive()) return false;
+  if (!wrapper || !isPongServerCachedPlaybackActive()) return false;
   const activeWrapper = document.querySelector('.video-wrapper.deck-active');
   const activeLocalIndex = Number(activeWrapper?.dataset?.index);
   const candidateLocalIndex = Number(wrapper.dataset?.index);
@@ -11320,7 +11320,10 @@ function random40ApplyServerVideoCacheRecords(records, endpoint = random40Server
 function random40StartServerVideoCacheTimers() {
   const endpoint = random40ServerVideoCacheEndpoint();
   if (!endpoint) return;
-  document.querySelectorAll('.video-wrapper[data-random40-card="true"]').forEach(wrapper => {
+  // Recall/Balbums cards use the same PC cache but are not Random40 cards.
+  // Apply completed cache files to every rendered card in a cached-playback
+  // session so later artists do not remain stuck on their origin/TikTok URL.
+  document.querySelectorAll('.video-wrapper').forEach(wrapper => {
     const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
     const streamUrl = random40ForegroundPlaybackUrl(originalUrl);
     if (!streamUrl) return;
