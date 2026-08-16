@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.10.6
+// @version      1.10.7
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -29,7 +29,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.10.6';
+  const SCRIPT_VERSION = '1.10.7';
   const FORUM_CREATOR_CONCURRENCY = 2;
   const SIMPCITY_REQUEST_GAP_MS = 500;
   const SIMPCITY_RATE_LIMIT_PAUSE_MS = 60_000;
@@ -629,8 +629,9 @@
     const isCurrentRun = () => activeRunTokens.get(channel) === runToken;
     diagnostic('Scrape button pressed', `channel=${channel}; runToken=${runToken}`);
     try {
-      const rootThreadUrl = canonicalSimpCityThreadUrl(location.href);
-      const listingRootUrl = canonicalSimpCityListingUrl(location.href);
+      const requestedSourceUrl = String(globalThis.PONG_SIMPCITY_SOURCE_URL || location.href);
+      const rootThreadUrl = canonicalSimpCityThreadUrl(requestedSourceUrl);
+      const listingRootUrl = canonicalSimpCityListingUrl(requestedSourceUrl);
       diagnostic('Source URL classified', `thread=${rootThreadUrl || 'none'}; listing=${listingRootUrl || 'none'}`);
       if (!rootThreadUrl && !listingRootUrl) throw new Error('Open a SimpCity thread, tag, or search page');
       // A one-time browser-cookie handoff lets the PC run this exact userscript
@@ -697,7 +698,8 @@
       }
       const first = new URL(rootThreadUrl || initialThreads[0]);
       const scrapeId = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      await sendToPong('/simpcity/recall/begin', { id: scrapeId, threadUrl: first.href, channel }, 12000);
+      const recallSourceUrl = listingRootUrl || rootThreadUrl || first.href;
+      await sendToPong('/simpcity/recall/begin', { id: scrapeId, threadUrl: recallSourceUrl, channel }, 12000);
       const names = new Map();
       const albums = new Map();
       const aiSlots = Array.from({ length: AI_CONCURRENCY }, () => Promise.resolve());
@@ -705,6 +707,17 @@
       const linkedThreadQueue = [];
       const seenThreads = new Set(listingRootUrl ? [] : [first.href]);
       let slotIndex = 0, pagesFetched = 0, totalPages = 0, postsSent = 0, listingPagesFetched = 0;
+      const saveResumeCursor = async cursorUrl => {
+        if (!listingRootUrl || !cursorUrl) return;
+        try {
+          await sendToPong('/simpcity/resume/progress', {
+            sourceUrl: listingRootUrl,
+            cursorUrl
+          }, 12000);
+        } catch (error) {
+          diagnostic('Resume cursor save failed', error?.message || String(error));
+        }
+      };
       const update = () => {
         if (isCurrentRun()) status.textContent = `Pong ${channel}: ${pagesFetched}/${Math.max(totalPages, pagesFetched)} pages · ${postsSent} posts · ${names.size} creators · ${albums.size} albums · ${seenThreads.size} threads`;
       };
@@ -810,12 +823,24 @@
         const creatorWaiters = [];
         let creatorCursor = 0;
         let nextCreatorToSubmit = 0;
+        let resumeCheckpointChain = Promise.resolve();
         const listingNeedsCreatorScan = listingIsForum || listingIsSearch;
         let listingDiscoveryComplete = !listingNeedsCreatorScan;
         const wakeCreatorWorkers = () => {
           while (creatorWaiters.length) creatorWaiters.shift()();
         };
         const waitForCreatorWork = () => new Promise(resolve => creatorWaiters.push(resolve));
+        const checkpointListingCursor = (cursorUrl, requiredCreatorCount) => {
+          resumeCheckpointChain = resumeCheckpointChain.then(async () => {
+            while (
+              listingNeedsCreatorScan &&
+              isCurrentRun() &&
+              nextCreatorToSubmit < requiredCreatorCount
+            ) await delay(250);
+            if (isCurrentRun()) await saveResumeCursor(cursorUrl);
+          });
+          return resumeCheckpointChain;
+        };
         const flushCompletedCreators = () => {
           while (completedThreads[nextCreatorToSubmit]) {
             const posts = completedThreads[nextCreatorToSubmit];
@@ -845,6 +870,7 @@
           if (posts.length && !listingNeedsCreatorScan) queuePosts(posts, MAX_LINKED_THREAD_DEPTH);
         };
         queueListingThreads(initialThreads);
+        void checkpointListingCursor(location.href, listingContentThreads.length);
         const creatorWorkers = listingNeedsCreatorScan
           ? Array.from({ length: FORUM_CREATOR_CONCURRENCY }, async () => {
             while (isCurrentRun()) {
@@ -894,13 +920,18 @@
                 pendingListingPages.push(continuation);
               }
             }
+            if (pages.length) void checkpointListingCursor(
+              pages[pages.length - 1].url,
+              listingContentThreads.length
+            );
             pendingListingPages.sort((left, right) => listingPageNumber(left) - listingPageNumber(right));
             if (isCurrentRun()) {
               status.textContent = `Pong ${channel}: ${listingPagesFetched} search pages · ${seenThreads.size} threads · following older posts`;
             }
           }
         } else {
-          for (let start = 2; start <= pageTotal; start += PAGE_CONCURRENCY) {
+          const resumeListingPage = listingPageNumber(location.href);
+          for (let start = Math.max(2, resumeListingPage + 1); start <= pageTotal; start += PAGE_CONCURRENCY) {
             await waitForDiscoveryCapacity(channel);
             const pageNumbers = Array.from({ length: PAGE_CONCURRENCY }, (_, index) => start + index)
               .filter(page => page <= pageTotal);
@@ -911,6 +942,10 @@
             }));
             listingPagesFetched += pages.length;
             pages.forEach(page => queueListingThreads(listingThreadUrls(page.html, page.url)));
+            if (pages.length) void checkpointListingCursor(
+              pages[pages.length - 1].url,
+              listingContentThreads.length
+            );
             if (isCurrentRun()) {
               status.textContent = `Pong ${channel}: ${Math.min(start + pageNumbers.length - 1, pageTotal)}/${pageTotal} search pages · ${seenThreads.size} threads`;
             }
@@ -921,6 +956,7 @@
           wakeCreatorWorkers();
           await Promise.all(creatorWorkers);
           flushCompletedCreators();
+          await resumeCheckpointChain;
         }
       } else if (rootIsSinglePageThread) {
         totalPages = 1;

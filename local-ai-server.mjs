@@ -64,6 +64,7 @@ const PC_SAVED_LINKS_PATH = path.join(LOCAL_AI_DIR, 'shared-saved-links-v1.json'
 const PONG_PLAYED_HISTORY_PATH = path.join(LOCAL_AI_DIR, 'played-history-v1.json');
 const SIMPCITY_SESSION_PATH = path.join(LOCAL_AI_DIR, 'simpcity-session-v1.dpapi');
 const SIMPCITY_CREDENTIALS_PATH = path.join(LOCAL_AI_DIR, 'simpcity-credentials-v1.dpapi');
+const SIMPCITY_RESUME_PATH = path.join(LOCAL_AI_DIR, 'simpcity-resume-v1.dpapi');
 const SIMPCITY_CHROME_PATH = process.env.PONG_SIMPCITY_CHROME || path.join(
   process.env.PROGRAMFILES || 'C:\\Program Files',
   'Google',
@@ -2323,6 +2324,9 @@ let pongPlayedHistoryLoadPromise = null;
 let pongPlayedHistoryWrite = Promise.resolve();
 const pongPlayedHistoryHashes = new Set();
 const pongPlayedHistoryScopes = new Map();
+let simpCityResumeLoaded = false;
+let simpCityResumeWrite = Promise.resolve();
+const simpCityResumeCursors = new Map();
 
 function pongOpaqueHash(value) {
   const input = String(value || '');
@@ -2367,6 +2371,65 @@ function pongPlayedHistoryScopeHash(sourceUrl) {
     'pong-played-scope-v1',
     pongPlayedCanonicalValue(sourceUrl)
   ].join('\u0000'));
+}
+
+async function loadSimpCityResumeCursors() {
+  if (simpCityResumeLoaded) return simpCityResumeCursors;
+  try {
+    const protectedValue = (await fs.readFile(SIMPCITY_RESUME_PATH, 'utf8')).trim();
+    const plaintext = await runSimpCityDpapi('unprotect', protectedValue);
+    const payload = JSON.parse(Buffer.from(plaintext, 'base64').toString('utf8'));
+    for (const entry of Array.isArray(payload?.entries) ? payload.entries : []) {
+      const scopeHash = String(entry?.scopeHash || '').toLowerCase();
+      const sourceUrl = normalizeSimpCityBackgroundUrl(entry?.sourceUrl);
+      const cursorUrl = normalizeSimpCityBackgroundUrl(entry?.cursorUrl);
+      if (/^[a-f0-9]{32}$/.test(scopeHash) && sourceUrl && cursorUrl) {
+        simpCityResumeCursors.set(scopeHash, { sourceUrl, cursorUrl, updatedAt: String(entry?.updatedAt || '') });
+      }
+    }
+  } catch (_) {}
+  simpCityResumeLoaded = true;
+  return simpCityResumeCursors;
+}
+
+function saveSimpCityResumeCursors() {
+  simpCityResumeWrite = simpCityResumeWrite.then(async () => {
+    await fs.mkdir(LOCAL_AI_DIR, { recursive: true });
+    const payload = {
+      schema: 'pong-simpcity-resume-v1',
+      entries: [...simpCityResumeCursors.entries()].slice(-2000).map(([scopeHash, entry]) => ({
+        scopeHash,
+        sourceUrl: entry.sourceUrl,
+        cursorUrl: entry.cursorUrl,
+        updatedAt: entry.updatedAt
+      }))
+    };
+    const plaintext = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
+    const protectedValue = await runSimpCityDpapi('protect', plaintext);
+    const temporaryPath = `${SIMPCITY_RESUME_PATH}.tmp`;
+    await fs.writeFile(temporaryPath, `${protectedValue}\n`, 'utf8');
+    await fs.rename(temporaryPath, SIMPCITY_RESUME_PATH);
+  }).catch(() => {});
+  return simpCityResumeWrite;
+}
+
+async function simpCityResumeEntry(sourceUrl) {
+  const normalized = normalizeSimpCityBackgroundUrl(sourceUrl);
+  if (!normalized) return null;
+  await loadSimpCityResumeCursors();
+  return simpCityResumeCursors.get(pongPlayedHistoryScopeHash(normalized)) || null;
+}
+
+async function setSimpCityResumeCursor(sourceUrl, cursorUrl) {
+  const source = normalizeSimpCityBackgroundUrl(sourceUrl);
+  const cursor = normalizeSimpCityBackgroundUrl(cursorUrl);
+  if (!source || !cursor) throw new Error('Valid SimpCity source and cursor URLs are required');
+  await loadSimpCityResumeCursors();
+  const scopeHash = pongPlayedHistoryScopeHash(source);
+  simpCityResumeCursors.delete(scopeHash);
+  simpCityResumeCursors.set(scopeHash, { sourceUrl: source, cursorUrl: cursor, updatedAt: new Date().toISOString() });
+  await saveSimpCityResumeCursors();
+  return simpCityResumeCursors.get(scopeHash);
 }
 
 async function loadPongPlayedHistory() {
@@ -2882,6 +2945,8 @@ function normalizeSimpCityBackgroundUrl(rawValue) {
 async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
   const targetUrl = normalizeSimpCityBackgroundUrl(rawUrl);
   if (!targetUrl) throw new Error('A valid SimpCity thread, tag, search, or forum URL is required');
+  const resumeEntry = await simpCityResumeEntry(targetUrl);
+  const navigationUrl = resumeEntry?.cursorUrl || targetUrl;
   const channel = simpCityRecallChannel(rawChannel);
   const session = await loadSimpCitySession();
   if (!simpCityHasAuthenticatedCookie(session?.cookies)) {
@@ -2923,7 +2988,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
       headless: false,
       hidden: true,
       allowLoopback: true,
-      targetUrl,
+      targetUrl: navigationUrl,
       cookies: session.cookies,
       userAgent: session.userAgent
     });
@@ -2940,6 +3005,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
     const shim = `(() => {
       globalThis.PONG_PC_BACKGROUND_CONTEXT = true;
       globalThis.PONG_SIMPCITY_CHANNEL = ${channel};
+      globalThis.PONG_SIMPCITY_SOURCE_URL = ${JSON.stringify(targetUrl)};
       globalThis.PONG_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787'];
       const request = options => {
         const timer = setTimeout(() => options.ontimeout?.(), Number(options.timeout || 90000));
@@ -10888,6 +10954,7 @@ const server = http.createServer(async (req, res) => {
           requestUrl.pathname === '/simpcity/session/handoff' ||
           requestUrl.pathname === '/simpcity/source/permit' ||
           requestUrl.pathname === '/simpcity/source/rate-limit' ||
+          requestUrl.pathname === '/simpcity/resume/progress' ||
           requestUrl.pathname === '/simpcity/discovery/backlog' ||
           requestUrl.pathname === '/simpcity/discovery/permit'
         )
@@ -11088,9 +11155,13 @@ const server = http.createServer(async (req, res) => {
         removed++;
       }
       if (removed) await savePongPlayedHistory();
+      await loadSimpCityResumeCursors();
+      const cursorRemoved = simpCityResumeCursors.delete(scopeHash);
+      if (cursorRemoved) await saveSimpCityResumeCursors();
       json(res, 200, {
         ok: true,
         removed,
+        cursorReset: cursorRemoved,
         hashes: [...pongPlayedHistoryHashes],
         count: pongPlayedHistoryHashes.size
       });
@@ -11143,6 +11214,12 @@ const server = http.createServer(async (req, res) => {
         pumpVideoFileCache();
       }
       json(res, 200, { ok: true, channel, creatorKey, stopped: true, cacheDownloadsStopped });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/resume/progress') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const entry = await setSimpCityResumeCursor(payload?.sourceUrl, payload?.cursorUrl);
+      json(res, 200, { ok: true, saved: true, updatedAt: entry.updatedAt });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/simpcity/recall') {
