@@ -11280,9 +11280,10 @@ const server = http.createServer(async (req, res) => {
       const channel = simpCityRecallChannel(payload?.channel);
       const state = simpCityRecallState(channel);
       const suppliedId = String(payload?.id || '').trim();
-      const threadUrl = normalizeSimpCityThreadUrl(payload?.threadUrl);
+      const threadUrl = normalizeSimpCityBackgroundUrl(payload?.threadUrl) ||
+        normalizeSimpCityThreadUrl(payload?.threadUrl);
       if (!/^[a-z0-9-]{8,100}$/i.test(suppliedId) || !threadUrl) {
-        throw new Error('A valid SimpCity scrape ID and thread URL are required');
+        throw new Error('A valid SimpCity scrape ID and source URL are required');
       }
       state.controller?.abort();
       for (const controller of state.collectionControllers?.values?.() || []) controller.abort();
