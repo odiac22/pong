@@ -2324,6 +2324,8 @@ let pongPlayedHistoryLoadPromise = null;
 let pongPlayedHistoryWrite = Promise.resolve();
 const pongPlayedHistoryHashes = new Set();
 const pongPlayedHistoryScopes = new Map();
+const pongProfileCursorHashes = new Set();
+const pongProfileCursorScopes = new Map();
 let simpCityResumeLoaded = false;
 let simpCityResumeWrite = Promise.resolve();
 const simpCityResumeCursors = new Map();
@@ -2447,6 +2449,13 @@ async function loadPongPlayedHistory() {
       for (const hash of Array.isArray(payload?.hashes) ? payload.hashes : []) {
         if (/^[a-f0-9]{32}$/i.test(String(hash || ''))) pongPlayedHistoryHashes.add(String(hash).toLowerCase());
       }
+      for (const entry of Array.isArray(payload?.cursorEntries) ? payload.cursorEntries : []) {
+        const hash = String(entry?.hash || '').toLowerCase();
+        const scopeHash = String(entry?.scopeHash || '').toLowerCase();
+        if (!/^[a-f0-9]{32}$/.test(hash)) continue;
+        pongProfileCursorHashes.add(hash);
+        if (/^[a-f0-9]{32}$/.test(scopeHash)) pongProfileCursorScopes.set(hash, scopeHash);
+      }
     } catch (_) {}
     pongPlayedHistoryLoaded = true;
     return pongPlayedHistoryHashes;
@@ -2459,11 +2468,16 @@ function savePongPlayedHistory() {
     await fs.mkdir(LOCAL_AI_DIR, { recursive: true });
     const temporaryPath = `${PONG_PLAYED_HISTORY_PATH}.tmp`;
     const retainedHashes = [...pongPlayedHistoryHashes].slice(-100000);
+    const retainedCursorHashes = [...pongProfileCursorHashes].slice(-100000);
     const payload = {
       schema: 'pong-played-history-v2',
       entries: retainedHashes.map(hash => ({
         hash,
         scopeHash: pongPlayedHistoryScopes.get(hash) || ''
+      })),
+      cursorEntries: retainedCursorHashes.map(hash => ({
+        hash,
+        scopeHash: pongProfileCursorScopes.get(hash) || ''
       }))
     };
     await fs.writeFile(temporaryPath, JSON.stringify(payload), 'utf8');
@@ -2474,7 +2488,8 @@ function savePongPlayedHistory() {
 
 async function pongPlayedHistoryHas(kind, sourceUrl, itemId) {
   await loadPongPlayedHistory();
-  return pongPlayedHistoryHashes.has(pongPlayedHistoryHash(kind, sourceUrl, itemId));
+  const hash = pongPlayedHistoryHash(kind, sourceUrl, itemId);
+  return pongPlayedHistoryHashes.has(hash) || pongProfileCursorHashes.has(hash);
 }
 
 function simpCityAlbumPlayedHistoryHash(album, fallbackSourceUrl = '') {
@@ -11121,7 +11136,23 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/played-history') {
       await loadPongPlayedHistory();
-      json(res, 200, { ok: true, hashes: [...pongPlayedHistoryHashes], count: pongPlayedHistoryHashes.size });
+      const hashes = [...new Set([...pongPlayedHistoryHashes, ...pongProfileCursorHashes])];
+      json(res, 200, { ok: true, hashes, count: hashes.length });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/profile-cursor/mark') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const hash = String(payload?.hash || '').trim().toLowerCase();
+      const scopeHash = String(payload?.scopeHash || '').trim().toLowerCase();
+      if (!/^[a-f0-9]{32}$/.test(hash)) throw new Error('A valid opaque profile cursor ID is required');
+      if (scopeHash && !/^[a-f0-9]{32}$/.test(scopeHash)) throw new Error('A valid opaque profile cursor scope is required');
+      await loadPongPlayedHistory();
+      const added = !pongProfileCursorHashes.has(hash);
+      const scopeChanged = Boolean(scopeHash && pongProfileCursorScopes.get(hash) !== scopeHash);
+      pongProfileCursorHashes.add(hash);
+      if (scopeHash) pongProfileCursorScopes.set(hash, scopeHash);
+      if (added || scopeChanged) await savePongPlayedHistory();
+      json(res, 200, { ok: true, added, count: pongProfileCursorHashes.size });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/played-history/mark') {
@@ -11155,12 +11186,13 @@ const server = http.createServer(async (req, res) => {
         removed++;
       }
       if (removed) await savePongPlayedHistory();
+      const hashes = [...new Set([...pongPlayedHistoryHashes, ...pongProfileCursorHashes])];
       json(res, 200, {
         ok: true,
         removed,
         resumePreserved: true,
-        hashes: [...pongPlayedHistoryHashes],
-        count: pongPlayedHistoryHashes.size
+        hashes,
+        count: hashes.length
       });
       return;
     }
@@ -11239,7 +11271,7 @@ const server = http.createServer(async (req, res) => {
         await loadPongPlayedHistory();
         visibleAlbums = visibleAlbums.filter(album => {
           const hash = simpCityAlbumPlayedHistoryHash(album, state.pending?.threadUrl || '');
-          return !hash || !pongPlayedHistoryHashes.has(hash);
+          return !hash || (!pongPlayedHistoryHashes.has(hash) && !pongProfileCursorHashes.has(hash));
         });
       }
       const recall = state.pending && (pendingNames.length || visibleAlbums.length)

@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.38</div>
+    <div class="version-number">26.39</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -1208,6 +1208,7 @@ let pongSkipPlayedEnabled = (() => {
 let pongPlayedHistoryHashes = new Set();
 let pongPlayedHistoryLoaded = false;
 let pongPlayedHistoryLoadPromise = null;
+const pongProfileCheckpointPendingHashes = new Set();
 const pongPlayedHistoryRemovedByScope = new Map();
 let pongCollectionArtistSequence = [];
 let pongCollectionStoppedIdentities = new Set();
@@ -3691,7 +3692,7 @@ function pongPlayedRecordForGroup(group, rawVideoUrl = '') {
   if (creatorKey) return { kind: 'simpcity-profile', sourceUrl, itemId: creatorKey };
   const source = String(group?.source || '').toLowerCase();
   if (source === 'erome' || (!['bunkr', 'hosted', 'direct', 'paired'].includes(source) && /(^|\.)erome\.com/i.test(sourceUrl))) {
-    return { kind: 'erome-video', sourceUrl, itemId: eromeMediaKey(rawVideoUrl) };
+    return { kind: 'erome-album', sourceUrl, itemId: String(group?.url || group?.postUrl || sourceUrl).trim() };
   }
   return {
     kind: 'balbums-album',
@@ -3712,9 +3713,9 @@ function pongPlayedRecordForGlobalIndex(globalIndex) {
   const source = String(meta.source || event.source || '').toLowerCase();
   if (source === 'erome') {
     return {
-      kind: 'erome-video',
+      kind: 'erome-album',
       sourceUrl,
-      itemId: String(meta.mediaKey || eromeMediaKey(allVideoUrls[index] || '')).trim()
+      itemId: String(meta.postUrl || event.postUrl || event.bundleKey || sourceUrl).trim()
     };
   }
   if (source === 'bunkr') {
@@ -3725,6 +3726,52 @@ function pongPlayedRecordForGlobalIndex(globalIndex) {
     };
   }
   return null;
+}
+
+function pongPlayedRecordForPasteEvent(event, index = -1) {
+  if (!event) return null;
+  const bounds = getPasteEventVideoBounds(event);
+  if (bounds?.start >= 0) {
+    const record = pongPlayedRecordForGlobalIndex(bounds.start);
+    if (record) return record;
+  }
+  const creatorKey = String(event.simpCityCreatorKey || '').trim();
+  const sourceUrl = String(event.artistUrl || event.sourceUrl || '').trim();
+  if (creatorKey) return { kind: 'simpcity-profile', sourceUrl, itemId: creatorKey };
+  const source = String(event.source || '').toLowerCase();
+  if (source === 'erome') {
+    return { kind: 'erome-album', sourceUrl, itemId: String(event.postUrl || event.bundleKey || sourceUrl).trim() };
+  }
+  if (source === 'bunkr') {
+    return { kind: 'balbums-album', sourceUrl, itemId: String(event.postUrl || event.bundleKey || sourceUrl).trim() };
+  }
+  return null;
+}
+
+async function recordPongProfileCheckpoint(event, index = -1) {
+  const record = pongPlayedRecordForPasteEvent(event, index);
+  const hash = pongPlayedHistoryHash(record);
+  const scopeHash = pongPlayedHistoryScopeHash(record?.sourceUrl);
+  if (!hash || pongPlayedHistoryHashes.has(hash) || pongProfileCheckpointPendingHashes.has(hash)) return false;
+  pongPlayedHistoryHashes.add(hash);
+  pongPlayedHistoryLoaded = true;
+  pongProfileCheckpointPendingHashes.add(hash);
+  try {
+    for (const delay of [0, 1200, 3500]) {
+      if (delay) await sleep(delay);
+      const endpoint = await getRandom40LocalEndpoint(true);
+      if (!endpoint) continue;
+      const response = await fetch(`${endpoint}/profile-cursor/mark`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hash, scopeHash })
+      }).catch(() => null);
+      if (response?.ok) return true;
+    }
+    return false;
+  } finally {
+    pongProfileCheckpointPendingHashes.delete(hash);
+  }
 }
 
 function updatePongSkipPlayedButton() {
@@ -3787,7 +3834,7 @@ async function recordPongPlayedHistory(wrapper) {
       if (delay) await sleep(delay);
       const endpoint = await getRandom40LocalEndpoint(true);
       if (!endpoint) continue;
-      const response = await fetch(`${endpoint}/played-history/mark`, {
+      const response = await fetch(`${endpoint}/profile-cursor/mark`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ hash, scopeHash })
@@ -7911,6 +7958,7 @@ function retireCurrentPasteEventForPaperclip() {
   indexes.forEach(index => {
     const event = pasteEvents[index];
     if (!event) return;
+    recordPongProfileCheckpoint(event, index).catch(() => false);
     markPasteEventVisitedForPaperclip(event, index);
     const key = getPasteEventPaperclipKey(event, index);
     if (!key) return;
@@ -10455,7 +10503,11 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
 }
 
 function cacheEromeCardImport(groups, proxyBase) {
-  const payload = buildEromeCardImportPayload(shuffleEromeGroupsForPlayback(groups), proxyBase, 0);
+  const payload = buildEromeCardImportPayload(
+    shuffleEromeGroupsForPlayback(filterPongPlayedGroups(groups)),
+    proxyBase,
+    0
+  );
   const { urls, metadata, events } = payload;
 
   eromeCheckpointActiveThisPage = true;
@@ -10479,7 +10531,11 @@ function cacheEromeCardImport(groups, proxyBase) {
 
 function appendEromeGroupsToCurrentCards(groups, proxyBase) {
   const startIndex = allVideoUrls.length;
-  const payload = buildEromeCardImportPayload(shuffleEromeGroupsForPlayback(groups), proxyBase, startIndex);
+  const payload = buildEromeCardImportPayload(
+    shuffleEromeGroupsForPlayback(filterPongPlayedGroups(groups)),
+    proxyBase,
+    startIndex
+  );
 
   if (!payload.urls.length) return payload;
 
