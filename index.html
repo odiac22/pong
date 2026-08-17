@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.39</div>
+    <div class="version-number">26.40</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -3692,7 +3692,11 @@ function pongPlayedRecordForGroup(group, rawVideoUrl = '') {
   if (creatorKey) return { kind: 'simpcity-profile', sourceUrl, itemId: creatorKey };
   const source = String(group?.source || '').toLowerCase();
   if (source === 'erome' || (!['bunkr', 'hosted', 'direct', 'paired'].includes(source) && /(^|\.)erome\.com/i.test(sourceUrl))) {
-    return { kind: 'erome-album', sourceUrl, itemId: String(group?.url || group?.postUrl || sourceUrl).trim() };
+    return {
+      kind: 'erome-creator',
+      sourceUrl,
+      itemId: String(group?.eromeCreatorKey || group?.creatorUrl || group?.creatorName || group?.url || group?.postUrl || sourceUrl).trim()
+    };
   }
   return {
     kind: 'balbums-album',
@@ -3713,9 +3717,9 @@ function pongPlayedRecordForGlobalIndex(globalIndex) {
   const source = String(meta.source || event.source || '').toLowerCase();
   if (source === 'erome') {
     return {
-      kind: 'erome-album',
+      kind: 'erome-creator',
       sourceUrl,
-      itemId: String(meta.postUrl || event.postUrl || event.bundleKey || sourceUrl).trim()
+      itemId: String(meta.eromeCreatorKey || event.eromeCreatorKey || meta.postUrl || event.postUrl || event.bundleKey || sourceUrl).trim()
     };
   }
   if (source === 'bunkr') {
@@ -3740,7 +3744,11 @@ function pongPlayedRecordForPasteEvent(event, index = -1) {
   if (creatorKey) return { kind: 'simpcity-profile', sourceUrl, itemId: creatorKey };
   const source = String(event.source || '').toLowerCase();
   if (source === 'erome') {
-    return { kind: 'erome-album', sourceUrl, itemId: String(event.postUrl || event.bundleKey || sourceUrl).trim() };
+    return {
+      kind: 'erome-creator',
+      sourceUrl,
+      itemId: String(event.eromeCreatorKey || event.postUrl || event.bundleKey || sourceUrl).trim()
+    };
   }
   if (source === 'bunkr') {
     return { kind: 'balbums-album', sourceUrl, itemId: String(event.postUrl || event.bundleKey || sourceUrl).trim() };
@@ -10415,9 +10423,45 @@ function buildEromeImportGroups(data, fallbackUrl) {
       title: group?.title || sourceTitle || `Erome batch ${index + 1}`,
       sourceUrl: fallbackUrl,
       sourceTitle,
+      creatorName: String(group?.creatorName || data?.creatorName || ''),
+      creatorUrl: String(group?.creatorUrl || data?.creatorUrl || ''),
+      eromeCreatorKey: pongCanonicalPlayedValue(group?.creatorUrl || data?.creatorUrl || group?.creatorName || data?.creatorName || ''),
       videos: Array.isArray(group?.videos) ? group.videos.filter(Boolean) : []
     }))
     .filter(group => group.videos.length);
+}
+
+function combineEromeCreatorGroups(groups) {
+  const combined = [];
+  const byCreator = new Map();
+  (groups || []).forEach(group => {
+    const creatorKey = String(group?.eromeCreatorKey || '').trim();
+    if (!creatorKey) {
+      combined.push(group);
+      return;
+    }
+    const scopedKey = `${pongCanonicalPlayedValue(group?.sourceUrl || '')}\u0000${creatorKey}`;
+    let target = byCreator.get(scopedKey);
+    if (!target) {
+      target = {
+        ...group,
+        title: group.creatorName || group.title,
+        videos: [],
+        albumUrls: []
+      };
+      byCreator.set(scopedKey, target);
+      combined.push(target);
+    }
+    if (group.url && !target.albumUrls.includes(group.url)) target.albumUrls.push(group.url);
+    const existing = new Set(target.videos);
+    (group.videos || []).forEach(video => {
+      if (video && !existing.has(video)) {
+        existing.add(video);
+        target.videos.push(video);
+      }
+    });
+  });
+  return combined;
 }
 
 function shuffleEromeGroupsForPlayback(groups) {
@@ -10468,6 +10512,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         simpCityPairId: String(group.pairId || ''),
         simpCityMediaKind: String(group.mediaKind || ''),
+        eromeCreatorKey: String(group.eromeCreatorKey || ''),
         postIndex: videoIndex,
         scrapedAt,
         mediaKey
@@ -10492,6 +10537,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         simpCityPairId: String(group.pairId || ''),
         simpCityMediaKind: String(group.mediaKind || ''),
+        eromeCreatorKey: String(group.eromeCreatorKey || ''),
         loadAll: false,
         ready: true,
         pending: false
@@ -10504,7 +10550,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
 
 function cacheEromeCardImport(groups, proxyBase) {
   const payload = buildEromeCardImportPayload(
-    shuffleEromeGroupsForPlayback(filterPongPlayedGroups(groups)),
+    shuffleEromeGroupsForPlayback(combineEromeCreatorGroups(filterPongPlayedGroups(groups))),
     proxyBase,
     0
   );
@@ -10532,7 +10578,7 @@ function cacheEromeCardImport(groups, proxyBase) {
 function appendEromeGroupsToCurrentCards(groups, proxyBase) {
   const startIndex = allVideoUrls.length;
   const payload = buildEromeCardImportPayload(
-    shuffleEromeGroupsForPlayback(filterPongPlayedGroups(groups)),
+    shuffleEromeGroupsForPlayback(combineEromeCreatorGroups(filterPongPlayedGroups(groups))),
     proxyBase,
     startIndex
   );
@@ -10547,6 +10593,61 @@ function appendEromeGroupsToCurrentCards(groups, proxyBase) {
   scheduleSessionSave(700);
   scheduleEromeCheckpointAutosave();
 
+  return payload;
+}
+
+function mergeEromeCreatorGroup(group, proxyBase) {
+  const filtered = combineEromeCreatorGroups(filterPongPlayedGroups([group]));
+  if (!filtered.length) return { urls: [], metadata: [], events: [] };
+  group = filtered[0];
+  const creatorKey = String(group?.eromeCreatorKey || '').trim();
+  if (!creatorKey || !Array.isArray(group?.videos)) {
+    return appendEromeGroupsToCurrentCards([group], proxyBase);
+  }
+  const sourceKey = pongCanonicalPlayedValue(group.sourceUrl || '');
+  const eventIndex = pasteEvents.findIndex(event => (
+    String(event?.eromeCreatorKey || '') === creatorKey &&
+    pongCanonicalPlayedValue(event?.artistUrl || event?.sourceUrl || '') === sourceKey
+  ));
+  if (eventIndex < 0) return appendEromeGroupsToCurrentCards([group], proxyBase);
+  const event = pasteEvents[eventIndex];
+  const bounds = getPasteEventVideoBounds(event);
+  if (!bounds) return { urls: [], metadata: [], events: [] };
+  const existingKeys = new Set();
+  for (let index = bounds.start; index < bounds.end; index++) {
+    existingKeys.add(String(allVideoMetadata[index]?.mediaKey || allVideoUrls[index] || ''));
+  }
+  const newVideos = group.videos.filter(video => !existingKeys.has(eromeMediaKey(video)));
+  if (!newVideos.length) return { urls: [], metadata: [], events: [] };
+  const payload = buildEromeCardImportPayload([{ ...group, videos: newVideos }], proxyBase, 0);
+  if (!payload.urls.length) return payload;
+  const insertionIndex = bounds.end;
+  allVideoUrls.splice(insertionIndex, 0, ...payload.urls);
+  allVideoMetadata.splice(insertionIndex, 0, ...payload.metadata);
+  event.count = Number(event.count || 0) + payload.urls.length;
+  pasteEvents.forEach((candidate, index) => {
+    if (index !== eventIndex && Number(candidate.startIndex || 0) >= insertionIndex) {
+      candidate.startIndex = Number(candidate.startIndex || 0) + payload.urls.length;
+    }
+  });
+  if (hasActivePlaybackRange()) {
+    if (currentPasteIndex === eventIndex) activePlaybackRange.end += payload.urls.length;
+    else if (insertionIndex <= activePlaybackRange.start) {
+      activePlaybackRange.start += payload.urls.length;
+      activePlaybackRange.end += payload.urls.length;
+    }
+  }
+  if (insertionIndex <= currentLoadedRangeStart) {
+    currentLoadedRangeStart += payload.urls.length;
+    currentLoadedRangeEnd += payload.urls.length;
+    videoMetadata = videoMetadata.map(meta => ({
+      ...meta,
+      globalIndex: Number(meta?.globalIndex || 0) + payload.urls.length
+    }));
+  }
+  updatePasteNavigationButton();
+  scheduleSessionSave(700);
+  scheduleEromeCheckpointAutosave();
   return payload;
 }
 
@@ -19364,7 +19465,12 @@ async function loadEromeAsCards() {
         rememberEromeArtistRecordsFromVideoGroups(newGroups);
       }
 
-      imported = appendEromeGroupsToCurrentCards(newGroups, base);
+      const mergedPayloads = newGroups.map(group => mergeEromeCreatorGroup(group, base));
+      imported = {
+        urls: mergedPayloads.flatMap(payload => payload.urls || []),
+        metadata: mergedPayloads.flatMap(payload => payload.metadata || []),
+        events: mergedPayloads.flatMap(payload => payload.events || [])
+      };
       importedGroupCount = allGroups.length;
     }
 
