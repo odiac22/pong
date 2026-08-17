@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.10.7
+// @version      1.10.8
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -29,7 +29,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.10.7';
+  const SCRIPT_VERSION = '1.10.8';
   const FORUM_CREATOR_CONCURRENCY = 2;
   const SIMPCITY_REQUEST_GAP_MS = 500;
   const SIMPCITY_RATE_LIMIT_PAUSE_MS = 60_000;
@@ -555,8 +555,13 @@
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;background:#10141ef5;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
   panel.innerHTML = `<span data-status style="flex:1;min-width:180px">v${SCRIPT_VERSION} · streaming PC handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button>`;
   document.body.appendChild(panel);
+  const resumeLabel = document.createElement('label');
+  resumeLabel.style.cssText = 'display:flex;align-items:center;gap:5px;font:inherit;white-space:nowrap';
+  resumeLabel.innerHTML = '<input data-resume type="checkbox" style="width:18px;height:18px"> Resume';
+  panel.insertBefore(resumeLabel, panel.querySelector('[data-scrape]'));
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
+  const resumeCheckbox = panel.querySelector('[data-resume]');
   const logLines = [];
   diagnosticSink = (message, details = '') => {
     const stamp = new Date().toISOString();
@@ -579,6 +584,16 @@
   const buttons = [...panel.querySelectorAll('[data-scrape]')];
   const activeRunTokens = new Map();
   diagnostic('Script initialized', `version=${SCRIPT_VERSION}; page=${location.href}; mode=${globalThis.PONG_PC_BACKGROUND_CONTEXT ? 'PC worker' : 'Android controller'}; pageConcurrency=${PAGE_CONCURRENCY}; creatorConcurrency=${FORUM_CREATOR_CONCURRENCY}; requestGap=${SIMPCITY_REQUEST_GAP_MS}ms`);
+  if (!globalThis.PONG_PC_BACKGROUND_CONTEXT) {
+    sendToPong('/simpcity/resume/status', { sourceUrl: location.href }, 10000).then(result => {
+      resumeCheckbox.checked = result?.available === true;
+      resumeCheckbox.title = result?.available
+        ? 'Continue this exact URL from its saved Pong position'
+        : 'No saved position exists for this exact URL yet';
+    }).catch(error => {
+      diagnostic('Resume check unavailable', error?.message || String(error));
+    });
+  }
 
   const monitorPcWorker = async (channel, workerId, runToken) => {
     let consecutiveConnectionFailures = 0;
@@ -652,7 +667,8 @@
             diagnostic('Starting PC worker with stored session', `channel=${channel}`);
             background = await sendToPong('/simpcity/background/start', {
               url: location.href,
-              channel
+              channel,
+              resumeFromSaved: resumeCheckbox.checked === true
             }, 30000);
           } catch (firstError) {
             diagnostic('Stored-session PC start failed', firstError?.message || String(firstError));
@@ -669,7 +685,8 @@
             diagnostic('Cookie handoff accepted; retrying PC worker', `channel=${channel}`);
             background = await sendToPong('/simpcity/background/start', {
               url: location.href,
-              channel
+              channel,
+              resumeFromSaved: resumeCheckbox.checked === true
             }, 30000);
           }
           if (!background?.sourceCaptureRequired) {

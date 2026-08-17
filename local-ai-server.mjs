@@ -2957,10 +2957,10 @@ function normalizeSimpCityBackgroundUrl(rawValue) {
   }
 }
 
-async function startSimpCityBackgroundRecall(rawUrl, rawChannel) {
+async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved = true) {
   const targetUrl = normalizeSimpCityBackgroundUrl(rawUrl);
   if (!targetUrl) throw new Error('A valid SimpCity thread, tag, search, or forum URL is required');
-  const resumeEntry = await simpCityResumeEntry(targetUrl);
+  const resumeEntry = resumeFromSaved === false ? null : await simpCityResumeEntry(targetUrl);
   const navigationUrl = resumeEntry?.cursorUrl || targetUrl;
   const channel = simpCityRecallChannel(rawChannel);
   const session = await loadSimpCitySession();
@@ -10969,6 +10969,7 @@ const server = http.createServer(async (req, res) => {
           requestUrl.pathname === '/simpcity/session/handoff' ||
           requestUrl.pathname === '/simpcity/source/permit' ||
           requestUrl.pathname === '/simpcity/source/rate-limit' ||
+          requestUrl.pathname === '/simpcity/resume/status' ||
           requestUrl.pathname === '/simpcity/resume/progress' ||
           requestUrl.pathname === '/simpcity/discovery/backlog' ||
           requestUrl.pathname === '/simpcity/discovery/permit'
@@ -11084,7 +11085,15 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/background/start') {
       const payload = JSON.parse(await readBody(req) || '{}');
-      json(res, 200, { ok: true, ...(await startSimpCityBackgroundRecall(payload?.url, payload?.channel)) });
+      json(res, 200, { ok: true, ...(await startSimpCityBackgroundRecall(payload?.url, payload?.channel, payload?.resumeFromSaved !== false)) });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/resume/status') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const sourceUrl = normalizeSimpCityBackgroundUrl(payload?.sourceUrl);
+      if (!sourceUrl) throw new Error('A valid SimpCity source URL is required');
+      const entry = await simpCityResumeEntry(sourceUrl);
+      json(res, 200, { ok: true, available: Boolean(entry?.cursorUrl), updatedAt: entry?.updatedAt || '' });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/source/permit') {

@@ -93,7 +93,6 @@ function decodeHtmlText(text) {
     .replace(/&amp;/gi, '&')
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
-    .replace(/&nbsp;/gi, ' ')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>');
 }
@@ -129,17 +128,6 @@ function extractMp4s(html) {
 function isVerifiedCreatorPage(html) {
   const normalized = String(html || '');
   return /id=["']user_name["'][^>]*>[\s\S]{0,500}?title=["']Verified["']/i.test(normalized);
-}
-
-function extractCreator(html) {
-  const match = String(html || '').match(
-    /<a\b[^>]*href=["']([^"']+)["'][^>]*id=["']user_name["'][^>]*>([\s\S]*?)<\/a>/i
-  );
-  if (!match) return { name: '', url: '' };
-  return {
-    name: cleanTitle(match[2]),
-    url: absolutizeEromeUrl(match[1]),
-  };
 }
 
 function absolutizeEromeUrl(raw) {
@@ -303,7 +291,6 @@ async function handleScrape(target, options = {}) {
   const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
   const title = titleMatch ? titleMatch[1].trim() : '';
   const verifiedCreator = isVerifiedCreatorPage(html);
-  const creator = extractCreator(html);
 
   // Direct MP4s on this page (album page case).
   let videos = extractMp4s(html);
@@ -331,7 +318,6 @@ async function handleScrape(target, options = {}) {
 
       const albumVideos = extractMp4s(albumHtml);
       const albumVerifiedCreator = isVerifiedCreatorPage(albumHtml);
-      const albumCreator = extractCreator(albumHtml);
 
       return {
         url: album.url,
@@ -339,8 +325,6 @@ async function handleScrape(target, options = {}) {
         count: albumVideos.length,
         videos: albumVideos,
         verifiedCreator: albumVerifiedCreator,
-        creatorName: albumCreator.name,
-        creatorUrl: albumCreator.url,
       };
     });
 
@@ -364,8 +348,6 @@ async function handleScrape(target, options = {}) {
       count: videos.length,
       videos,
       verifiedCreator,
-      creatorName: creator.name,
-      creatorUrl: creator.url,
     }];
   }
 
@@ -380,8 +362,6 @@ async function handleScrape(target, options = {}) {
     emptyAlbumCount,
     profilePageCount,
     verifiedCreator,
-    creatorName: creator.name,
-    creatorUrl: creator.url,
     albumGroups,
   }, 200);
 }
