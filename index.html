@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.34</div>
+    <div class="version-number">26.35</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -10200,8 +10200,6 @@ async function refreshSavedEromeRecordInBackground(record) {
         newVideoCount
       );
 
-      await waitForEromeBackgroundScrapeSlot();
-
       const data = await fetchEromeScrapeData(base, album.url, {
         attempts: 1,
         timeoutMs: note === 'final retry' ? EROME_FINAL_RETRY_TIMEOUT_MS : EROME_FETCH_TIMEOUT_MS,
@@ -17746,7 +17744,7 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
 
 const EROME_ALBUM_SCRAPE_CONCURRENCY = 8;
 const EROME_INITIAL_ALBUM_BATCH_SIZE = 4;
-const EROME_READY_ALBUM_BUFFER_TARGET = 5;
+const EROME_READY_ALBUM_BUFFER_TARGET = 10;
 const EROME_BACKGROUND_ALBUM_CONCURRENCY = 2;
 const EROME_BACKGROUND_LOW_BUFFER_DELAY_MS = 650;
 const EROME_BACKGROUND_PLAYING_LOW_BUFFER_DELAY_MS = 1100;
@@ -17850,7 +17848,7 @@ async function eromeRetryOnce(items, limit, task, onRetryStart) {
 }
 
 function getEromeReadyAlbumBufferCount() {
-  if (!eromeBatchAutoAdvance || !Array.isArray(pasteEvents) || !pasteEvents.length) return 0;
+  if (!Array.isArray(pasteEvents) || !pasteEvents.length) return 0;
 
   const syncedIndex = syncCurrentPasteIndexFromVisibleVideo();
   const activeIndex = syncedIndex >= 0
@@ -17860,22 +17858,24 @@ function getEromeReadyAlbumBufferCount() {
   return Math.max(0, pasteEvents.length - activeIndex - 1);
 }
 
+let eromeBackgroundBundleReservations = 0;
+
 async function waitForEromeBackgroundScrapeSlot() {
-  const readyAlbums = getEromeReadyAlbumBufferCount();
-  const needsBuffer = readyAlbums < EROME_READY_ALBUM_BUFFER_TARGET;
-  const activeVideo = window.currentlyPlayingVideo;
-  const isPlaying = !!(activeVideo && !activeVideo.paused && !activeVideo.ended);
-  const delay = needsBuffer
-    ? isPlaying
-      ? EROME_BACKGROUND_PLAYING_LOW_BUFFER_DELAY_MS
-      : EROME_BACKGROUND_LOW_BUFFER_DELAY_MS
-    : EROME_BACKGROUND_READY_BUFFER_DELAY_MS;
-
-  await sleep(delay);
-
-  if (!needsBuffer && isPlaying) {
-    await sleep(EROME_BACKGROUND_READY_BUFFER_DELAY_MS);
+  while (
+    getEromeReadyAlbumBufferCount() + eromeBackgroundBundleReservations >=
+    EROME_READY_ALBUM_BUFFER_TARGET
+  ) {
+    await sleep(250);
   }
+
+  eromeBackgroundBundleReservations++;
+  let released = false;
+
+  return () => {
+    if (released) return;
+    released = true;
+    eromeBackgroundBundleReservations = Math.max(0, eromeBackgroundBundleReservations - 1);
+  };
 }
 
 let bunkrLoadGeneration = 0;
@@ -19415,7 +19415,13 @@ async function loadEromeAsCards() {
             Math.min(EROME_ALBUM_SCRAPE_CONCURRENCY, readyAlbums.length),
             async album => {
               if (completedAlbumUrls.has(album.url)) return;
-              const ok = await scrapeEromeAlbumOnce(album, 'search background');
+              const releaseScrapeSlot = await waitForEromeBackgroundScrapeSlot();
+              let ok;
+              try {
+                ok = await scrapeEromeAlbumOnce(album, 'search background');
+              } finally {
+                releaseScrapeSlot();
+              }
               if (!ok) failedAlbums.push(album);
             }
           );
@@ -19590,9 +19596,13 @@ async function loadEromeAsCards() {
     }
 
     await eromePool(backgroundAlbums, EROME_BACKGROUND_ALBUM_CONCURRENCY, async album => {
-      await waitForEromeBackgroundScrapeSlot();
-
-      const ok = await scrapeEromeAlbumOnce(album, 'background');
+      const releaseScrapeSlot = await waitForEromeBackgroundScrapeSlot();
+      let ok;
+      try {
+        ok = await scrapeEromeAlbumOnce(album, 'background');
+      } finally {
+        releaseScrapeSlot();
+      }
 
       if (!ok) failedAlbums.push(album);
     });
@@ -19619,8 +19629,6 @@ async function loadEromeAsCards() {
         const firstUrl = eromeProfilePageUrl(item.target, 1);
 
         updateDiscoveryProgress(item.targetIndex, item.target, 1, 1, 'final retry');
-        await waitForEromeBackgroundScrapeSlot();
-
         try {
           const firstData = await fetchEromeAlbumListData(base, firstUrl, {
             attempts: 1,
@@ -19679,8 +19687,6 @@ async function loadEromeAsCards() {
         const pageUrl = eromeProfilePageUrl(item.target, item.page);
 
         updateDiscoveryProgress(item.targetIndex, item.target, item.page, item.pageCount, 'final retry');
-        await waitForEromeBackgroundScrapeSlot();
-
         try {
           const pageData = await fetchEromeAlbumListData(base, pageUrl, {
             attempts: 1,
@@ -19732,8 +19738,12 @@ async function loadEromeAsCards() {
       finalAlbumRetryQueue,
       EROME_BACKGROUND_ALBUM_CONCURRENCY,
       async album => {
-        await waitForEromeBackgroundScrapeSlot();
-        return scrapeEromeAlbumOnce(album, 'final retry');
+        const releaseScrapeSlot = await waitForEromeBackgroundScrapeSlot();
+        try {
+          return await scrapeEromeAlbumOnce(album, 'final retry');
+        } finally {
+          releaseScrapeSlot();
+        }
       },
       pending => {
         updateEromeProgress({
