@@ -11155,13 +11155,10 @@ const server = http.createServer(async (req, res) => {
         removed++;
       }
       if (removed) await savePongPlayedHistory();
-      await loadSimpCityResumeCursors();
-      const cursorRemoved = simpCityResumeCursors.delete(scopeHash);
-      if (cursorRemoved) await saveSimpCityResumeCursors();
       json(res, 200, {
         ok: true,
         removed,
-        cursorReset: cursorRemoved,
+        resumePreserved: true,
         hashes: [...pongPlayedHistoryHashes],
         count: pongPlayedHistoryHashes.size
       });
