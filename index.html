@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.36</div>
+    <div class="version-number">26.37</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -17860,6 +17860,12 @@ function getEromeReadyAlbumBufferCount() {
   return Math.max(0, pasteEvents.length - activeIndex - 1);
 }
 
+function eromeExactTitleKey(rawTitle, sourceUrl = '') {
+  const title = String(rawTitle || '').toLowerCase();
+  if (!title) return '';
+  return `${pongCanonicalPlayedValue(sourceUrl)}\u0000${title}`;
+}
+
 let eromeBackgroundBundleReservations = 0;
 
 async function waitForEromeBackgroundScrapeSlot() {
@@ -19180,6 +19186,12 @@ async function loadEromeAsCards() {
   const albumQueue = [];
   const seenAlbumUrls = new Set();
   const seenGroupUrls = new Set();
+  const seenGroupTitleKeys = new Set(
+    (pasteEvents || [])
+      .filter(event => String(event?.source || '').toLowerCase() === 'erome')
+      .map(event => eromeExactTitleKey(event?.bundleLabel || '', event?.artistUrl || event?.sourceUrl || ''))
+      .filter(Boolean)
+  );
   const seenVideoUrls = new Set();
   const completedAlbumUrls = new Set(resumeCompletedAlbumUrls);
   const failedAlbums = [];
@@ -19216,8 +19228,9 @@ async function loadEromeAsCards() {
   function addScrapedGroups(groups) {
     (groups || []).forEach(group => {
       const groupKey = group.url || `${group.sourceUrl || 'erome'}:${allGroups.length}`;
+      const titleKey = eromeExactTitleKey(group.title || '', group.sourceUrl || group.url || '');
 
-      if (groupKey && seenGroupUrls.has(groupKey)) return;
+      if ((groupKey && seenGroupUrls.has(groupKey)) || (titleKey && seenGroupTitleKeys.has(titleKey))) return;
 
       const videos = [];
 
@@ -19231,6 +19244,7 @@ async function loadEromeAsCards() {
       if (!videos.length) return;
 
       if (groupKey) seenGroupUrls.add(groupKey);
+      if (titleKey) seenGroupTitleKeys.add(titleKey);
       allGroups.push({
         ...group,
         videos
