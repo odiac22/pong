@@ -364,6 +364,20 @@
     }
     .paste-nav-button[data-unviewed=""]::before { display: none; }
     .paste-nav-button:hover, .paste-nav-button:active { opacity: 0.85; transform: translateY(-50%) scale(1.06); }
+    .simpcity-tiktok-button {
+      position: fixed; right: 12px; top: 50%; transform: translateY(-50%);
+      min-width: 44px; height: 24px; padding: 0 7px;
+      background: rgba(126,34,206,0.38); opacity: 0.46;
+      color: rgba(255,255,255,0.92); font-size: 8px; font-weight: 900;
+      border: 1px solid rgba(196,181,253,0.38); border-radius: 999px;
+      display: none; align-items: center; justify-content: center;
+      z-index: 1000; cursor: pointer; box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+      transition: all 0.18s ease; -webkit-tap-highlight-color: transparent;
+      user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    }
+    .simpcity-tiktok-button.active { opacity: 0.78; background: rgba(126,34,206,0.66); }
+    .simpcity-tiktok-button:hover, .simpcity-tiktok-button:active { opacity: 0.9; transform: translateY(-50%) scale(1.05); }
     .sorting-indicator {
       position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
       background: rgba(0,0,0,0.8); color: white; padding: 12px 20px;
@@ -873,7 +887,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.41</div>
+    <div class="version-number">26.43</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -1153,6 +1167,10 @@ function pongLocal2FastPlaybackActive() {
   if (random40State) return random40State.playbackProfile === 'local2fast';
   return new URLSearchParams(location.search).get('pongPlaybackProfile') === 'local2fast';
 }
+function pongLocal22TurboPlaybackActive() {
+  if (random40State) return random40State.playbackProfile === 'local22';
+  return new URLSearchParams(location.search).get('pongPlaybackProfile') === 'local22';
+}
 function pongDeckPreloadRadius() {
   // Bunkr media commonly shares one CDN host.  Attaching six videos from the
   // active album consumed every per-host connection and left queued albums
@@ -1253,6 +1271,7 @@ try {
 // ─── Paste tracking ───────────────────────────────────────────────────────────
 let pasteEvents = [];
 let currentPasteIndex = -1;
+let simpCityTikTokReturnState = null;
 let paperclipRetiredBundleKeys = new Set();
 let paperclipVisitedArtistTokens = new Set();
 let paperclipStepCount = 1;
@@ -4101,6 +4120,49 @@ async function clearCurrentPongPlayedHistory() {
   }
 }
 
+function compareLocal22PlaybackMetadata(left, right) {
+  const fastStartDelta = Number(right?.playbackFastStart === true) - Number(left?.playbackFastStart === true);
+  if (fastStartDelta) return fastStartDelta;
+  const leftMargin = Math.max(0, Number(left?.streamabilityMargin || 0));
+  const rightMargin = Math.max(0, Number(right?.streamabilityMargin || 0));
+  const leftBytes = Math.max(0, Number(left?.totalBytes || 0));
+  const rightBytes = Math.max(0, Number(right?.totalBytes || 0));
+  const leftProbeRate = Math.max(0, Number(left?.probeBytesPerSecond || 0));
+  const rightProbeRate = Math.max(0, Number(right?.probeBytesPerSecond || 0));
+  if (leftBytes > 0 && rightBytes > 0 && leftBytes !== rightBytes) return leftBytes - rightBytes;
+  if ((leftBytes > 0) !== (rightBytes > 0)) return leftBytes > 0 ? -1 : 1;
+  const leftCompletionSeconds = leftBytes > 0 && leftProbeRate > 0 ? leftBytes / leftProbeRate : 0;
+  const rightCompletionSeconds = rightBytes > 0 && rightProbeRate > 0 ? rightBytes / rightProbeRate : 0;
+  if (leftCompletionSeconds > 0 && rightCompletionSeconds > 0 && leftCompletionSeconds !== rightCompletionSeconds) {
+    return leftCompletionSeconds - rightCompletionSeconds;
+  }
+  if ((leftCompletionSeconds > 0) !== (rightCompletionSeconds > 0)) {
+    return leftCompletionSeconds > 0 ? -1 : 1;
+  }
+  if (leftMargin > 0 && rightMargin > 0 && leftMargin !== rightMargin) return rightMargin - leftMargin;
+  if ((leftMargin > 0) !== (rightMargin > 0)) return leftMargin > 0 ? -1 : 1;
+  const leftRate = Math.max(0, Number(left?.bytesPerSecond || 0));
+  const rightRate = Math.max(0, Number(right?.bytesPerSecond || 0));
+  if (leftRate > 0 && rightRate > 0 && leftRate !== rightRate) return leftRate - rightRate;
+  if ((leftRate > 0) !== (rightRate > 0)) return leftRate > 0 ? -1 : 1;
+  if (leftProbeRate > 0 && rightProbeRate > 0 && leftProbeRate !== rightProbeRate) {
+    return rightProbeRate - leftProbeRate;
+  }
+  return 0;
+}
+
+function local22RankedSwipeIndexes(indexes, sourceMetadata) {
+  const fastStartIndexes = indexes
+    .filter(index => sourceMetadata[index]?.playbackFastStart === true)
+    .sort((left, right) => compareLocal22PlaybackMetadata(sourceMetadata[left], sourceMetadata[right]));
+  const readyHead = fastStartIndexes.slice(0, 3);
+  const randomizedFastRemainder = shuffleInPlace(fastStartIndexes.slice(3));
+  const remainingIndexes = shuffleInPlace(indexes.filter(
+    index => sourceMetadata[index]?.playbackFastStart !== true
+  ));
+  return [...readyHead, ...randomizedFastRemainder, ...remainingIndexes];
+}
+
 function shuffleLoadedVideosForPlayback(urls, metadata, events) {
   const sourceUrls = (urls || []).slice();
   const sourceMetadata = sourceUrls.map((_, index) => (metadata && metadata[index]) || {});
@@ -4143,6 +4205,13 @@ function shuffleLoadedVideosForPlayback(urls, metadata, events) {
 
   groups.forEach(group => {
     if (group.event?.source === 'random40') {
+      const local22Ranked = group.indexes.some(
+        index => sourceMetadata[index]?.local2PlaybackProfile === 'local22'
+      );
+      if (local22Ranked) {
+        group.indexes = local22RankedSwipeIndexes(group.indexes, sourceMetadata);
+        return;
+      }
       const fastStartIndexes = shuffleInPlace(group.indexes.filter(
         index => sourceMetadata[index]?.playbackFastStart === true
       ));
@@ -4400,7 +4469,7 @@ function scheduleForegroundPlaybackStallRecovery(video) {
     video.dataset.foregroundStallRetries = String(attempts);
     rememberVideoPlaybackPosition(video, wrapper, { immediate: true });
     wrapper.dataset.serverCacheRecoveryRequested = 'true';
-    random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
+    const cacheWarm = random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
     random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
     rotateVideoRetrySource(wrapper, video);
     video.dataset.lastNetworkAttemptAt = String(Date.now());
@@ -4413,9 +4482,20 @@ function scheduleForegroundPlaybackStallRecovery(video) {
     }, { once: true });
     try { video.load(); } catch (_) {}
     refreshForegroundVideoPriority(video, true);
+    // The warm response refreshes byte progress. A Local2.2 recovery may then
+    // switch to the growing priority-zero LAN stream even before the normal
+    // background promotion cushion is reached; the origin has already proven
+    // that waiting for it is worse.
+    Promise.resolve(cacheWarm).then(() => {
+      if (
+        foregroundPriorityVideo === video &&
+        wrapper.classList.contains('deck-active') &&
+        (wrapper.dataset.playIntent === 'true' || !video.paused)
+      ) random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
+    }).catch(() => {});
     // Continue at a bounded interval until frames genuinely advance.
     scheduleForegroundPlaybackStallRecovery(video);
-  }, 5000);
+  }, pongLocal22TurboPlaybackActive() ? 2500 : 5000);
 }
 
 function transferForegroundVideoPriority(video) {
@@ -4442,8 +4522,12 @@ function transferForegroundVideoPriority(video) {
     restoreDeckVideoNetwork(nextWrapper, nextVideo);
     if (isPongServerCachedPlaybackActive()) {
       // An artist transition is real foreground demand. Do not wait for the
-      // five-second empty-card watchdog before promoting the visible file.
-      random40WarmServerVideoCacheForActiveWrapper(nextWrapper, { urgent: true });
+      // five-second empty-card watchdog before preparing its neighbors. Local
+      // 2.2 gives the visible origin request one clean attempt; its watchdog
+      // still launches the PC-cache hedge if that request actually stalls.
+      random40WarmServerVideoCacheForActiveWrapper(nextWrapper, {
+        urgent: !pongLocal22TurboPlaybackActive()
+      });
     }
   }
   nextVideo.preload = 'auto';
@@ -4488,7 +4572,9 @@ function restoreDeckVideoNetwork(wrapper, video) {
 
   const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
   const preferredUrl = String(
-    wrapper.dataset.random40Card === 'true'
+    wrapper.dataset.serverCacheBypassed === 'true'
+      ? originalUrl
+      : wrapper.dataset.random40Card === 'true'
       ? random40ForegroundPlaybackUrl(originalUrl)
       : random40PlaybackUrl(originalUrl)
   );
@@ -4529,7 +4615,11 @@ function getDeckNetworkWarmIndexes(activeWrapper) {
   const activeVideo = activeWrapper?.querySelector('video');
   const preloadRadius = pongDeckPreloadRadius();
   if (!activeVideo || preloadRadius < 1) return warmIndexes;
-  if (random40ForegroundPlaybackExclusive() && activeVideo.readyState > 0) {
+  if (
+    random40ForegroundPlaybackExclusive() &&
+    activeVideo.readyState > 0 &&
+    !pongLocal22TurboPlaybackActive()
+  ) {
     delete activeWrapper.dataset.deckNextWarm;
     return warmIndexes;
   }
@@ -4537,6 +4627,13 @@ function getDeckNetworkWarmIndexes(activeWrapper) {
   const criticallyLow = videoHasCriticalForegroundBuffer(activeVideo);
   const nextWasWarming = activeWrapper.dataset.deckNextWarm === 'true';
   if (criticallyLow) {
+    if (pongLocal22TurboPlaybackActive()) {
+      // Local2.2's PC cache is already filling the next cards at background
+      // priority. Do not attach another media reader while the visible card is
+      // starved; the current stream keeps the sole foreground lane.
+      delete activeWrapper.dataset.deckNextWarm;
+      return warmIndexes;
+    }
     // Keep two escape probes alive. A verified URL can still be a dead CDN
     // object; without another attached card the deck cannot recover.
     ensureDeckOrder();
@@ -4548,7 +4645,10 @@ function getDeckNetworkWarmIndexes(activeWrapper) {
     delete activeWrapper.dataset.deckNextWarm;
     return warmIndexes;
   }
-  if ((nextWasWarming && criticallyLow) || (!nextWasWarming && videoNeedsForegroundPriority(activeVideo))) {
+  if (
+    !pongLocal22TurboPlaybackActive() &&
+    ((nextWasWarming && criticallyLow) || (!nextWasWarming && videoNeedsForegroundPriority(activeVideo)))
+  ) {
     return warmIndexes;
   }
   activeWrapper.dataset.deckNextWarm = 'true';
@@ -4837,7 +4937,19 @@ function rotateVideoRetrySource(wrapper, video) {
     video.src = gatewayUrl;
     return true;
   }
-  if (random40IsPcFileCachePlaybackUrl(currentUrl)) return false;
+  if (random40IsPcFileCachePlaybackUrl(currentUrl)) {
+    // A completed local file can be structurally valid enough for readyState 4
+    // yet fail to advance on a particular Android decoder. The old recovery
+    // loop repeatedly reloaded that same file forever. Give the original CDN
+    // one clean fallback and keep this card pinned there for the session.
+    if (wrapper.dataset.serverCacheBypassed === 'true') return false;
+    wrapper.dataset.serverCacheBypassed = 'true';
+    delete wrapper.dataset.serverCacheRecoveryRequested;
+    delete wrapper.dataset.serverCachePromoting;
+    random40PlaybackUrlOverrides.delete(originalUrl);
+    video.src = originalUrl;
+    return true;
+  }
 
   const localIndex = Number(wrapper.dataset.index || 0);
   const metadata = videoMetadata[Number.isInteger(localIndex) ? localIndex : 0] || {};
@@ -5492,7 +5604,7 @@ function getDeckSwipePoint(event) {
 
 function isDeckSwipeBlockedTarget(target) {
   return !!(target && target.closest && target.closest(
-    '.video-progress-container, .audio-toggle-button, .control-button, .next-batch-button, .unwatched-videos-button, .paste-prev-button, .paste-nav-button, .save-video-button, .save-artist-button, .repair-button, .controls-overlay, #auth-helper, #erome-helper, button, input, textarea'
+    '.video-progress-container, .audio-toggle-button, .control-button, .next-batch-button, .unwatched-videos-button, .paste-prev-button, .paste-nav-button, .simpcity-tiktok-button, .save-video-button, .save-artist-button, .repair-button, .controls-overlay, #auth-helper, #erome-helper, button, input, textarea'
   ));
 }
 
@@ -5527,6 +5639,7 @@ function beginDeckSwipe(event, source) {
     startY: point.clientY,
     lastX: point.clientX,
     lastY: point.clientY,
+    axis: '',
     active: false,
     rejected: false
   };
@@ -5547,13 +5660,20 @@ function moveDeckSwipe(event, source) {
 
   if (!deckSwipeGesture.active) {
     if (absX > 14 && absX > absY * 1.18) {
-      deckSwipeGesture.rejected = true;
-      return;
+      const context = getSimpCityTikTokContext();
+      const canOpenTikTok = dx < 0 && !context.sideActive && context.tiktokIndex >= 0;
+      const canReturnFromTikTok = dx > 0 && context.sideActive;
+      if (!canOpenTikTok && !canReturnFromTikTok) {
+        deckSwipeGesture.rejected = true;
+        return;
+      }
+      deckSwipeGesture.axis = 'horizontal';
+      deckSwipeGesture.active = true;
+    } else {
+      if (absY < 16 || absY < absX * 1.04) return;
+      deckSwipeGesture.axis = 'vertical';
+      deckSwipeGesture.active = true;
     }
-
-    if (absY < 16 || absY < absX * 1.04) return;
-
-    deckSwipeGesture.active = true;
   }
 
   stopDeckSwipeEvent(event);
@@ -5564,8 +5684,12 @@ function endDeckSwipe(event, source) {
   if (source === 'pointer' && deckSwipeGesture.pointerId !== event.pointerId) return;
 
   const point = getDeckSwipePoint(event);
+  const dx = (point.clientX || deckSwipeGesture.lastX) - deckSwipeGesture.startX;
   const dy = (point.clientY || deckSwipeGesture.lastY) - deckSwipeGesture.startY;
-  const shouldNavigate = deckSwipeGesture.active && Math.abs(dy) >= 24;
+  const axis = deckSwipeGesture.axis || 'vertical';
+  const shouldNavigate = deckSwipeGesture.active && (
+    axis === 'horizontal' ? Math.abs(dx) >= 28 : Math.abs(dy) >= 24
+  );
   deckSwipeGesture = null;
 
   if (!shouldNavigate) return;
@@ -5576,7 +5700,10 @@ function endDeckSwipe(event, source) {
   if (now - lastDeckSwipeAt < 180) return;
   lastDeckSwipeAt = now;
 
-  if (dy < 0) goToNextDeckVideo();
+  if (axis === 'horizontal') {
+    if (dx < 0) enterSimpCityTikTokSideDeck();
+    else leaveSimpCityTikTokSideDeck();
+  } else if (dy < 0) goToNextDeckVideo();
   else goToPreviousDeckVideo();
 }
 
@@ -6932,8 +7059,14 @@ function random40VisibleVideoIsBuffering() {
 
 function random40PreloadConcurrencyLimit() {
   const video = getForegroundPriorityVideo();
-  if (random40VisibleVideoIsBuffering()) return RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY;
-  if (video && videoNeedsForegroundPriority(video)) return RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY;
+  // Local2.2 has a separate PC download lane, but Android still benefits from
+  // one browser-native hedge for the next card. Keep this bounded at one so
+  // the visible card remains dominant.
+  const foregroundLimit = pongLocal22TurboPlaybackActive()
+    ? RANDOM40_LOCAL22_PRELOAD_FOREGROUND_CONCURRENCY
+    : RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY;
+  if (random40VisibleVideoIsBuffering()) return foregroundLimit;
+  if (video && videoNeedsForegroundPriority(video)) return foregroundLimit;
   if (video && !video.paused) {
     const speculativeDeckLoad = [...document.querySelectorAll('.video-wrapper:not(.deck-active) video')]
       .some(candidate => {
@@ -7481,9 +7614,12 @@ function runRandom40PreloadPool() {
   // hidden <video> requests in Android wastes the shared source connection and
   // can starve the visible card. Keep browser preloads only as a no-PC fallback.
   const local2FastPlayback = pongLocal2FastPlaybackActive();
+  const local22TurboPlayback = pongLocal22TurboPlaybackActive();
   const useServerFileCache = Boolean(random40ServerVideoCacheEndpoint());
-  const currentPreloadReserve = pongLocal2FastPlaybackActive()
+  const currentPreloadReserve = local2FastPlayback
     ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
+    : local22TurboPlayback
+      ? 3
     : RANDOM40_PRELOAD_CURRENT_RESERVE;
   random40PreloadMap.forEach(record => {
     record.priority = 2;
@@ -7505,33 +7641,61 @@ function runRandom40PreloadPool() {
   // Do not start a second full-file origin request for the same URL. It joins
   // the authoritative background manifest as soon as the user leaves it.
   const deferActiveCache = Boolean(
-    activeOriginalUrl && !random40IsPcFileCachePlaybackUrl(activePlaybackUrl)
+    activeOriginalUrl &&
+    !local22TurboPlayback &&
+    !random40IsPcFileCachePlaybackUrl(activePlaybackUrl)
   );
-  const collectServerCandidate = (candidate, current = false) => {
+  // The PC cache prepares upcoming cards without competing with the active
+  // direct-CDN request.
+  const collectServerCandidate = (
+    candidate,
+    current = false,
+    backgroundReserve = 2,
+    promoteFirst = false
+  ) => {
     if (!useServerFileCache) return;
     const bounds = getPasteEventVideoBounds(candidate?.event);
     if (!bounds) return;
     const artistKey = getPasteEventPaperclipKey(candidate.event, candidate.index) ||
       String(candidate.event.artistKey || candidate.event.artistUrl || '');
+    const candidateStart = local22TurboPlayback && current
+      ? Math.max(bounds.start, Number(currentLoadedRangeStart || 0) + Number(activeWrapper?.dataset?.index || 0))
+      : bounds.start;
     const candidateEnd = (PONG_ADAPTIVE_PLAYBACK || pongLocal22PlaybackActive())
-      ? Math.min(bounds.end, bounds.start + (current ? currentPreloadReserve : 2))
+      ? Math.min(bounds.end, candidateStart + (current ? currentPreloadReserve : backgroundReserve))
       : bounds.end;
-    for (let globalIndex = bounds.start; globalIndex < candidateEnd; globalIndex++) {
+    for (let globalIndex = candidateStart; globalIndex < candidateEnd; globalIndex++) {
       const url = String(allVideoUrls[globalIndex] || '');
-      if (!url || (deferActiveCache && url === activeOriginalUrl) || serverCacheUrlSet.has(url)) continue;
+      if (
+        !url ||
+        (deferActiveCache && url === activeOriginalUrl) ||
+        serverCacheUrlSet.has(url)
+      ) continue;
       serverCacheUrlSet.add(url);
-      serverCacheItems.push({ url, artistKey });
-      if (current && serverCacheCurrentUrls.length < currentPreloadReserve) {
+      serverCacheItems.push({ url, artistKey, segmentConcurrency: 0 });
+      if (
+        (current && serverCacheCurrentUrls.length < currentPreloadReserve) ||
+        (promoteFirst && globalIndex < candidateStart + 3)
+      ) {
         serverCacheCurrentUrls.push(url);
       }
     }
   };
   collectServerCandidate(currentCandidate, true);
-  const backgroundServerCandidates = pongLocal22PlaybackActive()
-    ? candidates.filter(candidate => candidate.index !== currentIndex).slice(0, 1)
+  const backgroundServerCandidates = local22TurboPlayback
+    ? candidates.filter(candidate => candidate.index !== currentIndex).slice(0, 2)
+    : pongLocal22PlaybackActive()
+      ? candidates.filter(candidate => candidate.index !== currentIndex).slice(0, 1)
     : candidates.filter(candidate => candidate.index !== currentIndex);
-  backgroundServerCandidates.forEach(candidate => {
-    if (candidate.index !== currentIndex) collectServerCandidate(candidate, false);
+  backgroundServerCandidates.forEach((candidate, candidateOffset) => {
+    if (candidate.index !== currentIndex) {
+      collectServerCandidate(
+        candidate,
+        false,
+        local22TurboPlayback ? 3 : 2,
+        local22TurboPlayback && candidateOffset < 2
+      );
+    }
   });
   let preloadOrder = 0;
   const addCandidateVideo = ({ event, index }, offset, priority, { includeWarmed = false } = {}) => {
@@ -7547,8 +7711,12 @@ function runRandom40PreloadPool() {
     const url = allVideoUrls[globalIndex];
     if (!url) return true;
     const key = `${bundleKey}|${url}`;
-    if (!useServerFileCache) neededKeys.add(key);
-    if (!useServerFileCache) {
+    const local22BrowserHedge = local22TurboPlayback &&
+      index === currentIndex &&
+      url !== activeOriginalUrl &&
+      offset < currentPreloadReserve;
+    if (!useServerFileCache || local22BrowserHedge) neededKeys.add(key);
+    if (!useServerFileCache || local22BrowserHedge) {
       random40PreloadVideo(bundleKey, globalIndex, url, { priority, order: preloadOrder++ });
     }
     return true;
@@ -7752,6 +7920,7 @@ function isPasteEventRetiredForPaperclip(event, index = -1) {
 
 function isPasteEventViewableForPaperclip(event) {
   if (!event || !Array.isArray(allVideoUrls) || !allVideoUrls.length) return false;
+  if (event.paperclipHidden === true) return false;
   const start = Number(event.startIndex);
   const count = Number(event.count);
   if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) return false;
@@ -7942,6 +8111,7 @@ function getNextSimpCityPairEventIndex() {
   return pasteEvents.findIndex((event, index) => (
     index !== currentPasteIndex &&
     String(event?.simpCityPairId || '') === pairId &&
+    event?.paperclipHidden !== true &&
     isPasteEventViewableForPaperclip(event) &&
     !isPasteEventPreviouslyVisitedForPaperclip(event, index) &&
     !isPasteEventRetiredForPaperclip(event, index)
@@ -7975,9 +8145,125 @@ function shouldNextBatchAdvanceSavedArtist() {
     pasteEvents.length > 1;
 }
 
+function isSimpCityTikTokEvent(event) {
+  return Boolean(
+    event &&
+    String(event.simpCityMediaKind || '').toLowerCase() === 'tiktok' &&
+    String(event.simpCityPairId || '')
+  );
+}
+
+function getSimpCityTikTokContext(eventIndex = currentPasteIndex) {
+  const activeIndex = Number(eventIndex);
+  const activeEvent = Number.isInteger(activeIndex) && activeIndex >= 0 ? pasteEvents[activeIndex] : null;
+  const pairId = String(activeEvent?.simpCityPairId || '');
+  if (!pairId) return { pairId: '', primaryIndex: -1, tiktokIndex: -1, sideActive: false };
+  const tiktokIndex = pasteEvents.findIndex(event => (
+    String(event?.simpCityPairId || '') === pairId &&
+    isSimpCityTikTokEvent(event) &&
+    Number(event?.count || 0) > 0
+  ));
+  const primaryIndex = pasteEvents.findIndex(event => (
+    String(event?.simpCityPairId || '') === pairId &&
+    !isSimpCityTikTokEvent(event) &&
+    event?.paperclipHidden !== true &&
+    Number(event?.count || 0) > 0
+  ));
+  return {
+    pairId,
+    primaryIndex,
+    tiktokIndex,
+    sideActive: isSimpCityTikTokEvent(activeEvent)
+  };
+}
+
+function updateSimpCityTikTokButton() {
+  let button = document.getElementById('simpcity-tiktok-button');
+  if (!button) {
+    button = document.createElement('button');
+    button.id = 'simpcity-tiktok-button';
+    button.className = 'simpcity-tiktok-button';
+    button.type = 'button';
+    button.textContent = 'TikTok';
+    button.setAttribute('aria-label', 'Open TikTok videos for this profile');
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleSimpCityTikTokSideDeck();
+    });
+    document.body.appendChild(button);
+  }
+  const context = getSimpCityTikTokContext();
+  const available = context.tiktokIndex >= 0 && (context.primaryIndex >= 0 || context.sideActive);
+  button.style.display = available ? 'flex' : 'none';
+  button.classList.toggle('active', available && context.sideActive);
+  button.title = context.sideActive ? 'Return to this profile' : 'Open this profile\'s TikTok videos';
+  button.setAttribute('aria-label', button.title);
+  return available;
+}
+
+function enterSimpCityTikTokSideDeck() {
+  const context = getSimpCityTikTokContext();
+  if (context.sideActive || context.tiktokIndex < 0 || context.primaryIndex < 0) return false;
+  simpCityTikTokReturnState = { eventIndex: context.primaryIndex };
+  displayPasteEventAtIndex(context.tiktokIndex, { recordHistory: false });
+  return true;
+}
+
+function leaveSimpCityTikTokSideDeck() {
+  const context = getSimpCityTikTokContext();
+  if (!context.sideActive) return false;
+  const returnIndex = Number.isInteger(Number(simpCityTikTokReturnState?.eventIndex))
+    ? Number(simpCityTikTokReturnState.eventIndex)
+    : context.primaryIndex;
+  simpCityTikTokReturnState = null;
+  if (returnIndex < 0 || !pasteEvents[returnIndex]) return false;
+  displayPasteEventAtIndex(returnIndex, { recordHistory: false });
+  return true;
+}
+
+function toggleSimpCityTikTokSideDeck() {
+  return getSimpCityTikTokContext().sideActive
+    ? leaveSimpCityTikTokSideDeck()
+    : enterSimpCityTikTokSideDeck();
+}
+
+window.PongToggleSimpCityTikTok = toggleSimpCityTikTokSideDeck;
+
+function getBestCachedResumeOffsetForEvent(event) {
+  if (!event || event.source !== 'random40') return 0;
+  const start = Math.max(0, Number(event.startIndex || 0));
+  const count = Math.max(0, Number(event.count || 0));
+  const end = Math.min(allVideoUrls.length, start + count);
+  let bestOffset = 0;
+  let bestScore = 0;
+
+  for (let index = start; index < end; index++) {
+    const url = String(allVideoUrls[index] || '');
+    const metadata = allVideoMetadata[index] || {};
+    if (metadata.local2PlaybackProfile !== 'local22') continue;
+    const record = random40ServerVideoCacheTracked.get(url);
+    const override = random40PlaybackUrlOverrides.get(url);
+    const score = record?.ready === true
+      ? 3
+      : record?.growingReady === true
+        ? 2
+        : random40IsPcFileCachePlaybackUrl(override)
+          ? 1
+          : 0;
+    if (score > bestScore) {
+      bestScore = score;
+      bestOffset = index - start;
+      if (score >= 3) break;
+    }
+  }
+  return bestOffset;
+}
+
 function displayPasteEventAtIndex(index, { recordHistory = true } = {}) {
   const targetEvent = pasteEvents[index];
   const currentEvent = pasteEvents[currentPasteIndex];
+  if (!isSimpCityTikTokEvent(targetEvent)) simpCityTikTokReturnState = null;
   rememberCurrentPasteEventVideoPosition();
   if (isBunkrPasteEvent(targetEvent) || isBunkrPasteEvent(currentEvent)) {
     document.querySelectorAll('.video-wrapper video').forEach(video => {
@@ -7989,10 +8275,18 @@ function displayPasteEventAtIndex(index, { recordHistory = true } = {}) {
     });
   }
   setActivePlaybackRangeForPasteEvent(index, { recordHistory });
+  updateSimpCityTikTokButton();
   const targetCount = Math.max(1, Number(targetEvent?.count || BATCH_SIZE));
+  const hasSavedResumeOffset = Object.prototype.hasOwnProperty.call(
+    targetEvent || {},
+    'resumeVideoOffset'
+  );
+  const requestedResumeOffset = hasSavedResumeOffset
+    ? Number(targetEvent?.resumeVideoOffset || 0)
+    : getBestCachedResumeOffsetForEvent(targetEvent);
   const resumeOffset = Math.max(
     0,
-    Math.min(targetCount - 1, Number(targetEvent?.resumeVideoOffset || 0))
+    Math.min(targetCount - 1, requestedResumeOffset)
   );
   const batchSize = Math.max(1, getCurrentBatchSize());
   const resumeBatchOffset = Math.floor(resumeOffset / batchSize) * batchSize;
@@ -8214,6 +8508,7 @@ function resetRandom40AiStatsBaseline() {
 
 function resetPasteEvents(){
   pasteEvents=[];
+  simpCityTikTokReturnState = null;
   random40PlaybackReadyAcked = false;
   random40PlaybackReadyExpectedBundles = new Set();
   random40PlaybackUrlOverrides.clear();
@@ -8230,6 +8525,7 @@ function resetPasteEvents(){
 }
 
 function updatePasteNavigationButton(){
+  updateSimpCityTikTokButton();
   let btn=document.getElementById('paste-nav-button');
   let previousBtn=document.getElementById('paste-prev-button');
 
@@ -9134,6 +9430,7 @@ async function writeEromeCheckpoint(record) {
 async function restoreSavedEromeMenuFromDb() {
   let restored = 0;
   const saved = loadSavedEromeArtists();
+  const restoredFullUrls = new Set();
   try {
     const db = await openSavedEromeDb();
     const tx = db.transaction(SAVED_EROME_DB_STORE, 'readonly');
@@ -9141,6 +9438,7 @@ async function restoreSavedEromeMenuFromDb() {
     db.close();
     (Array.isArray(records) ? records : []).forEach(record => {
       const item = summarizeSavedEromeRecord(record);
+      if (item.url && item.hasVideoGroups) restoredFullUrls.add(item.url);
       if (!item.url || saved[item.url]) return;
       saved[item.url] = item;
       restored++;
@@ -9152,10 +9450,24 @@ async function restoreSavedEromeMenuFromDb() {
   }
 
   try {
-    let response = await fetch('pong-data/saved-links-v2.json', { cache: 'no-store' });
-    if (!response.ok) response = await fetch('pong-data/saved-links.json', { cache: 'no-store' });
-    const payload = response.ok ? await response.json() : {};
-    const recoveryPayloads = [payload];
+    const recoveryPayloads = [];
+    const compactResponse = await fetch('pong-data/saved-erome-recovery.json', { cache: 'no-store' }).catch(() => null);
+    if (compactResponse?.ok) {
+      const payload = await compactResponse.json().catch(() => null);
+      if (payload) recoveryPayloads.push(payload);
+    } else {
+      // Older deployments do not have the compact recovery artifact. Merge
+      // both full backups only as a compatibility fallback.
+      const backupResponses = await Promise.allSettled([
+        fetch('pong-data/saved-links-v2.json', { cache: 'no-store' }),
+        fetch('pong-data/saved-links.json', { cache: 'no-store' })
+      ]);
+      for (const result of backupResponses) {
+        if (result.status !== 'fulfilled' || !result.value.ok) continue;
+        const payload = await result.value.json().catch(() => null);
+        if (payload) recoveryPayloads.push(payload);
+      }
+    }
     try {
       const endpoint = location.port === '8787'
         ? location.origin
@@ -9189,6 +9501,15 @@ async function restoreSavedEromeMenuFromDb() {
         if (albumUrl && isEromeAlbumLaunchUrl(albumUrl) && !profile.albums.has(albumUrl)) {
           profile.albums.set(albumUrl, []);
         }
+        (Array.isArray(artist?.videos) ? artist.videos : []).forEach(rawVideoUrl => {
+          const videoUrl = String(rawVideoUrl || '').trim();
+          if (!videoUrl) return;
+          const meta = artist?.videoMeta?.[videoUrl] || {};
+          const videoAlbumUrl = normalizeEromeLaunchUrl(meta?.postUrl || artist?.postUrl || '') || profile.artistUrl;
+          if (!profile.albums.has(videoAlbumUrl)) profile.albums.set(videoAlbumUrl, []);
+          const videos = profile.albums.get(videoAlbumUrl);
+          if (!videos.includes(videoUrl)) videos.push(videoUrl);
+        });
       });
       Object.values(recoveryPayload?.savedVideos || {}).forEach(video => {
         const sourceIsErome = String(video?.source || '').toLowerCase() === 'erome' ||
@@ -9204,7 +9525,7 @@ async function restoreSavedEromeMenuFromDb() {
     });
 
     for (const [artistUrl, albums] of recovered) {
-      if (saved[artistUrl]) continue;
+      if (restoredFullUrls.has(artistUrl)) continue;
       const videoGroups = [...albums].filter(([, videos]) => videos.length).map(([albumUrl, videos]) => ({
         url: albumUrl,
         title: getEromeTargetLabel(albumUrl),
@@ -9223,7 +9544,10 @@ async function restoreSavedEromeMenuFromDb() {
         updatedAt: now
       };
       saved[artistUrl] = summarizeSavedEromeRecord(record);
-      if (videoGroups.length) await putSavedEromeFullRecord(record);
+      if (videoGroups.length) {
+        await putSavedEromeFullRecord(record);
+        restoredFullUrls.add(artistUrl);
+      }
       restored++;
     }
   } catch (error) {
@@ -9583,6 +9907,10 @@ function compactSavedEromeVideoGroups(groups) {
       creatorName: String(group?.creatorName || ''),
       creatorKey: String(group?.creatorKey || ''),
       simpCityJobId: String(group?.simpCityJobId || ''),
+      pairId: String(group?.pairId || ''),
+      mediaKind: String(group?.mediaKind || ''),
+      paperclipHidden: group?.paperclipHidden === true,
+      preserveGroupOrder: group?.preserveGroupOrder === true,
       videos
     });
   });
@@ -10438,6 +10766,7 @@ function buildEromeImportGroups(data, fallbackUrl) {
 }
 
 function shuffleEromeGroupsForPlayback(groups) {
+  const preserveGroupOrder = (groups || []).some(group => group?.preserveGroupOrder === true);
   const shuffledGroups = compactSavedEromeVideoGroups(groups)
     .map(group => ({
       ...group,
@@ -10445,7 +10774,7 @@ function shuffleEromeGroupsForPlayback(groups) {
     }))
     .filter(group => group.videos.length);
 
-  return shuffleInPlace(shuffledGroups);
+  return preserveGroupOrder ? shuffledGroups : shuffleInPlace(shuffledGroups);
 }
 
 function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
@@ -10509,6 +10838,9 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         simpCityPairId: String(group.pairId || ''),
         simpCityMediaKind: String(group.mediaKind || ''),
+        paperclipHidden: group.paperclipHidden === true || (
+          String(group.mediaKind || '').toLowerCase() === 'tiktok' && Boolean(group.pairId)
+        ),
         loadAll: false,
         ready: true,
         pending: false
@@ -10799,6 +11131,7 @@ const RANDOM40_PRELOAD_MAX_ELEMENTS = 180;
 const RANDOM40_PRELOAD_IDLE_CONCURRENCY = 12;
 const RANDOM40_PRELOAD_PLAYING_CONCURRENCY = 1;
 const RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY = 0;
+const RANDOM40_LOCAL22_PRELOAD_FOREGROUND_CONCURRENCY = 1;
 const RANDOM40_PRELOAD_LOAD_TIMEOUT_MS = 12000;
 const RANDOM40_PRELOAD_RETRY_DELAY_MS = 2000;
 let random40State = null;
@@ -11193,8 +11526,8 @@ function random40PcFileCacheStreamUrl(rawUrl) {
   // downloads the same file in parallel. A partially growing LAN stream can
   // wait forever for MP4 tail metadata; switch only after the local file is
   // fully ready.
-  if (pongLocal2FastPlaybackActive() || pongLocal22PlaybackActive()) return '';
-  const profile = pongLocal22PlaybackActive() ? '&profile=local22' : '';
+  if (pongLocal2FastPlaybackActive()) return '';
+  const profile = pongLocal22TurboPlaybackActive() ? '&profile=local22' : '';
   return `${endpoint}/video-cache/stream?url=${encodeURIComponent(rawUrl)}${profile}`;
 }
 
@@ -11316,6 +11649,7 @@ function random40ApplyServerCachePlaybackUrl(originalUrl, playbackUrl, { forceAc
   let changed = false;
   document.querySelectorAll('.video-wrapper').forEach(wrapper => {
     if (String(wrapper.dataset.originalVideoUrl || '') !== String(originalUrl)) return;
+    if (wrapper.dataset.serverCacheBypassed === 'true') return;
     if (wrapper.dataset.networkSuspended === 'true') wrapper.dataset.suspendedVideoSrc = playbackUrl;
     const recoverActive = forceActive || (
       wrapper.classList.contains('deck-active') &&
@@ -11329,12 +11663,22 @@ function random40ApplyServerCachePlaybackUrl(originalUrl, playbackUrl, { forceAc
 }
 
 function random40PromoteWrapperToServerCache(wrapper, { forceActive = false } = {}) {
+  if (wrapper?.dataset?.serverCacheBypassed === 'true') return false;
   const originalUrl = String(wrapper?.dataset?.originalVideoUrl || '');
   const record = originalUrl ? random40ServerVideoCacheTracked.get(originalUrl) : null;
-  // Only replace a working source after the complete LAN file is ready. A
-  // growing file remains useful to the PC downloader, but Android media stacks
-  // can reject it while probing/seek-reading the MP4 index.
-  if (!record?.ready || !record.playbackUrl) return false;
+  const video = wrapper?.querySelector?.('video');
+  const noMetadataRecovery = forceActive &&
+    Number(video?.readyState || 0) === 0 &&
+    Number(record?.bytes || 0) >= 384 * 1024;
+  // Local2.2 can also promote a fast-start growing file after its measured
+  // recovery cushion exists. A zero-metadata direct request may use the local
+  // tail-range reader sooner; other modes retain the completed-file rule.
+  const forcedGrowingRecovery = forceActive &&
+    pongLocal22TurboPlaybackActive() &&
+    record?.status === 'downloading' &&
+    Number(record?.bytes || 0) >= (noMetadataRecovery ? 384 : 768) * 1024 &&
+    (noMetadataRecovery || Number(record?.estimatedBufferedSeconds || 0) >= 2);
+  if (!(record?.ready || record?.growingReady || forcedGrowingRecovery) || !record.playbackUrl) return false;
   random40RememberPlaybackOverride(originalUrl, record.playbackUrl);
   return random40SwapRenderedVideoSource(wrapper, record.playbackUrl, { forceActive });
 }
@@ -11343,8 +11687,16 @@ function random40ForegroundPlaybackUrl(rawUrl) {
   const key = String(rawUrl || '');
   if (!random40ServerVideoCacheEndpoint()) return key;
   const serverRecord = random40ServerVideoCacheTracked.get(key);
-  if (serverRecord?.ready === true && serverRecord.playbackUrl) return serverRecord.playbackUrl;
-  if (pongLocal2FastPlaybackActive() || pongLocal22PlaybackActive()) return key;
+  if ((serverRecord?.ready === true || serverRecord?.growingReady === true) && serverRecord.playbackUrl) {
+    return serverRecord.playbackUrl;
+  }
+  if (pongLocal2FastPlaybackActive()) return key;
+  if (pongLocal22TurboPlaybackActive()) {
+    // Start the visible card immediately from its proven HTTPS source. The PC
+    // concurrently completes upcoming cards and becomes the source only when
+    // a file is ready or this direct request genuinely stalls.
+    return key;
+  }
   return random40PcPlaybackGatewayUrl(key) || key;
 }
 
@@ -11381,6 +11733,16 @@ function random40ApplyServerVideoCacheRecords(records, endpoint = random40Server
       const byteProgressAt = bytes > Number(previous?.bytes || 0)
         ? Date.now()
         : Number(previous?.byteProgressAt || 0);
+      const metadataIndex = allVideoUrls.indexOf(key);
+      const playbackMetadata = metadataIndex >= 0 ? allVideoMetadata[metadataIndex] || {} : {};
+      const encodedBytesPerSecond = Math.max(0, Number(playbackMetadata.bytesPerSecond || 0));
+      const estimatedBufferedSeconds = encodedBytesPerSecond > 0 ? bytes / encodedBytesPerSecond : 0;
+      const growingReady = pongLocal22TurboPlaybackActive() &&
+        playbackMetadata.local2PlaybackProfile === 'local22' &&
+        playbackMetadata.playbackFastStart === true &&
+        record.ready !== true &&
+        String(record.status || '') === 'downloading' &&
+        estimatedBufferedSeconds >= 6;
       random40ServerVideoCacheTracked.set(key, {
         id: record.id,
         status: String(record.status || ''),
@@ -11389,21 +11751,25 @@ function random40ApplyServerVideoCacheRecords(records, endpoint = random40Server
         bytes,
         totalBytes: Number(record.totalBytes || 0),
         playbackUrl,
+        growingReady,
+        estimatedBufferedSeconds,
         byteProgressAt,
         updatedAt: Date.now()
       });
-      if (record.ready === true && playbackUrl) {
+      if ((record.ready === true || growingReady) && playbackUrl) {
         random40RememberPlaybackOverride(key, playbackUrl);
         changed = random40ApplyServerCachePlaybackUrl(key, playbackUrl, { forceActive: false }) || changed;
         // A completed PC file is local and cannot starve the foreground origin
         // stream. Keep the first ten cards of the current artist attached so
         // their decoder metadata is ready before the user swipes.
-        document.querySelectorAll('.video-wrapper').forEach(wrapper => {
-          if (String(wrapper.dataset.originalVideoUrl || '') !== key) return;
-          if (!random40KeepReadyCacheCardAttached(wrapper)) return;
-          const video = wrapper.querySelector('video');
-          if (restoreDeckVideoNetwork(wrapper, video)) changed = true;
-        });
+        if (record.ready === true) {
+          document.querySelectorAll('.video-wrapper').forEach(wrapper => {
+            if (String(wrapper.dataset.originalVideoUrl || '') !== key) return;
+            if (!random40KeepReadyCacheCardAttached(wrapper)) return;
+            const video = wrapper.querySelector('video');
+            if (restoreDeckVideoNetwork(wrapper, video)) changed = true;
+          });
+        }
       } else if (playbackUrl && random40PlaybackUrlsMatch(random40PlaybackUrlOverrides.get(key), playbackUrl)) {
         random40PlaybackUrlOverrides.delete(key);
         document.querySelectorAll('.video-wrapper').forEach(wrapper => {
@@ -11429,6 +11795,7 @@ function random40StartServerVideoCacheTimers() {
   // Apply completed cache files to every rendered card in a cached-playback
   // session so later artists do not remain stuck on their origin/TikTok URL.
   document.querySelectorAll('.video-wrapper').forEach(wrapper => {
+    if (wrapper.dataset.serverCacheBypassed === 'true') return;
     const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
     const streamUrl = random40ForegroundPlaybackUrl(originalUrl);
     if (!streamUrl) return;
@@ -11540,7 +11907,11 @@ async function random40WarmServerVideoCache(urls, {
     if (!uniqueUrls.includes(raw)) uniqueUrls.push(raw);
     const key = String(value?.artistKey || value?.bundleKey || artistKey || '');
     if (key) {
-      const item = { url: raw, artistKey: key };
+      const item = {
+        url: raw,
+        artistKey: key,
+        segmentConcurrency: Math.max(0, Number(value?.segmentConcurrency || 0))
+      };
       if (manifestByUrl.has(raw)) Object.assign(manifestByUrl.get(raw), item);
       else {
         manifestByUrl.set(raw, item);
@@ -11620,15 +11991,18 @@ function random40WarmServerVideoCacheForActiveWrapper(
   wrapper = document.querySelector('.video-wrapper.deck-active'),
   { urgent = false } = {}
 ) {
-  if (!wrapper || !isPongServerCachedPlaybackActive()) return;
+  if (!wrapper || !isPongServerCachedPlaybackActive()) return false;
   const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
-  if (!originalUrl) return;
+  if (!originalUrl) return false;
   const video = wrapper.querySelector('video');
   const activePlaybackUrl = String(
     video?.currentSrc || video?.src || random40PlaybackUrlOverrides.get(originalUrl) || ''
   );
   const activeIsCompleteCache = random40IsPcFileCachePlaybackUrl(activePlaybackUrl);
-  const activeNeedsHedge = urgent && !activeIsCompleteCache;
+  // Local2.2 deliberately keeps one PC-side hedge advancing beside Android's
+  // direct stream. Cancelling that already-warm copy forced recovery to restart
+  // from byte zero whenever the CDN slowed several seconds into playback.
+  const activeNeedsHedge = (urgent || pongLocal22TurboPlaybackActive()) && !activeIsCompleteCache;
   const currentUrls = (activeIsCompleteCache || activeNeedsHedge) ? [originalUrl] : [];
   const localIndex = Number(wrapper.dataset.index || 0);
   const activeGlobalIndex = Number(currentLoadedRangeStart || 0) + (Number.isInteger(localIndex) ? localIndex : 0);
@@ -11640,23 +12014,28 @@ function random40WarmServerVideoCacheForActiveWrapper(
       ? Math.max(1, bounds.end - bounds.start)
       : pongLocal2FastPlaybackActive()
         ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
+        : pongLocal22TurboPlaybackActive()
+          ? 8
         : RANDOM40_PRELOAD_CURRENT_RESERVE;
     for (let index = bounds.start; index < Math.min(bounds.end, bounds.start + reserve); index++) {
+      const browserOwnsDirectWindow = pongLocal22TurboPlaybackActive() && index === activeGlobalIndex;
       if (
         allVideoUrls[index] &&
+        !browserOwnsDirectWindow &&
         allVideoUrls[index] !== originalUrl &&
         !currentUrls.includes(allVideoUrls[index])
       ) currentUrls.push(allVideoUrls[index]);
     }
   }
   if (currentUrls.length) {
-    void random40WarmServerVideoCache(currentUrls, {
+    return random40WarmServerVideoCache(currentUrls, {
       activeUrl: (activeIsCompleteCache || activeNeedsHedge) ? originalUrl : '',
       deferredUrl: (activeIsCompleteCache || activeNeedsHedge) ? '' : originalUrl,
       currentUrls,
       urgent
     });
   }
+  return false;
 }
 
 function resetRandom40ServerVideoCacheClientState() {
@@ -15797,6 +16176,14 @@ async function random40TakeLocal2Candidates(localEndpoint, count, runState, endp
             .filter(Boolean))],
           playbackProbeVerified: true,
           playbackFastStart: media.fastStart === true,
+          local2PlaybackProfile: endpointPath === '/local22-turbo' ? 'local22' : '',
+          serverPrebufferReady: media.serverPrebufferReady === true,
+          totalBytes: Math.max(0, Number(media.totalBytes || 0)),
+          durationSeconds: Math.max(0, Number(media.durationSeconds || 0)),
+          bytesPerSecond: Math.max(0, Number(media.bytesPerSecond || 0)),
+          probeBytesPerSecond: Math.max(0, Number(media.probeBytesPerSecond || 0)),
+          probeLatencyMs: Math.max(0, Number(media.probeLatencyMs || 0)),
+          streamabilityMargin: Math.max(0, Number(media.streamabilityMargin || 0)),
           reviewImageUrls,
           local2Revision: String(item?.revision || '')
         })));
@@ -16360,9 +16747,16 @@ function random40BuildImportPayload(entries, globalStartIndex = 0, mode = random
   const modelMode = random40NormalizeMode(mode);
 
   const randomizeWithFastStartFirst = artistEntries => {
-    const fastStart = shuffleInPlace(artistEntries.filter(entry => entry?.playbackFastStart === true));
+    const local22Ranked = artistEntries.some(entry => entry?.local2PlaybackProfile === 'local22');
+    const fastStart = artistEntries.filter(entry => entry?.playbackFastStart === true);
     const remaining = shuffleInPlace(artistEntries.filter(entry => entry?.playbackFastStart !== true));
-    return [...fastStart, ...remaining];
+    if (!local22Ranked) return [...shuffleInPlace(fastStart), ...remaining];
+    fastStart.sort(compareLocal22PlaybackMetadata);
+    return [
+      ...fastStart.slice(0, 3),
+      ...shuffleInPlace(fastStart.slice(3)),
+      ...remaining
+    ];
   };
 
   for (const artistEntries of byArtist.values()) {
@@ -16433,15 +16827,21 @@ function random40PublishEntries(entries, runState = random40State) {
     payload.urls.length &&
     runState.playbackProfile !== 'local2fast'
   ) {
+    const local22Turbo = runState.playbackProfile === 'local22';
     const initialWarmCount = runState.playbackProfile === 'local2fast'
       ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
+      : local22Turbo
+        ? 8
       : RANDOM40_PRELOAD_CURRENT_RESERVE;
-    const currentUrls = payload.urls.slice(0, initialWarmCount);
-    // Queue the first visible card as priority zero before its media element is
-    // rendered. Previously videos 2-20 could occupy every PC download lane
-    // while video 1 waited for a slot.
+    const currentUrls = local22Turbo
+      ? payload.urls.slice(0, 4)
+      : payload.urls.slice(0, initialWarmCount);
+    // Local2.2 starts one active PC hedge beside Android's direct request and
+    // prepares the next three cards. Both routes are hidden and media is never
+    // decoded or played on the PC.
     void random40WarmServerVideoCache(currentUrls, {
       activeUrl: currentUrls[0],
+      deferredUrl: '',
       currentUrls
     });
   }
@@ -18437,10 +18837,13 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     reservedAlbumSlots++;
     return true;
   };
-  const publishGroup = group => {
+  const publishGroup = rawGroups => {
+    const groups = (Array.isArray(rawGroups) ? rawGroups : [rawGroups])
+      .filter(group => Array.isArray(group?.videos) && group.videos.length);
+    if (!groups.length) return false;
     let imported;
     if (!cardsStarted) {
-      imported = cacheEromeCardImport([group], bunkrPlaybackBase);
+      imported = cacheEromeCardImport(groups, bunkrPlaybackBase);
       if (!imported.urls.length || !imported.events.length) return false;
       closeEromeHelper();
       setEromeTwentyCardMode(true, { respectRange: true });
@@ -18450,23 +18853,26 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       activateFirstEromeBatch();
       cardsStarted = true;
     } else {
-      imported = appendEromeGroupsToCurrentCards([group], bunkrPlaybackBase);
+      imported = appendEromeGroupsToCurrentCards(groups, bunkrPlaybackBase);
       if (!imported.urls.length || !imported.events.length) return false;
       updatePasteNavigationButton();
     }
     loadedAlbums++;
     videoCount += imported.urls.length;
     scheduleEromeCheckpointAutosave();
-    if (Array.isArray(group.videos) && group.videos.length) {
+    const warmItems = groups
+      .map(group => ({
+        url: group.videos[0],
+        artistKey: group.creatorKey || group.sourceUrl || group.url || ''
+      }))
+      .filter(item => item.url);
+    if (warmItems.length) {
       postJson('/video-cache/warm', {
         playbackProfile: 'bunkr',
         // Future artists need one prepared entry card. Their complete bundle
         // is submitted only when Paperclip makes that artist active, avoiding
         // hundreds of speculative downloads ahead of the viewer.
-        items: group.videos.slice(0, 1).map(url => ({
-          url,
-          artistKey: group.creatorKey || group.sourceUrl || group.url || ''
-        })),
+        items: warmItems,
         urgent: false,
         authoritative: false
       }).catch(() => {});
@@ -18484,18 +18890,27 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     if (!acquired) return;
     try {
       if (Array.isArray(album?.pairedGroups) && album.pairedGroups.length > 0) {
-        for (const pairedGroup of album.pairedGroups) {
-          if (!Array.isArray(pairedGroup?.videos) || !pairedGroup.videos.length) return;
-          publishGroup({
+        const pairedGroups = album.pairedGroups
+          .filter(pairedGroup => Array.isArray(pairedGroup?.videos) && pairedGroup.videos.length)
+          .map(pairedGroup => ({
             ...pairedGroup,
             sourceUrl: album.sourceUrl || sourceThreadUrl,
             sourceTitle: pairedGroup.title,
             creatorName: album.creatorName || pairedGroup.creatorName || '',
             creatorKey: album.creatorKey || pairedGroup.creatorKey || '',
             pairId: album.pairId || pairedGroup.pairId || '',
-            simpCityJobId: album.simpCityJobId || ''
-          });
-        }
+            simpCityJobId: album.simpCityJobId || '',
+            paperclipHidden: String(pairedGroup.mediaKind || '').toLowerCase() === 'tiktok',
+            preserveGroupOrder: true
+          }));
+        // TikTok is a side deck belonging to the creator, never a Paperclip
+        // bundle by itself. Wait for the creator's regular-video group, then
+        // publish both ranges together so the purple side button can switch.
+        if (!pairedGroups.some(group => String(group.mediaKind || '').toLowerCase() !== 'tiktok')) return;
+        publishGroup(pairedGroups.sort((left, right) => (
+          Number(String(left.mediaKind || '').toLowerCase() === 'tiktok') -
+          Number(String(right.mediaKind || '').toLowerCase() === 'tiktok')
+        )));
         return;
       }
       const readyVideos = Array.isArray(album?.videos) ? album.videos.filter(Boolean) : [];

@@ -60,6 +60,9 @@ const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD 
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const PONG_INDEX_PATH = path.join(process.cwd(), 'index.html');
 const PONG_SYNC_PATH = path.join(process.cwd(), 'pong-sync.js');
+const PONG_SAVED_LINKS_V2_PATH = path.join(process.cwd(), 'pong-data', 'saved-links-v2.json');
+const PONG_SAVED_LINKS_LEGACY_PATH = path.join(process.cwd(), 'pong-data', 'saved-links.json');
+const PONG_SAVED_EROME_RECOVERY_PATH = path.join(process.cwd(), 'pong-data', 'saved-erome-recovery.json');
 const PC_SAVED_LINKS_PATH = path.join(LOCAL_AI_DIR, 'shared-saved-links-v1.json');
 const PONG_PLAYED_HISTORY_PATH = path.join(LOCAL_AI_DIR, 'played-history-v1.json');
 const SIMPCITY_SESSION_PATH = path.join(LOCAL_AI_DIR, 'simpcity-session-v1.dpapi');
@@ -120,10 +123,16 @@ const VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(0, Math.min(
   VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY,
   Number(process.env.PONG_VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY ?? 2)
 ));
+const VIDEO_FILE_CACHE_LOCAL22_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(
+  VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY,
+  Math.min(
+    VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY,
+    Number(process.env.PONG_VIDEO_FILE_CACHE_LOCAL22_PLAYBACK_BACKGROUND_CONCURRENCY ?? 4)
+  )
+);
 const VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE = Math.max(20, Math.min(500, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE || 120)));
-// Random40 artist bundles commonly place every verified video on one CDN host.
-// Two slots leaves thirteen videos queued behind the current card; four keeps
-// the active stream responsive while materially warming the rest of that artist.
+// During a genuinely low foreground buffer, retain two upcoming downloads.
+// Normal playback still expands to the full background limit automatically.
 const VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY = Math.max(1, Math.min(12, Number(process.env.PONG_VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY || 8)));
 const VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS = Math.max(1, Math.min(60, Number(process.env.PONG_VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS || 10)));
 const VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS = Math.max(
@@ -147,6 +156,14 @@ const VIDEO_FILE_CACHE_TAIL_RANGE_HEADER_TIMEOUT_MS = Math.max(
 const VIDEO_FILE_CACHE_TAIL_RANGE_MAX_ACTIVE = Math.max(
   1,
   Math.min(8, Number(process.env.PONG_VIDEO_FILE_CACHE_TAIL_RANGE_MAX_ACTIVE || 4) || 4)
+);
+const VIDEO_FILE_CACHE_LOCAL22_SEGMENT_BYTES = Math.max(
+  256 * 1024,
+  Math.min(4 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_LOCAL22_SEGMENT_BYTES || 512 * 1024))
+);
+const VIDEO_FILE_CACHE_LOCAL22_SEGMENT_CONCURRENCY = Math.max(
+  2,
+  Math.min(6, Number(process.env.PONG_VIDEO_FILE_CACHE_LOCAL22_SEGMENT_CONCURRENCY || 4))
 );
 const LEARNED_STORE_PATH = path.join(LOCAL_AI_DIR, 'learned-examples.json');
 const BROWSER_SECRETS_PATH = path.join(LOCAL_AI_DIR, 'browser-secrets.json');
@@ -5149,7 +5166,13 @@ async function probePlayableMediaUrl(rawUrl, signal = null, timeoutMs = 8000) {
       ttl: playable ? VIDEO_VERIFY_CACHE_TTL_MS : Math.min(60000, VIDEO_VERIFY_CACHE_TTL_MS),
       playable: Boolean(playable),
       fastStart: details.fastStart === true,
-      container: String(details.container || '')
+      container: String(details.container || ''),
+      totalBytes: Math.max(0, Number(details.totalBytes || 0)),
+      durationSeconds: Math.max(0, Number(details.durationSeconds || 0)),
+      bytesPerSecond: Math.max(0, Number(details.bytesPerSecond || 0)),
+      probeBytesPerSecond: Math.max(0, Number(details.probeBytesPerSecond || 0)),
+      probeLatencyMs: Math.max(0, Number(details.probeLatencyMs || 0)),
+      streamabilityMargin: Math.max(0, Number(details.streamabilityMargin || 0))
     });
     while (videoPlaybackProbeCache.size > VIDEO_VERIFY_CACHE_MAX * 2) {
       videoPlaybackProbeCache.delete(videoPlaybackProbeCache.keys().next().value);
@@ -5160,6 +5183,7 @@ async function probePlayableMediaUrl(rawUrl, signal = null, timeoutMs = 8000) {
   const abort = () => controller.abort();
   signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs || 8000)));
+  const probeStartedAt = Date.now();
   try {
     const response = await gatewayFetch(rawUrl, {
       method: 'GET',
@@ -5171,6 +5195,12 @@ async function probePlayableMediaUrl(rawUrl, signal = null, timeoutMs = 8000) {
     }, controller, 'GET');
     const status = Number(response.statusCode || 0);
     const contentType = String(response.headers['content-type'] || '').toLowerCase();
+    const contentRange = String(response.headers['content-range'] || '');
+    const rangeMatch = contentRange.match(/\/(\d+)\s*$/);
+    const declaredLength = Number(response.headers['content-length'] || 0);
+    const totalBytes = rangeMatch
+      ? Number(rangeMatch[1] || 0)
+      : status === 200 ? declaredLength : 0;
     if (![200, 206].includes(status) || /(?:text\/html|application\/json)/.test(contentType)) {
       response.resume();
       return remember(false);
@@ -5216,6 +5246,7 @@ async function probePlayableMediaUrl(rawUrl, signal = null, timeoutMs = 8000) {
       (signature[0] === 0x1a && signature[1] === 0x45 && signature[2] === 0xdf && signature[3] === 0xa3);
     let fastStart = false;
     let container = '';
+    let durationSeconds = 0;
     if (mp4Like) {
       if (!latin.includes('ftyp')) return remember(false);
       if (/hvc1|hev1/.test(latin) && !/avc1/.test(latin)) return remember(false);
@@ -5223,14 +5254,33 @@ async function probePlayableMediaUrl(rawUrl, signal = null, timeoutMs = 8000) {
       // Some hosts label M4A/audio-only objects as video/mp4. When the moov
       // metadata is already in this probe window, require an actual video
       // track instead of treating duration + MIME as playable video.
-      if (fastStart && !mp4MetadataHasVideoTrack(signature)) return remember(false);
+      if (
+        fastStart &&
+        mp4MetadataHasAudioTrack(signature) &&
+        !mp4MetadataHasVideoTrack(signature)
+      ) return remember(false);
+      durationSeconds = mp4MetadataDurationSeconds(signature);
       container = 'mp4';
     } else if (webmLike) {
       if (!(signature[0] === 0x1a && signature[1] === 0x45 && signature[2] === 0xdf && signature[3] === 0xa3)) return remember(false);
       fastStart = true;
       container = 'webm';
     } else return remember(false);
-    return remember(true, { fastStart, container });
+    const probeLatencyMs = Math.max(1, Date.now() - probeStartedAt);
+    const bytesPerSecond = totalBytes > 0 && durationSeconds > 0
+      ? totalBytes / durationSeconds
+      : 0;
+    const probeBytesPerSecond = headerBuffer.length * 1000 / probeLatencyMs;
+    return remember(true, {
+      fastStart,
+      container,
+      totalBytes,
+      durationSeconds,
+      bytesPerSecond,
+      probeBytesPerSecond,
+      probeLatencyMs,
+      streamabilityMargin: bytesPerSecond > 0 ? probeBytesPerSecond / bytesPerSecond : 0
+    });
   } catch (_) {
     return remember(false);
   } finally {
@@ -5240,15 +5290,49 @@ async function probePlayableMediaUrl(rawUrl, signal = null, timeoutMs = 8000) {
 }
 
 function mp4MetadataHasVideoTrack(buffer) {
+  return mp4MetadataHasHandlerType(buffer, 'vide');
+}
+
+function mp4MetadataHasAudioTrack(buffer) {
+  return mp4MetadataHasHandlerType(buffer, 'soun');
+}
+
+function mp4MetadataHasHandlerType(buffer, handlerType) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) return false;
   const marker = Buffer.from('hdlr');
+  const expected = String(handlerType || '').slice(0, 4);
   let offset = -1;
   while ((offset = buffer.indexOf(marker, offset + 1)) >= 0) {
-    if (offset + 16 <= buffer.length && buffer.subarray(offset + 12, offset + 16).toString('latin1') === 'vide') {
+    if (
+      offset + 16 <= buffer.length &&
+      buffer.subarray(offset + 12, offset + 16).toString('latin1') === expected
+    ) {
       return true;
     }
   }
   return false;
+}
+
+function mp4MetadataDurationSeconds(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 32) return 0;
+  const marker = Buffer.from('mvhd');
+  const offset = buffer.indexOf(marker);
+  if (offset < 4 || offset + 24 > buffer.length) return 0;
+  try {
+    const version = buffer[offset + 4];
+    const timescaleOffset = version === 1 ? offset + 24 : offset + 16;
+    const durationOffset = version === 1 ? offset + 28 : offset + 20;
+    if (durationOffset + (version === 1 ? 8 : 4) > buffer.length) return 0;
+    const timescale = buffer.readUInt32BE(timescaleOffset);
+    if (!timescale) return 0;
+    const duration = version === 1
+      ? Number(buffer.readBigUInt64BE(durationOffset))
+      : buffer.readUInt32BE(durationOffset);
+    const seconds = duration / timescale;
+    return Number.isFinite(seconds) && seconds > 0 && seconds < 86400 ? seconds : 0;
+  } catch (_) {
+    return 0;
+  }
 }
 
 async function validateCompletedVideoCacheFile(filePath, record) {
@@ -5440,6 +5524,12 @@ const videoFileCacheTailRangeStats = {
   failures: 0,
   cancellations: 0
 };
+const videoFileCacheSegmentStats = {
+  attempts: 0,
+  successes: 0,
+  failures: 0,
+  bytes: 0
+};
 
 function videoFileCachePathFor(id, suffix = '.cache') {
   return path.join(VIDEO_FILE_CACHE_DIR, `${id}${suffix}`);
@@ -5568,6 +5658,7 @@ function videoFileCacheSnapshot() {
     concurrency: VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY,
     background_concurrency: VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY,
     playback_background_concurrency: VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY,
+    local22_playback_background_concurrency: VIDEO_FILE_CACHE_LOCAL22_PLAYBACK_BACKGROUND_CONCURRENCY,
     per_host_concurrency: VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY,
     buffer_scheduler: {
       low_seconds: VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS,
@@ -5587,6 +5678,14 @@ function videoFileCacheSnapshot() {
       bytes: videoFileCacheTailRangeStats.bytes,
       failures: videoFileCacheTailRangeStats.failures,
       cancellations: videoFileCacheTailRangeStats.cancellations
+    },
+    local22_segmented: {
+      chunk_bytes: VIDEO_FILE_CACHE_LOCAL22_SEGMENT_BYTES,
+      concurrency: VIDEO_FILE_CACHE_LOCAL22_SEGMENT_CONCURRENCY,
+      attempts: videoFileCacheSegmentStats.attempts,
+      successes: videoFileCacheSegmentStats.successes,
+      failures: videoFileCacheSegmentStats.failures,
+      bytes: videoFileCacheSegmentStats.bytes
     },
     idle_wipe_ms: VIDEO_FILE_CACHE_IDLE_WIPE_MS,
     viewed_ttl_ms: VIDEO_FILE_CACHE_VIEWED_TTL_MS,
@@ -5834,9 +5933,21 @@ function videoFileCachePlaybackIsConstrained(now = Date.now()) {
   return false;
 }
 
+function videoFileCacheConstrainedBackgroundConcurrency(playbackProfile = '') {
+  const local22Active = String(playbackProfile || '') === 'local22' ||
+    [...videoFileCacheRecords.values()].some(record => (
+      record.playbackProfile === 'local22' &&
+      record.playbackLease === true &&
+      currentVideoFileCachePriority(record) === 0
+    ));
+  return local22Active
+    ? VIDEO_FILE_CACHE_LOCAL22_PLAYBACK_BACKGROUND_CONCURRENCY
+    : VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY;
+}
+
 function videoFileCacheEffectiveBackgroundConcurrency(now = Date.now()) {
   return videoFileCachePlaybackIsConstrained(now)
-    ? VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY
+    ? videoFileCacheConstrainedBackgroundConcurrency()
     : VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY;
 }
 
@@ -5855,7 +5966,7 @@ function updateVideoFileCachePlaybackBuffer(id, bufferedSeconds, { critical = fa
   return true;
 }
 
-function protectVideoFileCacheForegroundPlayback(durationMs = 12000) {
+function protectVideoFileCacheForegroundPlayback(durationMs = 12000, { playbackProfile = '' } = {}) {
   const protectedForMs = Math.max(3000, Math.min(30000, Number(durationMs || 12000)));
   videoFileCacheGlobalPlaybackConstrainedUntil = Math.max(
     videoFileCacheGlobalPlaybackConstrainedUntil,
@@ -5878,7 +5989,8 @@ function protectVideoFileCacheForegroundPlayback(durationMs = 12000) {
   // let later multi-gigabyte background files refill every worker indefinitely.
   // The permitted trickle downloads are retained, so repeated signals do not
   // restart useful work.
-  runningBackground.slice(VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY).forEach(record => {
+  const backgroundConcurrency = videoFileCacheConstrainedBackgroundConcurrency(playbackProfile);
+  runningBackground.slice(backgroundConcurrency).forEach(record => {
     record.deferWhenIdle = true;
     record.controller?.abort();
   });
@@ -5978,6 +6090,138 @@ async function evictVideoFileCacheIfNeeded(extraBytes = 0) {
   }
 }
 
+function videoFileCacheCanUseLocal22Segments(record) {
+  if (record?.playbackProfile !== 'local22' || Number(record?.segmentConcurrency || 0) < 2) return false;
+  try {
+    const hostname = gatewayTargetUrl(record.sourceUrl).hostname.toLowerCase();
+    return /(?:^|\.)(?:coomerfans|onlyfaphouse)\.com$/.test(hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
+function requestLocal22VideoSegment(target, method, headers, controller) {
+  return new Promise((resolve, reject) => {
+    const request = https.request(target, {
+      method,
+      agent: GATEWAY_AGENT,
+      signal: controller.signal,
+      timeout: GATEWAY_TIMEOUT_MS,
+      headers: {
+        accept: 'video/*,*/*;q=0.8',
+        'accept-encoding': 'identity',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+        referer: `${target.protocol}//${target.host}/`,
+        ...headers
+      }
+    }, resolve);
+    request.once('timeout', () => request.destroy(new Error('segmented video cache timeout')));
+    request.once('error', reject);
+    request.end();
+  });
+}
+
+async function downloadLocal22VideoFileInSegments(record, partPath, controller, generation) {
+  videoFileCacheSegmentStats.attempts++;
+  const target = gatewayTargetUrl(record.sourceUrl);
+  let handle;
+  try {
+    const headResponse = await requestLocal22VideoSegment(target, 'HEAD', {}, controller);
+    const headStatus = Number(headResponse.statusCode || 0);
+    const totalBytes = Number(headResponse.headers['content-length'] || 0);
+    const acceptsRanges = /bytes/i.test(String(headResponse.headers['accept-ranges'] || ''));
+    const contentType = String(headResponse.headers['content-type'] || 'video/mp4').split(';')[0] || 'video/mp4';
+    const etag = String(headResponse.headers.etag || '');
+    const lastModified = String(headResponse.headers['last-modified'] || '');
+    headResponse.resume();
+    if (
+      headStatus !== 200 ||
+      !acceptsRanges ||
+      !Number.isFinite(totalBytes) ||
+      totalBytes <= 0 ||
+      totalBytes > VIDEO_FILE_CACHE_MAX_FILE_BYTES
+    ) throw new Error('segmented video cache metadata unavailable');
+
+    await fs.rm(partPath, { force: true }).catch(() => {});
+    handle = await fs.open(partPath, 'w');
+    record.bytes = 0;
+    record.totalBytes = totalBytes;
+    record.contentType = contentType;
+    record.etag = etag;
+    record.lastModified = lastModified;
+    record.headersReadyAt = Date.now();
+    const chunkBytes = VIDEO_FILE_CACHE_LOCAL22_SEGMENT_BYTES;
+    const chunkCount = Math.ceil(totalBytes / chunkBytes);
+    const segmentConcurrency = Math.max(
+      2,
+      Math.min(VIDEO_FILE_CACHE_LOCAL22_SEGMENT_CONCURRENCY, Number(record.segmentConcurrency || 2))
+    );
+
+    for (let waveStart = 0; waveStart < chunkCount; waveStart += segmentConcurrency) {
+      if (controller.signal.aborted || generation !== videoFileCacheGeneration) {
+        throw new Error('segmented video cache aborted');
+      }
+      const waveIndexes = Array.from(
+        { length: Math.min(segmentConcurrency, chunkCount - waveStart) },
+        (_, offset) => waveStart + offset
+      );
+      const requests = waveIndexes.map(async chunkIndex => {
+        const start = chunkIndex * chunkBytes;
+        const end = Math.min(totalBytes - 1, start + chunkBytes - 1);
+        const response = await requestLocal22VideoSegment(target, 'GET', {
+          range: `bytes=${start}-${end}`,
+          ...(etag || lastModified ? { 'if-range': etag || lastModified } : {})
+        }, controller);
+        const status = Number(response.statusCode || 0);
+        const contentRange = String(response.headers['content-range'] || '');
+        const match = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
+        if (
+          status !== 206 ||
+          !match ||
+          Number(match[1]) !== start ||
+          Number(match[2]) !== end ||
+          Number(match[3]) !== totalBytes
+        ) {
+          response.resume();
+          throw new Error('segmented video cache range mismatch');
+        }
+        const chunks = [];
+        let received = 0;
+        for await (const chunk of response) {
+          received += chunk.length;
+          if (received > end - start + 1) throw new Error('segmented video cache range overflow');
+          chunks.push(chunk);
+        }
+        if (received !== end - start + 1) throw new Error('segmented video cache range ended early');
+        return Buffer.concat(chunks, received);
+      });
+      const settledRequests = requests.map(request => request.then(
+        value => ({ value, error: null }),
+        error => ({ value: null, error })
+      ));
+      for (const request of settledRequests) {
+        const result = await request;
+        if (result.error) {
+          await Promise.all(settledRequests);
+          throw result.error;
+        }
+        const buffer = result.value;
+        await handle.write(buffer, 0, buffer.length, record.bytes);
+        record.bytes += buffer.length;
+        record.updatedAt = Date.now();
+        videoFileCacheSegmentStats.bytes += buffer.length;
+      }
+    }
+    if (record.bytes !== totalBytes) throw new Error('segmented video cache did not complete');
+    videoFileCacheSegmentStats.successes++;
+  } catch (error) {
+    videoFileCacheSegmentStats.failures++;
+    throw error;
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
 async function downloadVideoFileCacheRecord(record, generation) {
   const controller = new AbortController();
   videoFileCacheControllers.add(controller);
@@ -5990,12 +6234,26 @@ async function downloadVideoFileCacheRecord(record, generation) {
   record.error = '';
   try {
     await fs.mkdir(VIDEO_FILE_CACHE_DIR, { recursive: true });
+    let segmentedDownloadComplete = false;
+    if (!isTikTokVideoPageUrl(record.sourceUrl) && videoFileCacheCanUseLocal22Segments(record)) {
+      try {
+        await downloadLocal22VideoFileInSegments(record, partPath, controller, generation);
+        segmentedDownloadComplete = true;
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+        await fs.rm(partPath, { force: true }).catch(() => {});
+        record.bytes = 0;
+        record.totalBytes = 0;
+        record.etag = '';
+        record.lastModified = '';
+      }
+    }
     let currentUrl = record.sourceUrl;
     let redirects = 0;
     let freshRestarts = 0;
     if (isTikTokVideoPageUrl(record.sourceUrl)) {
       await downloadTikTokVideoFile(record, partPath, controller);
-    } else while (redirects <= GATEWAY_MAX_REDIRECTS && freshRestarts <= 2) {
+    } else if (!segmentedDownloadComplete) while (redirects <= GATEWAY_MAX_REDIRECTS && freshRestarts <= 2) {
       let resumeOffset = 0;
       try {
         resumeOffset = Math.max(0, Number((await fs.stat(partPath)).size || 0));
@@ -6316,6 +6574,21 @@ function queueVideoFileCacheUrl(rawUrl, priority = 2, metadata = {}) {
   if (metadata?.artistKey) record.artistKey = String(metadata.artistKey).slice(0, 300);
   if (['local22', 'bunkr'].includes(String(metadata?.playbackProfile || ''))) {
     record.playbackProfile = String(metadata.playbackProfile);
+  }
+  if (record.playbackProfile === 'local22') {
+    const hasExplicitSegmentConcurrency = Object.prototype.hasOwnProperty.call(
+      metadata || {},
+      'segmentConcurrency'
+    );
+    // Range mode is experimental and opt-in only. Missing metadata (including
+    // older live browsers) must use the reliable streaming/full-file path.
+    const requestedSegments = Number(hasExplicitSegmentConcurrency
+      ? metadata.segmentConcurrency
+      : 0);
+    record.segmentConcurrency = Math.max(
+      Number(record.segmentConcurrency || 0),
+      Math.max(0, Math.min(VIDEO_FILE_CACHE_LOCAL22_SEGMENT_CONCURRENCY, requestedSegments))
+    );
   }
   record.updatedAt = Date.now();
   record.priorityEpoch = videoFileCachePriorityEpoch;
@@ -6697,7 +6970,7 @@ async function serveVideoFileCacheMedia(req, res, id) {
   touchVideoFileCacheHeartbeat();
   // A real media reader is the strongest foreground signal. Recall/Bunkr cards
   // do not send Random40 buffer telemetry, so reclaim their worker lanes here.
-  protectVideoFileCacheForegroundPlayback(12000);
+  protectVideoFileCacheForegroundPlayback(12000, { playbackProfile: record.playbackProfile || '' });
   let tailRangeSession = null;
   try {
     if (knownOversized) {
@@ -9981,10 +10254,79 @@ function local2FlashDecisionCanConfirm(decision = {}) {
   );
 }
 
+function local2FlashPlaybackProbeDetails(entry) {
+  const probe = videoPlaybackProbeCache.get(entry?.videoUrl) || {};
+  const totalBytes = Math.max(0, Number(entry?.totalBytes || probe.totalBytes || 0));
+  const durationSeconds = Math.max(0, Number(entry?.durationSeconds || probe.durationSeconds || 0));
+  const bytesPerSecond = Math.max(0, Number(entry?.bytesPerSecond || probe.bytesPerSecond || 0));
+  const probeBytesPerSecond = Math.max(0, Number(entry?.probeBytesPerSecond || probe.probeBytesPerSecond || 0));
+  const probeLatencyMs = Math.max(0, Number(entry?.probeLatencyMs || probe.probeLatencyMs || 0));
+  const streamabilityMargin = Math.max(0, Number(
+    entry?.streamabilityMargin ||
+    probe.streamabilityMargin ||
+    (bytesPerSecond > 0 ? probeBytesPerSecond / bytesPerSecond : 0)
+  ));
+  return { totalBytes, durationSeconds, bytesPerSecond, probeBytesPerSecond, probeLatencyMs, streamabilityMargin };
+}
+
+function local2FlashCompareTurboPlaybackMedia(left, right) {
+  const fastStartDelta = Number(right?.fastStart === true || right?.playbackFastStart === true) -
+    Number(left?.fastStart === true || left?.playbackFastStart === true);
+  if (fastStartDelta) return fastStartDelta;
+  const leftProbe = local2FlashPlaybackProbeDetails(left);
+  const rightProbe = local2FlashPlaybackProbeDetails(right);
+  // A short range probe frequently catches a CDN burst that is not sustained.
+  // Small complete files are the more reliable swipe-first choice.
+  if (leftProbe.totalBytes > 0 && rightProbe.totalBytes > 0 && leftProbe.totalBytes !== rightProbe.totalBytes) {
+    return leftProbe.totalBytes - rightProbe.totalBytes;
+  }
+  if ((leftProbe.totalBytes > 0) !== (rightProbe.totalBytes > 0)) {
+    return leftProbe.totalBytes > 0 ? -1 : 1;
+  }
+  const leftCompletionSeconds = leftProbe.totalBytes > 0 && leftProbe.probeBytesPerSecond > 0
+    ? leftProbe.totalBytes / leftProbe.probeBytesPerSecond
+    : 0;
+  const rightCompletionSeconds = rightProbe.totalBytes > 0 && rightProbe.probeBytesPerSecond > 0
+    ? rightProbe.totalBytes / rightProbe.probeBytesPerSecond
+    : 0;
+  if (
+    leftCompletionSeconds > 0 &&
+    rightCompletionSeconds > 0 &&
+    leftCompletionSeconds !== rightCompletionSeconds
+  ) return leftCompletionSeconds - rightCompletionSeconds;
+  if ((leftCompletionSeconds > 0) !== (rightCompletionSeconds > 0)) {
+    return leftCompletionSeconds > 0 ? -1 : 1;
+  }
+  if (
+    leftProbe.streamabilityMargin > 0 &&
+    rightProbe.streamabilityMargin > 0 &&
+    leftProbe.streamabilityMargin !== rightProbe.streamabilityMargin
+  ) return rightProbe.streamabilityMargin - leftProbe.streamabilityMargin;
+  if ((leftProbe.streamabilityMargin > 0) !== (rightProbe.streamabilityMargin > 0)) {
+    return leftProbe.streamabilityMargin > 0 ? -1 : 1;
+  }
+  if (
+    leftProbe.bytesPerSecond > 0 &&
+    rightProbe.bytesPerSecond > 0 &&
+    leftProbe.bytesPerSecond !== rightProbe.bytesPerSecond
+  ) return leftProbe.bytesPerSecond - rightProbe.bytesPerSecond;
+  if ((leftProbe.bytesPerSecond > 0) !== (rightProbe.bytesPerSecond > 0)) {
+    return leftProbe.bytesPerSecond > 0 ? -1 : 1;
+  }
+  if (
+    leftProbe.probeBytesPerSecond > 0 &&
+    rightProbe.probeBytesPerSecond > 0 &&
+    leftProbe.probeBytesPerSecond !== rightProbe.probeBytesPerSecond
+  ) return rightProbe.probeBytesPerSecond - leftProbe.probeBytesPerSecond;
+  return 0;
+}
+
 function local2FlashAcceptedDto(profile, media, decision, revision) {
   const artistId = random40ReservoirIdentity(profile.artistUrl);
-  const orderedMedia = [...media].sort((left, right) =>
-    Number(right?.fastStart === true) - Number(left?.fastStart === true)
+  const turboRanked = media.some(entry => entry?.local22TurboPlaybackRanked === true);
+  const orderedMedia = [...media].sort((left, right) => turboRanked
+    ? local2FlashCompareTurboPlaybackMedia(left, right)
+    : Number(right?.fastStart === true) - Number(left?.fastStart === true)
   );
   return {
     schema: 'pong.local2.accepted.v1',
@@ -10003,7 +10345,10 @@ function local2FlashAcceptedDto(profile, media, decision, revision) {
       postIndex: Number(entry.postIndex || 0),
       alternateVideoUrls: Array.isArray(entry.alternateVideoUrls) ? entry.alternateVideoUrls : [],
       verified: true,
-      fastStart: entry.fastStart === true
+      fastStart: entry.fastStart === true,
+      local22TurboPlaybackRanked: entry.local22TurboPlaybackRanked === true,
+      serverPrebufferReady: entry.serverPrebufferReady === true,
+      ...local2FlashPlaybackProbeDetails(entry)
     }))
   };
 }
@@ -10367,6 +10712,7 @@ function local2FlashAcquireMediaProbeSlot(signal) {
 async function local2FlashPrioritizePlayableMedia(media, context) {
   const release = await local2FlashAcquireMediaProbeSlot(context.signal);
   try {
+    const turboPlaybackRanking = context?.variant === 'local22-turbo';
     const probeEntries = media.slice(0, 20);
     const rows = [];
     let cursor = 0;
@@ -10397,9 +10743,10 @@ async function local2FlashPrioritizePlayableMedia(media, context) {
           playable &&
           videoPlaybackProbeCache.get(entry.videoUrl)?.fastStart === true
         ) batchFastStart++;
-        if (
-          fastStartProven + batchFastStart >= 5 ||
-          settled >= batch.length
+        if (settled >= batch.length) finish();
+        else if (
+          fastStartProven + batchFastStart >= 5 &&
+          (!turboPlaybackRanking || settled >= 7)
         ) finish();
       });
       await batchFinished;
@@ -10415,16 +10762,37 @@ async function local2FlashPrioritizePlayableMedia(media, context) {
     const proven = rows
       .filter(row => row.playable)
       .map(row => {
-        const fastStart = videoPlaybackProbeCache.get(row.entry.videoUrl)?.fastStart === true;
+        const probe = videoPlaybackProbeCache.get(row.entry.videoUrl) || {};
+        const fastStart = probe.fastStart === true;
         return {
           ...row.entry,
           local2FlashByteProven: true,
+          local22TurboPlaybackRanked: turboPlaybackRanking,
           playbackProbeVerified: true,
           playbackFastStart: fastStart,
-          fastStart
+          fastStart,
+          ...local2FlashPlaybackProbeDetails({ ...row.entry, videoUrl: row.entry.videoUrl })
         };
       })
-      .sort((left, right) => Number(right.fastStart === true) - Number(left.fastStart === true));
+      .sort((left, right) => {
+        if (turboPlaybackRanking) return local2FlashCompareTurboPlaybackMedia(left, right);
+        const fastStartDelta = Number(right.fastStart === true) - Number(left.fastStart === true);
+        if (fastStartDelta) return fastStartDelta;
+        const leftProbe = videoPlaybackProbeCache.get(left.videoUrl) || {};
+        const rightProbe = videoPlaybackProbeCache.get(right.videoUrl) || {};
+        // For the swipe window, completion time matters more than nominal
+        // bitrate: these source CDNs often deliver slower than the encoded
+        // bitrate. Small complete files become buffer-proof much sooner.
+        const leftBytes = Number(leftProbe.totalBytes || 0);
+        const rightBytes = Number(rightProbe.totalBytes || 0);
+        if (leftBytes > 0 && rightBytes > 0 && leftBytes !== rightBytes) return leftBytes - rightBytes;
+        if ((leftBytes > 0) !== (rightBytes > 0)) return leftBytes > 0 ? -1 : 1;
+        const leftRate = Number(leftProbe.bytesPerSecond || 0);
+        const rightRate = Number(rightProbe.bytesPerSecond || 0);
+        if (leftRate > 0 && rightRate > 0 && leftRate !== rightRate) return leftRate - rightRate;
+        if ((leftRate > 0) !== (rightRate > 0)) return leftRate > 0 ? -1 : 1;
+        return 0;
+      });
     const provenUrls = new Set(proven.map(entry => entry.videoUrl));
     return {
       proven: proven.length,
@@ -10573,14 +10941,18 @@ let local22TurboWorkActive = 0;
 const local22TurboWorkWaiters = [];
 const local22TurboBranchControllers = new Set();
 let local22TurboDeliveredArtists = 0;
+let local22TurboStartupPrebufferPromise = null;
 
 function local22TurboPlaybackPhaseActive() {
-  return local22TurboDeliveredArtists >= 5 &&
+  return local22TurboDeliveredArtists >= 3 &&
     Date.now() < local2FlashPlaybackPriorityUntil;
 }
 
 function local22TurboQualificationLimit() {
-  return local22TurboPlaybackPhaseActive() ? 1 : 16;
+  // Keep the CUDA service's four execution lanes fed while slow image hosts
+  // finish out of order. Admission changes scheduling only; the exact same
+  // images, models, thresholds, and hard-filter verdicts are still required.
+  return local22TurboPlaybackPhaseActive() ? 1 : 10;
 }
 
 function local22TurboDrainQualificationWaiters() {
@@ -10593,7 +10965,10 @@ function local22TurboDrainQualificationWaiters() {
 }
 
 function local22TurboWorkLimit() {
-  return local22TurboPlaybackPhaseActive() ? 1 : 40;
+  // Match Local2's proven startup fan-out while the one-pass Local2.2 decision
+  // removes its second classification pass. Once three artists are delivered,
+  // collapse to one lane so discovery cannot compete with foreground media.
+  return local22TurboPlaybackPhaseActive() ? 1 : 48;
 }
 
 function local22TurboDrainWorkWaiters() {
@@ -10634,7 +11009,7 @@ function local22TurboAcquireWorkSlot(signal) {
 }
 
 function local22TurboEnterPlaybackPhase() {
-  if (local22TurboDeliveredArtists < 5) return;
+  if (local22TurboDeliveredArtists < 3) return;
   local2FlashProtectForegroundPlayback(12000);
   for (const controller of local22TurboBranchControllers) {
     if (!controller.signal.aborted) {
@@ -10647,6 +11022,7 @@ function local22TurboEnterPlaybackPhase() {
 
 function local22TurboResetRuntime() {
   local22TurboDeliveredArtists = 0;
+  local22TurboStartupPrebufferPromise = null;
   for (const controller of local22TurboBranchControllers) {
     if (!controller.signal.aborted) controller.abort(new Error('Local2.2 Turbo reset'));
   }
@@ -10681,6 +11057,65 @@ function local22TurboAcquireQualificationSlot(signal) {
   });
 }
 
+async function local22TurboPrebufferFirstMedia(media, profile, signal) {
+  const targets = (Array.isArray(media) ? media : []).slice(0, 3);
+  if (!targets[0]?.videoUrl || signal?.aborted) return false;
+  const artistKey = random40ReservoirIdentity(profile?.artistUrl || '');
+  const rows = targets.map((entry, index) => {
+    try {
+      const record = queueVideoFileCacheUrl(entry.videoUrl, index === 0 ? 1 : 2, {
+        artistKey,
+        playbackProfile: 'local22',
+        segmentConcurrency: 0
+      });
+      return record ? { entry, record, playback: local2FlashPlaybackProbeDetails(entry) } : null;
+    } catch (_) {
+      return null;
+    }
+  }).filter(Boolean);
+  if (!rows.length) return false;
+  pumpVideoFileCache();
+  const recordIsReady = ({ entry, record, playback }) => {
+    if (record.status === 'ready' && record.filePath) return true;
+    const estimatedBufferedSeconds = playback.bytesPerSecond > 0
+      ? Number(record.bytes || 0) / playback.bytesPerSecond
+      : 0;
+    return entry.fastStart === true &&
+      Number(record.bytes || 0) >= 384 * 1024 &&
+      estimatedBufferedSeconds >= 3;
+  };
+  const waitForStartupCushion = async () => {
+    // Queue the PC hedge before publication, but do not hold the first accepted
+    // artist behind a speculative media cushion. The browser now uses direct
+    // HTTPS until a completed file or an actual stall recovery is available.
+    const deadline = Date.now() + 250;
+    while (!signal?.aborted && Date.now() < deadline) {
+      if (recordIsReady(rows[0])) return true;
+      if (
+        rows[0].record.status === 'error' &&
+        !rows[0].record.downloadPromise &&
+        !videoFileCacheQueue.includes(rows[0].record)
+      ) {
+        return false;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return recordIsReady(rows[0]);
+  };
+  if (!local22TurboStartupPrebufferPromise) {
+    local22TurboStartupPrebufferPromise = waitForStartupCushion();
+  }
+  await local22TurboStartupPrebufferPromise;
+  rows.forEach(row => {
+    // Only advertise a completed file to the browser. An estimated partial
+    // cushion can be exhausted before its background download catches up.
+    if (row.record.status === 'ready' && row.record.filePath) {
+      row.entry.serverPrebufferReady = true;
+    }
+  });
+  return rows[0].entry.serverPrebufferReady === true;
+}
+
 async function local22TurboQualifyCandidateInner(candidate, context) {
   const startedAt = Date.now();
   const profile = await local2FlashPrepareProfile(candidate, {
@@ -10688,7 +11123,7 @@ async function local22TurboQualifyCandidateInner(candidate, context) {
     variant: 'local22-turbo'
   });
   // Work that began during the wide discovery phase yields immediately once
-  // the five-artist playback cohort is ready. One fresh lane remains available
+  // the three-artist playback cohort is ready. One fresh lane remains available
   // through the dynamic work semaphore below.
   if (local22TurboPlaybackPhaseActive() && local22TurboWorkActive > 1) {
     return {
@@ -10798,6 +11233,12 @@ async function local22TurboQualifyCandidateInner(candidate, context) {
         diagnostic: decision
       };
     }
+    const prebufferStartedAt = Date.now();
+    const prebufferReady = await local22TurboPrebufferFirstMedia(
+      mediaResult.media,
+      profile,
+      branchController.signal
+    );
     return {
       accepted: true,
       dto: local2FlashAcceptedDto(profile, mediaResult.media, {
@@ -10807,6 +11248,8 @@ async function local22TurboQualifyCandidateInner(candidate, context) {
       diagnostic: {
         ...decision,
         turbo: true,
+        prebufferReady,
+        prebufferMs: Date.now() - prebufferStartedAt,
         elapsedMs: Date.now() - startedAt
       }
     };
@@ -10857,9 +11300,13 @@ const local22TurboEngine = new Local2FlashEngine({
   },
   targetAccepted: 48,
   readyMinimum: 1,
+  // Publish candidates as soon as one paired source page returns. A three-page
+  // discovery wave was a hidden startup barrier on otherwise high-yield pages.
+  // The wider candidate pool overlaps the next page only after the first page's
+  // candidates are already qualifying.
   pageConcurrency: 1,
-  candidateConcurrency: 40,
-  maximumPendingCandidates: 80,
+  candidateConcurrency: 48,
+  maximumPendingCandidates: 96,
   maximumPages: 3500,
   variant: 'local22-turbo'
 });
@@ -10934,6 +11381,34 @@ const server = http.createServer(async (req, res) => {
       });
       if (req.method === 'HEAD') res.end();
       else res.end(script);
+    } catch (error) {
+      json(res, 500, { error: error.message || String(error) });
+    }
+    return;
+  }
+  if (
+    (req.method === 'GET' || req.method === 'HEAD') &&
+    [
+      '/pong-data/saved-links-v2.json',
+      '/pong-data/saved-links.json',
+      '/pong-data/saved-erome-recovery.json'
+    ].includes(requestUrl.pathname)
+  ) {
+    try {
+      const filePath = requestUrl.pathname.endsWith('saved-erome-recovery.json')
+        ? PONG_SAVED_EROME_RECOVERY_PATH
+        : requestUrl.pathname.endsWith('saved-links-v2.json')
+          ? PONG_SAVED_LINKS_V2_PATH
+          : PONG_SAVED_LINKS_LEGACY_PATH;
+      const data = await fs.readFile(filePath);
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': data.length,
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'X-Content-Type-Options': 'nosniff'
+      });
+      if (req.method === 'HEAD') res.end();
+      else res.end(data);
     } catch (error) {
       json(res, 500, { error: error.message || String(error) });
     }
@@ -11742,14 +12217,14 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST' && url.pathname === '/local22-turbo/playback-priority') {
         const durationMs = Math.max(3000, Math.min(15000, Number(body.durationMs || 12000)));
-        if (local22TurboDeliveredArtists >= 5) {
+        if (local22TurboDeliveredArtists >= 3) {
           local2FlashProtectForegroundPlayback(durationMs);
         }
-        const cacheProtectedUntil = protectVideoFileCacheForegroundPlayback(durationMs);
+        const cacheProtectedUntil = protectVideoFileCacheForegroundPlayback(durationMs, { playbackProfile: 'local22' });
         json(res, 200, {
           ok: true,
           protected: true,
-          classificationProtected: local22TurboDeliveredArtists >= 5,
+          classificationProtected: local22TurboDeliveredArtists >= 3,
           until: new Date(local2FlashPlaybackPriorityUntil).toISOString(),
           cacheUntil: new Date(cacheProtectedUntil).toISOString()
         });
@@ -11763,7 +12238,7 @@ const server = http.createServer(async (req, res) => {
         const candidates = local22TurboEngine.lease(count);
         if (candidates.length) {
           local22TurboDeliveredArtists += candidates.length;
-          if (local22TurboDeliveredArtists >= 5) local22TurboEnterPlaybackPhase();
+          if (local22TurboDeliveredArtists >= 3) local22TurboEnterPlaybackPhase();
         }
         const state = local22TurboEngine.snapshot();
         json(res, 200, {
@@ -11984,7 +12459,7 @@ const server = http.createServer(async (req, res) => {
       // stall narrows cache concurrency; otherwise upcoming cards use all
       // background lanes and can actually finish before the next swipe.
       if (payload?.foregroundStalled === true) {
-        protectVideoFileCacheForegroundPlayback(12000);
+        protectVideoFileCacheForegroundPlayback(12000, { playbackProfile });
       }
       const activeUrl = String(payload?.activeUrl || '');
       if (payload?.authoritative === true) beginVideoFileCachePriorityEpoch();
@@ -11994,13 +12469,21 @@ const server = http.createServer(async (req, res) => {
         const raw = String(value || '');
         if (!raw || urls.length >= VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE) return;
         if (!urls.includes(raw)) urls.push(raw);
-        if (metadata?.artistKey) metadataByUrl.set(raw, { artistKey: String(metadata.artistKey) });
+        if (metadata?.artistKey || Number(metadata?.segmentConcurrency || 0) > 0) {
+          metadataByUrl.set(raw, {
+            artistKey: String(metadata?.artistKey || ''),
+            segmentConcurrency: Math.max(0, Number(metadata?.segmentConcurrency || 0))
+          });
+        }
       };
       addUrl(payload?.activeUrl);
       (Array.isArray(payload?.currentUrls) ? payload.currentUrls : []).forEach(addUrl);
       (Array.isArray(payload?.urls) ? payload.urls : []).forEach(addUrl);
       (Array.isArray(payload?.items) ? payload.items : []).forEach(item => {
-        addUrl(item?.url, { artistKey: item?.artistKey || item?.bundleKey || '' });
+        addUrl(item?.url, {
+          artistKey: item?.artistKey || item?.bundleKey || '',
+          segmentConcurrency: item?.segmentConcurrency
+        });
       });
       // Multiple Pong tabs share this cache. An authoritative manifest belongs
       // only to its caller, so it must not cancel records requested by another
@@ -12075,7 +12558,10 @@ const server = http.createServer(async (req, res) => {
         reportedCritical ||
         (Number.isFinite(reportedBufferedSeconds) && reportedBufferedSeconds <= VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS)
       )) {
-        protectVideoFileCacheForegroundPlayback(5000);
+        const activeCacheRecord = activeId ? videoFileCacheRecords.get(activeId) : null;
+        protectVideoFileCacheForegroundPlayback(5000, {
+          playbackProfile: activeCacheRecord?.playbackProfile || ''
+        });
       } else if (
         reportedPlaying &&
         Number.isFinite(reportedBufferedSeconds) &&

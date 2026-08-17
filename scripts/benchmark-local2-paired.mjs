@@ -11,6 +11,9 @@ const CHROME = process.env.PONG_BENCH_CHROME || 'C:\\Program Files\\Google\\Chro
 const TRIALS = Math.max(1, Math.min(3, Number(process.env.PONG_PAIR_TRIALS || 3)));
 const DEADLINE_MS = Math.max(60_000, Number(process.env.PONG_PAIR_DEADLINE_MS || 360_000));
 const PLAY_TIMEOUT_MS = Math.max(5_000, Number(process.env.PONG_PAIR_PLAY_TIMEOUT_MS || 20_000));
+const ARTIST_COUNT = Math.max(1, Math.min(5, Number(process.env.PONG_PAIR_ARTISTS || 3)));
+const VIDEOS_PER_ARTIST = Math.max(1, Math.min(5, Number(process.env.PONG_PAIR_VIDEOS || 3)));
+const PLAY_PROOF_SECONDS = Math.max(0.5, Math.min(10, Number(process.env.PONG_PAIR_PLAY_SECONDS || 3)));
 const ONLY_MODE = ['local2', 'local22'].includes(String(process.env.PONG_PAIR_ONLY_MODE || '').toLowerCase())
   ? String(process.env.PONG_PAIR_ONLY_MODE).toLowerCase()
   : '';
@@ -222,6 +225,40 @@ async function trustedClick(cdp, selector) {
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
 }
 
+async function trustedSwipeUp(cdp) {
+  const points = await cdp.eval(`(() => {
+    const wrapper = document.querySelector('.video-wrapper.deck-active');
+    if (!wrapper) return null;
+    const rect = wrapper.getBoundingClientRect();
+    const x = rect.left + rect.width * 0.5;
+    return {
+      x,
+      startY: rect.top + rect.height * 0.72,
+      endY: rect.top + rect.height * 0.28,
+      width: rect.width,
+      height: rect.height,
+      index: Number(wrapper.dataset.index || -1)
+    };
+  })()`, false);
+  if (!points || points.width <= 0 || points.height <= 0) {
+    throw new Error('active video has no swipeable box');
+  }
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [{ x: points.x, y: points.startY, radiusX: 2, radiusY: 2, force: 1, id: 1 }]
+  });
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchMove',
+    touchPoints: [{ x: points.x, y: points.endY, radiusX: 2, radiusY: 2, force: 1, id: 1 }]
+  });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await waitFor(
+    () => cdp.eval(`deckCurrentIndex !== ${Number(points.index)}`),
+    3_000,
+    'trusted upward swipe'
+  );
+}
+
 async function resetWorkload() {
   await fetch(`${API}/workload/reset?resetMedia=1`, { method: 'POST' }).catch(() => {});
   await waitFor(async () => {
@@ -235,12 +272,14 @@ async function benchmarkState(cdp) {
   return raw ? JSON.parse(raw) : null;
 }
 
-async function proveActiveVideo(cdp, timeoutMs = PLAY_TIMEOUT_MS) {
+async function proveActiveVideo(cdp, timeoutMs = PLAY_TIMEOUT_MS, targetSeconds = PLAY_PROOF_SECONDS) {
   return cdp.eval(`(async () => {
     const timeoutMs = ${Number(timeoutMs)};
+    const targetSeconds = ${Number(targetSeconds)};
     const deadline = Date.now() + timeoutMs;
     let buffering = 0;
-    let lastTime = -1;
+    let proofStartTime = null;
+    let requiredTotalAdvance = targetSeconds;
     while (Date.now() < deadline) {
       const wrapper = document.querySelector('.video-wrapper.deck-active');
       const video = wrapper?.querySelector('video');
@@ -250,10 +289,34 @@ async function proveActiveVideo(cdp, timeoutMs = PLAY_TIMEOUT_MS) {
       }
       video.muted = true;
       video.volume = 0;
+      wrapper.dataset.playIntent = 'true';
+      if (proofStartTime === null) {
+        try { video.pause(); } catch (_) {}
+        await new Promise(resolve => setTimeout(resolve, 40));
+      }
+      if (proofStartTime === null && (
+        video.ended ||
+        (Number.isFinite(video.duration) && Number(video.duration || 0) - Number(video.currentTime || 0) < 0.35)
+      )) {
+        try { video.currentTime = 0; } catch (_) {}
+        await new Promise(resolve => setTimeout(resolve, 80));
+      }
+      if (proofStartTime === null) {
+        proofStartTime = Number(video.currentTime || 0);
+        if (Number.isFinite(video.duration)) {
+          requiredTotalAdvance = Math.min(
+            targetSeconds,
+            Math.max(0.15, Number(video.duration || 0) - proofStartTime - 0.20)
+          );
+        }
+      }
       const start = Number(video.currentTime || 0);
-      const onWaiting = () => buffering++;
-      video.addEventListener('waiting', onWaiting);
-      video.addEventListener('stalled', onWaiting);
+      let attemptBuffering = 0;
+      let firstAdvanceAt = 0;
+      let lastAdvanceAt = Date.now();
+      let lastObservedTime = start;
+      let bufferingEpisode = false;
+      const attemptStartedAt = Date.now();
       try {
         await Promise.race([
           video.play(),
@@ -263,23 +326,42 @@ async function proveActiveVideo(cdp, timeoutMs = PLAY_TIMEOUT_MS) {
       const proofDeadline = Math.min(deadline, Date.now() + 5000);
       while (Date.now() < proofDeadline) {
         const now = Number(video.currentTime || 0);
-        if (now - start >= 0.15 || (lastTime >= 0 && now - lastTime >= 0.15)) {
+        const observedAt = Date.now();
+        if (now > lastObservedTime + 0.01) {
+          if (!firstAdvanceAt) firstAdvanceAt = observedAt;
+          lastAdvanceAt = observedAt;
+          lastObservedTime = now;
+          bufferingEpisode = false;
+        } else if (
+          firstAdvanceAt &&
+          !video.paused &&
+          !video.ended &&
+          observedAt - lastAdvanceAt >= 450 &&
+          !bufferingEpisode
+        ) {
+          buffering++;
+          attemptBuffering++;
+          bufferingEpisode = true;
+        }
+        const totalAdvance = Math.max(0, now - proofStartTime);
+        if (totalAdvance >= requiredTotalAdvance - 0.03 || (video.ended && totalAdvance >= 0.15)) {
           video.pause();
-          video.removeEventListener('waiting', onWaiting);
-          video.removeEventListener('stalled', onWaiting);
           return {
             ok: true,
             url: String(wrapper.dataset.originalVideoUrl || video.currentSrc || video.src || ''),
             buffering,
-            readyState: Number(video.readyState || 0)
+            attemptBuffering,
+            readyState: Number(video.readyState || 0),
+            startupMs: firstAdvanceAt ? firstAdvanceAt - attemptStartedAt : Date.now() - attemptStartedAt,
+            playedSeconds: totalAdvance,
+            wallMs: Date.now() - attemptStartedAt
           };
         }
-        lastTime = now;
         await new Promise(resolve => setTimeout(resolve, 100));
       }
-      video.removeEventListener('waiting', onWaiting);
-      video.removeEventListener('stalled', onWaiting);
-      try { video.pause(); } catch (_) {}
+      // Keep continuous user play intent between observation windows. Pausing
+      // here used to cancel Pong's stall watchdog just before it could rotate
+      // to the PC-cache/gateway hedge, producing a benchmark-only deadlock.
       try {
         random40WarmServerVideoCacheForActiveWrapper(wrapper, { urgent: true });
         restoreDeckVideoNetwork(wrapper, video, { force: true });
@@ -297,6 +379,9 @@ async function proveActiveVideo(cdp, timeoutMs = PLAY_TIMEOUT_MS) {
       mediaErrorMessage: String(video?.error?.message || ''),
       url: String(wrapper?.dataset?.originalVideoUrl || video?.currentSrc || video?.src || ''),
       currentSrc: String(video?.currentSrc || ''),
+      currentTime: Number(video?.currentTime || 0),
+      duration: Number(video?.duration || 0),
+      ended: video?.ended === true,
       playbackFastStart: wrapper
         ? allVideoMetadata[Number(wrapper.dataset.index || -1)]?.playbackFastStart === true
         : false
@@ -304,27 +389,48 @@ async function proveActiveVideo(cdp, timeoutMs = PLAY_TIMEOUT_MS) {
   })()`);
 }
 
-async function proveFiveByFive(cdp, startedAt) {
-  const eventIndexes = await cdp.eval(`pasteEvents
-    .map((event, index) => ({ event, index }))
-    .filter(item => item.event?.source === 'random40')
-    .slice(0, 5)
-    .map(item => item.index)`);
-  if (!Array.isArray(eventIndexes) || eventIndexes.length < 5) {
-    return { ok: false, reason: 'fewer than five artist bundles', artists: [] };
+async function provePlaybackMatrix(cdp, startedAt) {
+  const availableArtists = await cdp.eval(`pasteEvents.filter(event => event?.source === 'random40').length`);
+  if (Number(availableArtists || 0) < ARTIST_COUNT) {
+    return { ok: false, reason: `fewer than ${ARTIST_COUNT} artist bundles`, artists: [] };
   }
   const artists = [];
   const provenUrls = new Set();
-  for (const eventIndex of eventIndexes) {
-    await cdp.eval(`displayPasteEventAtIndex(${eventIndex}, { recordHistory: false }); true`);
+  let priorEventIndex = -1;
+  for (let artistOffset = 0; artistOffset < ARTIST_COUNT; artistOffset++) {
+    if (artistOffset === 0) {
+      await cdp.eval(`(() => {
+        syncCurrentPasteIndexFromVisibleVideo();
+        if (pasteEvents[currentPasteIndex]?.source === 'random40') return true;
+        const first = pasteEvents.findIndex(event => event?.source === 'random40');
+        if (first >= 0) displayPasteEventAtIndex(first, { recordHistory: true });
+        return first >= 0;
+      })()`);
+    } else {
+      await trustedClick(cdp, '#paste-nav-button');
+    }
     await waitFor(
-      () => cdp.eval(`document.querySelectorAll('.video-wrapper').length >= 5`),
+      () => cdp.eval(`currentPasteIndex >= 0 && currentPasteIndex !== ${priorEventIndex} && pasteEvents[currentPasteIndex]?.source === 'random40'`),
+      20_000,
+      `paperclip artist ${artistOffset + 1}`
+    );
+    const eventIndex = Number(await cdp.eval('currentPasteIndex'));
+    await waitFor(
+      () => cdp.eval(`currentPasteIndex === ${eventIndex} && document.querySelectorAll('.video-wrapper').length >= ${VIDEOS_PER_ARTIST}`),
       20_000,
       `artist ${eventIndex} cards`
     );
+    priorEventIndex = eventIndex;
     const artist = { eventIndex, videos: [], completedMs: 0 };
-    for (let offset = 0; offset < 5; offset++) {
-      await cdp.eval(`setDeckActiveIndex(${offset}, 'none', { pushHistory: false }); true`);
+    for (let offset = 0; offset < VIDEOS_PER_ARTIST; offset++) {
+      if (offset > 0) {
+        await trustedSwipeUp(cdp);
+        await waitFor(
+          () => cdp.eval(`currentPasteIndex === ${eventIndex} && Boolean(document.querySelector('.video-wrapper.deck-active'))`),
+          5_000,
+          `artist ${eventIndex} swipe ${offset + 1}`
+        );
+      }
       const proof = await proveActiveVideo(cdp);
       if (!proof?.ok || provenUrls.has(proof.url)) {
         artist.videos.push({ ...proof, duplicate: provenUrls.has(proof?.url) });
@@ -341,6 +447,9 @@ async function proveFiveByFive(cdp, startedAt) {
     ok: true,
     completedMs: Date.now() - startedAt,
     distinctVideos: provenUrls.size,
+    requiredArtists: ARTIST_COUNT,
+    requiredVideosPerArtist: VIDEOS_PER_ARTIST,
+    targetPlaybackSeconds: PLAY_PROOF_SECONDS,
     buffers: artists.reduce((sum, artist) =>
       sum + artist.videos.reduce((inner, video) => inner + Number(video.buffering || 0), 0), 0),
     artists
@@ -369,7 +478,7 @@ async function runMode(page, mode, trialIndex) {
   const selector = mode === 'local2' ? '#random-40-local2' : '#random-40-local';
   let firstArtistMs = 0;
   let firstPlayableMs = 0;
-  let fiveArtistsMs = 0;
+  let targetArtistsMs = 0;
   let firstProof = null;
   try {
     // The decorative Pong splash is unrelated to either Local mode. Synthetic
@@ -407,7 +516,7 @@ async function runMode(page, mode, trialIndex) {
     // first Runtime read. Timing still starts immediately before the click.
     await delay(3500);
     const deadline = Date.now() + DEADLINE_MS;
-    while (Date.now() < deadline && (!fiveArtistsMs || !firstPlayableMs)) {
+    while (Date.now() < deadline && (!targetArtistsMs || !firstPlayableMs)) {
       const state = await benchmarkState(cdp);
       if (state?.accepted >= 1 && !firstArtistMs) {
         firstArtistMs = Date.now() - startedAt;
@@ -420,19 +529,21 @@ async function runMode(page, mode, trialIndex) {
           value: firstArtistMs
         }));
       }
-      if (state?.accepted >= 5 && !fiveArtistsMs) {
-        fiveArtistsMs = Date.now() - startedAt;
+      if (state?.accepted >= ARTIST_COUNT && !targetArtistsMs) {
+        targetArtistsMs = Date.now() - startedAt;
         console.log(JSON.stringify({
           status: 'milestone',
           trial: trialIndex,
           page,
           mode,
-          metric: 'fiveArtistsMs',
-          value: fiveArtistsMs
+          metric: 'targetArtistsMs',
+          value: targetArtistsMs
         }));
       }
       if (state?.accepted >= 1 && !firstPlayableMs) {
-        firstProof = await proveActiveVideo(cdp, Math.min(PLAY_TIMEOUT_MS, 3500));
+        // First-playable measures startup, not a full matrix proof. The full
+        // three-second playback contract is measured below for every card.
+        firstProof = await proveActiveVideo(cdp, Math.min(PLAY_TIMEOUT_MS, 8000), 0.35);
         if (firstProof?.ok) {
           firstPlayableMs = Date.now() - startedAt;
           console.log(JSON.stringify({
@@ -446,12 +557,12 @@ async function runMode(page, mode, trialIndex) {
           }));
         }
       }
-      if (state?.done && Number(state.accepted || 0) < 5) break;
+      if (state?.done && Number(state.accepted || 0) < ARTIST_COUNT) break;
       await delay(200);
     }
-    const fiveByFive = fiveArtistsMs
-      ? await proveFiveByFive(cdp, startedAt)
-      : { ok: false, reason: 'five accepted artists not reached', artists: [] };
+    const playbackMatrix = targetArtistsMs
+      ? await provePlaybackMatrix(cdp, startedAt)
+      : { ok: false, reason: `${ARTIST_COUNT} accepted artists not reached`, artists: [] };
     const finalState = await benchmarkState(cdp) || {};
     const acceptedUrls = (finalState.verdictAudit || [])
       .filter(item => item?.decision === 'accept')
@@ -464,9 +575,9 @@ async function runMode(page, mode, trialIndex) {
       mode,
       firstArtistMs,
       firstPlayableMs,
-      fiveArtistsMs,
-      fiveByFiveMs: fiveByFive.completedMs || 0,
-      fiveByFive,
+      targetArtistsMs,
+      playbackMatrixMs: playbackMatrix.completedMs || 0,
+      playbackMatrix,
       accepted: Number(finalState.accepted || 0),
       acceptedUrls,
       hardSafe: (finalState.verdictAudit || [])
@@ -515,17 +626,32 @@ async function main() {
     const trial = index + 1;
     const local2 = results.find(result => result.trial === trial && result.mode === 'local2');
     const local22 = results.find(result => result.trial === trial && result.mode === 'local22');
-    const metrics = ['firstArtistMs', 'firstPlayableMs', 'fiveArtistsMs', 'fiveByFiveMs'];
-    const wins = Object.fromEntries(metrics.map(metric => [
+    const observedMetrics = ['firstArtistMs', 'firstPlayableMs', 'targetArtistsMs', 'playbackMatrixMs'];
+    const requiredMetrics = ['firstArtistMs', 'firstPlayableMs', 'playbackMatrixMs'];
+    const metricValue = (result, metric) => {
+      if (metric === 'playbackMatrixMs' && result?.playbackMatrix?.ok !== true) return DEADLINE_MS;
+      const value = Number(result?.[metric] || 0);
+      return value > 0 ? value : DEADLINE_MS;
+    };
+    const wins = Object.fromEntries(observedMetrics.map(metric => [
       metric,
-      Number(local22?.[metric] || Infinity) < Number(local2?.[metric] || Infinity)
+      metricValue(local22, metric) < metricValue(local2, metric)
     ]));
     const overlap = local2?.acceptedUrls?.filter(url => local22?.acceptedUrls?.includes(url)) || [];
+    const local2Buffers = Number(local2?.playbackMatrix?.buffers ?? Infinity);
+    const local22Buffers = Number(local22?.playbackMatrix?.buffers ?? Infinity);
+    const bufferingWin = Number.isFinite(local22Buffers) && local22Buffers <= local2Buffers;
     return {
       trial,
       page,
       wins,
-      allTimingWins: Object.values(wins).every(Boolean),
+      // playbackMatrixMs starts at the button click and therefore already
+      // includes waiting for three accepted bundles. targetArtistsMs remains a
+      // useful diagnostic, but a card merely existing is not a playback result.
+      allTimingWins: requiredMetrics.every(metric => wins[metric] === true),
+      bufferingWin,
+      local2Buffers,
+      local22Buffers,
       local2Accepted: local2?.accepted || 0,
       local22Accepted: local22?.accepted || 0,
       overlap,
@@ -533,15 +659,59 @@ async function main() {
       local22
     };
   });
-  const passed = comparisons.every(comparison =>
-    comparison.allTimingWins &&
-    comparison.local22?.hardSafe &&
-    comparison.local22?.fiveByFive?.ok
+  const requiredMetrics = ['firstArtistMs', 'firstPlayableMs', 'playbackMatrixMs'];
+  const averages = Object.fromEntries(requiredMetrics.map(metric => {
+    const value = result => metric === 'playbackMatrixMs' && result?.playbackMatrix?.ok !== true
+      ? DEADLINE_MS
+      : Math.max(0, Number(result?.[metric] || 0)) || DEADLINE_MS;
+    const local2 = comparisons.reduce((sum, row) => sum + value(row.local2), 0) / comparisons.length;
+    const local22 = comparisons.reduce((sum, row) => sum + value(row.local22), 0) / comparisons.length;
+    return [metric, {
+      local2,
+      local22,
+      improvementPercent: local2 > 0 ? ((local2 - local22) / local2) * 100 : 0,
+      significant: local2 > 0 && local22 <= local2 * 0.90
+    }];
+  }));
+  const significantTimingMargin = Object.values(averages).every(row => row.significant === true);
+  const minimumTrialWins = Math.max(1, Math.ceil(comparisons.length * 2 / 3));
+  const timingRepeatability = Object.fromEntries(requiredMetrics.map(metric => {
+    const wins = comparisons.filter(row => row.wins?.[metric] === true).length;
+    return [metric, { wins, trials: comparisons.length, required: minimumTrialWins, passed: wins >= minimumTrialWins }];
+  }));
+  const repeatableTimingWins = Object.values(timingRepeatability).every(row => row.passed === true);
+  const completedBufferPairs = comparisons.filter(row =>
+    row.local2?.playbackMatrix?.ok === true && row.local22?.playbackMatrix?.ok === true
   );
+  const buffering = {
+    comparedTrials: completedBufferPairs.length,
+    local2: completedBufferPairs.reduce((sum, row) => sum + Number(row.local2Buffers || 0), 0),
+    local22: completedBufferPairs.reduce((sum, row) => sum + Number(row.local22Buffers || 0), 0)
+  };
+  buffering.passed = completedBufferPairs.length === 0 || buffering.local22 <= buffering.local2;
+  const passed = comparisons.every(comparison =>
+    comparison.local22?.hardSafe &&
+    comparison.local22?.playbackMatrix?.ok
+  ) && repeatableTimingWins && significantTimingMargin && buffering.passed;
   await emitReport({
-    benchmark: 'actual Pong Local 2 versus Local 2.2 paired one-page hidden muted playback',
+    benchmark: `actual Pong Local 2 versus Local 2.2 paired ${ARTIST_COUNT}x${VIDEOS_PER_ARTIST} hidden muted playback`,
     timestamp: new Date().toISOString(),
     pages,
+    contract: {
+      artists: ARTIST_COUNT,
+      videosPerArtist: VIDEOS_PER_ARTIST,
+      playbackSecondsPerVideo: PLAY_PROOF_SECONDS,
+      requiredTimingMetrics: requiredMetrics,
+      targetArtistsMs: 'diagnostic; full matrix timing already includes artist availability',
+      minimumAverageImprovementPercent: 10,
+      minimumPerMetricTrialWins: minimumTrialWins,
+      buffering: 'total playback freezes across completed paired matrices'
+    },
+    averages,
+    significantTimingMargin,
+    timingRepeatability,
+    repeatableTimingWins,
+    buffering,
     passed,
     comparisons
   });

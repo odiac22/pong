@@ -7,6 +7,7 @@
     "benchmark:video-loading": "node scripts/benchmark-video-loading.mjs",
     "benchmark:video-transports": "node scripts/benchmark-video-transports.mjs",
     "benchmark:feedback-memory": "python scripts\\benchmark-exact-feedback-memory.py",
+    "build:saved-erome-recovery": "node scripts/build-saved-erome-recovery.mjs",
     "benchmark:local2:live-regressions": "node scripts/benchmark-local2-live-regressions.mjs",
     "benchmark:local2:offline": ".\\.pong-local-ai\\lora-venv\\Scripts\\python.exe scripts\\benchmark-local2-offline.py",
     "test:local2": "node --test local2-pipeline.test.mjs local2-node-adapter.test.mjs && .\\.pong-local-ai\\lora-venv\\Scripts\\python.exe scripts\\local2_clean_test.py && .\\.pong-local-ai\\lora-venv\\Scripts\\python.exe scripts\\local2_vision_adapter_test.py",
