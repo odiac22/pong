@@ -873,7 +873,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.35</div>
+    <div class="version-number">26.36</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -10350,6 +10350,7 @@ function openEromeBrowser() {
 }
 
 function buildEromeImportGroups(data, fallbackUrl) {
+  if (data?.verifiedCreator === true) return [];
   const sourceTitle = data?.title || artistNameFromUrl(fallbackUrl) || 'Erome';
   const rawGroups = Array.isArray(data?.albumGroups) && data.albumGroups.length
     ? data.albumGroups
@@ -10360,6 +10361,7 @@ function buildEromeImportGroups(data, fallbackUrl) {
       }];
 
   return rawGroups
+    .filter(group => group?.verifiedCreator !== true)
     .map((group, index) => ({
       url: group?.url || fallbackUrl,
       title: group?.title || sourceTitle || `Erome batch ${index + 1}`,
@@ -19535,6 +19537,15 @@ async function loadEromeAsCards() {
         fast: note !== 'final retry'
       });
       if (pongCollectionWasStoppedForEvent(collectionEvent)) return true;
+      if (data?.verifiedCreator === true) {
+        if (!completedAlbumUrls.has(album.url)) {
+          completedAlbumUrls.add(album.url);
+          markEromeScrapeAlbumCompleted(scrapeProgress, album.url);
+          completedAlbums++;
+        }
+        updateAlbumProgress(album, 'skipped verified creator');
+        return true;
+      }
       const groups = buildEromeImportGroups(data, album.url).map(group => ({
         ...group,
         url: group.url || album.url,

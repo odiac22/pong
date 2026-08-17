@@ -125,6 +125,11 @@ function extractMp4s(html) {
   return [...set];
 }
 
+function isVerifiedCreatorPage(html) {
+  const normalized = String(html || '');
+  return /id=["']user_name["'][^>]*>[\s\S]{0,500}?title=["']Verified["']/i.test(normalized);
+}
+
 function absolutizeEromeUrl(raw) {
   try {
     return new URL(raw, 'https://www.erome.com/').href.replace(/\/$/, '');
@@ -285,6 +290,7 @@ async function handleScrape(target, options = {}) {
 
   const titleMatch = html.match(/<title>([^<]*)<\/title>/i);
   const title = titleMatch ? titleMatch[1].trim() : '';
+  const verifiedCreator = isVerifiedCreatorPage(html);
 
   // Direct MP4s on this page (album page case).
   let videos = extractMp4s(html);
@@ -311,12 +317,14 @@ async function handleScrape(target, options = {}) {
       }
 
       const albumVideos = extractMp4s(albumHtml);
+      const albumVerifiedCreator = isVerifiedCreatorPage(albumHtml);
 
       return {
         url: album.url,
         title: album.title,
         count: albumVideos.length,
         videos: albumVideos,
+        verifiedCreator: albumVerifiedCreator,
       };
     });
 
@@ -339,6 +347,7 @@ async function handleScrape(target, options = {}) {
       title,
       count: videos.length,
       videos,
+      verifiedCreator,
     }];
   }
 
@@ -352,6 +361,7 @@ async function handleScrape(target, options = {}) {
     failedAlbumCount,
     emptyAlbumCount,
     profilePageCount,
+    verifiedCreator,
     albumGroups,
   }, 200);
 }
