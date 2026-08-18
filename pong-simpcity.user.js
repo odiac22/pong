@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.10.8
+// @version      1.10.9
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -29,7 +29,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.10.8';
+  const SCRIPT_VERSION = '1.10.9';
   const FORUM_CREATOR_CONCURRENCY = 2;
   const SIMPCITY_REQUEST_GAP_MS = 500;
   const SIMPCITY_RATE_LIMIT_PAUSE_MS = 60_000;
@@ -588,8 +588,11 @@
     sendToPong('/simpcity/resume/status', { sourceUrl: location.href }, 10000).then(result => {
       resumeCheckbox.checked = result?.available === true;
       resumeCheckbox.title = result?.available
-        ? 'Continue this exact URL from its saved Pong position'
+        ? `Continue this exact URL after the last profile passed in Pong${Number(result?.passedProfiles || 0) ? ` (${Number(result.passedProfiles)} remembered)` : ''}`
         : 'No saved position exists for this exact URL yet';
+      if (result?.available) {
+        diagnostic('Exact profile resume recognized', `remembered=${Number(result?.passedProfiles || 0)}; source=${location.href}`);
+      }
     }).catch(error => {
       diagnostic('Resume check unavailable', error?.message || String(error));
     });
@@ -690,8 +693,13 @@
             }, 30000);
           }
           if (!background?.sourceCaptureRequired) {
-            status.textContent = `Pong ${channel}: PC running in background · ${background.id}`;
-            diagnostic('PC worker started successfully', `channel=${channel}; id=${background.id}; target=${background.targetUrl || location.href}; state=${background.state || 'running'}`);
+            status.textContent = background?.profileResume
+              ? `Pong ${channel}: resuming after last passed profile`
+              : `Pong ${channel}: PC running in background · ${background.id}`;
+            diagnostic(
+              'PC worker started successfully',
+              `channel=${channel}; id=${background.id}; target=${background.targetUrl || location.href}; state=${background.state || 'running'}; profileResume=${background?.profileResume === true}; remembered=${Number(background?.passedProfiles || 0)}`
+            );
             void monitorPcWorker(channel, background.id, runToken);
             return;
           }

@@ -2509,6 +2509,16 @@ async function pongPlayedHistoryHas(kind, sourceUrl, itemId) {
   return pongPlayedHistoryHashes.has(hash) || pongProfileCursorHashes.has(hash);
 }
 
+async function pongProfileCursorStatsForSource(sourceUrl) {
+  await loadPongPlayedHistory();
+  const scopeHash = pongPlayedHistoryScopeHash(sourceUrl);
+  let passedProfiles = 0;
+  for (const hash of pongProfileCursorHashes) {
+    if (pongProfileCursorScopes.get(hash) === scopeHash) passedProfiles++;
+  }
+  return { scopeHash, passedProfiles };
+}
+
 function simpCityAlbumPlayedHistoryHash(album, fallbackSourceUrl = '') {
   const creatorKey = String(album?.creatorKey || album?.creatorName || '').trim();
   if (!creatorKey) return '';
@@ -2977,12 +2987,24 @@ function normalizeSimpCityBackgroundUrl(rawValue) {
 async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved = true) {
   const targetUrl = normalizeSimpCityBackgroundUrl(rawUrl);
   if (!targetUrl) throw new Error('A valid SimpCity thread, tag, search, or forum URL is required');
-  const resumeEntry = resumeFromSaved === false ? null : await simpCityResumeEntry(targetUrl);
-  const navigationUrl = resumeEntry?.cursorUrl || targetUrl;
+  const resumeRequested = resumeFromSaved !== false;
+  const profileCursor = resumeRequested
+    ? await pongProfileCursorStatsForSource(targetUrl)
+    : { passedProfiles: 0 };
+  const profileResume = profileCursor.passedProfiles > 0;
+  const resumeEntry = resumeRequested ? await simpCityResumeEntry(targetUrl) : null;
+  // A listing-page cursor describes how far discovery ran, not how far the
+  // person moved through Pong. When Pong has profile checkpoints, rescan the
+  // exact source in its original order and reject those opaque checkpoints
+  // before any host, Balbums or TikTok resolution. The first published bundle
+  // is therefore the first profile after the user's last Pong position.
+  const navigationUrl = profileResume ? targetUrl : (resumeEntry?.cursorUrl || targetUrl);
   const channel = simpCityRecallChannel(rawChannel);
+  const channelState = simpCityRecallState(channel);
   const session = await loadSimpCitySession();
   if (!simpCityHasAuthenticatedCookie(session?.cookies)) {
-    resetSimpCityRecallState(simpCityRecallState(channel));
+    resetSimpCityRecallState(channelState);
+    channelState.skipSeenEnabled = profileResume;
     const previous = simpCityBackgroundRuns.get(channel);
     previous?.controller?.abort();
     await stopSimpCityBrowser(previous?.browser).catch(() => {});
@@ -2999,19 +3021,29 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
       run.error = String(error?.message || error).slice(0, 500);
       run.updatedAt = new Date().toISOString();
     });
-    return { id: run.id, channel, targetUrl, state: run.state, loginRequired: true };
+    return {
+      id: run.id, channel, targetUrl, state: run.state, loginRequired: true,
+      profileResume, passedProfiles: profileCursor.passedProfiles
+    };
   }
   // A scrape-button press is a new generation. Invalidate the previous
   // channel immediately, before the hidden browser has time to call
   // /recall/begin, so Pong can never retrieve yesterday's payload.
-  resetSimpCityRecallState(simpCityRecallState(channel));
+  resetSimpCityRecallState(channelState);
+  channelState.skipSeenEnabled = profileResume;
   const previous = simpCityBackgroundRuns.get(channel);
   previous?.controller?.abort();
   await stopSimpCityBrowser(previous?.browser).catch(() => {});
   const controller = new AbortController();
   const run = {
     id: crypto.randomUUID(), channel, targetUrl, controller, browser: null,
-    state: 'starting', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: ''
+    state: 'starting',
+    status: profileResume
+      ? `Pong ${channel}: resuming after the last passed profile`
+      : `Pong ${channel}: starting new scrape`,
+    profileResume,
+    passedProfiles: profileCursor.passedProfiles,
+    startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: ''
   };
   simpCityBackgroundRuns.set(channel, run);
   let browser = null;
@@ -3117,7 +3149,10 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
       if (controller.signal.aborted) run.state = 'cancelled';
     }
   })();
-  return { id: run.id, channel, targetUrl, state: run.state };
+  return {
+    id: run.id, channel, targetUrl, state: run.state,
+    profileResume, passedProfiles: profileCursor.passedProfiles
+  };
 }
 
 async function simpCityBrowserAuthState(browser) {
@@ -3874,12 +3909,17 @@ function scheduleSimpCityMediaLinks(state, channel, suppliedId, posts, creators)
   const tasks = links.map(link => simpCityMediaResolveLimit(async () => {
     if (signal?.aborted) return;
     try {
-      const videos = await resolveSimpCityMediaLink(link, signal);
-      if (!videos.length || !state.pending?.id || state.pending.id !== suppliedId || signal?.aborted) return;
       const creator = creatorByPost.get(link.postId);
       const creatorName = String(creator?.primaryName || `SimpCity ${link.postId}`).trim();
       const creatorKey = String(creatorName).toLowerCase().replace(/[^a-z0-9]+/g, '') || link.postId;
-      if (state.skippedCreatorKeys?.has(creatorKey)) return;
+      if (
+        state.skippedCreatorKeys?.has(creatorKey) ||
+        (state.skipSeenEnabled && await pongPlayedHistoryHas(
+          'simpcity-profile', state.pending?.threadUrl, creatorKey
+        ))
+      ) return;
+      const videos = await resolveSimpCityMediaLink(link, signal);
+      if (!videos.length || !state.pending?.id || state.pending.id !== suppliedId || signal?.aborted) return;
       if (link.kind === 'tiktok') {
         const existingTikTok = state.pending.albums.find(item => (
           item?.mediaKind === 'tiktok' && item?.creatorKey === creatorKey
@@ -11568,7 +11608,15 @@ const server = http.createServer(async (req, res) => {
       const sourceUrl = normalizeSimpCityBackgroundUrl(payload?.sourceUrl);
       if (!sourceUrl) throw new Error('A valid SimpCity source URL is required');
       const entry = await simpCityResumeEntry(sourceUrl);
-      json(res, 200, { ok: true, available: Boolean(entry?.cursorUrl), updatedAt: entry?.updatedAt || '' });
+      const profileCursor = await pongProfileCursorStatsForSource(sourceUrl);
+      json(res, 200, {
+        ok: true,
+        available: profileCursor.passedProfiles > 0,
+        profileResume: profileCursor.passedProfiles > 0,
+        passedProfiles: profileCursor.passedProfiles,
+        listingCheckpointAvailable: Boolean(entry?.cursorUrl),
+        updatedAt: entry?.updatedAt || ''
+      });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/source/permit') {
@@ -11609,7 +11657,9 @@ const server = http.createServer(async (req, res) => {
       const run = simpCityBackgroundRuns.get(channel);
       json(res, 200, { ok: true, channel, run: run ? {
         id: run.id, state: run.state, targetUrl: run.targetUrl, status: run.status || '',
-        error: run.error || '', startedAt: run.startedAt, updatedAt: run.updatedAt
+        error: run.error || '', profileResume: run.profileResume === true,
+        passedProfiles: Number(run.passedProfiles || 0),
+        startedAt: run.startedAt, updatedAt: run.updatedAt
       } : null });
       return;
     }
