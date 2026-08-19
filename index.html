@@ -887,7 +887,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.45</div>
+    <div class="version-number">26.46</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -18927,7 +18927,10 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       const readyVideos = Array.isArray(album?.videos) ? album.videos.filter(Boolean) : [];
       const data = readyVideos.length
         ? { title: album.title, videos: readyVideos }
-        : await postJson('/bunkr/album', album);
+        : await Promise.race([
+            postJson('/bunkr/album', album),
+            sleep(15000).then(() => { throw new Error('album resolution timed out'); })
+          ]);
       if (loadGeneration !== bunkrLoadGeneration) return;
       if (album?.creatorKey && simpCitySkippedCreatorKeys.has(album.creatorKey)) return;
       if (Array.isArray(data.videos) && data.videos.length) {
@@ -18950,6 +18953,15 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       }
     } catch (error) {
       console.warn('SimpCity Bunkr album import failed:', album.url, error);
+      if (
+        loadGeneration === bunkrLoadGeneration &&
+        /timed out/i.test(String(error?.message || '')) &&
+        Number(album?.playerResolveAttempts || 0) < 2
+      ) {
+        album.playerResolveAttempts = Number(album.playerResolveAttempts || 0) + 1;
+        albumQueue.push(album);
+        wakeAlbumWorkers();
+      }
     } finally {
       reservedAlbumSlots = Math.max(0, reservedAlbumSlots - 1);
       completedAlbums++;
@@ -18990,7 +19002,10 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         if (!shared.reachable) throw new Error(`Recall ${recallChannel} lost contact with the PC server`);
         void postJson('/simpcity/discovery/backlog', {
           channel: recallChannel,
-          unseen: unviewedAlbumCount() + reservedAlbumSlots
+          // Only cards the viewer can actually reach count as backlog. Worker
+          // reservations are not playable profiles; reporting them previously
+          // paused the PC at 5 while Paperclip was already at its final card.
+          unseen: unviewedAlbumCount()
         }).catch(() => {});
         if (shared.recall) {
           discoveredCreators = Math.max(discoveredCreators, shared.recall.names.length);
