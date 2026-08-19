@@ -142,6 +142,13 @@ const VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS = Math.max(
 const VIDEO_FILE_CACHE_QUEUE_MAX = Math.max(60, Math.min(6000, Number(process.env.PONG_VIDEO_FILE_CACHE_QUEUE_MAX || 5000)));
 const VIDEO_FILE_CACHE_ACTIVE_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_ACTIVE_HOLD_MS || 20000));
 const VIDEO_FILE_CACHE_CURRENT_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_CURRENT_HOLD_MS || 30000));
+// Whole-file background downloads let one large CDN object monopolize a lane.
+// Preserve each partial file, but rotate the lane after this much new data so
+// every reachable swipe/profile receives startup bytes promptly.
+const VIDEO_FILE_CACHE_BACKGROUND_QUANTUM_BYTES = Math.max(
+  4 * 1024 * 1024,
+  Math.min(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_QUANTUM_BYTES || 12 * 1024 * 1024))
+);
 const VIDEO_FILE_CACHE_READ_WAIT_MS = Math.max(10000, Number(process.env.PONG_VIDEO_FILE_CACHE_READ_WAIT_MS || 45000));
 const VIDEO_FILE_CACHE_IO_SETTLE_MS = 8000;
 const VIDEO_FILE_CACHE_WIPE_RETRIES = 12;
@@ -5700,6 +5707,7 @@ function videoFileCacheSnapshot() {
     playback_background_concurrency: VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY,
     local22_playback_background_concurrency: VIDEO_FILE_CACHE_LOCAL22_PLAYBACK_BACKGROUND_CONCURRENCY,
     per_host_concurrency: VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY,
+    background_quantum_bytes: VIDEO_FILE_CACHE_BACKGROUND_QUANTUM_BYTES,
     buffer_scheduler: {
       low_seconds: VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS,
       high_seconds: VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS,
@@ -6273,6 +6281,7 @@ async function downloadVideoFileCacheRecord(record, generation) {
   record.updatedAt = Date.now();
   record.error = '';
   try {
+    record.yieldForFairness = false;
     await fs.mkdir(VIDEO_FILE_CACHE_DIR, { recursive: true });
     let segmentedDownloadComplete = false;
     if (!isTikTokVideoPageUrl(record.sourceUrl) && videoFileCacheCanUseLocal22Segments(record)) {
@@ -6416,6 +6425,18 @@ async function downloadVideoFileCacheRecord(record, generation) {
           record.bytes = bytes;
           record.updatedAt = Date.now();
           if (bytes > VIDEO_FILE_CACHE_MAX_FILE_BYTES) fail(new Error('video cache file too large'));
+          if (
+            currentVideoFileCachePriority(record) > 0 &&
+            bytes - baseBytes >= VIDEO_FILE_CACHE_BACKGROUND_QUANTUM_BYTES &&
+            videoFileCacheQueue.some(candidate => (
+              candidate?.status === 'queued' &&
+              !candidate.downloadPromise &&
+              Number(candidate.retryNotBefore || 0) <= Date.now()
+            ))
+          ) {
+            record.yieldForFairness = true;
+            controller.abort();
+          }
         });
         response.once('error', fail);
         output.once('error', fail);
@@ -6473,7 +6494,16 @@ async function downloadVideoFileCacheRecord(record, generation) {
     record.pausedForPlayback = false;
     if (generation === videoFileCacheGeneration) {
       record.updatedAt = Date.now();
-      if (record.deferWhenIdle) {
+      if (record.yieldForFairness) {
+        // Keep the valid partial file. The next turn resumes with Range from
+        // record.bytes, while another reachable card gets this worker now.
+        record.yieldForFairness = false;
+        record.status = 'queued';
+        record.error = '';
+        record.retryNotBefore = Date.now() + 40;
+        record.order = ++videoFileCacheOrder;
+        if (!videoFileCacheQueue.includes(record)) videoFileCacheQueue.push(record);
+      } else if (record.deferWhenIdle) {
         // This item is no longer in the useful foreground/background window.
         // Delete its partial bytes immediately so long sessions remain rolling.
         record.deferWhenIdle = false;

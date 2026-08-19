@@ -887,7 +887,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.44</div>
+    <div class="version-number">26.45</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -7616,11 +7616,13 @@ function runRandom40PreloadPool() {
   const local2FastPlayback = pongLocal2FastPlaybackActive();
   const local22TurboPlayback = pongLocal22TurboPlaybackActive();
   const useServerFileCache = Boolean(random40ServerVideoCacheEndpoint());
-  const currentPreloadReserve = local2FastPlayback
-    ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
-    : local22TurboPlayback
-      ? 3
-    : RANDOM40_PRELOAD_CURRENT_RESERVE;
+  const currentPreloadReserve = !isRandom40PlaybackActive() && useServerFileCache
+    ? PONG_IMPORT_CURRENT_PLAYBACK_WINDOW
+    : local2FastPlayback
+      ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
+      : local22TurboPlayback
+        ? 3
+        : RANDOM40_PRELOAD_CURRENT_RESERVE;
   random40PreloadMap.forEach(record => {
     record.priority = 2;
     record.order = Number.MAX_SAFE_INTEGER;
@@ -7658,7 +7660,7 @@ function runRandom40PreloadPool() {
     if (!bounds) return;
     const artistKey = getPasteEventPaperclipKey(candidate.event, candidate.index) ||
       String(candidate.event.artistKey || candidate.event.artistUrl || '');
-    const candidateStart = local22TurboPlayback && current
+    const candidateStart = current && (local22TurboPlayback || !isRandom40PlaybackActive())
       ? Math.max(bounds.start, Number(currentLoadedRangeStart || 0) + Number(activeWrapper?.dataset?.index || 0))
       : bounds.start;
     const candidateEnd = (PONG_ADAPTIVE_PLAYBACK || pongLocal22PlaybackActive())
@@ -11119,6 +11121,9 @@ const RANDOM40_LOCAL2_MAX_REVIEW_IMAGES = 12;
 const RANDOM40_LOCAL2_LEARN_IMAGES_PER_EXAMPLE = 12;
 const RANDOM40_LOCAL2_OVERLAP_TIMEOUT_MS = 20000;
 const RANDOM40_PRELOAD_CURRENT_RESERVE = 20;
+// Recall/Erome/Bunkr must optimize time-to-next-playable instead of completing
+// a whole artist before preparing the next swipe and Paperclip destination.
+const PONG_IMPORT_CURRENT_PLAYBACK_WINDOW = 4;
 const RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE = 6;
 const RANDOM40_PRELOAD_RESIDENT_PER_BACKGROUND_ARTIST = 2;
 const RANDOM40_PRELOAD_GUARANTEED_ARTISTS = 8;
@@ -12011,13 +12016,19 @@ function random40WarmServerVideoCacheForActiveWrapper(
   const bounds = getPasteEventVideoBounds(event);
   if (bounds) {
     const reserve = !isRandom40PlaybackActive() && isPongServerCachedPlaybackActive()
-      ? Math.max(1, bounds.end - bounds.start)
+      ? Math.min(
+          PONG_IMPORT_CURRENT_PLAYBACK_WINDOW,
+          Math.max(1, bounds.end - Math.max(bounds.start, activeGlobalIndex))
+        )
       : pongLocal2FastPlaybackActive()
         ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
         : pongLocal22TurboPlaybackActive()
           ? 8
         : RANDOM40_PRELOAD_CURRENT_RESERVE;
-    for (let index = bounds.start; index < Math.min(bounds.end, bounds.start + reserve); index++) {
+    const windowStart = !isRandom40PlaybackActive() && isPongServerCachedPlaybackActive()
+      ? Math.max(bounds.start, activeGlobalIndex)
+      : bounds.start;
+    for (let index = windowStart; index < Math.min(bounds.end, windowStart + reserve); index++) {
       const browserOwnsDirectWindow = pongLocal22TurboPlaybackActive() && index === activeGlobalIndex;
       if (
         allVideoUrls[index] &&
