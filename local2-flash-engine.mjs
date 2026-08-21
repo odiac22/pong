@@ -37,6 +37,7 @@ export class Local2FlashEngine {
     candidateConcurrency = 12,
     maximumPendingCandidates = 32,
     maximumPages = 120,
+    candidateTimeoutMs = 45000,
     variant = 'local2-flash',
     now = () => Date.now()
   } = {}) {
@@ -52,6 +53,7 @@ export class Local2FlashEngine {
     this.candidateConcurrency = integer(candidateConcurrency, 12, 1, 48);
     this.maximumPendingCandidates = integer(maximumPendingCandidates, 32, this.candidateConcurrency, 256);
     this.maximumPages = integer(maximumPages, 120, 1, 3500);
+    this.candidateTimeoutMs = integer(candidateTimeoutMs, 45000, 5000, 180000);
     this.variant = text(variant, 64) || 'local2-flash';
     this.now = now;
     this.generation = 0;
@@ -220,9 +222,19 @@ export class Local2FlashEngine {
 
   async processCandidate(run, candidate) {
     const started = this.now();
+    const candidateController = new AbortController();
+    const abortFromRun = () => candidateController.abort(
+      run.controller.signal.reason || new Error(`${this.variant} stopped`)
+    );
+    if (run.controller.signal.aborted) abortFromRun();
+    else run.controller.signal.addEventListener('abort', abortFromRun, { once: true });
+    const timeout = setTimeout(() => candidateController.abort(
+      new Error(`${this.variant} candidate exceeded ${this.candidateTimeoutMs}ms`)
+    ), this.candidateTimeoutMs);
+    timeout.unref?.();
     try {
       const result = await this.qualifyCandidate(candidate, {
-        signal: run.controller.signal,
+        signal: candidateController.signal,
         revision: run.revision,
         generation: run.generation,
         variant: this.variant
@@ -272,6 +284,8 @@ export class Local2FlashEngine {
         if (run.stats.recentOutcomes.length > 256) run.stats.recentOutcomes.shift();
       }
     } finally {
+      clearTimeout(timeout);
+      run.controller.signal.removeEventListener('abort', abortFromRun);
       run.stats.timings.qualificationMs += this.now() - started;
     }
   }

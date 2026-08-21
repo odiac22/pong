@@ -10485,8 +10485,10 @@ async function local2FlashPrepareProfile(candidate, context) {
   const firstHtml = await random40ReservoirFetchHtml(artistUrl, 10000, context.signal);
   if (!addPage(1, firstHtml)) throw new Error('Local2 Flash profile listing unavailable');
   // Most video-rich creators prove the cheap 15-post requirement on page one.
-  // Only sparse profiles spend requests on additional listing pages.
-  for (let batchStart = 2; batchStart <= maximumPages && likelyVideoPostUrls.length < 15; batchStart += 3) {
+  // Count every candidate video-post link here. The narrower no-thumbnail
+  // heuristic is useful for ranking, but it must not reject real video posts
+  // before the authoritative post-page verifier gets to inspect them.
+  for (let batchStart = 2; batchStart <= maximumPages && allVideoPostUrls.length < 15; batchStart += 3) {
     const pageNumbers = [batchStart, batchStart + 1, batchStart + 2].filter(page => page <= maximumPages);
     const results = await Promise.allSettled(pageNumbers.map(page => random40ReservoirFetchHtml(
       random40ReservoirProfilePageUrl(artistUrl, page),
@@ -10499,8 +10501,8 @@ async function local2FlashPrepareProfile(candidate, context) {
     });
     if (!foundAny) break;
   }
-  if (likelyVideoPostUrls.length < 15) {
-    throw new Error(`Local2 Flash video gate found ${likelyVideoPostUrls.length}/15`);
+  if (allVideoPostUrls.length < 15) {
+    throw new Error(`Local2 Flash video gate found ${allVideoPostUrls.length}/15`);
   }
   const pageText = local2ProfileTextEvidence(firstHtml, artistInfo);
   artistInfo.pageText = pageText;
@@ -11022,7 +11024,7 @@ function local22TurboQualificationLimit() {
   // Keep the CUDA service's four execution lanes fed while slow image hosts
   // finish out of order. Admission changes scheduling only; the exact same
   // images, models, thresholds, and hard-filter verdicts are still required.
-  return local22TurboPlaybackPhaseActive() ? 1 : 10;
+  return local22TurboPlaybackPhaseActive() ? 2 : 10;
 }
 
 function local22TurboDrainQualificationWaiters() {
@@ -11035,10 +11037,10 @@ function local22TurboDrainQualificationWaiters() {
 }
 
 function local22TurboWorkLimit() {
-  // Match Local2's proven startup fan-out while the one-pass Local2.2 decision
-  // removes its second classification pass. Once three artists are delivered,
-  // collapse to one lane so discovery cannot compete with foreground media.
-  return local22TurboPlaybackPhaseActive() ? 1 : 48;
+  // Sixteen profile gates can issue up to 48 listing requests at once. The old
+  // forty-eight-profile fan-out generated as many as 144 simultaneous listing
+  // requests and buried early winners in the source queue.
+  return local22TurboPlaybackPhaseActive() ? 4 : 16;
 }
 
 function local22TurboDrainWorkWaiters() {
@@ -11081,11 +11083,8 @@ function local22TurboAcquireWorkSlot(signal) {
 function local22TurboEnterPlaybackPhase() {
   if (local22TurboDeliveredArtists < 3) return;
   local2FlashProtectForegroundPlayback(12000);
-  for (const controller of local22TurboBranchControllers) {
-    if (!controller.signal.aborted) {
-      controller.abort(new Error('Local2.2 foreground playback took priority'));
-    }
-  }
+  // Keep a bounded discovery trickle alive. Aborting every in-flight winner at
+  // the third delivery created the recurring multi-minute gap before artist 4.
   local22TurboDrainQualificationWaiters();
   local22TurboDrainWorkWaiters();
 }
@@ -11195,7 +11194,7 @@ async function local22TurboQualifyCandidateInner(candidate, context) {
   // Work that began during the wide discovery phase yields immediately once
   // the three-artist playback cohort is ready. One fresh lane remains available
   // through the dynamic work semaphore below.
-  if (local22TurboPlaybackPhaseActive() && local22TurboWorkActive > 1) {
+  if (local22TurboPlaybackPhaseActive() && local22TurboWorkActive > 4) {
     return {
       accepted: false,
       reason: 'Local2.2 foreground playback superseded queued profile work'
@@ -11217,15 +11216,7 @@ async function local22TurboQualifyCandidateInner(candidate, context) {
   else context.signal?.addEventListener('abort', abortBranch, { once: true });
   const branchContext = { ...context, signal: branchController.signal, variant: 'local22-turbo' };
   const mediaPromise = local2FlashVerifyProfile(profile, branchContext)
-    .then(async media => {
-      if (media.length < 15) return { branch: 'media', media, fastStartProven: 0 };
-      const prioritized = await local2FlashPrioritizePlayableMedia(media, branchContext);
-      return {
-        branch: 'media',
-        media: prioritized.media,
-        fastStartProven: prioritized.fastStartProven
-      };
-    })
+    .then(media => ({ branch: 'media', media }))
     .catch(error => ({ branch: 'media', error }));
   const decisionPromise = classifyInner({
     app: 'pong-random40-local22-turbo',
@@ -11248,15 +11239,11 @@ async function local22TurboQualifyCandidateInner(candidate, context) {
       branchController.abort();
       return { accepted: false, reason: String(first.error?.message || first.error) };
     }
-    if (first.branch === 'media' && (
-      first.media.length < 15 || first.fastStartProven < 5
-    )) {
+    if (first.branch === 'media' && first.media.length < 15) {
       branchController.abort();
       return {
         accepted: false,
-        reason: first.media.length < 15
-          ? `only ${first.media.length}/15 verified media URLs`
-          : `only ${first.fastStartProven}/5 foreground media URLs passed the fast-start byte probe`
+        reason: `only ${first.media.length}/15 verified media URLs`
       };
     }
     if (first.branch === 'decision' && !local2FlashDecisionIsSafe(first.decision)) {
@@ -11273,12 +11260,6 @@ async function local22TurboQualifyCandidateInner(candidate, context) {
     const decision = first.branch === 'decision' ? first.decision : second.decision;
     if (mediaResult.media.length < 15) {
       return { accepted: false, reason: `only ${mediaResult.media.length}/15 verified media URLs` };
-    }
-    if (mediaResult.fastStartProven < 5) {
-      return {
-        accepted: false,
-        reason: `only ${mediaResult.fastStartProven}/5 foreground media URLs passed the fast-start byte probe`
-      };
     }
     if (!local2FlashDecisionIsSafe(decision)) {
       return {
@@ -11375,8 +11356,9 @@ const local22TurboEngine = new Local2FlashEngine({
   // The wider candidate pool overlaps the next page only after the first page's
   // candidates are already qualifying.
   pageConcurrency: 1,
-  candidateConcurrency: 48,
-  maximumPendingCandidates: 96,
+  candidateConcurrency: 16,
+  maximumPendingCandidates: 32,
+  candidateTimeoutMs: 40000,
   maximumPages: 3500,
   variant: 'local22-turbo'
 });

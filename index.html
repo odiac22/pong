@@ -887,7 +887,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.47</div>
+    <div class="version-number">26.48</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -17548,10 +17548,10 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
         })
       });
       await random40RunCleanLocal2(runState, localEndpoint, {
-        // A cold PC needs longer than thirty seconds to get its first full
-        // fifteen-video, visually-screened artist. Dropping to browser scan at
-        // 30s made Local2.2 look alive while bypassing its fast server engine.
-        deadlineMs: RANDOM40_PAIR_BENCHMARK ? 0 : 120000,
+        // Keep the fast server pipeline alive for the entire button run. The
+        // former two-minute cutoff stopped healthy in-flight work after the
+        // first cohort and silently replaced it with the slower legacy scan.
+        deadlineMs: 0,
         endpointPath: '/local22-turbo',
         label: 'Local 2.2'
       });
