@@ -2207,8 +2207,14 @@ async function scrapeLeakedZoneCreator(rawUrl) {
       if (nextCreator === creatorUrl) pending.push(nextPageUrl);
     }
   }
+  // Warm the first card's signed manifest while the frontend is publishing
+  // the creator. The media request then reuses the in-flight promise instead
+  // of paying for the detail-page round trip after the card appears.
+  if (videos[0]) void leakedZonePlaylistForDetail(videos[0]).catch(() => {});
   return { creatorUrl, title, videos, pages: seenPages.size };
 }
+
+const leakedZonePlaylistCache = new Map();
 
 async function leakedZonePlaylistForDetail(rawUrl) {
   const detailUrl = normalizeLeakedZoneUrl(rawUrl);
@@ -2217,21 +2223,33 @@ async function leakedZonePlaylistForDetail(rawUrl) {
   if (!creatorUrl || parts.length !== 3 || !/^(?:video|short)$/i.test(parts[1]) || !/^\d+$/.test(parts[2])) {
     throw new Error('A valid LeakedZone video URL is required');
   }
-  const detail = await fetchLeakedZoneHtml(detailUrl);
-  const playlistUrl = extractLeakedZonePlaylistUrl(detail.html);
-  if (!playlistUrl) throw new Error('LeakedZone did not expose a playable video');
-  const playlistResponse = await fetch(playlistUrl, {
-    signal: AbortSignal.timeout(15000),
-    headers: {
-      Referer: detailUrl,
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36',
-      Accept: 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*'
-    }
-  });
-  if (!playlistResponse.ok) throw new Error(`LeakedZone playlist HTTP ${playlistResponse.status}`);
-  const playlist = await playlistResponse.text();
-  if (!/^#EXTM3U/m.test(playlist)) throw new Error('LeakedZone returned an invalid playlist');
-  return playlist;
+  const now = Date.now();
+  const cached = leakedZonePlaylistCache.get(detailUrl);
+  if (cached && cached.expiresAt > now) return cached.promise;
+  const promise = (async () => {
+    const detail = await fetchLeakedZoneHtml(detailUrl);
+    const playlistUrl = extractLeakedZonePlaylistUrl(detail.html);
+    if (!playlistUrl) throw new Error('LeakedZone did not expose a playable video');
+    const playlistResponse = await fetch(playlistUrl, {
+      signal: AbortSignal.timeout(15000),
+      headers: {
+        Referer: detailUrl,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36',
+        Accept: 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*'
+      }
+    });
+    if (!playlistResponse.ok) throw new Error(`LeakedZone playlist HTTP ${playlistResponse.status}`);
+    const playlist = await playlistResponse.text();
+    if (!/^#EXTM3U/m.test(playlist)) throw new Error('LeakedZone returned an invalid playlist');
+    return playlist;
+  })();
+  leakedZonePlaylistCache.set(detailUrl, { promise, expiresAt: now + 45_000 });
+  try {
+    return await promise;
+  } catch (error) {
+    leakedZonePlaylistCache.delete(detailUrl);
+    throw error;
+  }
 }
 
 function extractGalleryDlVideoUrls(sourceUrl) {
