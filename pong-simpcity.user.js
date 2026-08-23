@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.10.9
+// @version      1.11.0
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -29,7 +29,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.10.9';
+  const SCRIPT_VERSION = '1.11.0';
   const FORUM_CREATOR_CONCURRENCY = 2;
   const SIMPCITY_REQUEST_GAP_MS = 500;
   const SIMPCITY_RATE_LIMIT_PAUSE_MS = 60_000;
@@ -648,6 +648,9 @@
     diagnostic('Scrape button pressed', `channel=${channel}; runToken=${runToken}`);
     try {
       const requestedSourceUrl = String(globalThis.PONG_SIMPCITY_SOURCE_URL || location.href);
+      const resumeSkipProfiles = globalThis.PONG_PC_BACKGROUND_CONTEXT
+        ? Math.max(0, Math.floor(Number(globalThis.PONG_SIMPCITY_RESUME_SKIP_PROFILES || 0)))
+        : 0;
       const rootThreadUrl = canonicalSimpCityThreadUrl(requestedSourceUrl);
       const listingRootUrl = canonicalSimpCityListingUrl(requestedSourceUrl);
       diagnostic('Source URL classified', `thread=${rootThreadUrl || 'none'}; listing=${listingRootUrl || 'none'}`);
@@ -866,14 +869,22 @@
           });
           return resumeCheckpointChain;
         };
+        let resumedProfilesSkipped = 0;
         const flushCompletedCreators = () => {
           while (completedThreads[nextCreatorToSubmit]) {
             const posts = completedThreads[nextCreatorToSubmit];
             completedThreads[nextCreatorToSubmit] = null;
-            // A complete profile becomes one ordered server job. The server
-            // resolves SimpCity hosts, TikTok and Balbums concurrently and
-            // publishes Videos then TikTok as adjacent Pong bundles.
-            queuePosts(posts, MAX_LINKED_THREAD_DEPTH, posts.length, true);
+            if (nextCreatorToSubmit < resumeSkipProfiles) {
+              resumedProfilesSkipped++;
+              if (resumedProfilesSkipped === resumeSkipProfiles) {
+                diagnostic('Resume cursor reached', `continued after ${resumeSkipProfiles} Pong profiles`);
+              }
+            } else {
+              // A complete profile becomes one ordered server job. The server
+              // resolves SimpCity hosts, TikTok and Balbums concurrently and
+              // publishes Videos then TikTok as adjacent Pong bundles.
+              queuePosts(posts, MAX_LINKED_THREAD_DEPTH, posts.length, true);
+            }
             nextCreatorToSubmit++;
           }
         };
@@ -906,6 +917,14 @@
               }
               const index = creatorCursor++;
               const threadUrl = listingContentThreads[index];
+              // Resume is an ordered cursor, not a replay filter. Profiles the
+              // user already passed in Pong do not need their threads fetched,
+              // parsed, classified, or resolved again.
+              if (index < resumeSkipProfiles) {
+                completedThreads[index] = [];
+                flushCompletedCreators();
+                continue;
+              }
               if (isCurrentRun()) {
                 status.textContent = `Pong ${channel}: creator ${index + 1}/${Math.max(index + 1, listingContentThreads.length)} · discovering more listings`;
               }

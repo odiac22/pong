@@ -175,7 +175,11 @@ class RuntimeSiglipGroupedScorer:
                 key: value.to(device) if hasattr(value, "to") else value
                 for key, value in encoded.items()
             }
-            with torch.inference_mode():
+            with torch.inference_mode(), torch.autocast(
+                device_type="cuda",
+                dtype=torch.float16,
+                enabled=str(device).startswith("cuda"),
+            ):
                 output = model(**encoded)
                 logits = output.logits_per_image.float().detach().cpu().numpy()
             logits_batches.append(np.asarray(logits, dtype=np.float32))

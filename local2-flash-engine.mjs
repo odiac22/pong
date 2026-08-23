@@ -53,7 +53,9 @@ export class Local2FlashEngine {
     this.candidateConcurrency = integer(candidateConcurrency, 12, 1, 48);
     this.maximumPendingCandidates = integer(maximumPendingCandidates, 32, this.candidateConcurrency, 256);
     this.maximumPages = integer(maximumPages, 120, 1, 3500);
-    this.candidateTimeoutMs = integer(candidateTimeoutMs, 45000, 5000, 180000);
+    this.candidateTimeoutMs = Number(candidateTimeoutMs) === 0
+      ? 0
+      : integer(candidateTimeoutMs, 45000, 5000, 180000);
     this.variant = text(variant, 64) || 'local2-flash';
     this.now = now;
     this.generation = 0;
@@ -86,9 +88,16 @@ export class Local2FlashEngine {
       target: this.targetAccepted,
       readyMinimum: this.readyMinimum,
       pages: run.stats.pages,
+      productivePages: run.stats.productivePages,
+      nearbyPagesQueued: run.hotPages.length,
       discovered: run.stats.discovered,
       submitted: run.stats.submitted,
       completed: run.stats.completed,
+      acceptedTotal: run.stats.accepted,
+      deliveredTotal: run.stats.delivered,
+      deliveryGapsMs: run.stats.deliveredAt.slice(-12).map((value, index, values) => (
+        index ? value - values[index - 1] : value - run.startedAt
+      )),
       rejected: run.stats.rejected,
       failed: run.stats.failed,
       activeCandidates: run.active.size,
@@ -116,6 +125,8 @@ export class Local2FlashEngine {
       seed: Number(seed || 0),
       diagnostics: Boolean(diagnostics),
       seenPages: new Set(),
+      hotPages: [],
+      hotPageSet: new Set(),
       seenArtists: new Set(),
       accepted: new Map(),
       leases: new Map(),
@@ -128,6 +139,10 @@ export class Local2FlashEngine {
         discovered: 0,
         submitted: 0,
         completed: 0,
+        accepted: 0,
+        delivered: 0,
+        deliveredAt: [],
+        productivePages: 0,
         rejected: 0,
         failed: 0,
         rejectionReasons: new Map(),
@@ -153,12 +168,38 @@ export class Local2FlashEngine {
   nextPage(run, index) {
     if (index < run.forcedPages.length) return run.forcedPages[index];
     if (run.forcedPages.length) return 0;
+    while (run.hotPages.length) {
+      const page = run.hotPages.shift();
+      run.hotPageSet.delete(page);
+      if (!run.seenPages.has(page)) return page;
+    }
     if (run.seed) {
       // Deterministic sequence for paired benchmarks.
       const value = (Math.imul((run.seed + index) >>> 0, 1664525) + 1013904223) >>> 0;
       return 1 + (value % 3500);
     }
     return randomInt(1, 3501);
+  }
+
+  promoteNearbyPages(run, rawPage) {
+    if (run.forcedPages.length) return;
+    const page = Number(rawPage || 0);
+    if (!Number.isInteger(page) || page < 1 || page > 3500) return;
+    const offsets = [-1, 1, -2, 2, -3, 3, -5, 5, -8, 8];
+    let queued = 0;
+    for (const offset of offsets) {
+      const nearby = page + offset;
+      if (
+        nearby < 1 ||
+        nearby > 3500 ||
+        run.seenPages.has(nearby) ||
+        run.hotPageSet.has(nearby)
+      ) continue;
+      run.hotPageSet.add(nearby);
+      run.hotPages.push(nearby);
+      queued++;
+    }
+    if (queued) run.stats.productivePages++;
   }
 
   async produce(run) {
@@ -228,10 +269,12 @@ export class Local2FlashEngine {
     );
     if (run.controller.signal.aborted) abortFromRun();
     else run.controller.signal.addEventListener('abort', abortFromRun, { once: true });
-    const timeout = setTimeout(() => candidateController.abort(
-      new Error(`${this.variant} candidate exceeded ${this.candidateTimeoutMs}ms`)
-    ), this.candidateTimeoutMs);
-    timeout.unref?.();
+    const timeout = this.candidateTimeoutMs > 0
+      ? setTimeout(() => candidateController.abort(
+          new Error(`${this.variant} candidate exceeded ${this.candidateTimeoutMs}ms`)
+        ), this.candidateTimeoutMs)
+      : null;
+    timeout?.unref?.();
     try {
       const result = await this.qualifyCandidate(candidate, {
         signal: candidateController.signal,
@@ -241,6 +284,9 @@ export class Local2FlashEngine {
       });
       if (this.run !== run || run.controller.signal.aborted) return;
       run.stats.completed++;
+      if (result?.mediaQualified === true) {
+        this.promoteNearbyPages(run, candidate.sourcePage);
+      }
       if (!result?.accepted || !result?.dto) {
         run.stats.rejected++;
         const reason = text(result?.reason || 'rejected', 160);
@@ -258,6 +304,7 @@ export class Local2FlashEngine {
         return;
       }
       run.accepted.set(candidate.artistId, result.dto);
+      run.stats.accepted++;
       if (!run.firstAcceptedAt) run.firstAcceptedAt = this.now();
       if (run.diagnostics) {
         run.stats.recentOutcomes.push({
@@ -284,7 +331,7 @@ export class Local2FlashEngine {
         if (run.stats.recentOutcomes.length > 256) run.stats.recentOutcomes.shift();
       }
     } finally {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       run.controller.signal.removeEventListener('abort', abortFromRun);
       run.stats.timings.qualificationMs += this.now() - started;
     }
@@ -300,6 +347,14 @@ export class Local2FlashEngine {
       run.accepted.delete(identity);
       run.leases.set(identity, dto);
       output.push(dto);
+    }
+    if (output.length) {
+      const deliveredAt = this.now();
+      run.stats.delivered += output.length;
+      for (let index = 0; index < output.length; index++) run.stats.deliveredAt.push(deliveredAt);
+      if (run.stats.deliveredAt.length > 64) {
+        run.stats.deliveredAt.splice(0, run.stats.deliveredAt.length - 64);
+      }
     }
     return output;
   }

@@ -32,7 +32,11 @@ from PIL import Image
 from transformers import AutoImageProcessor, AutoModel, AutoProcessor
 
 from local2_clean import ENGINE_SCHEMA as LOCAL2_CLEAN_SCHEMA, Local2NumericStore
-from local2_vision_adapter import Local2VisionAdapter, MAX_LOCAL2_IMAGES
+from local2_vision_adapter import (
+    Local2VisionAdapter,
+    MAX_LOCAL2_IMAGES,
+    RuntimeSiglipGroupedScorer,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -123,6 +127,8 @@ AGE_OVER_50_MIN = float(os.environ.get("PONG_AGE_OVER_60_MIN", os.environ.get("P
 IMAGE_CACHE_MAX_ITEMS = max(8, int(os.environ.get("PONG_IMAGE_CACHE_MAX_ITEMS", "160")))
 IMAGE_CACHE_MAX_BYTES = max(16 * 1024 * 1024, int(os.environ.get("PONG_IMAGE_CACHE_MAX_BYTES", str(256 * 1024 * 1024))))
 IMAGE_DOWNLOAD_WORKERS = max(4, min(16, int(os.environ.get("PONG_IMAGE_DOWNLOAD_WORKERS", "12"))))
+LOCAL2_DINO_BATCH_SIZE = max(12, min(32, int(os.environ.get("PONG_LOCAL2_DINO_BATCH_SIZE", "24"))))
+LOCAL2_SIGLIP_BATCH_SIZE = max(8, min(32, int(os.environ.get("PONG_LOCAL2_SIGLIP_BATCH_SIZE", "24"))))
 CLASSIFY_ADMISSION_LIMIT = max(6, min(8, int(os.environ.get("PONG_CLASSIFY_ADMISSION_LIMIT", "8"))))
 FEATURE_CACHE_MAX_ITEMS = max(16, int(os.environ.get("PONG_FEATURE_CACHE_MAX_ITEMS", "128")))
 FEATURE_CACHE_MAX_BYTES = max(
@@ -792,8 +798,8 @@ class VisionRuntime:
             return []
         processor, model = self._dino(variant)
         values: list[np.ndarray] = []
-        for start in range(0, len(images), 12):
-            batch = images[start:start + 12]
+        for start in range(0, len(images), LOCAL2_DINO_BATCH_SIZE):
+            batch = images[start:start + LOCAL2_DINO_BATCH_SIZE]
             inputs = processor(images=batch, return_tensors="pt")
             inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
             with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=DTYPE, enabled=DEVICE == "cuda"):
@@ -1081,6 +1087,10 @@ def local2_clean_adapter() -> Local2VisionAdapter:
                 numeric_store=LOCAL2_CLEAN_STORE,
                 legacy_record_provider=STORE.records,
                 legacy_revision_provider=lambda: STORE.revision,
+                group_scorer=RuntimeSiglipGroupedScorer(
+                    VISION,
+                    batch_size=LOCAL2_SIGLIP_BATCH_SIZE,
+                ),
                 max_images=MAX_LOCAL2_IMAGES,
             )
         return LOCAL2_CLEAN_ADAPTER

@@ -873,7 +873,7 @@
       <h3>Erome</h3>
       <p>Watch in-app, or tap Cards to rip the album into the Pong player (needs proxy).</p>
       <div class="auth-url-row">
-        <input id="erome-helper-url" type="url" placeholder="Erome, Bunkr, Balbums, or SimpCity thread URL" spellcheck="false" autocomplete="off">
+        <input id="erome-helper-url" type="url" placeholder="Erome, Bunkr, Balbums, SimpCity, or LeakedZone URL" spellcheck="false" autocomplete="off">
         <button id="erome-helper-open" type="button">Open</button>
         <button id="erome-helper-cards" type="button">Cards</button>
       </div>
@@ -887,14 +887,14 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.48</div>
+    <div class="version-number">26.52</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
   <div class="controls-overlay">
     <div class="url-input">
       <textarea id="video-urls" placeholder="Paste video links here (one per line)" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="done"></textarea>
-      <textarea id="erome-url" placeholder="Erome, Bunkr, Balbums, or SimpCity thread URLs" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="go"></textarea>
+      <textarea id="erome-url" placeholder="Erome, Bunkr, Balbums, SimpCity, or LeakedZone URLs" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="url" enterkeyhint="go"></textarea>
       <div class="button-container">
         <button id="load-videos">Load Videos</button>
         <button id="open-erome">Open Albums</button>
@@ -1176,7 +1176,10 @@ function pongDeckPreloadRadius() {
   // active album consumed every per-host connection and left queued albums
   // with links but no prepared entry video.  Keep active + two attached.
   if (isBunkrPasteEvent(pasteEvents[currentPasteIndex])) return 2;
-  return pongLocal22PlaybackActive() ? 2 : DECK_PRELOAD_RADIUS;
+  // Local2.2 uses verified media spread across the PC cache and CDN shards.
+  // Keep a wider swipe window attached so rapid swipes do not turn every third
+  // card into a brand-new network load.
+  return pongLocal22PlaybackActive() ? 4 : DECK_PRELOAD_RADIUS;
 }
 function pongForegroundBufferTargetSeconds() {
   return pongLocal22PlaybackActive() ? 18 : FOREGROUND_VIDEO_BUFFER_TARGET_SECONDS;
@@ -7068,13 +7071,16 @@ function random40PreloadConcurrencyLimit() {
   if (random40VisibleVideoIsBuffering()) return foregroundLimit;
   if (video && videoNeedsForegroundPriority(video)) return foregroundLimit;
   if (video && !video.paused) {
+    const playingLimit = pongLocal22TurboPlaybackActive()
+      ? RANDOM40_LOCAL22_PRELOAD_PLAYING_CONCURRENCY
+      : RANDOM40_PRELOAD_PLAYING_CONCURRENCY;
     const speculativeDeckLoad = [...document.querySelectorAll('.video-wrapper:not(.deck-active) video')]
       .some(candidate => {
         const wrapper = candidate.closest('.video-wrapper');
         return wrapper?.dataset.networkSuspended !== 'true' &&
           videoNetworkRequestIsMakingProgress(candidate, wrapper);
       });
-    return speculativeDeckLoad ? 0 : RANDOM40_PRELOAD_PLAYING_CONCURRENCY;
+    return speculativeDeckLoad ? Math.max(0, playingLimit - 1) : playingLimit;
   }
   return RANDOM40_PRELOAD_IDLE_CONCURRENCY;
 }
@@ -7302,7 +7308,10 @@ function random40PauseHiddenPreloadsForPlayback() {
   // Keep a tiny background trickle, but actively requeue loads that were already
   // in flight before the foreground limit changed. Otherwise sixteen protected
   // hidden requests can continue starving the video the user is watching.
-  const keep = new Set(loading.slice(0, Math.max(0, RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY - 1)));
+  const keepLimit = pongLocal22TurboPlaybackActive()
+    ? RANDOM40_LOCAL22_PRELOAD_FOREGROUND_CONCURRENCY
+    : Math.max(0, RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY - 1);
+  const keep = new Set(loading.slice(0, keepLimit));
   loading.forEach(record => {
     if (keep.has(record)) return;
     random40FinishPreloadRecord(record, 'queued');
@@ -7621,7 +7630,7 @@ function runRandom40PreloadPool() {
     : local2FastPlayback
       ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
       : local22TurboPlayback
-        ? 3
+        ? RANDOM40_LOCAL22_PRELOAD_CURRENT_RESERVE
         : RANDOM40_PRELOAD_CURRENT_RESERVE;
   random40PreloadMap.forEach(record => {
     record.priority = 2;
@@ -7631,6 +7640,7 @@ function runRandom40PreloadPool() {
   const serverCacheItems = [];
   const serverCacheUrlSet = new Set();
   const serverCacheCurrentUrls = [];
+  const serverCacheEntryUrls = [];
   const activeWrapper = document.querySelector('.video-wrapper.deck-active');
   const activeOriginalUrl = String(activeWrapper?.dataset?.originalVideoUrl || '');
   const activePlaybackUrl = String(
@@ -7675,9 +7685,14 @@ function runRandom40PreloadPool() {
       ) continue;
       serverCacheUrlSet.add(url);
       serverCacheItems.push({ url, artistKey, segmentConcurrency: 0 });
+      if (!current && local22TurboPlayback && globalIndex === candidateStart) {
+        serverCacheEntryUrls.push(url);
+      }
       if (
         (current && serverCacheCurrentUrls.length < currentPreloadReserve) ||
-        (promoteFirst && globalIndex < candidateStart + 3)
+        (promoteFirst && globalIndex < candidateStart + (
+          local22TurboPlayback ? RANDOM40_LOCAL22_BACKGROUND_VIDEOS : 3
+        ))
       ) {
         serverCacheCurrentUrls.push(url);
       }
@@ -7685,7 +7700,8 @@ function runRandom40PreloadPool() {
   };
   collectServerCandidate(currentCandidate, true);
   const backgroundServerCandidates = local22TurboPlayback
-    ? candidates.filter(candidate => candidate.index !== currentIndex).slice(0, 2)
+    ? candidates.filter(candidate => candidate.index !== currentIndex)
+        .slice(0, RANDOM40_LOCAL22_BACKGROUND_ARTISTS)
     : pongLocal22PlaybackActive()
       ? candidates.filter(candidate => candidate.index !== currentIndex).slice(0, 1)
     : candidates.filter(candidate => candidate.index !== currentIndex);
@@ -7694,8 +7710,8 @@ function runRandom40PreloadPool() {
       collectServerCandidate(
         candidate,
         false,
-        local22TurboPlayback ? 3 : 2,
-        local22TurboPlayback && candidateOffset < 2
+        local22TurboPlayback ? RANDOM40_LOCAL22_BACKGROUND_VIDEOS : 2,
+        local22TurboPlayback && candidateOffset < RANDOM40_LOCAL22_BACKGROUND_ARTISTS
       );
     }
   });
@@ -7784,6 +7800,7 @@ function runRandom40PreloadPool() {
       activeUrl: deferActiveCache ? '' : activeOriginalUrl,
       deferredUrl: deferActiveCache ? activeOriginalUrl : '',
       currentUrls: serverCacheCurrentUrls,
+      entryUrls: serverCacheEntryUrls,
       authoritative: true
     });
   }
@@ -8844,7 +8861,7 @@ function normalizeEromeLaunchUrl(rawValue) {
   if (!raw) return '';
 
   const completeEromeUrl = /^https?:\/\/(?:www\.)?erome\.com\/[^\s"'<>]*$/i.test(raw);
-  const embedded = raw.match(/(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:search\?[^\s"'<>]+|a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*|(?:www\.)?simpcity\.cr\/threads\/[^\s"'<>]*)/i);
+  const embedded = raw.match(/(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:search\?[^\s"'<>]+|a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*|(?:www\.)?simpcity\.cr\/threads\/[^\s"'<>]*|(?:www\.)?leakedzone\.com\/[^\s"'<>]*)/i);
   const candidate = completeEromeUrl ? raw : embedded ? embedded[0] : raw;
   const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)
     ? candidate
@@ -8858,6 +8875,12 @@ function normalizeEromeLaunchUrl(rawValue) {
 
     if (host === 'bunkr.cr' && /^\/a\/[\w-]+\/?$/i.test(url.pathname)) return url.href;
     if (host === 'balbums.st') return url.href;
+    if (host === 'leakedzone.com') {
+      url.protocol = 'https:';
+      url.hostname = 'leakedzone.com';
+      url.hash = '';
+      return url.href;
+    }
     if (host === 'simpcity.cr' && /^\/threads\/[^/?#]+(?:\/page-\d+)?\/?$/i.test(url.pathname)) {
       url.protocol = 'https:';
       url.hostname = 'simpcity.cr';
@@ -8890,7 +8913,7 @@ function collectEromeLaunchUrls(rawValue, allowBareNames = true) {
     found.push(url);
   }
 
-  const linkRe = /(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:search\?[^\s"'<>]+|a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*|(?:www\.)?simpcity\.cr\/threads\/[^\s"'<>]*)/gi;
+  const linkRe = /(?:https?:\/\/)?(?:(?:www\.)?erome\.com\/(?:search\?[^\s"'<>]+|a\/[\w-]+|[\w.-]+)\/?|(?:www\.)?bunkr\.cr\/a\/[\w-]+\/?|(?:www\.)?balbums\.st\/[^\s"'<>]*|(?:www\.)?simpcity\.cr\/threads\/[^\s"'<>]*|(?:www\.)?leakedzone\.com\/[^\s"'<>]*)/gi;
   let match;
 
   while ((match = linkRe.exec(raw)) !== null) {
@@ -8902,7 +8925,7 @@ function collectEromeLaunchUrls(rawValue, allowBareNames = true) {
 
     if (!cleaned) return;
 
-    if (/(?:erome\.com|bunkr\.cr|balbums\.st|simpcity\.cr)/i.test(cleaned)) {
+    if (/(?:erome\.com|bunkr\.cr|balbums\.st|simpcity\.cr|leakedzone\.com)/i.test(cleaned)) {
       add(cleaned);
     } else if (allowBareNames && /^(?:a\/)?[\w.-]+$/i.test(cleaned)) {
       add(cleaned.startsWith('a/') ? `https://www.erome.com/${cleaned}` : cleaned);
@@ -8980,6 +9003,15 @@ function isSimpCityImportLaunchUrl(rawUrl) {
   }
 }
 
+function isLeakedZoneImportLaunchUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl, window.location.href);
+    return url.hostname.replace(/^www\./, '').toLowerCase() === 'leakedzone.com';
+  } catch (_) {
+    return false;
+  }
+}
+
 function eromeProfilePageUrl(rawUrl, page) {
   try {
     const url = new URL(rawUrl, window.location.href);
@@ -9008,6 +9040,9 @@ function getEromeTargetLabel(rawUrl) {
         .replace(/\.\d+$/, '')
         .replace(/[-_]+/g, ' ')
         .trim();
+    }
+    if (url.hostname.replace(/^www\./, '').toLowerCase() === 'leakedzone.com') {
+      return decodeURIComponent(parts[0] || 'LeakedZone').replace(/[-_]+/g, ' ').trim();
     }
     return parts[0] || url.hostname;
   } catch (e) {
@@ -11125,6 +11160,9 @@ const RANDOM40_PRELOAD_CURRENT_RESERVE = 20;
 // a whole artist before preparing the next swipe and Paperclip destination.
 const PONG_IMPORT_CURRENT_PLAYBACK_WINDOW = 4;
 const RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE = 6;
+const RANDOM40_LOCAL22_PRELOAD_CURRENT_RESERVE = 10;
+const RANDOM40_LOCAL22_BACKGROUND_ARTISTS = 4;
+const RANDOM40_LOCAL22_BACKGROUND_VIDEOS = 5;
 const RANDOM40_PRELOAD_RESIDENT_PER_BACKGROUND_ARTIST = 2;
 const RANDOM40_PRELOAD_GUARANTEED_ARTISTS = 8;
 const RANDOM40_PRELOAD_GUARANTEED_VIDEOS = 10;
@@ -11135,6 +11173,7 @@ let random40MemoryEndpoint = '';
 const RANDOM40_PRELOAD_MAX_ELEMENTS = 180;
 const RANDOM40_PRELOAD_IDLE_CONCURRENCY = 12;
 const RANDOM40_PRELOAD_PLAYING_CONCURRENCY = 1;
+const RANDOM40_LOCAL22_PRELOAD_PLAYING_CONCURRENCY = 2;
 const RANDOM40_PRELOAD_FOREGROUND_CONCURRENCY = 0;
 const RANDOM40_LOCAL22_PRELOAD_FOREGROUND_CONCURRENCY = 1;
 const RANDOM40_PRELOAD_LOAD_TIMEOUT_MS = 12000;
@@ -11897,6 +11936,7 @@ async function random40WarmServerVideoCache(urls, {
   activeUrl = '',
   deferredUrl = '',
   currentUrls = [],
+  entryUrls = [],
   urgent = false,
   authoritative = false
 } = {}) {
@@ -11925,13 +11965,14 @@ async function random40WarmServerVideoCache(urls, {
     }
   };
   addUrl(activeUrl);
+  entryUrls.forEach(addUrl);
   currentUrls.forEach(addUrl);
   (Array.isArray(urls) ? urls : []).forEach(addUrl);
   if (!uniqueUrls.length && !deferredUrl) return false;
   let manifestSignature = '';
   if (authoritative) {
     let hash = 2166136261;
-    for (const value of [activeUrl, deferredUrl, ...currentUrls, ...uniqueUrls]) {
+    for (const value of [activeUrl, deferredUrl, ...entryUrls, ...currentUrls, ...uniqueUrls]) {
       const text = String(value || '');
       for (let index = 0; index < text.length; index++) {
         hash ^= text.charCodeAt(index);
@@ -11966,6 +12007,7 @@ async function random40WarmServerVideoCache(urls, {
         playbackProfile: pongLocal22PlaybackActive() ? 'local22' : 'current',
         activeUrl: activeUrl || '',
         deferredUrl: deferredUrl || '',
+        entryUrls: entryUrls.slice(0, 20),
         currentUrls: currentUrls.slice(0, 80),
         urls: manifestItems.length === uniqueUrls.length
           ? []
@@ -12023,7 +12065,7 @@ function random40WarmServerVideoCacheForActiveWrapper(
       : pongLocal2FastPlaybackActive()
         ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
         : pongLocal22TurboPlaybackActive()
-          ? 8
+          ? RANDOM40_LOCAL22_PRELOAD_CURRENT_RESERVE
         : RANDOM40_PRELOAD_CURRENT_RESERVE;
     const windowStart = !isRandom40PlaybackActive() && isPongServerCachedPlaybackActive()
       ? Math.max(bounds.start, activeGlobalIndex)
@@ -16842,14 +16884,14 @@ function random40PublishEntries(entries, runState = random40State) {
     const initialWarmCount = runState.playbackProfile === 'local2fast'
       ? RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE
       : local22Turbo
-        ? 8
+        ? RANDOM40_LOCAL22_PRELOAD_CURRENT_RESERVE
       : RANDOM40_PRELOAD_CURRENT_RESERVE;
     const currentUrls = local22Turbo
-      ? payload.urls.slice(0, 4)
+      ? payload.urls.slice(0, RANDOM40_LOCAL22_PRELOAD_CURRENT_RESERVE)
       : payload.urls.slice(0, initialWarmCount);
     // Local2.2 starts one active PC hedge beside Android's direct request and
-    // prepares the next three cards. Both routes are hidden and media is never
-    // decoded or played on the PC.
+    // prepares a deep current-profile swipe window. Both routes are hidden and
+    // media is never decoded or played on the PC.
     void random40WarmServerVideoCache(currentUrls, {
       activeUrl: currentUrls[0],
       deferredUrl: '',
@@ -17512,7 +17554,8 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
         cache: 'no-store',
         body: JSON.stringify({
           pages: sourcePages,
-          seed: Number(RANDOM40_BENCHMARK_PARAMS.get('pongSeed') || 0)
+          seed: Number(RANDOM40_BENCHMARK_PARAMS.get('pongSeed') || 0),
+          diagnostics: true
         })
       });
       await random40RunCleanLocal2(runState, localEndpoint, {
@@ -17544,7 +17587,10 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
         cache: 'no-store',
         body: JSON.stringify({
           pages: sourcePages,
-          seed: Number(RANDOM40_BENCHMARK_PARAMS.get('pongSeed') || 0)
+          seed: Number(RANDOM40_BENCHMARK_PARAMS.get('pongSeed') || 0),
+          // Memory-only diagnostics make real button runs auditable without
+          // changing discovery, qualification, acceptance, or playback.
+          diagnostics: true
         })
       });
       await random40RunCleanLocal2(runState, localEndpoint, {
@@ -19397,6 +19443,164 @@ window.PongReceiveSimpCityNames = (rawNames, rawThreadUrl = '') => {
   }
 })();
 
+async function loadLeakedZoneAsCards(targets) {
+  console.log(`[LeakedZone] starting ${targets.length} pasted source${targets.length === 1 ? '' : 's'}`);
+  const loadGeneration = ++bunkrLoadGeneration;
+  const endpoint = await getRandom40LocalEndpoint(true);
+  if (!endpoint) {
+    alert('LeakedZone imports need the Pong PC server to be running and reachable.');
+    return;
+  }
+  const postJson = async (pathname, payload) => {
+    const response = await fetch(`${endpoint}${pathname}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || `Local HTTP ${response.status}`);
+    return data;
+  };
+  const creatorQueue = [];
+  const creatorWaiters = [];
+  const seenCreators = new Set();
+  const seenListingPages = new Set();
+  let discoveryDone = false;
+  let cardsStarted = false;
+  let reservedSlots = 0;
+  let creatorsChecked = 0;
+  let creatorsReady = 0;
+  let videoCount = 0;
+  const wakeWorkers = () => {
+    while (creatorWaiters.length) creatorWaiters.shift()();
+  };
+  const waitForWork = () => new Promise(resolve => creatorWaiters.push(resolve));
+  const unviewedReadyCreators = () => pasteEvents.reduce((count, event, index) => {
+    try {
+      if (
+        new URL(event?.artistUrl || '').hostname.replace(/^www\./, '') === 'leakedzone.com' &&
+        isPasteEventViewableForPaperclip(event) &&
+        !isPasteEventRetiredForPaperclip(event, index) &&
+        !isPasteEventPreviouslyVisitedForPaperclip(event, index)
+      ) return count + 1;
+    } catch (_) {}
+    return count;
+  }, 0);
+  const acquireReadySlot = async () => {
+    while (
+      loadGeneration === bunkrLoadGeneration &&
+      cardsStarted &&
+      unviewedReadyCreators() + reservedSlots >= 5
+    ) await sleep(300);
+    if (loadGeneration !== bunkrLoadGeneration) return false;
+    reservedSlots++;
+    return true;
+  };
+  const publishCreator = group => {
+    let imported;
+    if (!cardsStarted) {
+      imported = cacheEromeCardImport([group], endpoint);
+      closeEromeHelper();
+      setEromeTwentyCardMode(true, { respectRange: true });
+      window.PongEromeAutoAdvanceOnce = true;
+      window.PongLoadAllVideosOnce = false;
+      loadVideosButton.click();
+      activateFirstEromeBatch();
+      cardsStarted = true;
+    } else {
+      imported = appendEromeGroupsToCurrentCards([group], endpoint);
+      updatePasteNavigationButton();
+    }
+    creatorsReady++;
+    videoCount += imported.urls.length;
+    showSortingIndicator(`LeakedZone ready: ${creatorsReady} creators, ${videoCount} videos`);
+  };
+  const discover = async () => {
+    try {
+      for (const target of targets) {
+        let pageUrl = target;
+        while (pageUrl && loadGeneration === bunkrLoadGeneration && !seenListingPages.has(pageUrl)) {
+          while (creatorQueue.length >= 15 && loadGeneration === bunkrLoadGeneration) await sleep(300);
+          if (loadGeneration !== bunkrLoadGeneration) return;
+          seenListingPages.add(pageUrl);
+          const data = await postJson('/leakedzone/discover', { url: pageUrl });
+          for (const creatorUrl of data.creators || []) {
+            if (!creatorUrl || seenCreators.has(creatorUrl)) continue;
+            seenCreators.add(creatorUrl);
+            creatorQueue.push(creatorUrl);
+          }
+          wakeWorkers();
+          pageUrl = data.nextPageUrl || '';
+          updateEromeProgress({
+            title: cardsStarted ? 'LeakedZone playing while more load' : 'Finding LeakedZone creators',
+            detail: `${seenCreators.size} creators found · ${creatorsReady} ready`,
+            completed: seenListingPages.size,
+            total: Math.max(seenListingPages.size, seenListingPages.size + (pageUrl ? 1 : 0)),
+            videos: videoCount
+          });
+        }
+      }
+    } finally {
+      discoveryDone = true;
+      wakeWorkers();
+    }
+  };
+  const worker = async () => {
+    while (loadGeneration === bunkrLoadGeneration) {
+      if (!creatorQueue.length) {
+        if (discoveryDone) return;
+        await waitForWork();
+        continue;
+      }
+      const creatorUrl = creatorQueue.shift();
+      const acquired = await acquireReadySlot();
+      if (!acquired) return;
+      try {
+        const data = await postJson('/leakedzone/creator', { url: creatorUrl });
+        if (loadGeneration !== bunkrLoadGeneration) return;
+        const videos = (data.videos || []).map(detailUrl =>
+          `${endpoint}/leakedzone/media?url=${encodeURIComponent(detailUrl)}`
+        );
+        if (videos.length) {
+          publishCreator({
+            url: creatorUrl,
+            title: data.title || getEromeTargetLabel(creatorUrl),
+            sourceUrl: creatorUrl,
+            sourceTitle: data.title || getEromeTargetLabel(creatorUrl),
+            source: 'direct',
+            preserveGroupOrder: true,
+            videos
+          });
+        }
+      } catch (error) {
+        console.warn('LeakedZone creator import failed:', creatorUrl, error);
+      } finally {
+        reservedSlots = Math.max(0, reservedSlots - 1);
+        creatorsChecked++;
+      }
+    }
+  };
+  updateEromeProgress({
+    title: 'Finding LeakedZone creators',
+    detail: 'Following creator and next-page links',
+    completed: 0,
+    total: targets.length,
+    videos: 0
+  });
+  await Promise.all([discover(), ...Array.from({ length: 3 }, worker)]);
+  if (!cardsStarted && loadGeneration === bunkrLoadGeneration) {
+    alert('No playable LeakedZone videos were found.');
+    return;
+  }
+  updateEromeProgress({
+    title: 'LeakedZone ready',
+    detail: `${creatorsReady} creators ready · ${creatorsChecked} checked`,
+    completed: creatorsChecked,
+    total: Math.max(creatorsChecked, seenCreators.size),
+    videos: videoCount
+  });
+}
+
 async function loadBunkrAsCards(targets) {
   const loadGeneration = ++bunkrLoadGeneration;
   const resumeState = window.PongEromeResumeState || null;
@@ -19639,9 +19843,10 @@ async function loadEromeAsCards() {
   window.PongActiveSavedEromeRefreshUrl = '';
 
   const targets = getEromeScrapeTargets();
+  console.log('[Albums] parsed import targets', targets);
 
   if (!targets.length) {
-    alert('Paste one or more Erome, Bunkr, Balbums, or SimpCity thread URLs first.');
+    alert('Paste one or more Erome, Bunkr, Balbums, SimpCity, or LeakedZone URLs first.');
     return;
   }
   if (!window.PongEromeResumeState) {
@@ -19651,6 +19856,19 @@ async function loadEromeAsCards() {
   activeEromeScrapeTargets = targets.slice();
 
   if (pongSkipPlayedEnabled) await refreshPongPlayedHistory();
+
+  const leakedZoneTargets = targets.filter(isLeakedZoneImportLaunchUrl);
+  if (leakedZoneTargets.length) {
+    if (leakedZoneTargets.length !== targets.length) {
+      alert('Load LeakedZone URLs separately from Erome, Bunkr, or SimpCity URLs.');
+      return;
+    }
+    activeSimpCityRecallContext = null;
+    delete document.documentElement.dataset.pongSimpCityActive;
+    delete document.documentElement.dataset.pongRecallChannel;
+    await loadLeakedZoneAsCards(leakedZoneTargets);
+    return;
+  }
 
   const simpCityTargets = targets.filter(isSimpCityImportLaunchUrl);
   if (simpCityTargets.length) {

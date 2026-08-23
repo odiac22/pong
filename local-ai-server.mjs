@@ -28,6 +28,14 @@ import {
   distinctSimpCityProfileCreators,
   extractSimpCityMediaLinksForCreator
 } from './simpcity-import.mjs';
+import {
+  normalizeLeakedZoneUrl,
+  leakedZoneNextPageUrl,
+  leakedZoneCreatorUrl,
+  extractLeakedZoneCreatorUrls,
+  extractLeakedZoneVideoDetailUrls,
+  extractLeakedZonePlaylistUrl
+} from './leakedzone-import.mjs';
 
 const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
 const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
@@ -114,8 +122,8 @@ const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(proces
 const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_TTL_MS || 10 * 60 * 1000));
 const VIDEO_FILE_CACHE_VIEWED_TTL_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_VIEWED_TTL_MS || 2 * 60 * 1000));
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
-const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 10)));
-const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(8, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
+const VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY = Math.max(2, Math.min(24, Number(process.env.PONG_VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY || 14)));
+const VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY = Math.max(1, Math.min(VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY || Math.min(12, VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY))));
 // While the visible card is below its healthy buffer, keep only two background
 // cache downloads alive. The active stream remains dominant without completely
 // stopping preparation of the next cards.
@@ -127,13 +135,13 @@ const VIDEO_FILE_CACHE_LOCAL22_PLAYBACK_BACKGROUND_CONCURRENCY = Math.max(
   VIDEO_FILE_CACHE_PLAYBACK_BACKGROUND_CONCURRENCY,
   Math.min(
     VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY,
-    Number(process.env.PONG_VIDEO_FILE_CACHE_LOCAL22_PLAYBACK_BACKGROUND_CONCURRENCY ?? 4)
+    Number(process.env.PONG_VIDEO_FILE_CACHE_LOCAL22_PLAYBACK_BACKGROUND_CONCURRENCY ?? 8)
   )
 );
 const VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE = Math.max(20, Math.min(500, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_SPECULATIVE_QUEUE || 120)));
 // During a genuinely low foreground buffer, retain two upcoming downloads.
 // Normal playback still expands to the full background limit automatically.
-const VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY = Math.max(1, Math.min(12, Number(process.env.PONG_VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY || 8)));
+const VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY = Math.max(1, Math.min(12, Number(process.env.PONG_VIDEO_FILE_CACHE_PER_HOST_CONCURRENCY || 10)));
 const VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS = Math.max(1, Math.min(60, Number(process.env.PONG_VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS || 10)));
 const VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS = Math.max(
   VIDEO_FILE_CACHE_BUFFER_LOW_SECONDS + 1,
@@ -141,6 +149,7 @@ const VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS = Math.max(
 );
 const VIDEO_FILE_CACHE_QUEUE_MAX = Math.max(60, Math.min(6000, Number(process.env.PONG_VIDEO_FILE_CACHE_QUEUE_MAX || 5000)));
 const VIDEO_FILE_CACHE_ACTIVE_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_ACTIVE_HOLD_MS || 20000));
+const VIDEO_FILE_CACHE_ENTRY_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_ENTRY_HOLD_MS || 45000));
 const VIDEO_FILE_CACHE_CURRENT_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_CURRENT_HOLD_MS || 30000));
 // Whole-file background downloads let one large CDN object monopolize a lane.
 // Preserve each partial file, but rotate the lane after this much new data so
@@ -212,16 +221,21 @@ const GATEWAY_AGENT = new https.Agent({
 const VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST = Math.max(4, Math.min(96, Number(
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST ||
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY ||
-  36
+  64
 )));
 const VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST = Math.max(1, Math.min(
   VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST,
   Number(process.env.PONG_VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST || 8)
 ));
 const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(32, Number(process.env.PONG_VIDEO_VERIFY_PER_ARTIST_CONCURRENCY || 6)));
+// Default consumers still create only six workers. Local2/Local2.2 explicitly
+// request a wider artist pool and may use eight lanes, which proves 15 distinct
+// source-post videos in roughly two waves without changing any acceptance
+// requirement. Sixteen Local2.2 profiles can now fully occupy the 128-request
+// verifier while each artist remains capped at eight concurrent checks.
 const VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST = Math.max(1, Math.min(
-  VIDEO_VERIFY_PER_ARTIST_CONCURRENCY,
-  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 6)
+  16,
+  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 8)
 ));
 const VIDEO_VERIFY_CACHE_MAX = Math.max(200, Number(process.env.PONG_VIDEO_VERIFY_CACHE_MAX || 6000));
 const VIDEO_VERIFY_CACHE_TTL_MS = Math.max(30000, Number(process.env.PONG_VIDEO_VERIFY_CACHE_TTL_MS || 900000));
@@ -238,7 +252,11 @@ const RANDOM40_RESERVOIR_READY_MIN = Math.min(
 );
 const RANDOM40_RESERVOIR_PROFILE_CONCURRENCY = Math.max(2, Math.min(32, Number(process.env.PONG_RANDOM40_RESERVOIR_CONCURRENCY || 24)));
 const RANDOM40_RESERVOIR_PROFILE_PAGE_BATCH = Math.max(2, Math.min(12, Number(process.env.PONG_RANDOM40_PROFILE_PAGE_BATCH || 2)));
-const RANDOM40_RESERVOIR_ENABLED = process.env.PONG_RANDOM40_RESERVOIR_ENABLED !== '0';
+// The visible Local buttons perform fresh discovery. The legacy pre-approved
+// Local1 reservoir is unused by those routes, competes for GPU/source slots,
+// and violates the no-preapproved-artist-cache contract. It is opt-in only for
+// explicit legacy diagnostics.
+const RANDOM40_RESERVOIR_ENABLED = process.env.PONG_RANDOM40_RESERVOIR_ENABLED === '1';
 const RANDOM40_ACCEPTED_TARGET = Math.max(8, Math.min(32, Number(process.env.PONG_RANDOM40_ACCEPTED_TARGET || 24)));
 const RANDOM40_ACCEPTED_READY_MIN = Math.min(
   RANDOM40_ACCEPTED_TARGET,
@@ -343,6 +361,7 @@ let random40AcceptedFillPromise = null;
 let random40AcceptedAbortController = null;
 let random40ReservoirRefillPausedUntil = 0;
 let random40AcceptedRefillPausedUntil = 0;
+let localDiscoveryForegroundActive = false;
 let random40PreferenceRevision = '';
 let random40RejectedRevision = '';
 let random40AcceptedEvaluated = 0;
@@ -645,9 +664,17 @@ function pumpVideoVerifyFetchQueue(state) {
     ? VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST
     : VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST;
   while (state.active < concurrency && state.queue.length) {
-    const eligibleIndex = state.queue.findIndex(item =>
-      (state.activeByGroup.get(item.groupId) || 0) < VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST
-    );
+    let eligibleIndex = -1;
+    let eligiblePriority = -Infinity;
+    for (let index = 0; index < state.queue.length; index++) {
+      const item = state.queue[index];
+      if ((state.activeByGroup.get(item.groupId) || 0) >= VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST) continue;
+      const priority = Number(item.priorityControl?.priority || 0);
+      if (eligibleIndex < 0 || priority > eligiblePriority) {
+        eligibleIndex = index;
+        eligiblePriority = priority;
+      }
+    }
     if (eligibleIndex < 0) break;
     const item = state.queue.splice(eligibleIndex, 1)[0];
     item.signal?.removeEventListener('abort', item.abortQueued);
@@ -679,11 +706,11 @@ function pumpAllVideoVerifyFetchQueues() {
   for (const state of videoVerifyHostStates.values()) pumpVideoVerifyFetchQueue(state);
 }
 
-function scheduleVideoVerifyFetch(hostname, groupId, task, signal) {
+function scheduleVideoVerifyFetch(hostname, groupId, task, signal, priorityControl = null) {
   if (signal?.aborted) return Promise.reject(new DOMException('video verification aborted', 'AbortError'));
   const state = videoVerifyStateForHost(hostname);
   return new Promise((resolve, reject) => {
-    const item = { groupId, task, signal, resolve, reject, enqueuedAt: Date.now(), abortQueued: null };
+    const item = { groupId, task, signal, resolve, reject, enqueuedAt: Date.now(), abortQueued: null, priorityControl };
     item.abortQueued = () => {
       const index = state.queue.indexOf(item);
       if (index < 0) return;
@@ -974,6 +1001,7 @@ async function random40ReservoirPool(items, limit, worker) {
 
 function fillRandom40Reservoir() {
   if (!RANDOM40_RESERVOIR_ENABLED) return Promise.resolve();
+  if (localDiscoveryForegroundActive) return Promise.resolve();
   if (Date.now() < random40ReservoirRefillPausedUntil) return Promise.resolve();
   if (random40ReservoirFillPromise) return random40ReservoirFillPromise;
   const fillController = new AbortController();
@@ -982,6 +1010,7 @@ function fillRandom40Reservoir() {
     let rounds = 0;
     while (
       !fillController.signal.aborted &&
+      !localDiscoveryForegroundActive &&
       (random40Reservoir.length < RANDOM40_RESERVOIR_TARGET ||
         random40Reservoir.filter(item => item.verified).length < RANDOM40_RESERVOIR_VERIFIED_TARGET) &&
       rounds < 160
@@ -1895,6 +1924,7 @@ function random40AcceptedRejectionReasons() {
 
 function fillRandom40AcceptedReservoir() {
   if (!RANDOM40_RESERVOIR_ENABLED) return Promise.resolve();
+  if (localDiscoveryForegroundActive) return Promise.resolve();
   if (Date.now() < random40AcceptedRefillPausedUntil || foregroundClassifyRequests > 0) return Promise.resolve();
   if (random40AcceptedFillPromise) return random40AcceptedFillPromise;
   const fillController = new AbortController();
@@ -1908,7 +1938,7 @@ function fillRandom40AcceptedReservoir() {
     await random40RefreshRejectedIdentities(revision);
     let rounds = 0;
     while (
-      !fillController.signal.aborted && foregroundClassifyRequests === 0 &&
+      !fillController.signal.aborted && !localDiscoveryForegroundActive && foregroundClassifyRequests === 0 &&
       Date.now() >= random40AcceptedRefillPausedUntil &&
       (random40AcceptedCurrentItems().length < RANDOM40_ACCEPTED_TARGET || !random40AcceptedIsReady()) &&
       rounds < 240
@@ -1983,7 +2013,7 @@ function fillRandom40AcceptedReservoir() {
     random40AcceptedFillPromise = null;
     if (random40AcceptedAbortController === fillController) random40AcceptedAbortController = null;
     if (
-      RANDOM40_RESERVOIR_ENABLED && foregroundClassifyRequests === 0 &&
+      RANDOM40_RESERVOIR_ENABLED && !localDiscoveryForegroundActive && foregroundClassifyRequests === 0 &&
       Date.now() >= random40AcceptedRefillPausedUntil &&
       (random40AcceptedCurrentItems().length < RANDOM40_ACCEPTED_TARGET || !random40AcceptedIsReady())
     ) scheduleRandom40AcceptedReservoir(1500);
@@ -1994,6 +2024,26 @@ function fillRandom40AcceptedReservoir() {
 function scheduleRandom40AcceptedReservoir(delayMs = 0) {
   const timer = setTimeout(() => fillRandom40AcceptedReservoir().catch(() => {}), Math.max(0, delayMs));
   timer.unref();
+}
+
+function enterLocalDiscoveryForeground() {
+  localDiscoveryForegroundActive = true;
+  // Random40's RAM-only producer is opportunistic. Local2/Local2.2 must not
+  // wait behind its image downloads, GPU requests, or media-verification work.
+  // Aborting these controllers only cancels background discovery; it does not
+  // clear learned preferences, saved links, played history, or media caches.
+  random40ReservoirAbortController?.abort(new Error('foreground Local discovery started'));
+  random40AcceptedAbortController?.abort(new Error('foreground Local discovery started'));
+}
+
+function leaveLocalDiscoveryForeground() {
+  if (!localDiscoveryForegroundActive) return;
+  localDiscoveryForegroundActive = false;
+  if (
+    RANDOM40_RESERVOIR_ENABLED &&
+    Date.now() >= random40ReservoirRefillPausedUntil &&
+    Date.now() >= random40AcceptedRefillPausedUntil
+  ) scheduleRandom40AcceptedReservoir(900);
 }
 
 function protectRandom40PlaybackWindow(durationMs = RANDOM40_PLAYBACK_PROTECTION_MS) {
@@ -2096,6 +2146,92 @@ async function discoverBunkrAlbums(rawUrl) {
     });
   }
   return albums;
+}
+
+async function fetchLeakedZoneHtml(rawUrl) {
+  const url = normalizeLeakedZoneUrl(rawUrl);
+  if (!url) throw new Error('A valid LeakedZone URL is required');
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(15000),
+    redirect: 'follow',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36',
+      Accept: 'text/html,application/xhtml+xml'
+    }
+  });
+  if (!response.ok) throw new Error(`LeakedZone HTTP ${response.status}`);
+  return { url: normalizeLeakedZoneUrl(response.url) || url, html: await response.text() };
+}
+
+async function discoverLeakedZoneCreators(rawUrl) {
+  const target = normalizeLeakedZoneUrl(rawUrl);
+  if (!target) throw new Error('A valid LeakedZone creator or listing URL is required');
+  const creatorUrl = leakedZoneCreatorUrl(target);
+  if (creatorUrl) return { creators: [creatorUrl], nextPageUrl: '' };
+  const parsed = new URL(target);
+  if (parsed.pathname.replace(/\/+$/, '') !== '/creators') {
+    throw new Error('Use a LeakedZone creators listing, creator, or video URL');
+  }
+  const page = await fetchLeakedZoneHtml(target);
+  return {
+    creators: extractLeakedZoneCreatorUrls(page.html, page.url),
+    nextPageUrl: leakedZoneNextPageUrl(page.html, page.url)
+  };
+}
+
+async function scrapeLeakedZoneCreator(rawUrl) {
+  const creatorUrl = leakedZoneCreatorUrl(rawUrl);
+  if (!creatorUrl) throw new Error('A valid LeakedZone creator URL is required');
+  const pending = [creatorUrl];
+  const seenPages = new Set();
+  const seenVideos = new Set();
+  const videos = [];
+  let title = decodeURIComponent(new URL(creatorUrl).pathname.split('/').filter(Boolean)[0] || 'LeakedZone');
+  while (pending.length && seenPages.size < 100 && videos.length < 500) {
+    const pageUrl = pending.shift();
+    if (!pageUrl || seenPages.has(pageUrl)) continue;
+    seenPages.add(pageUrl);
+    const page = await fetchLeakedZoneHtml(pageUrl);
+    const heading = page.html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1]
+      || page.html.match(/<meta\b[^>]*property=["']og:title["'][^>]*content=["']([^"']+)/i)?.[1];
+    if (heading) title = decodeBasicHtmlText(heading).replace(/\s*\([^)]*\).*$/i, '') || title;
+    for (const detailUrl of extractLeakedZoneVideoDetailUrls(page.html, creatorUrl)) {
+      if (seenVideos.has(detailUrl)) continue;
+      seenVideos.add(detailUrl);
+      videos.push(detailUrl);
+      if (videos.length >= 500) break;
+    }
+    const nextPageUrl = leakedZoneNextPageUrl(page.html, page.url);
+    if (nextPageUrl && !seenPages.has(nextPageUrl)) {
+      const nextCreator = leakedZoneCreatorUrl(nextPageUrl);
+      if (nextCreator === creatorUrl) pending.push(nextPageUrl);
+    }
+  }
+  return { creatorUrl, title, videos, pages: seenPages.size };
+}
+
+async function leakedZonePlaylistForDetail(rawUrl) {
+  const detailUrl = normalizeLeakedZoneUrl(rawUrl);
+  const creatorUrl = leakedZoneCreatorUrl(detailUrl);
+  const parts = detailUrl ? new URL(detailUrl).pathname.split('/').filter(Boolean) : [];
+  if (!creatorUrl || parts.length !== 3 || !/^(?:video|short)$/i.test(parts[1]) || !/^\d+$/.test(parts[2])) {
+    throw new Error('A valid LeakedZone video URL is required');
+  }
+  const detail = await fetchLeakedZoneHtml(detailUrl);
+  const playlistUrl = extractLeakedZonePlaylistUrl(detail.html);
+  if (!playlistUrl) throw new Error('LeakedZone did not expose a playable video');
+  const playlistResponse = await fetch(playlistUrl, {
+    signal: AbortSignal.timeout(15000),
+    headers: {
+      Referer: detailUrl,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36',
+      Accept: 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*'
+    }
+  });
+  if (!playlistResponse.ok) throw new Error(`LeakedZone playlist HTTP ${playlistResponse.status}`);
+  const playlist = await playlistResponse.text();
+  if (!/^#EXTM3U/m.test(playlist)) throw new Error('LeakedZone returned an invalid playlist');
+  return playlist;
 }
 
 function extractGalleryDlVideoUrls(sourceUrl) {
@@ -3077,6 +3213,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
       globalThis.PONG_PC_BACKGROUND_CONTEXT = true;
       globalThis.PONG_SIMPCITY_CHANNEL = ${channel};
       globalThis.PONG_SIMPCITY_SOURCE_URL = ${JSON.stringify(targetUrl)};
+      globalThis.PONG_SIMPCITY_RESUME_SKIP_PROFILES = ${Math.max(0, Number(profileCursor.passedProfiles || 0))};
       globalThis.PONG_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787'];
       const request = options => {
         const timer = setTimeout(() => options.ontimeout?.(), Number(options.timeout || 90000));
@@ -4843,7 +4980,7 @@ function extractVideoUrlsFromHtml(html, postUrl) {
   return urls;
 }
 
-async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, groupId) {
+async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, groupId, priorityControl = null) {
   const normalizedPostUrl = gatewayTargetUrl(postUrl).toString();
   const cached = videoVerifyCache.get(normalizedPostUrl);
   if (cached && Date.now() - cached.at < VIDEO_VERIFY_CACHE_TTL_MS) {
@@ -4893,7 +5030,7 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, gro
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
     }
-  }, signal);
+  }, signal, priorityControl);
 
   videoVerifyCache.set(normalizedPostUrl, { at: Date.now(), entries });
   while (videoVerifyCache.size > VIDEO_VERIFY_CACHE_MAX) {
@@ -5114,6 +5251,9 @@ async function verifyVideoPostBatch(payload, requestSignal) {
     Math.min(16, Number(payload?.perArtistConcurrency || VIDEO_VERIFY_PER_ARTIST_CONCURRENCY))
   );
   const artistInfo = payload?.artistInfo && typeof payload.artistInfo === 'object' ? payload.artistInfo : {};
+  const priorityControl = payload?.priorityControl && typeof payload.priorityControl === 'object'
+    ? payload.priorityControl
+    : null;
   const postGroups = balanceVideoPostGroups(originalPostUrls, artistInfo).slice(0, 500);
   const controller = new AbortController();
   const abort = () => controller.abort();
@@ -5137,8 +5277,33 @@ async function verifyVideoPostBatch(payload, requestSignal) {
       const index = nextIndex++;
       if (index >= postGroups.length) return;
       const group = postGroups[index];
-      for (const postUrl of group.urls) {
-        const found = await fetchVideoEntriesForVerification(postUrl, artistInfo, controller.signal, groupId).catch(() => []);
+      const sourceUrls = [...group.urls].sort((left, right) => {
+        const stateLoad = rawUrl => {
+          try {
+            const state = videoVerifyStateForHost(new URL(rawUrl).hostname);
+            return state.active + state.queue.length;
+          } catch (_) {
+            return Number.MAX_SAFE_INTEGER;
+          }
+        };
+        return stateLoad(left) - stateLoad(right);
+      });
+      for (const postUrl of sourceUrls) {
+        let found;
+        try {
+          found = await fetchVideoEntriesForVerification(
+            postUrl,
+            artistInfo,
+            controller.signal,
+            groupId,
+            priorityControl
+          );
+        } catch (_) {
+          // The alternate mirror is an availability fallback. Try it only when
+          // the selected source failed; a successful canonical post response is
+          // authoritative even when that post contains no video.
+          continue;
+        }
         for (const entry of found) {
           if (!entry?.videoUrl) continue;
           const mediaKeys = canonicalVideoEntryKeys(entry);
@@ -5168,8 +5333,11 @@ async function verifyVideoPostBatch(payload, requestSignal) {
           }
         }
         if (controller.signal.aborted || verificationSatisfied() || entries.length >= maximumAccepted) break;
-        const foundWithKeys = found.filter(entry => entry?.videoUrl).map(entry => canonicalVideoEntryKeys(entry));
-        if (foundWithKeys.length && foundWithKeys.every(keys => keys.some(key => seenVideos.has(key)))) break;
+        // Both hosts expose the same canonical post database. Fetching the
+        // second copy after a successful 200 response doubled every image-only
+        // candidate's work and dominated the real six-minute trace. Preserve
+        // the alternate solely for transport failure, not duplicate proof.
+        break;
       }
     }
   }
@@ -5902,6 +6070,7 @@ function currentVideoFileCachePriority(record, now = Date.now()) {
     (record.playbackLease && record.status !== 'ready') ||
     Number(record.activeUntil || 0) > now
   ) return 0;
+  if (Number(record.entryUntil || 0) > now) return 0.5;
   if (Number(record.currentUntil || 0) > now) return 1;
   return 2;
 }
@@ -6484,6 +6653,7 @@ async function downloadVideoFileCacheRecord(record, generation) {
     record.status = 'ready';
     record.updatedAt = Date.now();
     record.activeUntil = 0;
+    record.entryUntil = 0;
     record.currentUntil = 0;
     record.playbackLease = false;
     record.priority = 2;
@@ -6667,6 +6837,7 @@ function queueVideoFileCacheUrl(rawUrl, priority = 2, metadata = {}) {
     if (!alreadyPlaybackLease && record.status !== 'ready') record.playbackBufferConstrained = true;
     record.activeUntil = Math.max(Number(record.activeUntil || 0), now + VIDEO_FILE_CACHE_ACTIVE_HOLD_MS);
   }
+  else if (Number(priority) === 0.5) record.entryUntil = Math.max(Number(record.entryUntil || 0), now + VIDEO_FILE_CACHE_ENTRY_HOLD_MS);
   else if (Number(priority) === 1) record.currentUntil = Math.max(Number(record.currentUntil || 0), now + VIDEO_FILE_CACHE_CURRENT_HOLD_MS);
   record.priority = currentVideoFileCachePriority(record, now);
   if (record.status === 'idle' || record.status === 'error') {
@@ -6682,6 +6853,7 @@ function beginVideoFileCachePriorityEpoch() {
     record.playbackLease = false;
     record.playbackBufferConstrained = false;
     record.activeUntil = Number(record.activeReaders || 0) > 0 ? Number.MAX_SAFE_INTEGER : 0;
+    record.entryUntil = 0;
     record.currentUntil = 0;
     record.priorityEpoch = videoFileCachePriorityEpoch;
     record.priority = currentVideoFileCachePriority(record);
@@ -10274,9 +10446,18 @@ async function local2FlashDiscoverPages(pages, context) {
         }));
     groups.push(fallback);
   }
+  // Local2.2 optimizes time to the first passing artist. Do not make an unlucky
+  // random listing page monopolize all sixteen workers for minutes: take eight
+  // profiles from each mirrored source, then immediately sample another page.
+  // This changes discovery order only; every sampled profile still runs through
+  // the identical 15-video, visual-model, and hard-filter contracts below.
+  // Both Local buttons use the same bounded, page-diverse production flow.
+  // Four listing pages contribute candidates to one interleaved wave, so an
+  // unusually media-poor page cannot occupy every worker for minutes.
+  const defaultMaximumPerWave = pages.length === 1 ? 96 : 32;
   const maximumPerWave = Math.max(
-    32,
-    Math.min(192, Number(process.env.PONG_LOCAL2_FLASH_CANDIDATES_PER_WAVE || 96))
+    16,
+    Math.min(192, Number(process.env.PONG_LOCAL2_FLASH_CANDIDATES_PER_WAVE || defaultMaximumPerWave))
   );
   const candidates = [];
   const maximumGroupLength = Math.max(0, ...groups.map(group => group.length));
@@ -10464,6 +10645,24 @@ async function local2FlashPrepareProfile(candidate, context) {
   const allKeys = new Set();
   const maximumPages = Math.max(4, Math.min(24, Number(process.env.PONG_LOCAL2_FLASH_GATE_PAGES || 12)));
 
+  const fetchProfilePage = async page => {
+    const primaryUrl = random40ReservoirProfilePageUrl(artistUrl, page);
+    try {
+      return await random40ReservoirFetchHtml(primaryUrl, page === 1 ? 10000 : 8000, context.signal);
+    } catch (error) {
+      if (context.signal?.aborted) throw error;
+      const mirrorUrl = new URL(primaryUrl);
+      if (mirrorUrl.hostname.endsWith('coomerfans.com')) mirrorUrl.hostname = 'onlyfaphouse.com';
+      else if (mirrorUrl.hostname.endsWith('onlyfaphouse.com')) mirrorUrl.hostname = 'coomerfans.com';
+      else throw error;
+      // A listing may select an artist from one mirror while that mirror has a
+      // transiently stalled HTTP/2 stream. The counterpart has the same artist
+      // identity and content contract, so retrying there recovers availability
+      // without changing which profiles or media pass any gate.
+      return random40ReservoirFetchHtml(mirrorUrl.toString(), page === 1 ? 10000 : 8000, context.signal);
+    }
+  };
+
   const addPage = (page, html) => {
     if (random40ReservoirProfileScore(html).posts <= 0) return false;
     pages.push({ page, html });
@@ -10482,7 +10681,7 @@ async function local2FlashPrepareProfile(candidate, context) {
     return true;
   };
 
-  const firstHtml = await random40ReservoirFetchHtml(artistUrl, 10000, context.signal);
+  const firstHtml = await fetchProfilePage(1);
   if (!addPage(1, firstHtml)) throw new Error('Local2 Flash profile listing unavailable');
   // Most video-rich creators prove the cheap 15-post requirement on page one.
   // Count every candidate video-post link here. The narrower no-thumbnail
@@ -10490,11 +10689,7 @@ async function local2FlashPrepareProfile(candidate, context) {
   // before the authoritative post-page verifier gets to inspect them.
   for (let batchStart = 2; batchStart <= maximumPages && allVideoPostUrls.length < 15; batchStart += 3) {
     const pageNumbers = [batchStart, batchStart + 1, batchStart + 2].filter(page => page <= maximumPages);
-    const results = await Promise.allSettled(pageNumbers.map(page => random40ReservoirFetchHtml(
-      random40ReservoirProfilePageUrl(artistUrl, page),
-      8000,
-      context.signal
-    )));
+    const results = await Promise.allSettled(pageNumbers.map(page => fetchProfilePage(page)));
     let foundAny = false;
     results.forEach((result, index) => {
       if (result.status === 'fulfilled' && addPage(pageNumbers[index], result.value)) foundAny = true;
@@ -10518,7 +10713,7 @@ async function local2FlashPrepareProfile(candidate, context) {
       artistInfo
     )
   ), 32);
-  const decisionImageLimit = context?.variant === 'local22-turbo'
+  const decisionImageLimit = ['local22-turbo', 'local2-fast'].includes(context?.variant)
     ? LOCAL22_TURBO_DECISION_IMAGES
     : LOCAL2_FLASH_DECISION_IMAGES;
   const candidateImageUrls = [...new Set([
@@ -10673,14 +10868,38 @@ async function local2FlashConfirmHardFilters(profile, initialDecision, context) 
 }
 
 async function local2FlashVerifyProfile(profile, context) {
+  const priorityControl = context?.verificationPriority || null;
+  if (priorityControl && profile.videoPostUrls.length > 4) {
+    // A four-post sample is a scheduling probe, never an acceptance gate. The
+    // authoritative pass below still checks the complete profile and still
+    // requires the same 15 distinct real media URLs. Sampling lets profiles
+    // whose strongest four post cards actually contain video move ahead of
+    // hundreds of zero-video profiles competing for the same source host.
+    const startingPriority = Number(priorityControl.priority || 0);
+    const sample = await verifyVideoPostBatch({
+      postUrls: profile.videoPostUrls.slice(0, 4),
+      stopAt: 4,
+      perArtistConcurrency: 4,
+      artistInfo: profile,
+      priorityControl
+    }, context.signal).catch(() => ({ entries: [] }));
+    const sampleHits = Array.isArray(sample?.entries) ? sample.entries.length : 0;
+    priorityControl.priority = startingPriority + sampleHits * 100 - (4 - sampleHits) * 25;
+  }
   const result = await verifyVideoPostBatch({
     postUrls: profile.videoPostUrls,
     // Fifteen distinct source-post media URLs is the delivery contract. Do
     // not spend five extra post requests before publishing; the player needs
     // only five foreground-proven entries for its immediate swipe window.
     stopAt: 15,
-    perArtistConcurrency: 14,
-    artistInfo: profile
+    // The host scheduler permits eight active requests for one artist. Creating
+    // fourteen workers only placed six redundant requests per artist ahead of
+    // newer candidate groups, producing the hundreds-deep queue seen in the
+    // real Android trace. Eight preserves the same maximum active work and all
+    // fifteen checks while allowing round-robin progress between artists.
+    perArtistConcurrency: 8,
+    artistInfo: profile,
+    priorityControl
   }, context.signal).catch(() => ({ entries: [] }));
   const verified = Array.isArray(result?.entries) ? result.entries : [];
   // A successful source-post fetch plus an explicit, distinct <video>/<source>
@@ -10889,84 +11108,45 @@ async function local2FlashQualifyCandidate(candidate, context) {
     confirmationMs: 0,
     totalMs: 0
   };
-  const releaseQualificationSlot = await local2FlashAcquireQualificationSlot(context.signal);
+  let releaseQualificationSlot = null;
   const branchController = new AbortController();
   const abortBranch = () => branchController.abort(context.signal?.reason || new Error('Local2 Flash stopped'));
   if (context.signal?.aborted) abortBranch();
   else context.signal?.addEventListener('abort', abortBranch, { once: true });
   const branchContext = { ...context, signal: branchController.signal };
-  const verifyPromise = local2FlashVerifyProfile(profile, branchContext)
-    .then(async media => {
-      if (media.length < 15) return { branch: 'media', media, fastStartProven: 0 };
-      const prioritized = await local2FlashPrioritizePlayableMedia(media, branchContext);
-      return {
-        branch: 'media',
-        media: prioritized.media,
-        fastStartProven: prioritized.fastStartProven
-      };
-    })
-    .then(result => {
-      flashTimings.mediaMs = Date.now() - flashStartedAt;
-      return result;
-    })
-    .catch(error => ({ branch: 'media', error }));
-  const decisionPromise = classifyInner({
-    app: 'pong-random40-local2-flash',
-    localVariant: 'local2',
-    preferencePolicy: 'broad-hard-safe',
-    stage: 'full',
-    deferQwenReview: true,
-    visionModel: LOCAL2_QWEN_MODEL,
-    artist: profile,
-    candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL2_FLASH_DECISION_IMAGES)
-  }, workloadGeneration, branchController.signal)
-    .then(result => ({
-      branch: 'decision',
-      decision: local2PipelineDecision(result, profile.candidateImageUrls)
-    }))
-    .then(result => {
-      flashTimings.decisionMs = Date.now() - flashStartedAt;
-      return result;
-    })
-    .catch(error => ({ branch: 'decision', error }));
   try {
-    const first = await Promise.race([verifyPromise, decisionPromise]);
-    if (first.error) {
-      branchController.abort();
-      return { accepted: false, reason: String(first.error?.message || first.error) };
+    // Prove authoritative media before consuming scarce preference/GPU work.
+    // Aborted Node requests cannot cancel Python work already admitted, so the
+    // old speculative ordering left hundreds of doomed classifications alive.
+    const verifiedMedia = await local2FlashVerifyProfile(profile, branchContext);
+    if (verifiedMedia.length < 15) {
+      return { accepted: false, reason: `only ${verifiedMedia.length}/15 verified media URLs` };
     }
-    if (first.branch === 'media' && first.media.length < 15) {
-      branchController.abort();
-      return { accepted: false, reason: `only ${first.media.length}/15 verified media URLs` };
-    }
-    if (first.branch === 'media' && first.fastStartProven < 5) {
-      branchController.abort();
-      return {
-        accepted: false,
-        reason: `only ${first.fastStartProven}/5 foreground media URLs passed the fast-start byte probe`
-      };
-    }
-    if (first.branch === 'decision' && !local2FlashDecisionCanConfirm(first.decision)) {
-      branchController.abort();
-      return {
-        accepted: false,
-        reason: first.decision.reason || 'hard-filter or preference rejection',
-        diagnostic: first.decision
-      };
-    }
-    const second = first.branch === 'media' ? await decisionPromise : await verifyPromise;
-    if (second.error) return { accepted: false, reason: String(second.error?.message || second.error) };
-    const mediaResult = first.branch === 'media' ? first : second;
-    const media = mediaResult.media;
-    const decision = first.branch === 'decision' ? first.decision : second.decision;
+    const prioritized = await local2FlashPrioritizePlayableMedia(verifiedMedia, branchContext);
+    const media = prioritized.media;
+    flashTimings.mediaMs = Date.now() - flashStartedAt;
     if (media.length < 15) return { accepted: false, reason: `only ${media.length}/15 verified media URLs` };
-    if (mediaResult.fastStartProven < 5) {
+    if (prioritized.fastStartProven < 5) {
       return {
         accepted: false,
-        reason: `only ${mediaResult.fastStartProven}/5 foreground media URLs passed the fast-start byte probe`,
-        diagnostic: decision
+        reason: `only ${prioritized.fastStartProven}/5 foreground media URLs passed the fast-start byte probe`
       };
     }
+
+    releaseQualificationSlot = await local2FlashAcquireQualificationSlot(branchController.signal);
+    const decisionStartedAt = Date.now();
+    const rawDecision = await classifyInner({
+      app: 'pong-random40-local2-flash',
+      localVariant: 'local2',
+      preferencePolicy: 'broad-hard-safe',
+      stage: 'full',
+      deferQwenReview: true,
+      visionModel: LOCAL2_QWEN_MODEL,
+      artist: profile,
+      candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL2_FLASH_DECISION_IMAGES)
+    }, workloadGeneration, branchController.signal);
+    const decision = local2PipelineDecision(rawDecision, profile.candidateImageUrls);
+    flashTimings.decisionMs = Date.now() - decisionStartedAt;
     if (!local2FlashDecisionCanConfirm(decision)) {
       return {
         accepted: false,
@@ -11003,7 +11183,7 @@ async function local2FlashQualifyCandidate(candidate, context) {
   } finally {
     context.signal?.removeEventListener('abort', abortBranch);
     if (!branchController.signal.aborted) branchController.abort();
-    releaseQualificationSlot();
+    releaseQualificationSlot?.();
   }
 }
 
@@ -11014,17 +11194,15 @@ const local22TurboWorkWaiters = [];
 const local22TurboBranchControllers = new Set();
 let local22TurboDeliveredArtists = 0;
 let local22TurboStartupPrebufferPromise = null;
-
-function local22TurboPlaybackPhaseActive() {
-  return local22TurboDeliveredArtists >= 3 &&
-    Date.now() < local2FlashPlaybackPriorityUntil;
-}
+let local22TurboSpeculativeAiActive = 0;
 
 function local22TurboQualificationLimit() {
-  // Keep the CUDA service's four execution lanes fed while slow image hosts
-  // finish out of order. Admission changes scheduling only; the exact same
-  // images, models, thresholds, and hard-filter verdicts are still required.
-  return local22TurboPlaybackPhaseActive() ? 2 : 10;
+  // The sidecar executes four GPU inference lanes. Matching that limit keeps
+  // priority visible in Node instead of hiding accepted candidates behind a
+  // second FIFO admission queue inside Python.
+  // Playback has its own file-cache lanes, so delivery does not reduce this
+  // producer after artist three.
+  return 4;
 }
 
 function local22TurboDrainQualificationWaiters() {
@@ -11032,7 +11210,14 @@ function local22TurboDrainQualificationWaiters() {
     local22TurboQualificationActive < local22TurboQualificationLimit() &&
     local22TurboQualificationWaiters.length
   ) {
-    local22TurboQualificationWaiters.shift()?.();
+    let bestIndex = 0;
+    for (let index = 1; index < local22TurboQualificationWaiters.length; index++) {
+      if (
+        Number(local22TurboQualificationWaiters[index]?.priority || 0) >
+        Number(local22TurboQualificationWaiters[bestIndex]?.priority || 0)
+      ) bestIndex = index;
+    }
+    local22TurboQualificationWaiters.splice(bestIndex, 1)[0]?.enter?.();
   }
 }
 
@@ -11040,7 +11225,9 @@ function local22TurboWorkLimit() {
   // Sixteen profile gates can issue up to 48 listing requests at once. The old
   // forty-eight-profile fan-out generated as many as 144 simultaneous listing
   // requests and buried early winners in the source queue.
-  return local22TurboPlaybackPhaseActive() ? 4 : 16;
+  // Profile HTML does not use the media playback cache. Keep all sixteen lanes
+  // running while the user watches so the accepted cushion replenishes.
+  return 16;
 }
 
 function local22TurboDrainWorkWaiters() {
@@ -11082,9 +11269,10 @@ function local22TurboAcquireWorkSlot(signal) {
 
 function local22TurboEnterPlaybackPhase() {
   if (local22TurboDeliveredArtists < 3) return;
-  local2FlashProtectForegroundPlayback(12000);
-  // Keep a bounded discovery trickle alive. Aborting every in-flight winner at
-  // the third delivery created the recurring multi-minute gap before artist 4.
+  // Android playback protection is handled by the dedicated video-file cache.
+  // Source-post HTML and PC-side classification do not share its download
+  // lanes, so throttling them created the recurring multi-minute gap before
+  // artists four and five without improving foreground playback.
   local22TurboDrainQualificationWaiters();
   local22TurboDrainWorkWaiters();
 }
@@ -11092,13 +11280,34 @@ function local22TurboEnterPlaybackPhase() {
 function local22TurboResetRuntime() {
   local22TurboDeliveredArtists = 0;
   local22TurboStartupPrebufferPromise = null;
+  local22TurboSpeculativeAiActive = 0;
   for (const controller of local22TurboBranchControllers) {
     if (!controller.signal.aborted) controller.abort(new Error('Local2.2 Turbo reset'));
   }
   local22TurboBranchControllers.clear();
 }
 
-function local22TurboAcquireQualificationSlot(signal) {
+function local22TurboResetDeliveryRuntime() {
+  local22TurboDeliveredArtists = 0;
+  local22TurboStartupPrebufferPromise = null;
+}
+
+function local22TurboTryAcquireSpeculativeAiSlot(priority = 0) {
+  // Overlap at most four high-density candidates with authoritative media
+  // verification. Unlike the former unbounded speculative branch, these jobs
+  // are never abandoned: a media failure waits for its admitted decision to
+  // finish, keeping Node and Python admission counts synchronized.
+  if (Number(priority || 0) < 15 || local22TurboSpeculativeAiActive >= 4) return null;
+  local22TurboSpeculativeAiActive++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    local22TurboSpeculativeAiActive = Math.max(0, local22TurboSpeculativeAiActive - 1);
+  };
+}
+
+function local22TurboAcquireQualificationSlot(signal, priority = 0) {
   if (local22TurboQualificationActive < local22TurboQualificationLimit()) {
     local22TurboQualificationActive++;
     return Promise.resolve(() => {
@@ -11107,6 +11316,7 @@ function local22TurboAcquireQualificationSlot(signal) {
     });
   }
   return new Promise((resolve, reject) => {
+    const waiter = { enter: null, priority: Number(priority || 0) };
     const enter = () => {
       signal?.removeEventListener('abort', abort);
       local22TurboQualificationActive++;
@@ -11115,13 +11325,14 @@ function local22TurboAcquireQualificationSlot(signal) {
         local22TurboDrainQualificationWaiters();
       });
     };
+    waiter.enter = enter;
     const abort = () => {
-      const index = local22TurboQualificationWaiters.indexOf(enter);
+      const index = local22TurboQualificationWaiters.indexOf(waiter);
       if (index >= 0) local22TurboQualificationWaiters.splice(index, 1);
       reject(signal?.reason || new Error('Local2.2 Turbo stopped'));
     };
     if (signal?.aborted) return abort();
-    local22TurboQualificationWaiters.push(enter);
+    local22TurboQualificationWaiters.push(waiter);
     signal?.addEventListener('abort', abort, { once: true });
   });
 }
@@ -11185,28 +11396,26 @@ async function local22TurboPrebufferFirstMedia(media, profile, signal) {
   return rows[0].entry.serverPrebufferReady === true;
 }
 
-async function local22TurboQualifyCandidateInner(candidate, context) {
-  const startedAt = Date.now();
-  const profile = await local2FlashPrepareProfile(candidate, {
-    ...context,
-    variant: 'local22-turbo'
-  });
-  // Work that began during the wide discovery phase yields immediately once
-  // the three-artist playback cohort is ready. One fresh lane remains available
-  // through the dynamic work semaphore below.
-  if (local22TurboPlaybackPhaseActive() && local22TurboWorkActive > 4) {
-    return {
-      accepted: false,
-      reason: 'Local2.2 foreground playback superseded queued profile work'
-    };
-  }
+async function local22TurboQualifyCandidateInner(candidate, context, preparedProfile = null) {
+  const startedAt = Date.now() - Number(context?.preparedProfileMs || 0);
+  const qualificationVariant = context?.variant === 'local22-turbo'
+    ? 'local22-turbo'
+    : 'local2-fast';
+  const profile = preparedProfile || await local2FlashPrepareProfile(candidate, {
+      ...context,
+      variant: qualificationVariant
+    });
+  const profileMs = Number(context?.preparedProfileMs || (Date.now() - startedAt));
   if (profile.candidateImageUrls.length < 6) {
     return {
       accepted: false,
       reason: `only ${profile.candidateImageUrls.length}/6 distinct hard-filter images`
     };
   }
-  const release = await local22TurboAcquireQualificationSlot(context.signal);
+  // The narrow video-post heuristic is only a scheduling hint. Version 26.48
+  // correctly stopped using it as an acceptance gate; low-hint profiles still
+  // run later and can pass if the authoritative verifier proves 15 real videos.
+  const qualificationPriority = Number(profile.likelyVideoPostCount || 0);
   const branchController = new AbortController();
   local22TurboBranchControllers.add(branchController);
   const abortBranch = () => branchController.abort(
@@ -11214,56 +11423,86 @@ async function local22TurboQualifyCandidateInner(candidate, context) {
   );
   if (context.signal?.aborted) abortBranch();
   else context.signal?.addEventListener('abort', abortBranch, { once: true });
-  const branchContext = { ...context, signal: branchController.signal, variant: 'local22-turbo' };
-  const mediaPromise = local2FlashVerifyProfile(profile, branchContext)
-    .then(media => ({ branch: 'media', media }))
-    .catch(error => ({ branch: 'media', error }));
-  const decisionPromise = classifyInner({
-    app: 'pong-random40-local22-turbo',
-    localVariant: 'local2',
-    preferencePolicy: 'broad-hard-safe',
-    stage: 'full',
-    deferQwenReview: true,
-    visionModel: LOCAL2_QWEN_MODEL,
-    artist: profile,
-    candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL22_TURBO_DECISION_IMAGES)
-  }, workloadGeneration, branchController.signal)
-    .then(result => ({
-      branch: 'decision',
-      decision: local2PipelineDecision(result, profile.candidateImageUrls)
-    }))
-    .catch(error => ({ branch: 'decision', error }));
+  const verificationPriority = { priority: qualificationPriority };
+  const branchContext = {
+    ...context,
+    signal: branchController.signal,
+    variant: 'local22-turbo',
+    verificationPriority
+  };
+  let releaseQualification = null;
+  let releaseSpeculativeAi = null;
   try {
-    const first = await Promise.race([mediaPromise, decisionPromise]);
-    if (first.error) {
-      branchController.abort();
-      return { accepted: false, reason: String(first.error?.message || first.error) };
+    const classifyPreparedProfile = async () => {
+      releaseQualification = await local22TurboAcquireQualificationSlot(
+        branchController.signal,
+        qualificationPriority
+      );
+      try {
+        const rawDecision = await classifyInner({
+          app: qualificationVariant === 'local22-turbo'
+            ? 'pong-random40-local22-turbo'
+            : 'pong-random40-local2-fast',
+          localVariant: 'local2',
+          preferencePolicy: 'broad-hard-safe',
+          stage: 'full',
+          deferQwenReview: true,
+          visionModel: LOCAL2_QWEN_MODEL,
+          artist: profile,
+          candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL22_TURBO_DECISION_IMAGES)
+        }, workloadGeneration, branchController.signal);
+        return {
+          decision: local2PipelineDecision(rawDecision, profile.candidateImageUrls),
+          error: null
+        };
+      } catch (error) {
+        return { decision: null, error };
+      }
+    };
+
+    // Media proof remains authoritative. Only a bounded, high-video-likelihood
+    // fast lane overlaps AI with it; all other profiles prove 15 real videos
+    // before occupying scarce AI admission.
+    releaseSpeculativeAi = local22TurboTryAcquireSpeculativeAiSlot(qualificationPriority);
+    const speculativeDecisionStartedAt = releaseSpeculativeAi ? Date.now() : 0;
+    const speculativeDecisionPromise = releaseSpeculativeAi ? classifyPreparedProfile() : null;
+    const mediaStartedAt = Date.now();
+    const media = await local2FlashVerifyProfile(profile, branchContext);
+    const mediaMs = Date.now() - mediaStartedAt;
+    if (media.length < 15) {
+      if (speculativeDecisionPromise) {
+        // Node fetch cancellation cannot cancel work already admitted by the
+        // Python ThreadingHTTPServer. Aborting here released our admission slot
+        // immediately while the GPU service kept processing the abandoned
+        // request, allowing hundreds of invisible classifications to pile up
+        // across runs. Let the bounded speculative request finish so the Node
+        // and Python admission counts remain synchronized.
+        await speculativeDecisionPromise;
+      } else if (!branchController.signal.aborted) {
+        branchController.abort();
+      }
+      return { accepted: false, reason: `only ${media.length}/15 verified media URLs` };
     }
-    if (first.branch === 'media' && first.media.length < 15) {
-      branchController.abort();
+
+    const decisionStartedAt = Date.now();
+    const decisionResult = speculativeDecisionPromise
+      ? await speculativeDecisionPromise
+      : await classifyPreparedProfile();
+    const decisionMs = speculativeDecisionPromise
+      ? Date.now() - speculativeDecisionStartedAt
+      : Date.now() - decisionStartedAt;
+    if (decisionResult.error) {
       return {
         accepted: false,
-        reason: `only ${first.media.length}/15 verified media URLs`
+        mediaQualified: true,
+        reason: String(decisionResult.error?.message || decisionResult.error)
       };
     }
-    if (first.branch === 'decision' && !local2FlashDecisionIsSafe(first.decision)) {
-      branchController.abort();
-      return {
-        accepted: false,
-        reason: first.decision?.reason || 'Local2.2 hard-filter or preference rejection',
-        diagnostic: first.decision
-      };
-    }
-    const second = first.branch === 'media' ? await decisionPromise : await mediaPromise;
-    if (second.error) return { accepted: false, reason: String(second.error?.message || second.error) };
-    const mediaResult = first.branch === 'media' ? first : second;
-    const decision = first.branch === 'decision' ? first.decision : second.decision;
-    if (mediaResult.media.length < 15) {
-      return { accepted: false, reason: `only ${mediaResult.media.length}/15 verified media URLs` };
-    }
+    const decision = decisionResult.decision;
     if (!local2FlashDecisionIsSafe(decision)) {
       return {
         accepted: false,
+        mediaQualified: true,
         reason: decision?.reason || 'Local2.2 hard-filter or preference rejection',
         diagnostic: decision
       };
@@ -11273,6 +11512,7 @@ async function local22TurboQualifyCandidateInner(candidate, context) {
     if (examined < 6) {
       return {
         accepted: false,
+        mediaQualified: true,
         reason: `only ${examined}/6 perceptually distinct hard-filter images`,
         diagnostic: decision
       };
@@ -11280,27 +11520,34 @@ async function local22TurboQualifyCandidateInner(candidate, context) {
     if (clearBody < LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES) {
       return {
         accepted: false,
+        mediaQualified: true,
         reason: `only ${clearBody}/${LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES} clear body views`,
         diagnostic: decision
       };
     }
     const prebufferStartedAt = Date.now();
-    const prebufferReady = await local22TurboPrebufferFirstMedia(
-      mediaResult.media,
-      profile,
-      branchController.signal
-    );
+    const prebufferReady = qualificationVariant === 'local22-turbo'
+      ? await local22TurboPrebufferFirstMedia(media, profile, branchController.signal)
+      : false;
     return {
       accepted: true,
-      dto: local2FlashAcceptedDto(profile, mediaResult.media, {
+      mediaQualified: true,
+      dto: local2FlashAcceptedDto(profile, media, {
         ...decision,
-        reason: `Local2.2 one-pass personalized and hard-filter decision passed: ${decision.reason || 'accepted'}`.slice(0, 240)
+        reason: `Local2.2 personalized and hard-filter decision passed: ${decision.reason || 'accepted'}`.slice(0, 240)
       }, context.revision),
       diagnostic: {
         ...decision,
         turbo: true,
+        likelyVideoPostCount: Number(profile.likelyVideoPostCount || 0),
         prebufferReady,
         prebufferMs: Date.now() - prebufferStartedAt,
+        timings: {
+          profileMs,
+          mediaMs,
+          decisionMs,
+          prebufferMs: Date.now() - prebufferStartedAt
+        },
         elapsedMs: Date.now() - startedAt
       }
     };
@@ -11308,22 +11555,35 @@ async function local22TurboQualifyCandidateInner(candidate, context) {
     local22TurboBranchControllers.delete(branchController);
     context.signal?.removeEventListener('abort', abortBranch);
     if (!branchController.signal.aborted) branchController.abort();
-    release();
+    releaseQualification?.();
+    releaseSpeculativeAi?.();
   }
 }
 
 async function local22TurboQualifyCandidate(candidate, context) {
   const releaseWork = await local22TurboAcquireWorkSlot(context.signal);
+  const profileStartedAt = Date.now();
+  let profile;
   try {
-    return await local22TurboQualifyCandidateInner(candidate, context);
+    profile = await local2FlashPrepareProfile(candidate, {
+      ...context,
+      variant: context?.variant === 'local22-turbo' ? 'local22-turbo' : 'local2-fast'
+    });
   } finally {
     releaseWork();
   }
+  return local22TurboQualifyCandidateInner(candidate, {
+    ...context,
+    preparedProfileMs: Date.now() - profileStartedAt
+  }, profile);
 }
 
 const local2FlashEngine = new Local2FlashEngine({
   discoverPages: local2FlashDiscoverPages,
-  qualifyCandidate: local2FlashQualifyCandidate,
+  // Local and Local2.2 share one 15-media + conservative eight-image hard-safe
+  // flow. Playback speed ranks media and controls caching; it does not decide
+  // whether an artist passes the user's acceptance criteria.
+  qualifyCandidate: local22TurboQualifyCandidate,
   getRevision: async () => {
     const health = await local2CleanHealth().catch(() => null);
     return String(health?.local2_revision || local2LastKnownRevision || 'local2-flash-uninitialized');
@@ -11333,13 +11593,17 @@ const local2FlashEngine = new Local2FlashEngine({
   // Submit the first random page as soon as its two source listings return.
   // Candidate qualification then overlaps the next page instead of waiting
   // for an eight-request four-page discovery barrier.
-  pageConcurrency: 1,
+  pageConcurrency: 4,
   candidateConcurrency: 32,
   maximumPendingCandidates: 64,
+  // Stage-local network/model timeouts already bound work. Do not convert time
+  // spent waiting for a fair scheduler slot into a false artist rejection.
+  candidateTimeoutMs: 0,
   // A low-yield random batch previously ended permanently after 120 pages,
   // which could strand the player at three artists. Keep scanning the full
   // configured source range until the accepted target is filled or stopped.
-  maximumPages: 3500
+  maximumPages: 3500,
+  variant: 'local2-fast'
 });
 
 const local22TurboEngine = new Local2FlashEngine({
@@ -11355,10 +11619,22 @@ const local22TurboEngine = new Local2FlashEngine({
   // discovery wave was a hidden startup barrier on otherwise high-yield pages.
   // The wider candidate pool overlaps the next page only after the first page's
   // candidates are already qualifying.
-  pageConcurrency: 1,
-  candidateConcurrency: 16,
-  maximumPendingCandidates: 32,
-  candidateTimeoutMs: 40000,
+  pageConcurrency: 4,
+  // Three 16-profile discovery waves may be prepared concurrently. Media-poor
+  // profiles no longer prevent the next random page's stronger candidates from
+  // entering the priority scheduler, while the verification host ceilings
+  // still bound actual network work independently.
+  candidateConcurrency: 32,
+  maximumPendingCandidates: 64,
+  // This is a stuck-work guard, not an acceptance deadline. With eight active
+  // qualification lanes, a candidate should no longer spend most of its life
+  // waiting for admission. Keep enough headroom for slow source hosts so valid
+  // artists are not converted into false failures under transient latency.
+  // Profile requests, post fetches, AI requests, and prebuffering each have
+  // their own bounded timeout. A whole-candidate clock also counted semaphore
+  // waits and falsely killed valid work during long button runs, so Local2.2
+  // relies on those stage-local guards instead.
+  candidateTimeoutMs: 0,
   maximumPages: 3500,
   variant: 'local22-turbo'
 });
@@ -11475,6 +11751,7 @@ const server = http.createServer(async (req, res) => {
       requestUrl.pathname === '/random40/candidates' ||
       requestUrl.pathname === '/video-cache/status' ||
       requestUrl.pathname === '/proxy' ||
+      requestUrl.pathname === '/leakedzone/media' ||
       requestUrl.pathname === '/video-cache/stream' ||
       requestUrl.pathname.startsWith('/video-cache/media/')
     );
@@ -11565,6 +11842,40 @@ const server = http.createServer(async (req, res) => {
         videos,
         count: videos.length
       });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/leakedzone/discover') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const result = await discoverLeakedZoneCreators(payload?.url);
+      json(res, 200, {
+        ok: true,
+        ...result,
+        creatorCount: result.creators.length
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/leakedzone/creator') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const result = await scrapeLeakedZoneCreator(payload?.url);
+      json(res, 200, {
+        ok: true,
+        ...result,
+        count: result.videos.length
+      });
+      return;
+    }
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/leakedzone/media') {
+      const playlist = await leakedZonePlaylistForDetail(url.searchParams.get('url'));
+      const body = Buffer.from(playlist, 'utf8');
+      res.writeHead(200, {
+        ...gatewayCorsHeaders(),
+        'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+        'Content-Length': body.length,
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'X-Content-Type-Options': 'nosniff'
+      });
+      if (req.method === 'HEAD') res.end();
+      else res.end(body);
       return;
     }
     if (req.method === 'GET' && url.pathname === '/simpcity/session/status') {
@@ -12193,6 +12504,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/local2-fast/start') {
         await local2Adapter.stop({ clearAudit: true }).catch(() => {});
         await local22TurboEngine.stop().catch(() => {});
+        enterLocalDiscoveryForeground();
         local2FlashClearForegroundPlaybackProtection();
         const state = await local2FlashEngine.start({
           pages: Array.isArray(body.pages) ? body.pages : [],
@@ -12205,6 +12517,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/local2-fast/stop') {
         local2FlashClearForegroundPlaybackProtection();
         await local2FlashEngine.stop();
+        leaveLocalDiscoveryForeground();
         json(res, 200, local2FlashEngine.snapshot());
         return;
       }
@@ -12253,18 +12566,35 @@ const server = http.createServer(async (req, res) => {
         ? JSON.parse(await readBody(req) || '{}')
         : {};
       if (req.method === 'GET' && url.pathname === '/local22-turbo/health') {
-        json(res, 200, local22TurboEngine.snapshot());
+        json(res, 200, {
+          ...local22TurboEngine.snapshot(),
+          scheduling: {
+            foregroundIsolated: localDiscoveryForegroundActive,
+            workActive: local22TurboWorkActive,
+            workQueued: local22TurboWorkWaiters.length,
+            qualificationActive: local22TurboQualificationActive,
+            qualificationQueued: local22TurboQualificationWaiters.length,
+            qualificationLimit: local22TurboQualificationLimit(),
+            speculativeAiActive: local22TurboSpeculativeAiActive,
+            warmBuffer: false
+          }
+        });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/local22-turbo/start') {
         await local2Adapter.stop({ clearAudit: true }).catch(() => {});
         await local2FlashEngine.stop().catch(() => {});
-        await local22TurboEngine.stop().catch(() => {});
+        enterLocalDiscoveryForeground();
         local2FlashClearForegroundPlaybackProtection();
+        const requestedPages = Array.isArray(body.pages) ? body.pages : [];
+        const requestedSeed = Number(body.seed || 0);
+        // Every real button press starts a fresh random run. Accepted artists
+        // are never prepared or retained for a later Local2.2 press.
+        await local22TurboEngine.stop().catch(() => {});
         local22TurboResetRuntime();
         const state = await local22TurboEngine.start({
-          pages: Array.isArray(body.pages) ? body.pages : [],
-          seed: Number(body.seed || 0),
+          pages: requestedPages,
+          seed: requestedSeed,
           diagnostics: body.diagnostics === true
         });
         json(res, 200, state);
@@ -12274,27 +12604,26 @@ const server = http.createServer(async (req, res) => {
         await local22TurboEngine.stop();
         local2FlashClearForegroundPlaybackProtection();
         local22TurboResetRuntime();
+        leaveLocalDiscoveryForeground();
         json(res, 200, local22TurboEngine.snapshot());
         return;
       }
       if (req.method === 'POST' && url.pathname === '/local22-turbo/playback-priority') {
         const durationMs = Math.max(3000, Math.min(15000, Number(body.durationMs || 12000)));
-        if (local22TurboDeliveredArtists >= 3) {
-          local2FlashProtectForegroundPlayback(durationMs);
-        }
         const cacheProtectedUntil = protectVideoFileCacheForegroundPlayback(durationMs, { playbackProfile: 'local22' });
         json(res, 200, {
           ok: true,
           protected: true,
-          classificationProtected: local22TurboDeliveredArtists >= 3,
-          until: new Date(local2FlashPlaybackPriorityUntil).toISOString(),
+          classificationProtected: false,
+          until: '',
           cacheUntil: new Date(cacheProtectedUntil).toISOString()
         });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/local22-turbo/candidates') {
         if (!local22TurboEngine.snapshot().active && !local22TurboEngine.snapshot().done) {
-          await local22TurboEngine.start();
+          enterLocalDiscoveryForeground();
+          await local22TurboEngine.start({ diagnostics: true });
         }
         const count = Math.max(1, Math.min(64, Number(url.searchParams.get('count') || 12)));
         const candidates = local22TurboEngine.lease(count);
@@ -12539,6 +12868,7 @@ const server = http.createServer(async (req, res) => {
         }
       };
       addUrl(payload?.activeUrl);
+      (Array.isArray(payload?.entryUrls) ? payload.entryUrls : []).forEach(addUrl);
       (Array.isArray(payload?.currentUrls) ? payload.currentUrls : []).forEach(addUrl);
       (Array.isArray(payload?.urls) ? payload.urls : []).forEach(addUrl);
       (Array.isArray(payload?.items) ? payload.items : []).forEach(item => {
@@ -12551,10 +12881,11 @@ const server = http.createServer(async (req, res) => {
       // only to its caller, so it must not cancel records requested by another
       // tab. Explicit deferredUrl messages and rolling eviction retire old work.
       const currentUrls = new Set((Array.isArray(payload?.currentUrls) ? payload.currentUrls : []).map(String));
+      const entryUrls = new Set((Array.isArray(payload?.entryUrls) ? payload.entryUrls : []).map(String));
       const records = [];
       for (const rawUrl of urls) {
         try {
-          const priority = rawUrl === activeUrl ? 0 : currentUrls.has(rawUrl) ? 1 : 2;
+          const priority = rawUrl === activeUrl ? 0 : entryUrls.has(rawUrl) ? 0.5 : currentUrls.has(rawUrl) ? 1 : 2;
           const record = queueVideoFileCacheUrl(rawUrl, priority, {
             ...(metadataByUrl.get(rawUrl) || {}),
             playbackProfile
@@ -12588,6 +12919,7 @@ const server = http.createServer(async (req, res) => {
             record.status = 'idle';
             record.playbackLease = false;
             record.activeUntil = 0;
+            record.entryUntil = 0;
             record.currentUntil = 0;
             record.priority = 2;
             record.updatedAt = Date.now();
@@ -12923,6 +13255,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/workload/reset') {
       workloadGeneration++;
+      localDiscoveryForegroundActive = false;
       const leasedBeforeReset = random40AcceptedLeases.size;
       await local2Adapter.stop({ clearAudit: true }).catch(() => {});
       await local2FlashEngine.stop().catch(() => {});
@@ -12947,8 +13280,8 @@ const server = http.createServer(async (req, res) => {
       random40AcceptedPending.clear();
       const releaseCandidateLeases = url.searchParams.get('releaseCandidateLeases') === '1';
       if (releaseCandidateLeases) random40ReleaseExpiredAcceptedLeases(Date.now(), true);
-      // Stay idle after Refresh. Local modes and Train AI explicitly resume
-      // their own work when the user presses a button.
+      // Stay idle after Refresh. Local modes begin only after a real button
+      // press and always perform fresh discovery and qualification.
       const idleUntilExplicitUse = Date.now() + 365 * 24 * 60 * 60 * 1000;
       random40ReservoirRefillPausedUntil = idleUntilExplicitUse;
       random40AcceptedRefillPausedUntil = idleUntilExplicitUse;
@@ -13149,7 +13482,6 @@ server.listen(PORT, HOST, () => {
         random40SyncPreferenceRevision(revision);
         await random40RefreshRejectedIdentities(revision);
       }
-      scheduleRandom40AcceptedReservoir(25);
       warmOllamaVisionModel()
         .then(() => console.log(`Ollama vision model kept warm: ${OLLAMA_VISION_MODEL}`))
         .catch(error => console.error(`Ollama vision warmup failed: ${error.message || error}`));
