@@ -43,8 +43,8 @@ test('extracts video and short details for the exact creator', () => {
   assert.equal(leakedZoneCreatorUrl('https://leakedzone.com/agatha.s/video/18525112'), 'https://leakedzone.com/agatha.s');
 });
 
-test('decodes the reversed base64 HLS payload', () => {
-  const playlist = 'https://leakedzone.com/m3u8/12.m3u8?time=1&sig=abc';
-  const encoded = [...Buffer.from(playlist).toString('base64')].reverse().join('');
+test('decodes the signed HLS URL without binary padding', () => {
+  const playlist = 'https://leakedzone.com/m3u8/12.m3u8?time=1&sig=abc&sig2=AbCdEfGhIjKlMnOp';
+  const encoded = [...Buffer.concat([Buffer.from(playlist), Buffer.from([0xff, 0x0d, 0x1b])]).toString('base64')].reverse().join('');
   assert.equal(extractLeakedZonePlaylistUrl(`<script>player.setup({file: f("${encoded}")})</script>`), playlist);
 });

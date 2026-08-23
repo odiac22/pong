@@ -115,7 +115,12 @@ export function extractLeakedZonePlaylistUrl(html) {
   if (!encoded) return '';
   try {
     const decoded = Buffer.from([...encoded].reverse().join(''), 'base64').toString('utf8');
-    return decoded.match(/https:\/\/[^\s\x00-\x1f"']+\.m3u8\?[^\s\x00-\x1f"']+/i)?.[0] || '';
+    // The obfuscated blob contains binary padding immediately after the signed
+    // URL on live LeakedZone pages.  A broad "not whitespace" match absorbs
+    // that padding into sig2, invalidating the otherwise valid playlist with
+    // a 401.  Their signature shape is stable: a hex signature plus a 16-char
+    // URL-safe token.
+    return decoded.match(/https:\/\/[^\s\x00-\x1f"']+\.m3u8\?time=\d+&sig=[a-f0-9]+&sig2=[A-Za-z0-9_-]{16}/i)?.[0] || '';
   } catch (_) {
     return '';
   }
