@@ -887,7 +887,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.52</div>
+    <div class="version-number">26.53</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -953,6 +953,7 @@
     </section>
   </div>
 
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.6.15/dist/hls.min.js" defer></script>
 <script>
 // ─── State ────────────────────────────────────────────────────────────────────
 let videoUrls = [];
@@ -4589,7 +4590,7 @@ function restoreDeckVideoNetwork(wrapper, video) {
   if (!playbackUrl) return false;
 
   video.preload = 'auto';
-  video.src = playbackUrl;
+  setPongVideoSource(video, playbackUrl);
   if (random40IsPcProxyPlaybackUrl(playbackUrl)) wrapper.dataset.gatewayFallbackTried = 'true';
   video.dataset.lastLoadKick = String(Date.now());
   delete video.dataset.lastNetworkProgressAt;
@@ -5925,13 +5926,13 @@ function createVideoElements() {
       const playbackUrl = isRandom40Card
         ? random40ForegroundPlaybackUrl(url)
         : random40PlaybackUrl(url);
-      video.src = playbackUrl;
+      setPongVideoSource(video, playbackUrl);
       // A proxy attempt has its own direct fallback. The PC file-cache route is
       // separate: if it fails, the normal proxy should still get one attempt.
       if (random40IsPcProxyPlaybackUrl(playbackUrl)) wrapper.dataset.gatewayFallbackTried = 'true';
     } else if (shouldAttachInitially && isRandom40Card) {
       const playbackUrl = random40ForegroundPlaybackUrl(url);
-      if (playbackUrl && String(video.currentSrc || video.src || '') !== playbackUrl) video.src = playbackUrl;
+      if (playbackUrl && String(video.currentSrc || video.src || '') !== playbackUrl) setPongVideoSource(video, playbackUrl);
     } else if (!shouldAttachInitially) {
       wrapper.dataset.networkSuspended = 'true';
       wrapper.dataset.suspendedVideoSrc = isRandom40Card
@@ -11531,6 +11532,7 @@ async function random40TryKnownLocalEndpoint(timeoutMs = 2200) {
 }
 
 function random40PcGatewayUrl(rawUrl) {
+  if (random40IsLeakedZoneGatewayMediaUrl(rawUrl)) return '';
   const endpoint = random40GatewayEndpoint || random40State?.localEndpoint || '';
   if (!endpoint) return '';
   return `${endpoint}/proxy?url=${encodeURIComponent(rawUrl)}`;
@@ -11557,6 +11559,10 @@ function random40ProtectLocal2FastPlayback(force = false) {
 
 function random40PcPlaybackGatewayUrl(rawUrl) {
   if (random40IsPcFileCachePlaybackUrl(rawUrl)) return '';
+  // LeakedZone media is already a same-gateway, freshly signed HLS manifest.
+  // Sending it through /proxy turns it into a localhost gateway request, which
+  // is deliberately rejected and leaves the card at 0:00.
+  if (random40IsLeakedZoneGatewayMediaUrl(rawUrl)) return '';
   if (EROME_PROXY_BASE && String(rawUrl || '').startsWith(`${EROME_PROXY_BASE.replace(/\/+$/, '')}/`)) return '';
   const gatewayUrl = random40PcGatewayUrl(rawUrl);
   if (location.protocol === 'https:' && /^http:\/\//i.test(gatewayUrl)) return '';
@@ -11612,6 +11618,45 @@ function random40LooksLikePcFileCachePlaybackUrl(rawUrl) {
   } catch (_) {
     return false;
   }
+}
+
+function random40IsLeakedZoneGatewayMediaUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ''), location.href);
+    return parsed.pathname === '/leakedzone/media' && parsed.port === '8787';
+  } catch (_) {
+    return false;
+  }
+}
+
+function setPongVideoSource(video, rawUrl) {
+  const sourceUrl = String(rawUrl || '');
+  if (!video || !sourceUrl) return false;
+  try {
+    if (video.__pongHls) {
+      video.__pongHls.destroy();
+      video.__pongHls = null;
+    }
+  } catch (_) {}
+  // Chromium does not consistently provide native HLS support. LeakedZone
+  // serves signed HLS only, so use hls.js when Media Source Extensions exist.
+  if (random40IsLeakedZoneGatewayMediaUrl(sourceUrl) && window.Hls?.isSupported?.()) {
+    try {
+      video.crossOrigin = 'anonymous';
+      const hls = new window.Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60
+      });
+      video.__pongHls = hls;
+      hls.attachMedia(video);
+      hls.on(window.Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(sourceUrl));
+      return true;
+    } catch (_) {}
+  }
+  video.src = sourceUrl;
+  return false;
 }
 
 function random40PlaybackUrlsMatch(left, right) {
@@ -19451,6 +19496,17 @@ async function loadLeakedZoneAsCards(targets) {
     alert('LeakedZone imports need the Pong PC server to be running and reachable.');
     return;
   }
+  // A GitHub Pages Pong page is HTTPS while the PC gateway is intentionally
+  // private-LAN HTTP. Mobile browsers block that fetch as mixed content. Move
+  // the app itself onto the gateway first (the same handoff Local2 uses), then
+  // resume this exact import from its hash without persisting the pasted URL.
+  if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) {
+    const target = new URL('/pong', `${endpoint}/`);
+    target.searchParams.set('pongAutoStart', 'leakedzone');
+    target.hash = `pongLeakedZone=${encodeURIComponent(targets.join('\n'))}`;
+    location.assign(target.href);
+    return;
+  }
   const postJson = async (pathname, payload) => {
     const response = await fetch(`${endpoint}${pathname}`, {
       method: 'POST',
@@ -20971,8 +21027,22 @@ document.addEventListener('DOMContentLoaded',()=>{
     }
     setTimeout(startSimpCityRecall, 0);
   }
+  if (autoStartMode === 'leakedzone') {
+    const overlay = document.getElementById('pong-overlay');
+    if (overlay) {
+      overlay.classList.add('hidden');
+      overlay.style.display = 'none';
+    }
+    const prefix = '#pongLeakedZone=';
+    const encodedTargets = location.hash.startsWith(prefix) ? location.hash.slice(prefix.length) : '';
+    let pastedTargets = '';
+    try { pastedTargets = decodeURIComponent(encodedTargets); } catch (_) {}
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
+    if (pastedTargets && eromeUrlInput) eromeUrlInput.value = pastedTargets;
+    setTimeout(() => loadEromeAsCards(), 0);
+  }
 
-  if (!PONG_PLAYBACK_BENCHMARK_FRESH && loadSession()) {
+  if (autoStartMode !== 'leakedzone' && !PONG_PLAYBACK_BENCHMARK_FRESH && loadSession()) {
     console.log(`[Session] Restoring ${allVideoUrls.length} videos, batch ${currentBatch}, index ${currentVideoIndex}`);
     const savedBatch = currentBatch;
     const restoreBatchSize = getCurrentBatchSize();
