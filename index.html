@@ -19491,7 +19491,14 @@ window.PongReceiveSimpCityNames = (rawNames, rawThreadUrl = '') => {
 async function loadLeakedZoneAsCards(targets) {
   console.log(`[LeakedZone] starting ${targets.length} pasted source${targets.length === 1 ? '' : 's'}`);
   const loadGeneration = ++bunkrLoadGeneration;
-  const endpoint = await getRandom40LocalEndpoint(true);
+  // Do not probe an HTTP LAN endpoint from the HTTPS GitHub Pages origin:
+  // mixed-content blocking prevents the probe before the handoff can occur.
+  // Use the configured LAN default for the first navigation, then the local
+  // Pong page will perform its same-origin health check.
+  const httpsLanEndpoint = location.protocol === 'https:'
+    ? random40NormalizeLocalEndpoint(RANDOM40_LOCAL_ENDPOINTS[RANDOM40_LOCAL_ENDPOINTS.length - 1])
+    : '';
+  const endpoint = httpsLanEndpoint || await getRandom40LocalEndpoint(true);
   if (!endpoint) {
     alert('LeakedZone imports need the Pong PC server to be running and reachable.');
     return;
