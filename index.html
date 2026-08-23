@@ -19593,7 +19593,10 @@ async function loadLeakedZoneAsCards(targets) {
             creatorQueue.push(creatorUrl);
           }
           wakeWorkers();
-          pageUrl = data.nextPageUrl || '';
+          // A pasted LeakedZone creators page is the user's source set. Do
+          // not walk its pagination here; scrape these profiles in order and
+          // move to the next profile as each one produces videos.
+          pageUrl = '';
           updateEromeProgress({
             title: cardsStarted ? 'LeakedZone playing while more load' : 'Finding LeakedZone creators',
             detail: `${seenCreators.size} creators found · ${creatorsReady} ready`,
@@ -19645,7 +19648,7 @@ async function loadLeakedZoneAsCards(targets) {
   };
   updateEromeProgress({
     title: 'Finding LeakedZone creators',
-    detail: 'Following creator and next-page links',
+    detail: 'Scraping creators and their videos',
     completed: 0,
     total: targets.length,
     videos: 0
