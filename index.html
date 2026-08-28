@@ -887,7 +887,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.55</div>
+    <div class="version-number">26.56</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -18972,7 +18972,11 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     while (
       loadGeneration === bunkrLoadGeneration &&
       cardsStarted &&
-      unviewedAlbumCount() + reservedAlbumSlots >= READY_ALBUM_TARGET
+      // Keep a small safety overflow so the paperclip can always advance. If
+      // workers stop exactly at the visible-buffer boundary, the button can
+      // become disabled at N/N and no user action can release a slot. One
+      // extra card breaks that deadlock without opening the floodgate.
+      unviewedAlbumCount() + reservedAlbumSlots > READY_ALBUM_TARGET + 3
     ) {
       await sleep(350);
     }
