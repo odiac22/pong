@@ -887,7 +887,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.54</div>
+    <div class="version-number">26.55</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -2696,7 +2696,24 @@ function getPasteEventIndexForGlobalVideo(globalIndex) {
 function syncCurrentPasteIndexFromVisibleVideo() {
   const eventIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
 
-  if (eventIndex >= 0) currentPasteIndex = eventIndex;
+  if (eventIndex >= 0) {
+    currentPasteIndex = eventIndex;
+    const event = pasteEvents[eventIndex];
+    const localIndex = getCurrentLoadedGlobalVideoIndex() - Number(event?.startIndex || 0);
+    if (localIndex >= 1 && event?.simpCityPreviewExpanded !== true && Array.isArray(event?.simpCityDeferredVideos) && event.simpCityDeferredVideos.length) {
+      event.simpCityPreviewExpanded = true;
+      const deferred = event.simpCityDeferredVideos.splice(0);
+      mergeProgressiveSimpCityGroup({
+        url: event.postUrl || event.artistUrl,
+        title: event.bundleLabel || event.artistDisplayName,
+        creatorName: event.simpCityCreatorName,
+        creatorKey: event.simpCityCreatorKey,
+        pairId: event.simpCityPairId,
+        mediaKind: event.simpCityMediaKind,
+        videos: deferred
+      }, random40ServerVideoCacheEndpoint() || EROME_PROXY_BASE.replace(/\/+$/, ''));
+    }
+  }
 
   return eventIndex;
 }
@@ -10876,6 +10893,8 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         simpCityPairId: String(group.pairId || ''),
         simpCityMediaKind: String(group.mediaKind || ''),
+        simpCityDeferredVideos: Array.isArray(group.deferredVideos) ? group.deferredVideos.slice() : [],
+        simpCityPreviewExpanded: group.previewExpanded === true,
         paperclipHidden: group.paperclipHidden === true || (
           String(group.mediaKind || '').toLowerCase() === 'tiktok' && Boolean(group.pairId)
         ),
@@ -11160,6 +11179,9 @@ const RANDOM40_PRELOAD_CURRENT_RESERVE = 20;
 // Recall/Erome/Bunkr must optimize time-to-next-playable instead of completing
 // a whole artist before preparing the next swipe and Paperclip destination.
 const PONG_IMPORT_CURRENT_PLAYBACK_WINDOW = 4;
+// SimpCity cards start with a five-video preview; the remaining resolved
+// videos are expanded when the user reaches the second video.
+const SIMPCITY_PREVIEW_VIDEO_COUNT = 5;
 const RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE = 6;
 const RANDOM40_LOCAL22_PRELOAD_CURRENT_RESERVE = 10;
 const RANDOM40_LOCAL22_BACKGROUND_ARTISTS = 4;
@@ -18824,9 +18846,17 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     [...(albums || [])]
       .sort((left, right) => Number(right?.mediaKind === 'tiktok') - Number(left?.mediaKind === 'tiktok'))
       .forEach(rawAlbum => {
-      const readyVideos = Array.isArray(rawAlbum?.videos) ? rawAlbum.videos.filter(Boolean) : [];
+      const allReadyVideos = Array.isArray(rawAlbum?.videos) ? rawAlbum.videos.filter(Boolean) : [];
+      const isSimpCityPreview = Boolean(rawAlbum?.pairId || rawAlbum?.simpCityPairId);
+      const previewExpanded = rawAlbum?.previewExpanded === true;
+      const readyVideos = isSimpCityPreview && !previewExpanded
+        ? allReadyVideos.slice(0, SIMPCITY_PREVIEW_VIDEO_COUNT)
+        : allReadyVideos;
+      const deferredVideos = isSimpCityPreview && !previewExpanded
+        ? allReadyVideos.slice(SIMPCITY_PREVIEW_VIDEO_COUNT)
+        : [];
       let albumUrl = normalizeEromeLaunchUrl(rawAlbum?.url || '');
-      if (!albumUrl && readyVideos.length) {
+      if (!albumUrl && allReadyVideos.length) {
         try {
           const candidate = new URL(String(rawAlbum?.url || ''));
           if (candidate.protocol === 'https:' && !candidate.username && !candidate.password) {
@@ -18850,12 +18880,18 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       if (previousVersion > 0) {
         const queuedExisting = albumQueue.find(item => String(item?.pairId || '') === String(rawAlbum?.pairId || ''));
         if (queuedExisting) {
-          queuedExisting.videos = readyVideos;
+          queuedExisting.videos = previewExpanded ? readyVideos : (queuedExisting.previewExpanded ? readyVideos : queuedExisting.videos);
+          if (deferredVideos.length) queuedExisting.deferredVideos = deferredVideos;
           queuedExisting.pairedGroups = progressiveGroups;
           queuedExisting.collecting = rawAlbum?.collecting === true;
           return;
         }
         if (cardsStarted) {
+          const activeEvent = pasteEvents.find(event => String(event?.simpCityPairId || '') === String(rawAlbum?.pairId || ''));
+          if (isSimpCityPreview && activeEvent?.simpCityPreviewExpanded !== true) {
+            activeEvent.simpCityDeferredVideos = [...new Set(progressiveGroups.flatMap(group => group?.videos || []))].slice(SIMPCITY_PREVIEW_VIDEO_COUNT);
+            return;
+          }
           let added = 0;
           progressiveGroups.forEach(group => {
             const imported = mergeProgressiveSimpCityGroup({
@@ -18895,7 +18931,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
             ? 'hosted'
             : 'bunkr',
         mediaKind: String(rawAlbum?.mediaKind || ''),
-        videos: readyVideos
+        videos: readyVideos,
+        deferredVideos,
+        previewExpanded
       };
       if (queuedAlbum.mediaKind === 'tiktok') albumQueue.unshift(queuedAlbum);
       else albumQueue.push(queuedAlbum);
