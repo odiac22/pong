@@ -101,7 +101,7 @@ const SIMPCITY_SEARCH_CONCURRENCY = Math.max(
 );
 const SIMPCITY_BROWSER_REQUEST_GAP_MS = Math.max(
   250,
-  Math.min(5000, Number(process.env.PONG_SIMPCITY_BROWSER_REQUEST_GAP_MS || 500))
+  Math.min(5000, Number(process.env.PONG_SIMPCITY_BROWSER_REQUEST_GAP_MS || 650))
 );
 const SIMPCITY_RECALL_AI_BATCH_LIMIT = Math.max(
   0,
