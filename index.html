@@ -887,7 +887,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.53</div>
+    <div class="version-number">26.54</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -19593,10 +19593,10 @@ async function loadLeakedZoneAsCards(targets) {
             creatorQueue.push(creatorUrl);
           }
           wakeWorkers();
-          // A pasted LeakedZone creators page is the user's source set. Do
-          // not walk its pagination here; scrape these profiles in order and
-          // move to the next profile as each one produces videos.
-          pageUrl = '';
+          // Continue through the listing's own pagination. Each page is still
+          // processed in order, while creator workers scrape profile videos in
+          // parallel and publish cards as soon as they are playable.
+          pageUrl = String(data.nextPageUrl || '').trim();
           updateEromeProgress({
             title: cardsStarted ? 'LeakedZone playing while more load' : 'Finding LeakedZone creators',
             detail: `${seenCreators.size} creators found · ${creatorsReady} ready`,
