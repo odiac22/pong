@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.11.0
+// @version      1.11.1
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -29,7 +29,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.11.0';
+  const SCRIPT_VERSION = '1.11.1';
   const FORUM_CREATOR_CONCURRENCY = 2;
   const SIMPCITY_REQUEST_GAP_MS = 500;
   const SIMPCITY_RATE_LIMIT_PAUSE_MS = 60_000;
@@ -759,7 +759,7 @@
           return url.toString();
         } catch (_) { return ''; }
       };
-      const queuePosts = (posts, depth = 0, batchSize = AI_BATCH_SIZE, orderedPair = false) => {
+      const queuePosts = (posts, depth = 0, batchSize = AI_BATCH_SIZE, orderedPair = false, allowExisting = false) => {
         if (depth < MAX_LINKED_THREAD_DEPTH && seenThreads.size <= MAX_LINKED_THREADS) {
           for (const post of posts) {
             for (const link of post?.links || []) {
@@ -777,7 +777,7 @@
           const slot = orderedPair ? 0 : slotIndex++ % AI_CONCURRENCY;
           const task = aiSlots[slot] = aiSlots[slot].then(async () => {
             const result = await sendToPong('/simpcity/extract-creators', {
-              id: scrapeId, channel, posts: batch, orderedPair
+              id: scrapeId, channel, posts: batch, orderedPair, allowExisting
             });
             postsSent += batch.length;
             for (const creator of result.creators || []) {
@@ -799,7 +799,7 @@
           .map(anchor => Number(anchor.getAttribute('href')?.match(/page-(\d+)/i)?.[1] || 1));
         return Math.max(1, ...pages);
       };
-      const scanThread = async ({ url: threadUrl, depth, maxPages = 0, atomic = false, deferSubmit = false }, currentHtml = '') => {
+      const scanThread = async ({ url: threadUrl, depth, maxPages = 0, atomic = false, deferSubmit = false, streamFirstPage = false }, currentHtml = '') => {
         if (!isCurrentRun()) throw Object.assign(new Error('This scrape was superseded'), { status: 409 });
         const firstHtml = currentHtml || await fetchSimpCityPage(threadUrl, 1);
         const discoveredPages = pageCountFromHtml(firstHtml);
@@ -807,8 +807,20 @@
         const threadPages = maxPages > 0 ? Math.min(depthLimitedPages, maxPages) : depthLimitedPages;
         totalPages += threadPages;
         const collectedPosts = [];
+        const firstPosts = extractPostPayloads(firstHtml, 1, threadUrl);
         const submitPosts = posts => atomic ? collectedPosts.push(...posts) : queuePosts(posts, depth);
-        submitPosts(extractPostPayloads(firstHtml, 1, threadUrl));
+        submitPosts(firstPosts);
+        if (atomic && streamFirstPage && firstPosts.length) {
+          // Publish from page 1 immediately; deeper pages enrich the same
+          // creator bundle instead of blocking time-to-first-artist.
+          const probePosts = [{
+            postId: `thread-title-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            page: 1, text: '',
+            links: [{ text: '', url: threadUrl, simpcityThread: true }],
+            attachments: []
+          }, ...firstPosts];
+          queuePosts(probePosts, depth, probePosts.length, true, true);
+        }
         pagesFetched++;
         update();
         for (let start = 2; start <= threadPages; start += PAGE_CONCURRENCY) {
@@ -819,7 +831,17 @@
             return { page, url: pageUrl.href, html: await fetchSimpCityPage(pageUrl.href, page) };
           }));
           for (const item of fetched) {
-            submitPosts(extractPostPayloads(item.html, item.page, item.url));
+            const pagePosts = extractPostPayloads(item.html, item.page, item.url);
+            submitPosts(pagePosts);
+            if (atomic && streamFirstPage && pagePosts.length) {
+              const enrichPosts = [{
+                postId: `thread-title-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                page: 1, text: '',
+                links: [{ text: '', url: threadUrl, simpcityThread: true }],
+                attachments: []
+              }, ...pagePosts];
+              queuePosts(enrichPosts, depth, enrichPosts.length, true, true);
+            }
             pagesFetched++;
           }
           update();
@@ -835,7 +857,7 @@
           // One request marks the complete creator thread. The PC can resolve
           // every host concurrently without releasing a partial pair.
           if (deferSubmit) return collectedPosts;
-          queuePosts(collectedPosts, depth, collectedPosts.length, true);
+          queuePosts(collectedPosts, depth, collectedPosts.length, true, streamFirstPage);
         }
         return collectedPosts;
       };
@@ -930,11 +952,12 @@
               }
               try {
                 completedThreads[index] = await scanThread({
-                  url: threadUrl,
-                  depth: 0,
-                  atomic: true,
-                  deferSubmit: true
-                });
+                url: threadUrl,
+                depth: 0,
+                atomic: true,
+                deferSubmit: true,
+                streamFirstPage: true
+              });
               } catch (error) {
                 diagnostic('Creator thread failed', `index=${index + 1}; url=${threadUrl}; ${error?.message || error}`);
                 completedThreads[index] = [];

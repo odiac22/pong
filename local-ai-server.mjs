@@ -4206,7 +4206,8 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
   const readyTasks = (creators || []).map(creator => {
     const creatorName = String(creator?.primaryName || '').trim();
     const creatorKey = creatorName.toLowerCase().replace(/[^a-z0-9]+/g, '');
-    if (!creatorKey || seenPairs.has(creatorKey) || state.skippedCreatorKeys?.has(creatorKey)) {
+    const existingRecord = state.pending.albums.find(item => String(item?.creatorKey || '') === creatorKey) || null;
+    if (!creatorKey || (seenPairs.has(creatorKey) && options?.allowExisting !== true) || state.skippedCreatorKeys?.has(creatorKey)) {
       return Promise.resolve();
     }
 
@@ -4247,8 +4248,11 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
         ? [...postMap.values()]
         : creatorPost ? [creatorPost] : [];
       const links = extractSimpCityMediaLinksForCreator(relevantPosts, creators, creator);
-      const artistVideos = new Set();
-      const tiktokVideos = new Set();
+      // Incremental profile scans may revisit an already-published artist as
+      // deeper pages arrive. Seed from the existing bundle so enrichment never
+      // replaces the fast page-1 result with a smaller later batch.
+      const artistVideos = new Set(existingRecord?.videos || []);
+      const tiktokVideos = new Set(existingRecord?.pairedGroups?.find(group => group?.mediaKind === 'tiktok')?.videos || []);
       const pairId = `${suppliedId}:${creatorKey}`;
       let artistGroup = null;
       let tiktokGroup = null;
@@ -12256,7 +12260,12 @@ const server = http.createServer(async (req, res) => {
         payload?.orderedPair === true
           ? simpCityPrimaryPairCreator(deterministic.creators)
           : simpCityProfilePairCreators(deterministic.creators),
-        { includeAllPosts: payload?.orderedPair === true }
+        {
+          includeAllPosts: payload?.orderedPair === true,
+          // Ordered creator-thread scans are now streamed page-by-page. Allow
+          // later pages to enrich the already-published page-1 bundle.
+          allowExisting: payload?.allowExisting === true
+        }
       );
       // Creator media resolution continues independently. Completed creators
       // can publish at 20 videos while later host/Balbums/TikTok work continues.
