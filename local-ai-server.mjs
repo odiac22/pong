@@ -103,6 +103,10 @@ const SIMPCITY_BROWSER_REQUEST_GAP_MS = Math.max(
   250,
   Math.min(5000, Number(process.env.PONG_SIMPCITY_BROWSER_REQUEST_GAP_MS || 650))
 );
+const SIMPCITY_REQUESTS_PER_MINUTE = Math.max(
+  20,
+  Math.min(120, Number(process.env.PONG_SIMPCITY_REQUESTS_PER_MINUTE || 60))
+);
 const SIMPCITY_RECALL_AI_BATCH_LIMIT = Math.max(
   0,
   Math.min(20, Number(process.env.PONG_SIMPCITY_RECALL_AI_BATCH_LIMIT || 6))
@@ -2436,9 +2440,13 @@ let simpCitySourcePauseUntil = 0;
 let simpCitySourceAdaptiveGapMs = SIMPCITY_BROWSER_REQUEST_GAP_MS;
 let simpCitySourceLastRateLimitAt = 0;
 let simpCitySourceLastChannel = 0;
+const simpCitySourceRequestTimes = [];
 
 function reserveSimpCitySourceRequest(rawChannel = 1) {
   const now = Date.now();
+  while (simpCitySourceRequestTimes.length && now - simpCitySourceRequestTimes[0] >= 60_000) {
+    simpCitySourceRequestTimes.shift();
+  }
   const channel = simpCityRecallChannel(rawChannel);
   if (simpCitySourceLastRateLimitAt && now - simpCitySourceLastRateLimitAt > 120_000) {
     simpCitySourceAdaptiveGapMs = Math.max(
@@ -2446,12 +2454,16 @@ function reserveSimpCitySourceRequest(rawChannel = 1) {
       Math.floor(simpCitySourceAdaptiveGapMs * 0.9)
     );
   }
-  const slot = Math.max(now, simpCitySourceNextRequestAt, simpCitySourcePauseUntil);
+  const budgetSlot = simpCitySourceRequestTimes.length >= SIMPCITY_REQUESTS_PER_MINUTE
+    ? simpCitySourceRequestTimes[0] + 60_000
+    : now;
+  const slot = Math.max(now, budgetSlot, simpCitySourceNextRequestAt, simpCitySourcePauseUntil);
   const bothChannelsRunning = [1, 2].every(value => simpCityBackgroundRuns.get(value)?.state === 'running');
   const fairnessDelay = bothChannelsRunning && simpCitySourceLastChannel === channel
     ? Math.floor(simpCitySourceAdaptiveGapMs * 0.5)
     : 0;
   simpCitySourceNextRequestAt = slot + simpCitySourceAdaptiveGapMs + fairnessDelay + Math.floor(Math.random() * 200);
+  simpCitySourceRequestTimes.push(slot);
   simpCitySourceLastChannel = channel;
   return {
     waitMs: Math.max(0, slot - now),
@@ -11994,7 +12006,7 @@ const server = http.createServer(async (req, res) => {
       const state = simpCityRecallState(channel);
       const fresh = Date.now() - Date.parse(state.pending?.playerBacklogAt || 0) < 5000;
       const unseen = fresh ? Number(state.pending?.playerUnseenProfiles || 0) : 0;
-      json(res, 200, { ok: true, channel, paused: unseen >= 5, unseen, waitMs: unseen >= 5 ? 1000 : 0 });
+      json(res, 200, { ok: true, channel, paused: unseen >= 8, unseen, waitMs: unseen >= 8 ? 1000 : 0 });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/simpcity/background/status') {

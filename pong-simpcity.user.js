@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.11.2
+// @version      1.11.3
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -29,7 +29,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.11.2';
+  const SCRIPT_VERSION = '1.11.3';
   const FORUM_CREATOR_CONCURRENCY = 2;
   // Match the proven 1.9.1 pacing baseline. The PC worker still delegates
   // to the server's shared adaptive limiter, so both Recall channels remain
