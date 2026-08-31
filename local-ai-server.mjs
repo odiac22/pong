@@ -2101,7 +2101,7 @@ function normalizeBunkrImportUrl(rawValue) {
     const url = new URL(String(rawValue || '').trim());
     const host = url.hostname.replace(/^www\./, '').toLowerCase();
     if (host === 'balbums.st') return { kind: 'listing', url: url.toString() };
-    if (host === 'bunkr.cr' && /^\/a\/[a-z0-9_-]+\/?$/i.test(url.pathname)) {
+    if (/^bunkr\.(?:cr|ph)$/i.test(host) && /^\/a\/[a-z0-9_-]+\/?$/i.test(url.pathname)) {
       url.search = '';
       url.hash = '';
       return { kind: 'album', url: url.toString() };
@@ -2150,7 +2150,7 @@ async function discoverBunkrAlbums(rawUrl) {
   // Pagination links are never followed.
   const albums = [];
   const seen = new Set();
-  const anchorRe = /<a\b[^>]*href=["'](https?:\/\/(?:www\.)?bunkr\.cr\/a\/[a-z0-9_-]+\/?)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const anchorRe = /<a\b[^>]*href=["'](https?:\/\/(?:www\.)?bunkr\.(?:cr|ph)\/a\/[a-z0-9_-]+\/?)["'][^>]*>([\s\S]*?)<\/a>/gi;
   for (const match of html.matchAll(anchorRe)) {
     const normalized = normalizeBunkrImportUrl(decodeHtmlUrl(match[1]));
     if (!normalized || seen.has(normalized.url)) continue;

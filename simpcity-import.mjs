@@ -133,7 +133,7 @@ export function classifySimpCityMediaUrl(rawValue) {
     let kind = '';
     if (host === 'gofile.io' && /^\/d\/[a-z0-9_-]+$/i.test(path)) kind = 'gofile';
     else if (host === 'pixeldrain.com' && /^\/(?:u|l|d)\/[a-z0-9_-]+$/i.test(path)) kind = 'pixeldrain';
-    else if (/^(?:bunkr\.(?:cr|si|ru|su|la|fi|site|black|media)|bunkrrr\.org|xbunkr\.com)$/i.test(host) && /^\/(?:a|f|v)\/[a-z0-9_.-]+$/i.test(path)) kind = 'bunkr';
+    else if (/^(?:bunkr\.(?:cr|ph|si|ru|su|la|fi|site|black|media)|bunkrrr\.org|xbunkr\.com)$/i.test(host) && /^\/(?:a|f|v)\/[a-z0-9_.-]+$/i.test(path)) kind = 'bunkr';
     else if (/^cyberdrop\.(?:cr|me|to)$/i.test(host) && /^\/(?:a|f)\/[a-z0-9_-]+$/i.test(path)) kind = 'cyberdrop';
     else if (/^(?:[^.]+\.)?cyberfile\.me$/i.test(host) && path !== '/') kind = 'cyberfile';
     else if (/^(?:saint\.to|saint2\.(?:su|cr)|turbo\.cr)$/i.test(host) && /^\/(?:embed|v)\/[a-z0-9_-]+$/i.test(path)) kind = 'saint';
