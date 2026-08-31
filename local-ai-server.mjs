@@ -781,21 +781,33 @@ function random40ReservoirIsReady() {
 }
 
 async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = null) {
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  signal?.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await gatewayH2Fetch(rawUrl, { signal: controller.signal, timeoutMs });
-    const status = Number(response.status || 0);
-    if (status < 200 || status >= 300) {
-      throw new Error(`reservoir HTTP ${status}`);
+  // Listing/profile reservoirs occasionally return transient 503/5xx responses
+  // while their edge is rotating. A single failure used to permanently discard
+  // that candidate page, starving Local2.2 even when the browser could load it.
+  // Retry only transient statuses with bounded backoff; acceptance criteria are
+  // unchanged and non-transient responses still fail immediately.
+  const maxAttempts = 3;
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await gatewayH2Fetch(rawUrl, { signal: controller.signal, timeoutMs });
+      const status = Number(response.status || 0);
+      if (status >= 200 && status < 300) return response.body.toString('utf8');
+      lastStatus = status;
+      const transient = status === 408 || status === 425 || status === 429 || status >= 500;
+      if (!transient || attempt === maxAttempts - 1) break;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
     }
-    return response.body.toString('utf8');
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener('abort', abort);
+    await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+    if (signal?.aborted) throw new DOMException('gateway request aborted', 'AbortError');
   }
+  throw new Error(`reservoir HTTP ${lastStatus || 0}`);
 }
 
 function random40ReservoirArtistUrls(html, pageUrl) {
