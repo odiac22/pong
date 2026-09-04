@@ -7,8 +7,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $serverPath = Join-Path $repoRoot 'local-ai-server.mjs'
 $runtimeDir = Join-Path $repoRoot '.pong-local-ai'
 $logPath = Join-Path $runtimeDir 'server-watchdog.log'
+$reportDir = Join-Path $runtimeDir 'node-reports'
 
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
 
 function Write-WatchdogLog {
   param([string]$Message)
@@ -54,7 +56,8 @@ while ($true) {
 
   Write-WatchdogLog 'Port 8787 is down; starting local-ai-server.mjs.'
   try {
-    & $nodeCommand.Source $serverPath *>> $logPath
+    $reportDirectoryArgument = "--report-directory=$reportDir"
+    & $nodeCommand.Source '--report-on-fatalerror' '--report-uncaught-exception' $reportDirectoryArgument $serverPath *>> $logPath
     $serverExitCode = $LASTEXITCODE
     Write-WatchdogLog "local-ai-server.mjs exited with code $serverExitCode; restarting in 2 seconds."
   } catch {
