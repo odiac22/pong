@@ -529,6 +529,11 @@
     }
     #erome-helper-open { background: rgba(103,232,249,0.18); }
     #erome-helper-cards { background: rgba(34,197,94,0.22); }
+    #artist-lookup-panel { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; background: rgba(0,0,0,.72); }
+    #artist-lookup-panel[hidden] { display: none; }
+    #artist-lookup-panel .auth-inner { width: min(760px, 94vw); max-height: 88vh; overflow: auto; }
+    #artist-lookup-input { width: 100%; min-height: 130px; box-sizing: border-box; margin: 8px 0 12px; }
+    #artist-lookup-results { white-space: pre-wrap; max-height: 42vh; overflow: auto; margin: 14px 0; font-size: 12px; }
     #erome-iframe-container { width: 100%; flex: 1; overflow: auto; margin: 0 0 8px; border-radius: 8px; background: #05070a; }
     #erome-iframe-container iframe { width: 100%; height: 100%; border: none; }
     #erome-scrape-progress {
@@ -882,12 +887,26 @@
     </div>
   </div>
 
+  <div id="artist-lookup-panel" class="auth-helper-panel" hidden>
+    <div class="auth-inner">
+      <h3>Artist Lookup</h3>
+      <p>Paste names, handles, profile URLs, or a JSON export. Pong normalizes spelling variants and creates cross-site search links.</p>
+      <textarea id="artist-lookup-input" rows="5" placeholder="Lola Pelligrini\nlola_pelligrini\n—or paste a JSON export" spellcheck="false"></textarea>
+      <div class="auth-url-row">
+        <button id="artist-lookup-run" type="button">Find artists</button>
+        <button id="artist-lookup-copy" type="button" disabled>Copy Pong paste</button>
+      </div>
+      <pre id="artist-lookup-results" aria-live="polite"></pre>
+      <div><button id="artist-lookup-close" type="button">Close</button></div>
+    </div>
+  </div>
+
   <div id="pong-overlay">
     <canvas id="pong-canvas"></canvas>
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.56</div>
+    <div class="version-number">26.57</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -898,6 +917,7 @@
       <div class="button-container">
         <button id="load-videos">Load Videos</button>
         <button id="open-erome">Open Albums</button>
+        <button id="artist-lookup-open" type="button">Artist Lookup</button>
         <button id="saved-erome">Saved Erome</button>
         <button id="random-40-local2">R40 Local 2</button>
         <button id="random-40-local">R40 Local 2.2</button>
@@ -21200,6 +21220,71 @@ document.addEventListener('DOMContentLoaded',()=>{
 window.addEventListener('blur',()=>{
   if(window.currentlyPlayingVideo&&!window.currentlyPlayingVideo.paused)window.currentlyPlayingVideo.pause();
 });
+
+// Universal artist lookup: accepts plain names, handles, URLs, or JSON exports.
+(() => {
+  const panel = document.getElementById('artist-lookup-panel');
+  const input = document.getElementById('artist-lookup-input');
+  const results = document.getElementById('artist-lookup-results');
+  const copy = document.getElementById('artist-lookup-copy');
+  let pasteText = '';
+  const key = value => String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const variants = value => {
+    const raw = String(value || '').trim().replace(/^[@#]+/, '');
+    if (!raw) return [];
+    const compact = raw.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '');
+    const spaced = raw.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return [...new Set([raw, spaced, spaced.replace(/\s+/g, '_'), spaced.replace(/\s+/g, '-'), compact].filter(Boolean))];
+  };
+  const extract = text => {
+    const names = new Map();
+    const add = (value, service = '') => {
+      const clean = String(value || '').trim().replace(/^[@#]+/, '');
+      if (!clean || clean.length < 3 || clean.length > 100 || /^(?:http|www\.)/i.test(clean)) return;
+      const id = key(clean); if (!id || id.length < 3) return;
+      if (!names.has(id)) names.set(id, { name: clean, service });
+    };
+    try {
+      const parsed = JSON.parse(text);
+      for (const creator of (Array.isArray(parsed?.creators) ? parsed.creators : [])) add(creator?.name || creator?.username, creator?.service || '');
+      for (const post of (Array.isArray(parsed?.posts) ? parsed.posts : [])) add(post?.user, post?.service || '');
+    } catch (_) {}
+    for (const line of String(text || '').split(/\r?\n/)) {
+      const value = line.trim();
+      if (!value) continue;
+      try {
+        const url = new URL(value);
+        const parts = url.pathname.split('/').filter(Boolean);
+        const candidate = parts.find((part, index) => /^(?:u|c|creator|model|profile)$/i.test(part) && parts[index + 1]) ? parts[parts.findIndex(part => /^(?:u|c|creator|model|profile)$/i.test(part)) + 1] : parts.at(-1);
+        add(candidate, url.hostname);
+      } catch (_) { add(value); }
+    }
+    return [...names.values()];
+  };
+  const link = (base, value) => `${base}${encodeURIComponent(value)}`;
+  document.getElementById('artist-lookup-open')?.addEventListener('click', () => { panel.hidden = false; input.focus(); });
+  document.getElementById('artist-lookup-close')?.addEventListener('click', () => { panel.hidden = true; });
+  document.getElementById('artist-lookup-run')?.addEventListener('click', () => {
+    const artists = extract(input.value);
+    if (!artists.length) { results.textContent = 'No artist names or handles found.'; copy.disabled = true; pasteText = ''; return; }
+    const blocks = [];
+    for (const artist of artists) {
+      const searchTerms = variants(artist.name);
+      const term = searchTerms[0];
+      blocks.push(`${artist.name}${artist.service ? ` (${artist.service})` : ''}\n` +
+        `  SimpCity: ${link('https://simpcity.cr/search/?q=', term)}\n` +
+        `  CoomerFans: ${link('https://coomerfans.com/?q=', term)}\n` +
+        `  LeakedZone: ${link('https://leakedzone.com/creators?search=', term)}\n` +
+        `  Erome: ${link('https://www.erome.com/search?q=', term)}\n` +
+        `  Bunkr/Balbums: ${link('https://balbums.st/?q=', term)}\n` +
+        `  Variants: ${searchTerms.join(', ')}`);
+    }
+    pasteText = artists.map(artist => variants(artist.name)[0]).join('\n');
+    results.textContent = `${artists.length} artist${artists.length === 1 ? '' : 's'} found.\n\n${blocks.join('\n\n')}`;
+    copy.disabled = false;
+  });
+  copy?.addEventListener('click', async () => { if (pasteText) await navigator.clipboard?.writeText(pasteText); });
+})();
 </script>
 <script src="pong-sync.js?v=111"></script>
 </body>
