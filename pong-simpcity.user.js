@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.12.5
+// @version      1.12.6
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -1146,12 +1146,17 @@
         at: Date.now()
       });
       const controllerUrl = artistLookupSearchUrl(pendingItem.query, controllerToken);
-      if (typeof GM_openInTab === 'function') {
-        GM_openInTab(controllerUrl, { active: false, insert: true, setParent: true });
-      } else {
-        window.open(controllerUrl, '_blank', 'noopener,noreferrer');
-      }
-      status.textContent = `Pong Artist Lookup: background tab started for ${pendingItem.query}`;
+      // Run the authenticated navigator inside a hidden same-origin frame.
+      // No browser tab is opened and the user's current SimpCity page never
+      // changes. X-Frame-Options SAMEORIGIN permits this SimpCity-to-SimpCity
+      // controller while still blocking foreign embedding.
+      const controllerFrame = document.createElement('iframe');
+      controllerFrame.name = LOOKUP_CONTROLLER_WINDOW_NAME;
+      controllerFrame.src = controllerUrl;
+      controllerFrame.setAttribute('aria-hidden', 'true');
+      controllerFrame.style.cssText = 'display:none!important;width:0!important;height:0!important;border:0!important';
+      (document.body || document.documentElement).appendChild(controllerFrame);
+      status.textContent = `Pong Artist Lookup: hidden controller started for ${pendingItem.query}`;
       setTimeout(processArtistLookupQueue, 4000);
       return;
     }

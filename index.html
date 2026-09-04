@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.71</div>
+    <div class="version-number">26.72</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -19013,14 +19013,16 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   const unviewedAlbumCount = () => {
     const identities = new Set();
     pasteEvents.forEach((event, index) => {
-    if (
-      (recallChannel === 3
-        ? Boolean(event?.simpCityPairId) && !isSimpCityTikTokEvent(event)
-        : event?.source === 'bunkr') &&
-      isPasteEventViewableForPaperclip(event) &&
-      !isPasteEventRetiredForPaperclip(event, index) &&
-      !isPasteEventPreviouslyVisitedForPaperclip(event, index)
-    ) identities.add(event.simpCityPairId || `event:${index}`);
+      const available = !isPasteEventRetiredForPaperclip(event, index) &&
+        !isPasteEventPreviouslyVisitedForPaperclip(event, index);
+      if (!available) return;
+      if (recallChannel === 3) {
+        // A TikTok side deck still occupies one of the five artist slots even
+        // before that artist's primary source arrives.
+        if (event?.simpCityPairId) identities.add(event.simpCityPairId);
+      } else if (event?.source === 'bunkr' && isPasteEventViewableForPaperclip(event)) {
+        identities.add(event.simpCityPairId || `event:${index}`);
+      }
     });
     return identities.size;
   };
@@ -19087,12 +19089,16 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       }))
       .filter(item => item.url);
     if (warmItems.length) {
+      const tiktokEntryUrls = groups
+        .filter(group => String(group.mediaKind || '').toLowerCase() === 'tiktok')
+        .flatMap(group => group.videos.slice(0, 5));
       postJson('/video-cache/warm', {
         playbackProfile: 'bunkr',
         // Future artists need one prepared entry card. Their complete bundle
         // is submitted only when Paperclip makes that artist active, avoiding
         // hundreds of speculative downloads ahead of the viewer.
         items: warmItems,
+        entryUrls: tiktokEntryUrls,
         urgent: false,
         authoritative: false
       }).catch(() => {});
@@ -19103,7 +19109,13 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   document.documentElement.dataset.pongRecallChannel = String(Number(recallChannel || 0));
   const scrapeAlbum = async album => {
     if (album?.creatorKey && simpCitySkippedCreatorKeys.has(album.creatorKey)) return;
-    const acquired = await acquireAlbumSlot();
+    // Additional sources for an artist already inside the five-slot window
+    // enrich that artist immediately instead of waiting behind new artists.
+    const enrichingExistingArtist = recallChannel === 3 && Boolean(album?.pairId) && pasteEvents.some(event => (
+      String(event?.simpCityPairId || '') === String(album.pairId)
+    ));
+    const acquired = enrichingExistingArtist || await acquireAlbumSlot();
+    const reservedSlot = acquired && !enrichingExistingArtist;
     if (!acquired) return;
     try {
       if (Array.isArray(album?.pairedGroups) && album.pairedGroups.length > 0) {
@@ -19172,7 +19184,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         wakeAlbumWorkers();
       }
     } finally {
-      reservedAlbumSlots = Math.max(0, reservedAlbumSlots - 1);
+      if (reservedSlot) reservedAlbumSlots = Math.max(0, reservedAlbumSlots - 1);
       completedAlbums++;
       updateEromeProgress({
         title: cardsStarted ? 'SimpCity playing while more load' : 'Opening first SimpCity match',
