@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.12.0
+// @version      1.12.1
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -32,7 +32,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.12.0';
+  const SCRIPT_VERSION = '1.12.1';
   const FORUM_CREATOR_CONCURRENCY = 2;
   // Use a conservative source pace. The PC worker still delegates
   // to the server's shared adaptive limiter, so both Recall channels remain
@@ -1087,7 +1087,7 @@
   const waitForRecall2Completion = async () => {
     const deadline = Date.now() + 30 * 60_000;
     while (Date.now() < deadline) {
-      const state = await getFromPong('/simpcity/background/status?channel=2').catch(() => null);
+      const state = await getFromPong('/simpcity/background/status?channel=3').catch(() => null);
       const run = state?.run;
       if (run && ['complete', 'empty', 'error', 'cancelled'].includes(String(run.state || ''))) return run;
       await delay(2000);
@@ -1112,7 +1112,7 @@
       return;
     }
     status.textContent = `Pong Artist Lookup: scanning ${item.query}`;
-    await runScrape(2);
+    await runScrape(3);
     await waitForRecall2Completion();
     await sendToPong('/simpcity/artist-lookup/complete', { id: item.id }, 15000);
     await gmDelete(LOOKUP_STORAGE_KEY);

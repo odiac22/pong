@@ -2530,15 +2530,30 @@ function enqueueSimpCityArtistLookup(rawNames) {
     simpCityArtistLookupQueue.push(item);
     queued.push(item);
   }
+  if (queued.length) {
+    const state = simpCityRecallChannels.get(3);
+    state.payload = null;
+    state.pending = {
+      id: `artist-lookup-${Date.now()}`,
+      threadUrl: 'https://simpcity.cr/',
+      creators: [],
+      albums: [],
+      postsProcessed: 0,
+      queuedArtists: simpCityArtistLookupQueue.length + (simpCityArtistLookupActive ? 1 : 0),
+      startedAt: new Date().toISOString()
+    };
+  }
   return { queued: queued.length, pending: simpCityArtistLookupQueue.length, active: simpCityArtistLookupActive };
 }
 const simpCityRecallChannels = new Map([
   [1, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), skipSeenEnabled: false }],
-  [2, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), skipSeenEnabled: false }]
+  [2, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), skipSeenEnabled: false }],
+  [3, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), skipSeenEnabled: false }]
 ]);
 const simpCityRecallAlbumTasks = new Map();
 function simpCityRecallChannel(rawChannel) {
-  return Number(rawChannel) === 2 ? 2 : 1;
+  const channel = Number(rawChannel);
+  return channel === 3 ? 3 : channel === 2 ? 2 : 1;
 }
 function simpCityRecallState(rawChannel) {
   return simpCityRecallChannels.get(simpCityRecallChannel(rawChannel));
@@ -12089,6 +12104,18 @@ const server = http.createServer(async (req, res) => {
       const payload = JSON.parse(await readBody(req) || '{}');
       const completed = Boolean(simpCityArtistLookupActive && String(payload?.id || '') === simpCityArtistLookupActive.id);
       if (completed) simpCityArtistLookupActive = null;
+      if (completed && simpCityArtistLookupQueue.length) {
+        const state = simpCityRecallChannels.get(3);
+        state.pending = {
+          id: `artist-lookup-${Date.now()}`,
+          threadUrl: 'https://simpcity.cr/',
+          creators: [],
+          albums: [],
+          postsProcessed: 0,
+          queuedArtists: simpCityArtistLookupQueue.length,
+          startedAt: new Date().toISOString()
+        };
+      }
       json(res, 200, { ok: true, completed, pending: simpCityArtistLookupQueue.length });
       return;
     }

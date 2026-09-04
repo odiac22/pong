@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.62</div>
+    <div class="version-number">26.63</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -21283,7 +21283,7 @@ window.addEventListener('blur',()=>{
     const names = [...new Set((Array.isArray(rawNames) ? rawNames : []).map(value => String(value || '').trim()).filter(Boolean))];
     if (!names.length) throw new Error('No artist names were supplied');
     await postJson('/simpcity/artist-lookup/enqueue', { names });
-    return loadSimpCityAsCards([], names, [], false, 0, { source: 'artist-lookup' });
+    return loadSimpCityAsCards(['https://simpcity.cr/'], names, [], false, 3, { source: 'artist-lookup' });
   };
   const link = (base, value) => `${base}${encodeURIComponent(value)}`;
   document.getElementById('artist-lookup-open')?.addEventListener('click', () => { panel.hidden = false; input.focus(); });
