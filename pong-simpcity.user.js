@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.12.3
+// @version      1.12.4
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -76,7 +76,10 @@
     if (slot > now) await delay(slot - now);
   };
   const waitForDiscoveryCapacity = async channel => {
-    if (!globalThis.PONG_PC_BACKGROUND_CONTEXT) return;
+    // Artist Lookup channel 3 is browser-driven but must still honor Pong's
+    // five-artist unseen buffer. Recall 1/2 browser runs retain their legacy
+    // behavior; PC background runs continue using the shared permit.
+    if (!globalThis.PONG_PC_BACKGROUND_CONTEXT && Number(channel) !== 3) return;
     while (true) {
       const permit = await sendToPong('/simpcity/discovery/permit', { channel }, 10000);
       if (!permit?.paused) return;

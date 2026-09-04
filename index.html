@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.70</div>
+    <div class="version-number">26.71</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -19014,7 +19014,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     const identities = new Set();
     pasteEvents.forEach((event, index) => {
     if (
-      event?.source === 'bunkr' &&
+      (recallChannel === 3
+        ? Boolean(event?.simpCityPairId) && !isSimpCityTikTokEvent(event)
+        : event?.source === 'bunkr') &&
       isPasteEventViewableForPaperclip(event) &&
       !isPasteEventRetiredForPaperclip(event, index) &&
       !isPasteEventPreviouslyVisitedForPaperclip(event, index)
@@ -19026,11 +19028,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     while (
       loadGeneration === bunkrLoadGeneration &&
       cardsStarted &&
-      // Keep a small safety overflow so the paperclip can always advance. If
-      // workers stop exactly at the visible-buffer boundary, the button can
-      // become disabled at N/N and no user action can release a slot. One
-      // extra card breaks that deadlock without opening the floodgate.
-      unviewedAlbumCount() + reservedAlbumSlots > READY_ALBUM_TARGET + 3
+      unviewedAlbumCount() + reservedAlbumSlots >= READY_ALBUM_TARGET
     ) {
       await sleep(350);
     }
@@ -19099,9 +19097,6 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         authoritative: false
       }).catch(() => {});
     }
-    showSortingIndicator(
-      `SimpCity ready: ${loadedAlbums} artists, ${videoCount} videos`
-    );
     return true;
   };
   document.documentElement.dataset.pongSimpCityActive = 'true';
@@ -19437,14 +19432,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     hideEromeProgress(1500);
     return;
   }
-  updateEromeProgress({
-    title: 'SimpCity ready',
-    detail: `${loadedAlbums} artists · ${discoveredCreators} names searched`,
-    completed: completedAlbums,
-    total: Math.max(1, discoveredAlbums),
-    videos: videoCount,
-    force: true
-  });
+  hideEromeProgress(0);
 }
 
 const SIMPCITY_RECALL_STORAGE_KEY = 'pong_simpcity_recall_v1';

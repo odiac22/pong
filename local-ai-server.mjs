@@ -12075,7 +12075,7 @@ const server = http.createServer(async (req, res) => {
       const state = simpCityRecallState(channel);
       const fresh = Date.now() - Date.parse(state.pending?.playerBacklogAt || 0) < 5000;
       const unseen = fresh ? Number(state.pending?.playerUnseenProfiles || 0) : 0;
-      json(res, 200, { ok: true, channel, paused: unseen >= 8, unseen, waitMs: unseen >= 8 ? 1000 : 0 });
+      json(res, 200, { ok: true, channel, paused: unseen >= 5, unseen, waitMs: unseen >= 5 ? 1000 : 0 });
       return;
     }
     if (req.method === 'GET' && url.pathname === '/simpcity/background/status') {
