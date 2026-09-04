@@ -2522,7 +2522,10 @@ function enqueueSimpCityArtistLookup(rawNames) {
     // One site search per artist prevents punctuation variants from multiplying
     // authenticated SimpCity page requests. Keep all variants as matching
     // evidence, but search the readable normalized form once.
-    const query = variants.find(value => /\s/.test(value)) || variants[0];
+    // The exported platform handle is authoritative. Searching a prettified
+    // spaced version first can target a different person and loses punctuation
+    // that distinguishes OnlyFans/TikTok usernames.
+    const query = variants[0];
     const key = variants.map(value => value.toLowerCase().replace(/[^a-z0-9]+/g, '')).find(Boolean) || '';
     if (!key || existing.has(key)) continue;
     existing.add(key);

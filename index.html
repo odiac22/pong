@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.63</div>
+    <div class="version-number">26.64</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -5683,6 +5683,7 @@ function beginDeckSwipe(event, source) {
     startY: point.clientY,
     lastX: point.clientX,
     lastY: point.clientY,
+    startedAt: Date.now(),
     axis: '',
     active: false,
     rejected: false
@@ -5703,8 +5704,9 @@ function moveDeckSwipe(event, source) {
   deckSwipeGesture.lastY = point.clientY;
 
   if (!deckSwipeGesture.active) {
-    if (absX > 14 && absX > absY * 1.18) {
-      const context = getSimpCityTikTokContext();
+    const context = getSimpCityTikTokContext();
+    const horizontalActivation = context.sideActive ? 72 : context.tiktokIndex >= 0 ? 44 : 14;
+    if (absX > horizontalActivation && absX > absY * 1.18) {
       const canOpenTikTok = dx < 0 && !context.sideActive && context.tiktokIndex >= 0;
       const canReturnFromTikTok = dx > 0 && context.sideActive;
       if (!canOpenTikTok && !canReturnFromTikTok) {
@@ -5731,8 +5733,11 @@ function endDeckSwipe(event, source) {
   const dx = (point.clientX || deckSwipeGesture.lastX) - deckSwipeGesture.startX;
   const dy = (point.clientY || deckSwipeGesture.lastY) - deckSwipeGesture.startY;
   const axis = deckSwipeGesture.axis || 'vertical';
+  const context = getSimpCityTikTokContext();
+  const horizontalDistance = context.sideActive ? 120 : context.tiktokIndex >= 0 ? 72 : 28;
+  const horizontalHeldLongEnough = !context.sideActive || Date.now() - Number(deckSwipeGesture.startedAt || 0) >= 180;
   const shouldNavigate = deckSwipeGesture.active && (
-    axis === 'horizontal' ? Math.abs(dx) >= 28 : Math.abs(dy) >= 24
+    axis === 'horizontal' ? Math.abs(dx) >= horizontalDistance && horizontalHeldLongEnough : Math.abs(dy) >= 24
   );
   deckSwipeGesture = null;
 
@@ -21301,6 +21306,7 @@ window.addEventListener('blur',()=>{
         `  LeakedZone: ${link('https://leakedzone.com/creators?search=', term)}\n` +
         `  Erome: ${link('https://www.erome.com/search?q=', term)}\n` +
         `  Bunkr/Balbums: ${link('https://balbums.st/?q=', term)}\n` +
+        `  TikTok exact handle: https://www.tiktok.com/@${encodeURIComponent(term.replace(/^@/, ''))}\n` +
         `  Variants: ${searchTerms.join(', ')}`);
     }
     pasteText = artists.map(artist => variants(artist.name)[0]).join('\n');
