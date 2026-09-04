@@ -2976,6 +2976,30 @@ async function extractTikTokCandidateProfile(candidate, fallbackVideos = []) {
   }
 }
 
+async function discoverTikTokBrowserVideoUrls(candidate, signal = null) {
+  const profileUrl = `https://www.tiktok.com/@${candidate}`;
+  const html = await gatewayArtistLookupBrowserHtml(profileUrl, {
+    signal,
+    timeoutMs: 25000,
+    settleMs: 2500
+  });
+  const decoded = decodeHtmlUrl(String(html || ''))
+    .replace(/\\u002F/gi, '/')
+    .replace(/%3A/gi, ':')
+    .replace(/%2F/gi, '/')
+    .replace(/%40/gi, '@');
+  const identity = tiktokHandleKey(candidate);
+  const videos = [];
+  const pattern = /(?:https?:\/\/(?:www\.)?tiktok\.com)?\/@([a-z0-9_.-]{3,64})\/video\/(\d{12,24})/gi;
+  for (const match of decoded.matchAll(pattern)) {
+    if (tiktokHandleKey(match[1]) !== identity) continue;
+    const videoUrl = `https://www.tiktok.com/@${match[1]}/video/${match[2]}`;
+    if (!videos.includes(videoUrl)) videos.push(videoUrl);
+    if (videos.length >= 20) break;
+  }
+  return videos;
+}
+
 function normalizeSimpCityArtistQuery(rawQuery) {
   const query = String(rawQuery || '').trim().replace(/^[@#]+/, '').slice(0, 100);
   if (!query || query.length < 3 || /[\r\n]/.test(query)) return '';
@@ -3720,7 +3744,7 @@ async function getGatewayArtistLookupBrowser(targetUrl) {
   return gatewayArtistLookupBrowserCache;
 }
 
-function gatewayArtistLookupBrowserHtml(rawUrl, { signal = null, timeoutMs = 30000 } = {}) {
+function gatewayArtistLookupBrowserHtml(rawUrl, { signal = null, timeoutMs = 30000, settleMs = 0 } = {}) {
   const targetUrl = gatewayArtistLookupBrowserUrl(rawUrl);
   const run = gatewayArtistLookupBrowserTail.catch(() => {}).then(async () => {
     if (signal?.aborted) throw new DOMException('gateway browser request aborted', 'AbortError');
@@ -3733,6 +3757,7 @@ function gatewayArtistLookupBrowserHtml(rawUrl, { signal = null, timeoutMs = 300
         'gateway browser page',
         150
       );
+      if (Number(settleMs) > 0) await simpCityDelay(Math.min(5000, Number(settleMs)));
       const readPage = () => browser.cdp.evaluate(`(() => ({
           title: String(document.title || ''),
           text: String(document.body?.innerText || '').slice(0, 1200),
@@ -13217,6 +13242,24 @@ const server = http.createServer(async (req, res) => {
         });
         profileKeys.add(identity);
       }
+      const browserEvidence = [];
+      if (payload?.browserVerify === true) {
+        const browserCandidates = requestedCandidates;
+        for (const candidate of browserCandidates.slice(0, 4)) {
+          try {
+            const indexedVideos = await discoverTikTokBrowserVideoUrls(candidate);
+            browserEvidence.push({ candidate, videos: indexedVideos.length });
+            const identity = tiktokHandleKey(candidate);
+            if (!indexedVideos.length || profileKeys.has(identity)) continue;
+            const browserProfile = await extractTikTokCandidateProfile(candidate, indexedVideos);
+            if (!browserProfile) continue;
+            profiles.push(browserProfile);
+            profileKeys.add(identity);
+          } catch (error) {
+            errors.push(`${candidate}/browser: ${String(error?.message || error)}`);
+          }
+        }
+      }
       const discoveredCandidates = [...new Set(combinedDiscoveredHandles)];
       const candidates = requestedCandidates.slice();
       const seenCandidates = new Set();
@@ -13260,6 +13303,7 @@ const server = http.createServer(async (req, res) => {
         videos,
         count: videos.length,
         candidatesChecked: candidates.length,
+        ...(payload?.browserVerify === true ? { browserEvidence } : {}),
         errors: errors.slice(0, 3)
       });
       return;

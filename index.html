@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.80</div>
+    <div class="version-number">26.81</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -2249,8 +2249,32 @@ function compactSessionVideoMetadata(meta) {
     postUrl: meta.postUrl || '',
     postIndex: Number(meta.postIndex || 0),
     scrapedAt: meta.scrapedAt || '',
-    mediaKey: meta.mediaKey || ''
+    mediaKey: meta.mediaKey || '',
+    simpCityPairId: meta.simpCityPairId || '',
+    simpCityMediaKind: meta.simpCityMediaKind || '',
+    simpCityCreatorKey: meta.simpCityCreatorKey || '',
+    simpCityCreatorName: meta.simpCityCreatorName || '',
+    artistSources: Array.isArray(meta.artistSources) ? meta.artistSources.slice() : []
   };
+}
+
+function migrateTikTokSessionPlaybackUrl(rawUrl) {
+  const original = String(rawUrl || '');
+  let candidate = original;
+  for (let depth = 0; depth < 5; depth++) {
+    try {
+      const parsed = new URL(candidate, window.location.href);
+      if (/(^|\.)tiktok\.com$/i.test(parsed.hostname) && /\/@[^/]+\/video\/\d+/i.test(parsed.pathname)) {
+        return `http://127.0.0.1:8787/video-cache/stream?url=${encodeURIComponent(parsed.href)}&profile=tiktok`;
+      }
+      const nested = parsed.searchParams.get('url') || parsed.searchParams.get('u');
+      if (!nested || nested === candidate) break;
+      candidate = nested;
+    } catch (_) {
+      break;
+    }
+  }
+  return original;
 }
 
 function migrateBunkrSessionPlaybackUrl(rawUrl) {
@@ -2322,11 +2346,13 @@ function loadSession() {
     allVideoMetadata = Array.isArray(s.allVideoMetadata)
       ? s.allVideoMetadata.map(compactSessionVideoMetadata)
       : [];
-    allVideoUrls = allVideoUrls.map((url, index) => (
-      allVideoMetadata[index]?.source === 'bunkr'
+    allVideoUrls = allVideoUrls.map((url, index) => {
+      const tiktokUrl = migrateTikTokSessionPlaybackUrl(url);
+      if (tiktokUrl !== url) return tiktokUrl;
+      return allVideoMetadata[index]?.source === 'bunkr'
         ? migrateBunkrSessionPlaybackUrl(url)
-        : url
-    ));
+        : url;
+    });
     currentBatch = s.currentBatch || 0;
     currentVideoIndex = s.currentVideoIndex || 0;
     currentPasteIndex = Number.isInteger(s.currentPasteIndex) ? s.currentPasteIndex : -1;
@@ -6023,6 +6049,8 @@ function createVideoElements() {
   videoContainer.querySelectorAll('video').forEach(video => {
     try {
       video.pause();
+      if (video.__pongBlobUrl) URL.revokeObjectURL(video.__pongBlobUrl);
+      video.__pongBlobUrl = '';
       video.removeAttribute('src');
       video.load();
     } catch (_) {}
@@ -11904,6 +11932,43 @@ function random40IsLeakedZoneGatewayMediaUrl(rawUrl) {
 function setPongVideoSource(video, rawUrl) {
   const sourceUrl = String(rawUrl || '');
   if (!video || !sourceUrl) return false;
+  if (video.__pongBlobUrl) {
+    try { URL.revokeObjectURL(video.__pongBlobUrl); } catch (_) {}
+    video.__pongBlobUrl = '';
+  }
+  // The live app is HTTPS while the private PC cache is HTTP. Fetching the
+  // CORS-enabled loopback response is permitted, but attaching it directly as
+  // media is not reliable. A blob URL keeps TikTok playback inside the secure
+  // page after the local cache has completed the download.
+  if (
+    location.protocol === 'https:' &&
+    /^http:\/\/(?:127\.0\.0\.1|localhost):8787\/video-cache\/(?:stream|media\/)/i.test(sourceUrl) &&
+    (/[?&]profile=tiktok(?:&|$)/i.test(sourceUrl) || /tiktok\.com%2f%40/i.test(sourceUrl))
+  ) {
+    const requestId = String(Number(video.dataset.pongBlobRequestId || 0) + 1);
+    video.dataset.pongBlobRequestId = requestId;
+    video.removeAttribute('src');
+    fetch(sourceUrl, { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`TikTok cache HTTP ${response.status}`);
+        return response.blob();
+      })
+      .then(blob => {
+        if (video.dataset.pongBlobRequestId !== requestId || !document.body.contains(video)) return;
+        const blobUrl = URL.createObjectURL(blob);
+        video.__pongBlobUrl = blobUrl;
+        video.src = blobUrl;
+        try { video.load(); } catch (_) {}
+        const wrapper = video.closest('.video-wrapper');
+        if (wrapper?.classList.contains('deck-active') && wrapper.dataset.playIntent === 'true') {
+          void playVideoCleanly(video);
+        }
+      })
+      .catch(() => {
+        if (video.dataset.pongBlobRequestId === requestId) video.dispatchEvent(new Event('error'));
+      });
+    return true;
+  }
   try {
     if (video.__pongHls) {
       video.__pongHls.destroy();
