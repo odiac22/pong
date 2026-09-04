@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.65</div>
+    <div class="version-number">26.66</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -21403,7 +21403,15 @@ window.addEventListener('blur',()=>{
   window.PongStartArtistLookup = async rawNames => {
     const names = [...new Set((Array.isArray(rawNames) ? rawNames : []).map(value => String(value || '').trim()).filter(Boolean))];
     if (!names.length) throw new Error('No artist names were supplied');
-    await postJson('/simpcity/artist-lookup/enqueue', { names });
+    const endpoint = await getRandom40LocalEndpoint(true);
+    if (!endpoint) throw new Error('The Pong PC server is not running or reachable');
+    const response = await fetch(`${endpoint}/simpcity/artist-lookup/enqueue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || `Local HTTP ${response.status}`);
     return loadSimpCityAsCards(['https://simpcity.cr/'], names, [], false, 3, { source: 'artist-lookup' });
   };
   const link = (base, value) => `${base}${encodeURIComponent(value)}`;
