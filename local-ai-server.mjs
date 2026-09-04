@@ -2831,6 +2831,131 @@ function simpCityArtistLookupVariants(rawName) {
     .map(value => value.trim()).filter(value => value.length >= 3))];
 }
 
+const tiktokHandleDiscoveryCache = new Map();
+const TIKTOK_HANDLE_DISCOVERY_TTL_MS = 6 * 60 * 60 * 1000;
+let tiktokSearchTail = Promise.resolve();
+let tiktokSearchNextAt = 0;
+
+function fetchTikTokSearchPage(rawUrl, signal = null) {
+  const run = tiktokSearchTail.catch(() => {}).then(async () => {
+    const waitMs = Math.max(0, tiktokSearchNextAt - Date.now());
+    if (waitMs) await new Promise(resolve => setTimeout(resolve, waitMs));
+    if (signal?.aborted) throw new DOMException('TikTok search aborted', 'AbortError');
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36',
+      Accept: 'text/html,application/xhtml+xml',
+      'Accept-Language': 'en-US,en;q=0.9'
+    };
+    let response = await fetch(rawUrl, { signal, redirect: 'follow', headers });
+    tiktokSearchNextAt = Date.now() + 1300;
+    if (response.status === 429) {
+      await new Promise(resolve => setTimeout(resolve, 2600));
+      if (signal?.aborted) throw new DOMException('TikTok search aborted', 'AbortError');
+      response = await fetch(rawUrl, { signal, redirect: 'follow', headers });
+      tiktokSearchNextAt = Date.now() + 1800;
+    }
+    return { status: response.status, ok: response.ok, text: await response.text() };
+  });
+  tiktokSearchTail = run.catch(() => {});
+  return run;
+}
+
+function tiktokHandleKey(value) {
+  return String(value || '').trim().replace(/^@+/, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+async function discoverTikTokSearchEvidence(rawUsername, rawAliases = [], signal = null) {
+  const username = String(rawUsername || '').trim().replace(/^@+/, '');
+  const key = tiktokHandleKey(username);
+  if (key.length < 3) return [];
+  const cached = tiktokHandleDiscoveryCache.get(key);
+  if (cached && Date.now() - cached.at < TIKTOK_HANDLE_DISCOVERY_TTL_MS) {
+    return {
+      handles: cached.handles.slice(),
+      videosByHandle: Object.fromEntries(Object.entries(cached.videosByHandle || {}).map(([handle, videos]) => [handle, videos.slice()]))
+    };
+  }
+
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(() => controller.abort(), 15000);
+  timer.unref?.();
+  try {
+    const queryNames = [username, ...(Array.isArray(rawAliases) ? rawAliases : [])]
+      .map(value => String(value || '').trim().replace(/^@+/, ''))
+      .filter(value => /^[a-z0-9_.-]{3,64}$/i.test(value))
+      .slice(0, 6);
+    const query = `site:tiktok.com/@ ${queryNames.map(value => `"${value}"`).join(' OR ')}`;
+    let response = await fetchTikTokSearchPage(
+      `https://search.brave.com/search?q=${encodeURIComponent(query)}`,
+      controller.signal
+    );
+    if (!response.ok) {
+      response = await fetchTikTokSearchPage(
+        `https://search.brave.com/images?q=${encodeURIComponent(`${username} tiktok`)}`,
+        controller.signal
+      );
+    }
+    if (!response.ok) throw new Error(`TikTok handle search HTTP ${response.status}`);
+    const html = response.text;
+    const handles = [];
+    const seen = new Set();
+    const pattern = /https?:\/\/(?:www\.)?tiktok\.com\/(?:%40|@)([a-z0-9_.-]{3,64})/gi;
+    for (const match of html.matchAll(pattern)) {
+      const handle = String(match[1] || '').trim();
+      const handleKey = tiktokHandleKey(handle);
+      if (!handleKey || seen.has(handleKey)) continue;
+      // Search ranking alone is not identity evidence. Only accept punctuation,
+      // suffix and prefix variants here; unrelated people with the same first
+      // name must never be merged into the pasted artist.
+      const related = handleKey === key || handleKey.includes(key) || key.includes(handleKey);
+      if (!related) continue;
+      seen.add(handleKey);
+      handles.push(handle);
+      if (handles.length >= 6) break;
+    }
+    const videosByHandle = {};
+    const decodedHtml = decodeHtmlUrl(html).replace(/\\u002F/gi, '/');
+    const videoPattern = /https?:\/\/(?:www\.)?tiktok\.com\/@([a-z0-9_.-]{3,64})\/video\/(\d{12,24})/gi;
+    for (const match of decodedHtml.matchAll(videoPattern)) {
+      const handle = String(match[1] || '').trim();
+      const handleKey = tiktokHandleKey(handle);
+      if (!handleKey) continue;
+      const videoUrl = `https://www.tiktok.com/@${handle}/video/${match[2]}`;
+      videosByHandle[handleKey] ||= [];
+      if (!videosByHandle[handleKey].includes(videoUrl) && videosByHandle[handleKey].length < 20) {
+        videosByHandle[handleKey].push(videoUrl);
+      }
+    }
+    const evidence = { handles, videosByHandle };
+    tiktokHandleDiscoveryCache.set(key, { at: Date.now(), handles, videosByHandle });
+    return evidence;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
+async function extractTikTokCandidateProfile(candidate, fallbackVideos = []) {
+  const profileUrl = `https://www.tiktok.com/@${candidate}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  timer.unref?.();
+  try {
+    let videos = [];
+    try {
+      videos = await extractTikTokVideoUrls(profileUrl, controller.signal);
+    } catch (profileError) {
+      videos = Array.isArray(fallbackVideos) ? fallbackVideos.filter(Boolean) : [];
+      if (!videos.length) throw profileError;
+    }
+    return videos.length ? { username: candidate, profileUrl, videos } : null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function normalizeSimpCityArtistQuery(rawQuery) {
   const query = String(rawQuery || '').trim().replace(/^[@#]+/, '').slice(0, 100);
   if (!query || query.length < 3 || /[\r\n]/.test(query)) return '';
@@ -13021,37 +13146,101 @@ const server = http.createServer(async (req, res) => {
       const payload = JSON.parse(await readBody(req) || '{}');
       const username = String(payload?.username || '').trim().replace(/^@+/, '');
       if (!/^[a-z0-9_.-]{3,64}$/i.test(username)) throw new Error('A valid exact TikTok username is required');
-      const candidates = artistLookupRequestedCandidates(payload, 6)
+      const requestedCandidates = artistLookupRequestedCandidates(payload, 6)
         .filter(value => /^[a-z0-9_.-]{3,64}$/i.test(value));
       const errors = [];
-      for (const candidate of candidates) {
-        const profileUrl = `https://www.tiktok.com/@${candidate}`;
+      const requestedResults = await mapWithConcurrency(requestedCandidates, 3, async candidate => {
         try {
-          const videos = await extractTikTokVideoUrls(profileUrl);
-          if (videos.length) {
-            json(res, 200, {
-              ok: true,
-              username,
-              matchedUsername: candidate,
-              profileUrl,
-              videos,
-              count: videos.length,
-              candidatesChecked: candidates.indexOf(candidate) + 1
-            });
-            return;
-          }
+          return await extractTikTokCandidateProfile(candidate);
         } catch (error) {
           errors.push(`${candidate}: ${String(error?.message || error)}`);
+          return null;
         }
-        await new Promise(resolve => setTimeout(resolve, 350));
+      });
+      let profiles = requestedResults.filter(Boolean);
+      const profileKeys = new Set(profiles.map(profile => tiktokHandleKey(profile.username)));
+      const unresolvedCandidates = requestedCandidates.filter(candidate => !profileKeys.has(tiktokHandleKey(candidate)));
+      const suppliedAliasKeys = new Set((Array.isArray(payload?.aliases) ? payload.aliases : []).map(tiktokHandleKey).filter(Boolean));
+      const evidenceCandidates = suppliedAliasKeys.size
+        ? unresolvedCandidates.filter(candidate => suppliedAliasKeys.has(tiktokHandleKey(candidate)))
+        : unresolvedCandidates;
+      const evidenceResults = [];
+      for (const candidate of evidenceCandidates) {
+        try {
+          const evidence = await discoverTikTokSearchEvidence(candidate);
+          evidenceResults.push(evidence);
+          // One exact/verified-alias query commonly reveals the creator's
+          // other linked handles too. Stop as soon as it yields video evidence
+          // instead of rate-limiting the search engine with redundant queries.
+          if (Object.values(evidence.videosByHandle || {}).some(videoUrls => videoUrls.length)) break;
+        } catch (error) {
+          errors.push(`${candidate}/discovery: ${String(error?.message || error)}`);
+        }
       }
+      const combinedVideosByHandle = {};
+      const combinedDiscoveredHandles = [];
+      for (const evidence of evidenceResults) {
+        for (const handle of evidence.handles || []) combinedDiscoveredHandles.push(handle);
+        for (const [handleKey, videoUrls] of Object.entries(evidence.videosByHandle || {})) {
+          combinedVideosByHandle[handleKey] ||= [];
+          combinedVideosByHandle[handleKey].push(...videoUrls);
+          combinedVideosByHandle[handleKey] = [...new Set(combinedVideosByHandle[handleKey])].slice(0, 20);
+        }
+      }
+      for (const candidate of unresolvedCandidates) {
+        const identity = tiktokHandleKey(candidate);
+        const fallbackVideos = combinedVideosByHandle[identity] || [];
+        if (!identity || profileKeys.has(identity) || !fallbackVideos.length) continue;
+        profiles.push({
+          username: candidate,
+          profileUrl: `https://www.tiktok.com/@${candidate}`,
+          videos: fallbackVideos.slice(0, 20),
+          searchFallback: true
+        });
+        profileKeys.add(identity);
+      }
+      const discoveredCandidates = [...new Set(combinedDiscoveredHandles)];
+      const candidates = requestedCandidates.slice();
+      const seenCandidates = new Set();
+      requestedCandidates.forEach(candidate => seenCandidates.add(tiktokHandleKey(candidate)));
+      const discoveryFallback = [];
+      for (const candidate of discoveredCandidates) {
+        const identity = tiktokHandleKey(candidate);
+        if (!identity || seenCandidates.has(identity)) continue;
+        seenCandidates.add(identity);
+        candidates.push(candidate);
+        discoveryFallback.push(candidate);
+        if (candidates.length >= 8) break;
+      }
+      // Exact and identity-verified aliases win immediately. Only if neither
+      // profile extraction nor indexed video evidence succeeds do we probe a
+      // punctuation/suffix variant discovered by search.
+      if (!profiles.length && discoveryFallback.length) {
+        const fallbackResults = await mapWithConcurrency(discoveryFallback, 3, async candidate => {
+          try {
+            const identity = tiktokHandleKey(candidate);
+            return await extractTikTokCandidateProfile(
+              candidate,
+              combinedVideosByHandle[identity] || []
+            );
+          } catch (error) {
+            errors.push(`${candidate}: ${String(error?.message || error)}`);
+            return null;
+          }
+        });
+        profiles = fallbackResults.filter(Boolean);
+      }
+      const videos = [...new Set(profiles.flatMap(profile => profile.videos || []))].slice(0, 60);
+      const matchedUsernames = profiles.map(profile => profile.username);
       json(res, 200, {
         ok: true,
         username,
-        matchedUsername: '',
-        profileUrl: `https://www.tiktok.com/@${username}`,
-        videos: [],
-        count: 0,
+        matchedUsername: matchedUsernames[0] || '',
+        matchedUsernames,
+        profileUrl: profiles[0]?.profileUrl || `https://www.tiktok.com/@${username}`,
+        profiles,
+        videos,
+        count: videos.length,
         candidatesChecked: candidates.length,
         errors: errors.slice(0, 3)
       });

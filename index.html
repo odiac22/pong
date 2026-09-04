@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.78</div>
+    <div class="version-number">26.79</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -1403,6 +1403,61 @@ function getArtistDisplayName(meta) {
   if (!displayName || /^\d+$/.test(displayName) || displayName.toLowerCase() === 'pong') return '';
 
   return displayName;
+}
+
+const ARTIST_SOURCE_DISPLAY_ORDER = Object.freeze([
+  'SimpCity', 'Bunkr', 'Balbums', 'Erome', 'LeakedZone',
+  'CoomerFans', 'OnlyFaHouse', 'TikTok', 'Direct'
+]);
+
+function normalizeArtistSourceName(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  if (raw.includes('simpcity')) return 'SimpCity';
+  if (raw.includes('balbums')) return 'Balbums';
+  if (raw.includes('bunkr')) return 'Bunkr';
+  if (raw.includes('erome')) return 'Erome';
+  if (raw.includes('leakedzone')) return 'LeakedZone';
+  if (raw.includes('coomerfans')) return 'CoomerFans';
+  if (raw.includes('onlyfaphouse')) return 'OnlyFaHouse';
+  if (raw.includes('tiktok')) return 'TikTok';
+  if (raw === 'direct') return 'Direct';
+  return '';
+}
+
+function artistSourceNamesFromRecord(record) {
+  const names = new Set();
+  const add = value => {
+    const normalized = normalizeArtistSourceName(value);
+    if (normalized) names.add(normalized);
+  };
+  (Array.isArray(record?.artistSources) ? record.artistSources : []).forEach(add);
+  [record?.source, record?.sourceUrl, record?.artistUrl, record?.postUrl, record?.url, record?.title]
+    .forEach(add);
+  (Array.isArray(record?.videos) ? record.videos : []).slice(0, 8).forEach(video => {
+    const descriptor = eromeMediaDescriptor(video);
+    add(descriptor?.url || video);
+    add(descriptor?.postUrl);
+  });
+  if (names.size > 1) names.delete('Direct');
+  return [...names].sort((left, right) => {
+    const leftIndex = ARTIST_SOURCE_DISPLAY_ORDER.indexOf(left);
+    const rightIndex = ARTIST_SOURCE_DISPLAY_ORDER.indexOf(right);
+    return (leftIndex < 0 ? 999 : leftIndex) - (rightIndex < 0 ? 999 : rightIndex);
+  });
+}
+
+function mergeArtistSourceNames(...records) {
+  return artistSourceNamesFromRecord({
+    artistSources: records.flatMap(record => artistSourceNamesFromRecord(record))
+  });
+}
+
+function getArtistLabelText(meta) {
+  const artistName = getArtistDisplayName(meta);
+  const sources = artistSourceNamesFromRecord(meta);
+  if (!sources.length) return artistName;
+  return artistName ? `${artistName} · ${sources.join(' • ')}` : sources.join(' • ');
 }
 
 function parsePastedVideoLines(text) {
@@ -2627,7 +2682,7 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
     percentText.classList.add('not-ready');
   }
   if (artistLabel) {
-    const artistName = getArtistDisplayName(nextMetadata);
+    const artistName = getArtistLabelText(nextMetadata);
     const artistCounterText = getArtistLabelCounterText(`0/${videoUrls.length}`);
     artistLabel.dataset.artistName = artistName || '';
     artistLabel.textContent = artistName ? `${artistName}  ${artistCounterText}` : artistCounterText;
@@ -4879,7 +4934,7 @@ function updateBatchReadyCounter() {
     if (!label) return;
 
     const index = Number(wrapper.dataset.index || -1);
-    const artistName = label.dataset.artistName || getArtistDisplayName(videoMetadata[index]);
+    const artistName = getArtistLabelText(videoMetadata[index]) || label.dataset.artistName;
 
     if (artistName && !label.dataset.artistName) {
       label.dataset.artistName = artistName;
@@ -6061,7 +6116,7 @@ function createVideoElements() {
     progressContainer.appendChild(progressBar); progressContainer.appendChild(durationText);
     const artistLabel = document.createElement('div');
     artistLabel.className = 'artist-label';
-    const artistLabelText = getArtistDisplayName(videoMetadata[index]);
+    const artistLabelText = getArtistLabelText(videoMetadata[index]);
     const artistCounterText = getArtistLabelCounterText(`0/${videoUrls.length}`);
     artistLabel.dataset.artistName = artistLabelText;
     artistLabel.textContent = artistLabelText ? `${artistLabelText}  ${artistCounterText}` : artistCounterText;
@@ -6720,7 +6775,7 @@ function renumberVisibleVideoWrappers() {
 
     const label = wrapper.querySelector('.artist-label');
     if (label) {
-      const artistName = getArtistDisplayName(videoMetadata[index]);
+      const artistName = getArtistLabelText(videoMetadata[index]);
       label.dataset.artistName = artistName || '';
     }
   });
@@ -10912,6 +10967,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
     const groupStartIndex = urls.length;
     const groupSourceUrl = group.sourceUrl || group.url || '';
     const groupSourceTitle = group.sourceTitle || artistNameFromUrl(groupSourceUrl) || 'Erome';
+    const groupArtistSources = artistSourceNamesFromRecord(group);
 
     group.videos.forEach((rawUrl, videoIndex) => {
       const descriptor = eromeMediaDescriptor(rawUrl);
@@ -10934,7 +10990,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         type: 'video',
         source: isSimpCityMedia ? 'bunkr' : 'erome',
         artistName: groupSourceTitle,
-        artistDisplayName: group.title || groupSourceTitle,
+        artistDisplayName: group.creatorName || group.title || groupSourceTitle,
         artistKey: groupSourceUrl,
         artistUrl: groupSourceUrl,
         postUrl: descriptor.postUrl || group.url || groupSourceUrl,
@@ -10944,6 +11000,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityPairId: String(group.pairId || ''),
         simpCitySourcePairId: String(group.sourcePairId || ''),
         simpCityMediaKind: String(group.mediaKind || ''),
+        artistSources: groupArtistSources.slice(),
         postIndex: Number.isFinite(Number(descriptor.postIndex)) ? descriptor.postIndex : videoIndex,
         scrapedAt,
         mediaKey,
@@ -10964,14 +11021,15 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         source: group.source === 'erome' ? 'erome' : 'bunkr',
         artistUrl: groupSourceUrl,
         postUrl: group.url || groupSourceUrl,
-        artistDisplayName: groupSourceTitle,
-        bundleLabel: group.title || groupSourceTitle,
+        artistDisplayName: group.creatorName || groupSourceTitle,
+        bundleLabel: group.creatorName || group.title || groupSourceTitle,
         simpCityJobId: String(group.simpCityJobId || ''),
         simpCityCreatorKey: String(group.creatorKey || ''),
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         simpCityPairId: String(group.pairId || ''),
         simpCitySourcePairId: String(group.sourcePairId || ''),
         simpCityMediaKind: String(group.mediaKind || ''),
+        artistSources: groupArtistSources.slice(),
         simpCityDeferredVideos: Array.isArray(group.deferredVideos) ? group.deferredVideos.slice() : [],
         simpCityPreviewExpanded: group.previewExpanded === true,
         // A TikTok result is hidden only when its paired primary group asks for
@@ -11164,6 +11222,15 @@ function mergeProgressiveSimpCityGroup(group, proxyBase) {
   if (!Array.isArray(event.simpCityDeferredVideos)) event.simpCityDeferredVideos = [];
   const bounds = getPasteEventVideoBounds(event);
   if (!bounds) return { urls: [], metadata: [], events: [] };
+  const mergedArtistSources = mergeArtistSourceNames(event, group);
+  event.artistSources = mergedArtistSources;
+  for (let index = bounds.start; index < bounds.end; index++) {
+    if (!allVideoMetadata[index]) continue;
+    allVideoMetadata[index].artistSources = mergedArtistSources.slice();
+    if (event.simpCityCreatorName) {
+      allVideoMetadata[index].artistDisplayName = event.simpCityCreatorName;
+    }
+  }
   const existingKeys = new Set();
   for (let index = bounds.start; index < bounds.end; index++) {
     existingKeys.add(String(allVideoMetadata[index]?.mediaKey || allVideoUrls[index] || ''));
@@ -11192,6 +11259,7 @@ function mergeProgressiveSimpCityGroup(group, proxyBase) {
     newVideos = newVideos.slice(0, openSlots);
   }
   if (!newVideos.length) {
+    renumberVisibleVideoWrappers();
     reconcileArtistLookupTikTokVisibility(pairId);
     return { urls: [], metadata: [], events: [] };
   }
@@ -11201,6 +11269,13 @@ function mergeProgressiveSimpCityGroup(group, proxyBase) {
   allVideoUrls.splice(insertionIndex, 0, ...payload.urls);
   allVideoMetadata.splice(insertionIndex, 0, ...payload.metadata);
   event.count = Number(event.count || 0) + payload.urls.length;
+  for (let index = insertionIndex; index < insertionIndex + payload.urls.length; index++) {
+    if (!allVideoMetadata[index]) continue;
+    allVideoMetadata[index].artistSources = mergedArtistSources.slice();
+    if (event.simpCityCreatorName) {
+      allVideoMetadata[index].artistDisplayName = event.simpCityCreatorName;
+    }
+  }
   pasteEvents.forEach((candidate, index) => {
     if (index !== eventIndex && Number(candidate.startIndex || 0) >= insertionIndex) {
       candidate.startIndex = Number(candidate.startIndex || 0) + payload.urls.length;
@@ -11225,6 +11300,7 @@ function mergeProgressiveSimpCityGroup(group, proxyBase) {
   scheduleSessionSave(700);
   scheduleEromeCheckpointAutosave();
   scheduleSimpCityPreviewDeckRefresh(eventIndex);
+  renumberVisibleVideoWrappers();
   reconcileArtistLookupTikTokVisibility(pairId);
   return payload;
 }
@@ -18673,6 +18749,7 @@ const ARTIST_LOOKUP_VERIFIED_ALIASES = Object.freeze({
   littleellee: ['secretelle'],
   missskyeevans: ['miss_skye_evans'],
   murmuriell: ['murmurielll', 'murkameow'],
+  rileyroscato: ['rileyroscato_', 'reelingwithriley'],
   satanpetitcul: ['sav.agoras']
 });
 
@@ -19545,14 +19622,18 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
             aliases: sourceCandidatesFor(rawName).slice(1)
           });
           if (!Array.isArray(data.videos) || !data.videos.length) return;
+          const matchedUsernames = Array.isArray(data.matchedUsernames) && data.matchedUsernames.length
+            ? data.matchedUsernames
+            : [data.matchedUsername || username].filter(Boolean);
           enqueueAlbums([{
             url: data.profileUrl,
-            title: `TikTok account · ${username}`,
-            creatorName: username,
-            creatorKey: normalizeSimpCityCreatorKey(username),
+            title: `TikTok · ${matchedUsernames.map(value => `@${value}`).join(' + ')}`,
+            creatorName: rawName,
+            creatorKey: normalizeSimpCityCreatorKey(rawName),
             sourceUrl: data.profileUrl,
             source: 'hosted',
             mediaKind: 'tiktok',
+            artistSources: ['TikTok'],
             videos: data.videos
           }]);
         }),
