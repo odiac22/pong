@@ -2511,17 +2511,22 @@ function simpCityArtistLookupVariants(rawName) {
 }
 
 function enqueueSimpCityArtistLookup(rawNames) {
-  const names = (Array.isArray(rawNames) ? rawNames : []).flatMap(simpCityArtistLookupVariants);
   const existing = new Set([
     ...simpCityArtistLookupQueue.map(item => item.key),
     simpCityArtistLookupActive?.key
   ].filter(Boolean));
   const queued = [];
-  for (const query of names) {
-    const key = query.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  for (const rawName of (Array.isArray(rawNames) ? rawNames : [])) {
+    const variants = simpCityArtistLookupVariants(rawName);
+    if (!variants.length) continue;
+    // One site search per artist prevents punctuation variants from multiplying
+    // authenticated SimpCity page requests. Keep all variants as matching
+    // evidence, but search the readable normalized form once.
+    const query = variants.find(value => /\s/.test(value)) || variants[0];
+    const key = variants.map(value => value.toLowerCase().replace(/[^a-z0-9]+/g, '')).find(Boolean) || '';
     if (!key || existing.has(key)) continue;
     existing.add(key);
-    const item = { id: crypto.randomUUID(), query, key, queuedAt: new Date().toISOString() };
+    const item = { id: crypto.randomUUID(), query, variants, key, queuedAt: new Date().toISOString() };
     simpCityArtistLookupQueue.push(item);
     queued.push(item);
   }
