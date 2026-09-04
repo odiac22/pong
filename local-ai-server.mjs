@@ -333,6 +333,35 @@ const gatewayWarmState = {
   unavailableHosts: [...GATEWAY_ALLOWED_HOSTS],
   error: ''
 };
+const gatewayHttp1FallbackStats = {
+  requests: 0,
+  successes: 0,
+  failures: 0,
+  skipped: 0,
+  consecutiveFailures: 0,
+  backoffUntil: 0,
+  lastStatus: 0
+};
+// HTML listings, profiles, and post pages all hit the same upstream edge even
+// when their public hostnames differ. Space starts globally and stop probing
+// as soon as the edge reports a transient outage. Previously every artist in
+// a large paste performed its own three H2 attempts while the HTTP/1 circuit
+// was open, turning one 503 into thousands of requests and a long-lived block.
+const gatewayHtmlFetchStats = {
+  active: 0,
+  queued: 0,
+  requests: 0,
+  successes: 0,
+  transientFailures: 0,
+  skipped: 0,
+  consecutiveTransientFailures: 0,
+  nextStartAt: 0,
+  backoffUntil: 0,
+  lastStatus: 0,
+  gapMs: Math.max(500, Number(process.env.PONG_GATEWAY_HTML_GAP_MS || 575)),
+  concurrency: Math.max(1, Math.min(2, Number(process.env.PONG_GATEWAY_HTML_CONCURRENCY || 2)))
+};
+const gatewayHtmlFetchWaiters = [];
 const gatewayH2Sessions = new Map();
 const lanBrowserSessions = new Map();
 const LAN_BROWSER_SESSION_MS = 4 * 60 * 60 * 1000;
@@ -453,6 +482,41 @@ function gatewayTargetUrl(raw) {
   return target;
 }
 
+const gatewayCookieJars = new Map();
+
+function gatewayCookieJarFor(target) {
+  const host = gatewayTargetUrl(target).hostname.toLowerCase();
+  if (!gatewayCookieJars.has(host)) gatewayCookieJars.set(host, new Map());
+  return gatewayCookieJars.get(host);
+}
+
+function gatewayCookieHeader(target) {
+  return [...gatewayCookieJarFor(target).entries()]
+    .slice(-24)
+    .map(([name, value]) => `${name}=${value}`)
+    .join('; ');
+}
+
+function gatewayStoreResponseCookies(target, headers = {}) {
+  const values = headers['set-cookie'];
+  const cookies = Array.isArray(values) ? values : values ? [values] : [];
+  if (!cookies.length) return;
+  const jar = gatewayCookieJarFor(target);
+  for (const rawCookie of cookies) {
+    const first = String(rawCookie || '').split(';', 1)[0];
+    const separator = first.indexOf('=');
+    if (separator <= 0) continue;
+    const name = first.slice(0, separator).trim();
+    const value = first.slice(separator + 1).trim();
+    if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(name)) continue;
+    if (!value || /(?:^|;)\s*max-age=0(?:;|$)/i.test(String(rawCookie))) jar.delete(name);
+    else {
+      jar.delete(name);
+      jar.set(name, value);
+    }
+  }
+}
+
 function gatewayH2Session(target) {
   const origin = `${target.protocol}//${target.host}`;
   const existing = gatewayH2Sessions.get(origin);
@@ -470,6 +534,16 @@ function gatewayH2Session(target) {
   });
   gatewayH2Sessions.set(origin, session);
   return session;
+}
+
+function resetGatewayH2Session(rawUrl) {
+  try {
+    const target = gatewayTargetUrl(rawUrl);
+    const origin = `${target.protocol}//${target.host}`;
+    const session = gatewayH2Sessions.get(origin);
+    gatewayH2Sessions.delete(origin);
+    if (session && !session.destroyed) session.destroy();
+  } catch (_) {}
 }
 
 function decodeGatewayH2Body(buffer, encoding) {
@@ -491,14 +565,19 @@ async function gatewayH2Fetch(rawUrl, { signal = null, timeoutMs = GATEWAY_TIMEO
         return;
       }
       const session = gatewayH2Session(target);
-      const request = session.request({
+      const requestHeaders = {
         ':method': method,
         ':path': `${target.pathname}${target.search}`,
         ':authority': target.host,
-        'user-agent': 'Mozilla/5.0 PongLocalGateway/2.0',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'accept-language': 'en-US,en;q=0.9',
+        referer: `${target.protocol}//${target.host}/`,
         'accept-encoding': 'gzip, br'
-      });
+      };
+      const cookie = gatewayCookieHeader(target);
+      if (cookie) requestHeaders.cookie = cookie;
+      const request = session.request(requestHeaders);
       const chunks = [];
       let bytes = 0;
       let headers = {};
@@ -549,6 +628,7 @@ async function gatewayH2Fetch(rawUrl, { signal = null, timeoutMs = GATEWAY_TIMEO
       });
       request.end();
     });
+    gatewayStoreResponseCookies(target, response.headers);
     if (response.status >= 300 && response.status < 400 && response.headers.location) {
       target = gatewayTargetUrl(new URL(String(response.headers.location), target).toString());
       continue;
@@ -556,6 +636,93 @@ async function gatewayH2Fetch(rawUrl, { signal = null, timeoutMs = GATEWAY_TIMEO
     return response;
   }
   throw new Error('too many gateway HTTP/2 redirects');
+}
+
+async function gatewayHttp1BufferFetch(rawUrl, { signal = null, timeoutMs = GATEWAY_TIMEOUT_MS } = {}) {
+  if (signal?.aborted) throw new DOMException('gateway request aborted', 'AbortError');
+  if (Date.now() < gatewayHttp1FallbackStats.backoffUntil) {
+    gatewayHttp1FallbackStats.skipped++;
+    throw new Error('gateway HTTP/1 fallback circuit open');
+  }
+  let target = gatewayTargetUrl(rawUrl);
+  for (let redirect = 0; redirect <= GATEWAY_MAX_REDIRECTS; redirect++) {
+    gatewayHttp1FallbackStats.requests++;
+    const response = await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (error, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        if (error) reject(error);
+        else resolve(value);
+      };
+      const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Connection: 'keep-alive',
+        Referer: `${target.protocol}//${target.host}/`
+      };
+      const cookie = gatewayCookieHeader(target);
+      if (cookie) headers.Cookie = cookie;
+      const request = https.request(target, {
+        method: 'GET',
+        // Use the bounded HTTP/1.1 keep-alive pool. The edge rejects Node's
+        // HTTP/2/undici fingerprints intermittently, but opening a brand-new
+        // socket for every post exhausts Windows' ephemeral port range during
+        // a large Artist Lookup paste.
+        agent: GATEWAY_AGENT,
+        headers
+      }, value => finish(null, value));
+      const abort = () => request.destroy(new DOMException('gateway request aborted', 'AbortError'));
+      const timer = setTimeout(() => request.destroy(new Error('gateway HTTP/1 request timed out')), Math.max(1000, timeoutMs));
+      signal?.addEventListener('abort', abort, { once: true });
+      request.once('error', error => finish(error));
+      request.end();
+    }).catch(error => {
+      gatewayHttp1FallbackStats.failures++;
+      gatewayHttp1FallbackStats.consecutiveFailures++;
+      if (gatewayHttp1FallbackStats.consecutiveFailures >= 3) {
+        gatewayHttp1FallbackStats.backoffUntil = Date.now() + 60000;
+      }
+      throw error;
+    });
+    gatewayStoreResponseCookies(target, response.headers);
+    const status = Number(response.statusCode || 0);
+    gatewayHttp1FallbackStats.lastStatus = status;
+    const location = response.headers.location;
+    if (status >= 300 && status < 400 && location) {
+      response.resume();
+      if (redirect >= GATEWAY_MAX_REDIRECTS) throw new Error('too many gateway HTTP/1 redirects');
+      target = gatewayTargetUrl(new URL(String(location), target).toString());
+      continue;
+    }
+    const chunks = [];
+    let bytes = 0;
+    for await (const chunk of response) {
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += value.length;
+      if (bytes > 8 * 1024 * 1024) {
+        response.destroy(new Error('gateway HTTP/1 response too large'));
+        throw new Error('gateway HTTP/1 response too large');
+      }
+      chunks.push(value);
+    }
+    if (status >= 200 && status < 300) {
+      gatewayHttp1FallbackStats.successes++;
+      gatewayHttp1FallbackStats.consecutiveFailures = 0;
+      gatewayHttp1FallbackStats.backoffUntil = 0;
+    } else {
+      gatewayHttp1FallbackStats.failures++;
+      gatewayHttp1FallbackStats.consecutiveFailures++;
+      if (gatewayHttp1FallbackStats.consecutiveFailures >= 3) {
+        gatewayHttp1FallbackStats.backoffUntil = Date.now() + 60000;
+      }
+    }
+    return { status, headers: response.headers, body: Buffer.concat(chunks) };
+  }
+  throw new Error('gateway HTTP/1 redirect failed');
 }
 
 function gatewayRequest(current, req, controller, method = req.method === 'HEAD' ? 'HEAD' : 'GET') {
@@ -643,6 +810,96 @@ function videoVerifyDelay(ms, signal = null) {
     };
     signal?.addEventListener('abort', abort, { once: true });
   });
+}
+
+function gatewayHtmlReleaseSlot() {
+  gatewayHtmlFetchStats.active = Math.max(0, gatewayHtmlFetchStats.active - 1);
+  const next = gatewayHtmlFetchWaiters.shift();
+  gatewayHtmlFetchStats.queued = gatewayHtmlFetchWaiters.length;
+  next?.();
+}
+
+function gatewayHtmlAcquireSlot(signal = null) {
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException('gateway HTML request aborted', 'AbortError'));
+  }
+  if (gatewayHtmlFetchStats.active < gatewayHtmlFetchStats.concurrency) {
+    gatewayHtmlFetchStats.active++;
+    return Promise.resolve(gatewayHtmlReleaseSlot);
+  }
+  return new Promise((resolve, reject) => {
+    const enter = () => {
+      signal?.removeEventListener('abort', abort);
+      gatewayHtmlFetchStats.active++;
+      gatewayHtmlFetchStats.queued = gatewayHtmlFetchWaiters.length;
+      resolve(gatewayHtmlReleaseSlot);
+    };
+    const abort = () => {
+      const index = gatewayHtmlFetchWaiters.indexOf(enter);
+      if (index >= 0) gatewayHtmlFetchWaiters.splice(index, 1);
+      gatewayHtmlFetchStats.queued = gatewayHtmlFetchWaiters.length;
+      reject(new DOMException('gateway HTML request aborted', 'AbortError'));
+    };
+    gatewayHtmlFetchWaiters.push(enter);
+    gatewayHtmlFetchStats.queued = gatewayHtmlFetchWaiters.length;
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function gatewayHtmlBackoffRemainingMs() {
+  return Math.max(0, gatewayHtmlFetchStats.backoffUntil - Date.now());
+}
+
+function gatewayHtmlTransientStatus(status) {
+  const value = Number(status || 0);
+  return value === 0 || value === 408 || value === 425 || value === 429 || value >= 500;
+}
+
+function gatewayHtmlRecordStatus(status) {
+  const value = Number(status || 0);
+  gatewayHtmlFetchStats.lastStatus = value;
+  if (value >= 200 && value < 300) {
+    gatewayHtmlFetchStats.successes++;
+    gatewayHtmlFetchStats.consecutiveTransientFailures = 0;
+    gatewayHtmlFetchStats.backoffUntil = 0;
+    return;
+  }
+  if (!gatewayHtmlTransientStatus(value)) return;
+  gatewayHtmlFetchStats.transientFailures++;
+  gatewayHtmlFetchStats.consecutiveTransientFailures++;
+  const consecutive = gatewayHtmlFetchStats.consecutiveTransientFailures;
+  if (value === 429 || consecutive >= 3) {
+    const exponent = Math.min(2, Math.max(0, consecutive - 3));
+    const durationMs = value === 429 ? 120_000 : 60_000 * (2 ** exponent);
+    gatewayHtmlFetchStats.backoffUntil = Math.max(
+      gatewayHtmlFetchStats.backoffUntil,
+      Date.now() + durationMs
+    );
+  }
+}
+
+async function gatewayHtmlBeginAttempt(signal = null) {
+  const initialBackoff = gatewayHtmlBackoffRemainingMs();
+  if (initialBackoff > 0) {
+    gatewayHtmlFetchStats.skipped++;
+    throw new Error(`gateway HTML shared backoff (${initialBackoff}ms remaining)`);
+  }
+  const release = await gatewayHtmlAcquireSlot(signal);
+  try {
+    const waitMs = Math.max(0, gatewayHtmlFetchStats.nextStartAt - Date.now());
+    if (waitMs > 0) await videoVerifyDelay(waitMs, signal);
+    const backoff = gatewayHtmlBackoffRemainingMs();
+    if (backoff > 0) {
+      gatewayHtmlFetchStats.skipped++;
+      throw new Error(`gateway HTML shared backoff (${backoff}ms remaining)`);
+    }
+    gatewayHtmlFetchStats.nextStartAt = Date.now() + gatewayHtmlFetchStats.gapMs;
+    gatewayHtmlFetchStats.requests++;
+    return release;
+  } catch (error) {
+    release();
+    throw error;
+  }
 }
 
 function videoVerifyStateForHost(hostname) {
@@ -789,20 +1046,50 @@ async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = nu
   const maxAttempts = 3;
   let lastStatus = 0;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const releaseGatewaySlot = await gatewayHtmlBeginAttempt(signal);
     const controller = new AbortController();
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await gatewayH2Fetch(rawUrl, { signal: controller.signal, timeoutMs });
-      const status = Number(response.status || 0);
-      if (status >= 200 && status < 300) return response.body.toString('utf8');
+      let response;
+      try {
+        response = await gatewayH2Fetch(rawUrl, { signal: controller.signal, timeoutMs });
+      } catch (_) {
+        response = null;
+      }
+      let status = Number(response?.status || 0);
+      if (status >= 200 && status < 300) {
+        gatewayHtmlRecordStatus(status);
+        return response.body.toString('utf8');
+      }
+      let transient = status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
+      if (transient) resetGatewayH2Session(rawUrl);
+      // Some source edges intermittently reject a reused HTTP/2 session while
+      // accepting the same browser request over HTTP/1.1. Fail over inside the
+      // attempt so Artist Lookup does not report a false empty result or spend
+      // several minutes retrying every absent name.
+      if (transient && !controller.signal.aborted) {
+        try {
+          const fallback = await gatewayHttp1BufferFetch(rawUrl, {
+            signal: controller.signal,
+            timeoutMs
+          });
+          status = Number(fallback.status || 0);
+          if (status >= 200 && status < 300) {
+            gatewayHtmlRecordStatus(status);
+            return fallback.body.toString('utf8');
+          }
+          transient = status === 408 || status === 425 || status === 429 || status >= 500;
+        } catch (_) {}
+      }
       lastStatus = status;
-      const transient = status === 408 || status === 425 || status === 429 || status >= 500;
+      gatewayHtmlRecordStatus(status);
       if (!transient || attempt === maxAttempts - 1) break;
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
+      releaseGatewaySlot();
     }
     await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
     if (signal?.aborted) throw new DOMException('gateway request aborted', 'AbortError');
@@ -810,7 +1097,7 @@ async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = nu
   throw new Error(`reservoir HTTP ${lastStatus || 0}`);
 }
 
-function random40ReservoirArtistUrls(html, pageUrl) {
+function random40ReservoirArtistUrls(html, pageUrl, { includeRecent = false } = {}) {
   const urls = [];
   const seen = new Set();
   const pattern = /href\s*=\s*["']([^"']+)["']/gi;
@@ -822,7 +1109,11 @@ function random40ReservoirArtistUrls(html, pageUrl) {
       url.hash = '';
       const value = url.toString().replace(/\/$/, '');
       const identity = random40ReservoirIdentity(value);
-      if (!identity || seen.has(identity) || random40ReservoirRecent.has(identity)) continue;
+      if (
+        !identity ||
+        seen.has(identity) ||
+        (!includeRecent && random40ReservoirRecent.has(identity))
+      ) continue;
       seen.add(identity);
       urls.push(value);
     } catch (_) {}
@@ -2243,21 +2534,30 @@ async function leakedZonePlaylistForDetail(rawUrl) {
   const cached = leakedZonePlaylistCache.get(detailUrl);
   if (cached && cached.expiresAt > now) return cached.promise;
   const promise = (async () => {
-    const detail = await fetchLeakedZoneHtml(detailUrl);
-    const playlistUrl = extractLeakedZonePlaylistUrl(detail.html);
-    if (!playlistUrl) throw new Error('LeakedZone did not expose a playable video');
-    const playlistResponse = await fetch(playlistUrl, {
-      signal: AbortSignal.timeout(15000),
-      headers: {
-        Referer: detailUrl,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36',
-        Accept: 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*'
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const detail = await fetchLeakedZoneHtml(detailUrl);
+        const playlistUrl = extractLeakedZonePlaylistUrl(detail.html);
+        if (!playlistUrl) throw new Error('LeakedZone did not expose a playable video');
+        const playlistResponse = await fetch(playlistUrl, {
+          signal: AbortSignal.timeout(15000),
+          headers: {
+            Referer: detailUrl,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36',
+            Accept: 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*'
+          }
+        });
+        if (!playlistResponse.ok) throw new Error(`LeakedZone playlist HTTP ${playlistResponse.status}`);
+        const playlist = await playlistResponse.text();
+        if (!/^#EXTM3U/m.test(playlist)) throw new Error('LeakedZone returned an invalid playlist');
+        return playlist;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 3) await simpCityDelay(350 * attempt);
       }
-    });
-    if (!playlistResponse.ok) throw new Error(`LeakedZone playlist HTTP ${playlistResponse.status}`);
-    const playlist = await playlistResponse.text();
-    if (!/^#EXTM3U/m.test(playlist)) throw new Error('LeakedZone returned an invalid playlist');
-    return playlist;
+    }
+    throw lastError || new Error('LeakedZone playlist could not be loaded');
   })();
   leakedZonePlaylistCache.set(detailUrl, { promise, expiresAt: now + 45_000 });
   try {
@@ -2322,7 +2622,9 @@ function extractTikTokVideoUrls(sourceUrl, signal = null) {
     const python = path.join(LOCAL_AI_DIR, 'lora-venv', 'Scripts', 'python.exe');
     const child = spawn(python, [
       '-m', 'yt_dlp', '--no-warnings', '--impersonate', 'chrome',
-      '--flat-playlist', '--playlist-end', '20', '--print', 'webpage_url', sourceUrl
+      '--ignore-errors', '--playlist-end', '12', '--skip-download', '-f',
+      'best[vcodec^=h264][ext=mp4]/best[vcodec^=avc1][ext=mp4]/best[ext=mp4]',
+      '--print', '%(webpage_url)s\t%(vcodec)s\t%(ext)s', sourceUrl
     ], {
       cwd: process.cwd(),
       windowsHide: true,
@@ -2346,7 +2648,7 @@ function extractTikTokVideoUrls(sourceUrl, signal = null) {
     const timer = setTimeout(() => {
       child.kill();
       finish(new Error('TikTok extraction timed out'));
-    }, 30000);
+    }, 60000);
     timer.unref?.();
     signal?.addEventListener('abort', abort, { once: true });
     child.stdout.on('data', chunk => {
@@ -2356,8 +2658,15 @@ function extractTikTokVideoUrls(sourceUrl, signal = null) {
     child.stderr.on('data', chunk => { stderr += chunk.toString(); });
     child.on('error', finish);
     child.on('close', code => {
-      const urls = stdout.split(/\r?\n/).map(value => value.trim()).filter(value => {
-        try { return new URL(value).protocol === 'https:'; } catch (_) { return false; }
+      const urls = stdout.split(/\r?\n/).map(value => value.trim()).flatMap(value => {
+        const [rawUrl, rawCodec, rawExt] = value.split('\t');
+        const codec = String(rawCodec || '').toLowerCase();
+        const ext = String(rawExt || '').toLowerCase();
+        if (!codec || codec === 'none' || codec === 'na' || (ext && ext !== 'mp4')) return [];
+        try {
+          const url = new URL(rawUrl);
+          return url.protocol === 'https:' && isTikTokVideoPageUrl(url.toString()) ? [url.toString()] : [];
+        } catch (_) { return []; }
       });
       if (urls.length) finish(null, [...new Set(urls)].slice(0, 20));
       else finish(new Error(stderr.trim() || `TikTok extractor exited ${code}`));
@@ -2447,6 +2756,11 @@ const SIMPCITY_JOB_RETENTION_MS = 30 * 60 * 1000;
 let simpCitySessionCache;
 let simpCityLoginState = null;
 const simpCityBackgroundRuns = new Map();
+let simpCityArtistLookupBrowserCache = null;
+let simpCityArtistLookupBrowserExpiryTimer = null;
+let gatewayArtistLookupBrowserCache = null;
+let gatewayArtistLookupBrowserExpiryTimer = null;
+let gatewayArtistLookupBrowserTail = Promise.resolve();
 let simpCitySourceNextRequestAt = 0;
 let simpCitySourcePauseUntil = 0;
 let simpCitySourceAdaptiveGapMs = SIMPCITY_BROWSER_REQUEST_GAP_MS;
@@ -2508,6 +2822,12 @@ function simpCityArtistLookupVariants(rawName) {
   const compact = spaced.replace(/[^a-z0-9]+/gi, '');
   return [...new Set([raw, spaced, spaced.replace(/\s+/g, '_'), spaced.replace(/\s+/g, '-'), compact]
     .map(value => value.trim()).filter(value => value.length >= 3))];
+}
+
+function normalizeSimpCityArtistQuery(rawQuery) {
+  const query = String(rawQuery || '').trim().replace(/^[@#]+/, '').slice(0, 100);
+  if (!query || query.length < 3 || /[\r\n]/.test(query)) return '';
+  return query;
 }
 
 function enqueueSimpCityArtistLookup(rawNames) {
@@ -3084,7 +3404,7 @@ async function reserveSimpCityDebugPort() {
   return port;
 }
 
-async function startSimpCityBrowser({ headless, hidden = false, allowLoopback = false, targetUrl, cookies = [], userAgent = '' }) {
+async function startSimpCityBrowser({ headless, hidden = false, allowLoopback = false, preserveMediaUrls = false, stealth = false, targetUrl, cookies = [], userAgent = '' }) {
   try {
     await fs.access(SIMPCITY_CHROME_PATH);
   } catch (_) {
@@ -3108,6 +3428,7 @@ async function startSimpCityBrowser({ headless, hidden = false, allowLoopback = 
     '--media-cache-size=1',
     '--window-size=1100,800'
   ];
+  if (stealth) args.push('--disable-blink-features=AutomationControlled');
   if (allowLoopback) args.push('--disable-web-security', '--allow-running-insecure-content');
   if (hidden) args.push('--window-position=-32000,-32000');
   if (userAgent) args.push(`--user-agent=${userAgent}`);
@@ -3150,11 +3471,17 @@ async function startSimpCityBrowser({ headless, hidden = false, allowLoopback = 
     await cdp.send('Network.setBlockedURLs', { urls: SIMPCITY_MEDIA_BLOCK_PATTERNS });
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
       source: `(() => {
+        ${stealth === true ? `try { Object.defineProperty(navigator, 'webdriver', { configurable: true, get: () => undefined }); } catch (_) {}
+        try { Object.defineProperty(navigator, 'languages', { configurable: true, get: () => ['en-US', 'en'] }); } catch (_) {}` : ''}
         const disableMedia = () => {
           document.querySelectorAll('video,audio').forEach(media => {
             try { media.pause(); } catch (_) {}
-            media.removeAttribute('src');
-            media.querySelectorAll('source').forEach(source => source.removeAttribute('src'));
+            media.muted = true;
+            media.volume = 0;
+            if (${preserveMediaUrls === true ? 'false' : 'true'}) {
+              media.removeAttribute('src');
+              media.querySelectorAll('source').forEach(source => source.removeAttribute('src'));
+            }
             media.style.setProperty('display', 'none', 'important');
           });
         };
@@ -3205,6 +3532,134 @@ async function startSimpCityBrowser({ headless, hidden = false, allowLoopback = 
   }
 }
 
+function gatewayArtistLookupBrowserUrl(rawUrl) {
+  const url = gatewayTargetUrl(rawUrl);
+  if (url.hostname.endsWith('coomerfans.com')) {
+    url.hostname = 'onlyfaphouse.com';
+    if (/^\/u\//i.test(url.pathname)) url.pathname = url.pathname.replace(/^\/u\//i, '/c/');
+  }
+  return url.toString();
+}
+
+async function stopGatewayArtistLookupBrowser() {
+  if (gatewayArtistLookupBrowserExpiryTimer) clearTimeout(gatewayArtistLookupBrowserExpiryTimer);
+  gatewayArtistLookupBrowserExpiryTimer = null;
+  const browser = gatewayArtistLookupBrowserCache;
+  gatewayArtistLookupBrowserCache = null;
+  if (browser) await stopSimpCityBrowser(browser).catch(() => {});
+}
+
+async function getGatewayArtistLookupBrowser(targetUrl) {
+  const cached = gatewayArtistLookupBrowserCache;
+  if (cached?.child?.exitCode === null) {
+    const ready = await cached.cdp.evaluate('document.readyState !== "loading"', 3000).catch(() => false);
+    if (ready) return cached;
+  }
+  await stopGatewayArtistLookupBrowser();
+  gatewayArtistLookupBrowserCache = await startSimpCityBrowser({
+    headless: false,
+    hidden: true,
+    preserveMediaUrls: true,
+    stealth: true,
+    targetUrl,
+    cookies: [],
+    userAgent: ''
+  });
+  return gatewayArtistLookupBrowserCache;
+}
+
+function gatewayArtistLookupBrowserHtml(rawUrl, { signal = null, timeoutMs = 30000 } = {}) {
+  const targetUrl = gatewayArtistLookupBrowserUrl(rawUrl);
+  const run = gatewayArtistLookupBrowserTail.catch(() => {}).then(async () => {
+    if (signal?.aborted) throw new DOMException('gateway browser request aborted', 'AbortError');
+    let browser = await getGatewayArtistLookupBrowser(targetUrl);
+    try {
+      await browser.cdp.send('Page.navigate', { url: targetUrl }, Math.max(5000, timeoutMs));
+      await simpCityWaitFor(
+        () => browser.cdp.evaluate('document.readyState !== "loading"', 3000).catch(() => false),
+        Math.max(5000, timeoutMs),
+        'gateway browser page',
+        150
+      );
+      const readPage = () => browser.cdp.evaluate(`(() => ({
+          title: String(document.title || ''),
+          text: String(document.body?.innerText || '').slice(0, 1200),
+          html: String(document.documentElement?.outerHTML || '')
+        }))()`, Math.max(5000, timeoutMs));
+      let page = await readPage();
+      const accessDeadline = Date.now() + Math.min(20_000, Math.max(5000, timeoutMs - 2000));
+      while (
+        /checking your browser|verifying you are human/i.test(`${page?.title || ''} ${page?.text || ''}`) &&
+        Date.now() < accessDeadline
+      ) {
+        await simpCityDelay(1000);
+        page = await readPage();
+      }
+      if (/checking your browser|verify you are human|too many requests|rate limit/i.test(`${page?.title || ''} ${page?.text || ''}`)) {
+        throw new Error(`gateway browser access check: ${page?.title || 'blocked'}`);
+      }
+      if (!page?.html || page.html.length < 200) throw new Error('gateway browser returned an empty page');
+      return page.html;
+    } catch (error) {
+      await stopGatewayArtistLookupBrowser();
+      browser = null;
+      throw error;
+    } finally {
+      if (browser && gatewayArtistLookupBrowserCache === browser) {
+        if (gatewayArtistLookupBrowserExpiryTimer) clearTimeout(gatewayArtistLookupBrowserExpiryTimer);
+        gatewayArtistLookupBrowserExpiryTimer = setTimeout(() => {
+          void stopGatewayArtistLookupBrowser();
+        }, 10 * 60_000);
+        gatewayArtistLookupBrowserExpiryTimer.unref?.();
+      }
+    }
+  });
+  gatewayArtistLookupBrowserTail = run.catch(() => {});
+  return run;
+}
+
+function gatewayArtistLookupBrowserHtmlBatch(rawUrls, { signal = null, timeoutMs = 30000 } = {}) {
+  const targetUrls = [...new Set((rawUrls || []).map(gatewayArtistLookupBrowserUrl))].slice(0, 10);
+  if (!targetUrls.length) return Promise.resolve([]);
+  const run = gatewayArtistLookupBrowserTail.catch(() => {}).then(async () => {
+    if (signal?.aborted) throw new DOMException('gateway browser request aborted', 'AbortError');
+    const browser = await getGatewayArtistLookupBrowser('https://onlyfaphouse.com/');
+    const origin = await browser.cdp.evaluate('String(location.origin || "")', 3000).catch(() => '');
+    if (origin !== 'https://onlyfaphouse.com') {
+      await browser.cdp.send('Page.navigate', { url: 'https://onlyfaphouse.com/' }, timeoutMs);
+      await simpCityWaitFor(
+        () => browser.cdp.evaluate('document.readyState !== "loading"', 3000).catch(() => false),
+        timeoutMs,
+        'gateway browser origin',
+        150
+      );
+    }
+    const results = await browser.cdp.evaluate(`(async () => {
+      const urls = ${JSON.stringify(targetUrls)};
+      return Promise.all(urls.map(async url => {
+        try {
+          const response = await fetch(url, {
+            credentials: 'include',
+            cache: 'no-store',
+            signal: AbortSignal.timeout(${Math.max(5000, Number(timeoutMs || 30000))})
+          });
+          return { url, status: response.status, html: response.ok ? await response.text() : '' };
+        } catch (error) {
+          return { url, status: 0, html: '', error: String(error?.message || error) };
+        }
+      }));
+    })()`, timeoutMs + 5000);
+    if (gatewayArtistLookupBrowserExpiryTimer) clearTimeout(gatewayArtistLookupBrowserExpiryTimer);
+    gatewayArtistLookupBrowserExpiryTimer = setTimeout(() => {
+      void stopGatewayArtistLookupBrowser();
+    }, 10 * 60_000);
+    gatewayArtistLookupBrowserExpiryTimer.unref?.();
+    return Array.isArray(results) ? results : [];
+  });
+  gatewayArtistLookupBrowserTail = run.catch(() => {});
+  return run;
+}
+
 function normalizeSimpCityBackgroundUrl(rawValue) {
   try {
     const url = new URL(String(rawValue || '').trim());
@@ -3222,10 +3677,99 @@ function normalizeSimpCityBackgroundUrl(rawValue) {
   }
 }
 
-async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved = true) {
-  const targetUrl = normalizeSimpCityBackgroundUrl(rawUrl);
+function takeReusableSimpCityArtistLookupBrowser() {
+  if (simpCityArtistLookupBrowserExpiryTimer) {
+    clearTimeout(simpCityArtistLookupBrowserExpiryTimer);
+    simpCityArtistLookupBrowserExpiryTimer = null;
+  }
+  const browser = simpCityArtistLookupBrowserCache;
+  simpCityArtistLookupBrowserCache = null;
+  if (!browser || browser.child?.exitCode !== null) return null;
+  return browser;
+}
+
+async function keepReusableSimpCityArtistLookupBrowser(browser) {
+  if (!browser || browser.child?.exitCode !== null) {
+    await stopSimpCityBrowser(browser).catch(() => {});
+    return false;
+  }
+  const previous = simpCityArtistLookupBrowserCache;
+  simpCityArtistLookupBrowserCache = browser;
+  if (previous && previous !== browser) await stopSimpCityBrowser(previous).catch(() => {});
+  if (simpCityArtistLookupBrowserExpiryTimer) clearTimeout(simpCityArtistLookupBrowserExpiryTimer);
+  simpCityArtistLookupBrowserExpiryTimer = setTimeout(() => {
+    const expired = simpCityArtistLookupBrowserCache;
+    if (expired !== browser) return;
+    simpCityArtistLookupBrowserCache = null;
+    simpCityArtistLookupBrowserExpiryTimer = null;
+    void stopSimpCityBrowser(expired).catch(() => {});
+  }, 120_000);
+  simpCityArtistLookupBrowserExpiryTimer.unref?.();
+  return true;
+}
+
+async function submitSimpCityArtistSearch(browser, rawQuery, signal = null) {
+  const query = normalizeSimpCityArtistQuery(rawQuery);
+  if (!query) throw new Error('A valid artist query is required');
+  const permit = reserveSimpCitySourceRequest(3);
+  if (permit.waitMs) await simpCityDelay(permit.waitMs);
+  if (signal?.aborted) throw new Error('The previous Artist Lookup search was replaced');
+  const submission = await browser.cdp.evaluate(`(() => {
+    const input = document.querySelector(
+      'form[action*="/search"] input[name="keywords"], form[action*="/search"] input[name="q"], input[name="keywords"], input[name="q"]'
+    );
+    const form = input?.closest('form');
+    if (!input || !form) {
+      return {
+        ok: false,
+        url: location.href,
+        title: document.title,
+        reason: 'search form not found',
+        inputs: [...document.querySelectorAll('input')].slice(0, 20).map(item => item.name || item.type || ''),
+        forms: [...document.forms].slice(0, 10).map(item => item.action || '')
+      };
+    }
+    input.focus();
+    input.value = ${JSON.stringify(query)};
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    const order = form.querySelector('[name="o"]');
+    if (order) order.value = 'date';
+    if (typeof form.requestSubmit === 'function') form.requestSubmit();
+    else form.submit();
+    return { ok: true, url: location.href, action: form.action || '' };
+  })()`, 15_000);
+  if (!submission?.ok) {
+    throw new Error(
+      `SimpCity artist search could not start: ${submission?.reason || 'search form unavailable'} ` +
+      `(${submission?.title || 'untitled'} at ${submission?.url || 'unknown URL'}; ` +
+      `inputs=${(submission?.inputs || []).join(',')}; forms=${(submission?.forms || []).join(',')})`
+    );
+  }
+  const result = await simpCityWaitFor(async () => {
+    if (signal?.aborted) throw new Error('The previous Artist Lookup search was replaced');
+    const page = await browser.cdp.evaluate(`(() => ({
+      url: location.href,
+      ready: document.readyState,
+      title: document.title,
+      login: Boolean(document.querySelector('form[action*="login"], input[name="login"]')),
+      blocked: /checking your browser|just a moment|access denied|ddos-guard/i.test(document.title + ' ' + document.body?.innerText?.slice(0, 500))
+    }))()`, 5000).catch(() => null);
+    if (!page || page.ready === 'loading') return '';
+    if (page.login) throw new Error('SimpCity session reached the login page while searching');
+    if (page.blocked) throw new Error('SimpCity access check blocked the artist search');
+    const resolved = normalizeSimpCityBackgroundUrl(page.url);
+    return resolved && /^\/search\/\d+\//i.test(new URL(resolved).pathname) ? resolved : '';
+  }, 60_000, `SimpCity search results for ${query}`, 250);
+  return result;
+}
+
+async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved = true, rawArtistQuery = '') {
+  const artistQuery = normalizeSimpCityArtistQuery(rawArtistQuery);
+  const requestedUrl = artistQuery ? 'https://simpcity.cr/search/' : rawUrl;
+  const targetUrl = normalizeSimpCityBackgroundUrl(requestedUrl);
   if (!targetUrl) throw new Error('A valid SimpCity thread, tag, search, or forum URL is required');
-  const resumeRequested = resumeFromSaved !== false;
+  const resumeRequested = !artistQuery && resumeFromSaved !== false;
   const profileCursor = resumeRequested
     ? await pongProfileCursorStatsForSource(targetUrl)
     : { passedProfiles: 0 };
@@ -3248,7 +3792,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
     await stopSimpCityBrowser(previous?.browser).catch(() => {});
     const login = await startSimpCityInteractiveLogin(targetUrl);
     const run = {
-      id: crypto.randomUUID(), channel, targetUrl, controller: new AbortController(), browser: null,
+      id: crypto.randomUUID(), channel, targetUrl, artistQuery, controller: new AbortController(), browser: null,
       state: 'waiting_for_login', status: 'Open Pong and press Recall to finish the one-time PC login',
       startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: ''
     };
@@ -3274,7 +3818,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
   await stopSimpCityBrowser(previous?.browser).catch(() => {});
   const controller = new AbortController();
   const run = {
-    id: crypto.randomUUID(), channel, targetUrl, controller, browser: null,
+    id: crypto.randomUUID(), channel, targetUrl, artistQuery, controller, browser: null,
     state: 'starting',
     status: profileResume
       ? `Pong ${channel}: resuming after the last passed profile`
@@ -3284,16 +3828,27 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
     startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: ''
   };
   simpCityBackgroundRuns.set(channel, run);
-  let browser = null;
+  let browser = artistQuery && channel === 3
+    ? takeReusableSimpCityArtistLookupBrowser()
+    : null;
   try {
-    browser = await startSimpCityBrowser({
-      headless: false,
-      hidden: true,
-      allowLoopback: true,
-      targetUrl: navigationUrl,
-      cookies: session.cookies,
-      userAgent: session.userAgent
-    });
+    if (browser) {
+      const reusable = await browser.cdp.evaluate('document.readyState !== "loading"', 3000).catch(() => false);
+      if (!reusable) {
+        await stopSimpCityBrowser(browser).catch(() => {});
+        browser = null;
+      }
+    }
+    if (!browser) {
+      browser = await startSimpCityBrowser({
+        headless: false,
+        hidden: true,
+        allowLoopback: true,
+        targetUrl: navigationUrl,
+        cookies: session.cookies,
+        userAgent: session.userAgent
+      });
+    }
     run.browser = browser;
     if (controller.signal.aborted) throw new Error('The previous Recall run was replaced');
     const auth = await simpCityBrowserAuthState(browser);
@@ -3303,11 +3858,20 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
     if (auth?.hasLoginForm || auth?.loginPath) {
       throw new Error('Transferred SimpCity session reached the login page');
     }
+    const scrapeSourceUrl = artistQuery
+      ? await submitSimpCityArtistSearch(browser, artistQuery, controller.signal)
+      : targetUrl;
+    run.targetUrl = scrapeSourceUrl;
+    run.status = artistQuery
+      ? `Pong ${channel}: searching SimpCity for ${artistQuery}`
+      : run.status;
+    run.updatedAt = new Date().toISOString();
     const userscript = await fs.readFile(path.join(process.cwd(), 'pong-simpcity.user.js'), 'utf8');
     const shim = `(() => {
       globalThis.PONG_PC_BACKGROUND_CONTEXT = true;
       globalThis.PONG_SIMPCITY_CHANNEL = ${channel};
-      globalThis.PONG_SIMPCITY_SOURCE_URL = ${JSON.stringify(targetUrl)};
+      globalThis.PONG_SIMPCITY_SOURCE_URL = ${JSON.stringify(scrapeSourceUrl)};
+      globalThis.PONG_SIMPCITY_ARTIST_QUERY = ${JSON.stringify(artistQuery)};
       globalThis.PONG_SIMPCITY_RESUME_SKIP_PROFILES = ${Math.max(0, Number(profileCursor.passedProfiles || 0))};
       globalThis.PONG_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787'];
       const request = options => {
@@ -3330,6 +3894,10 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
     })();`;
     await browser.cdp.evaluate(`${shim}\n${userscript}`, 30_000);
     const clicked = await browser.cdp.evaluate(`(() => {
+      if (typeof globalThis.PONG_RUN_SIMPCITY_SCRAPE === 'function') {
+        globalThis.PONG_RUN_SIMPCITY_SCRAPE(${channel});
+        return true;
+      }
       const button = document.querySelector('[data-scrape="${channel}"]');
       if (!button) return false;
       button.click();
@@ -3347,6 +3915,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
     throw error;
   }
   void (async () => {
+    let terminalState = '';
     try {
       const deadline = Date.now() + 6 * 60 * 60_000;
       while (!controller.signal.aborted && Date.now() < deadline) {
@@ -3365,7 +3934,8 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
           const hasResults = Boolean(
             recallState.payload?.names?.length || recallState.payload?.albums?.length
           );
-          run.state = hasResults ? 'complete' : 'empty';
+          terminalState = hasResults ? 'complete' : 'empty';
+          run.state = 'finishing';
           if (!hasResults) {
             run.status = `Pong ${channel}: finished - no creators or playable media found`;
           }
@@ -3373,7 +3943,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
         }
         if (/failed:/i.test(status)) throw new Error(status);
       }
-      if (!controller.signal.aborted && !['complete', 'empty'].includes(run.state)) {
+      if (!controller.signal.aborted && !terminalState) {
         throw new Error('SimpCity background scrape timed out');
       }
     } catch (error) {
@@ -3382,10 +3952,15 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
         run.error = String(error?.message || error).slice(0, 500);
       }
     } finally {
-      await stopSimpCityBrowser(run.browser).catch(() => {});
+      const reusable = Boolean(
+        artistQuery && channel === 3 && terminalState && !controller.signal.aborted
+      );
+      if (reusable) await keepReusableSimpCityArtistLookupBrowser(run.browser);
+      else await stopSimpCityBrowser(run.browser).catch(() => {});
       run.browser = null;
       run.updatedAt = new Date().toISOString();
       if (controller.signal.aborted) run.state = 'cancelled';
+      else if (terminalState) run.state = terminalState;
     }
   })();
   return {
@@ -4934,10 +5509,14 @@ function startSimpCityImportJob(rawThreadUrl) {
 
 function startSimpCityNamesJob(rawNames, rawSourceUrl = '', { aiExtracted = false } = {}) {
   const suppliedNames = (Array.isArray(rawNames) ? rawNames : []).map(name => String(name || '').trim());
-  const names = [...new Set((aiExtracted
-    ? suppliedNames.filter(name => name.length >= 2 && name.length <= 100 && name.replace(/[^a-z0-9]+/gi, '').length >= 2)
-    : suppliedNames.flatMap(name => simpCityCreatorAliases(name)).filter(isDistinctSimpCityCreatorName)
-  ))].slice(0, 1000);
+  // Explicit Artist Lookup input is authoritative. The heuristic used to
+  // reject ambiguous names extracted from arbitrary post text must never drop
+  // short real handles such as Kilri or gumiho from a pasted creator list.
+  const names = [...new Set(suppliedNames.filter(name => (
+    name.length >= (aiExtracted ? 2 : 3) &&
+    name.length <= 100 &&
+    name.replace(/[^a-z0-9]+/gi, '').length >= (aiExtracted ? 2 : 3)
+  )))].slice(0, 1000);
   if (!names.length) throw new Error('No SimpCity creator names were supplied');
   const id = crypto.randomUUID();
   const timestamp = new Date().toISOString();
@@ -4956,6 +5535,7 @@ function startSimpCityNamesJob(rawNames, rawSourceUrl = '', { aiExtracted = fals
     creators: names.map(name => ({
       name,
       query: name,
+      queries: simpCityArtistLookupVariants(name),
       key: name.toLowerCase().replace(/[^a-z0-9]+/g, '')
     })).filter(item => item.key),
     creatorsSearched: 0,
@@ -4977,9 +5557,17 @@ function startSimpCityNamesJob(rawNames, rawSourceUrl = '', { aiExtracted = fals
         return;
       }
       job.activeCreators.set(candidate.key, candidate.name);
-      const searchUrl = buildBAlbumsCreatorSearchUrl(candidate.query);
+      let searchUrl = buildBAlbumsCreatorSearchUrl(candidate.query);
       try {
-        const matching = bunkrAlbumsMatchingCreator(await discoverBunkrAlbums(searchUrl), candidate);
+        let matching = [];
+        for (const query of (candidate.queries || [candidate.query]).slice(0, 3)) {
+          searchUrl = buildBAlbumsCreatorSearchUrl(query);
+          matching = bunkrAlbumsMatchingCreator(
+            await discoverBunkrAlbums(searchUrl),
+            { ...candidate, query }
+          );
+          if (matching.length) break;
+        }
         if (job.cancelled || job.skippedCreatorKeys.has(candidate.key)) return;
         for (const album of matching) {
           if (job.skippedCreatorKeys.has(candidate.key)) break;
@@ -5051,6 +5639,8 @@ function simpCityRecallFingerprint(threadUrl, names) {
 
 process.once('exit', () => {
   try { simpCityLoginState?.browser?.child?.kill(); } catch (_) {}
+  try { simpCityArtistLookupBrowserCache?.child?.kill(); } catch (_) {}
+  try { gatewayArtistLookupBrowserCache?.child?.kill(); } catch (_) {}
   for (const run of simpCityBackgroundRuns.values()) {
     try { run?.browser?.child?.kill(); } catch (_) {}
   }
@@ -5079,6 +5669,41 @@ function extractVideoUrlsFromHtml(html, postUrl) {
   return urls;
 }
 
+async function artistLookupBrowserPostEntries(postUrls, artistInfo, stopAt, signal = null) {
+  const entries = [];
+  const seen = new Set();
+  const targets = (postUrls || []).slice(0, 30);
+  for (let offset = 0; offset < targets.length; offset += 8) {
+    if (signal?.aborted) throw new DOMException('gateway browser request aborted', 'AbortError');
+    const pages = await gatewayArtistLookupBrowserHtmlBatch(
+      targets.slice(offset, offset + 8),
+      { signal, timeoutMs: 25000 }
+    ).catch(() => []);
+    for (const page of pages) {
+      if (Number(page?.status || 0) < 200 || Number(page?.status || 0) >= 300 || !page?.html) continue;
+      for (const [postIndex, videoUrl] of extractVideoUrlsFromHtml(page.html, page.url).entries()) {
+        const key = String(videoUrl || '');
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        entries.push({
+          ...artistInfo,
+          type: 'video',
+          videoUrl,
+          mediaKey: videoUrl,
+          postUrl: page.url,
+          postIndex,
+          alternateVideoUrls: [],
+          playbackProbeVerified: false,
+          playbackFastStart: false,
+          browserResolved: true
+        });
+        if (entries.length >= stopAt) return entries;
+      }
+    }
+  }
+  return entries;
+}
+
 async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, groupId, priorityControl = null) {
   const normalizedPostUrl = gatewayTargetUrl(postUrl).toString();
   const cached = videoVerifyCache.get(normalizedPostUrl);
@@ -5096,19 +5721,33 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, gro
     const timer = setTimeout(() => controller.abort(), Math.min(GATEWAY_TIMEOUT_MS, 16000));
     try {
       const sourceStarted = Date.now();
-      let response = await gatewayH2Fetch(normalizedPostUrl, {
-        signal: controller.signal,
-        timeoutMs: Math.min(GATEWAY_TIMEOUT_MS, 16000)
-      });
-      if (Number(response.status || 0) === 429) {
-        const retryAfterSeconds = Number(response.headers['retry-after'] || 0);
-        hostState.rateLimits++;
-        hostState.backoffUntil = Math.max(hostState.backoffUntil, Date.now() + Math.min(5000, Math.max(500, retryAfterSeconds * 1000)));
-        await videoVerifyDelay(Math.max(0, hostState.backoffUntil - Date.now()), controller.signal);
+      let response;
+      try {
         response = await gatewayH2Fetch(normalizedPostUrl, {
           signal: controller.signal,
           timeoutMs: Math.min(GATEWAY_TIMEOUT_MS, 16000)
         });
+      } catch (_) {
+        response = null;
+      }
+      if (
+        !controller.signal.aborted &&
+        (!response || Number(response.status || 0) === 408 || Number(response.status || 0) === 425 || Number(response.status || 0) >= 500)
+      ) {
+        resetGatewayH2Session(normalizedPostUrl);
+        response = await gatewayHttp1BufferFetch(normalizedPostUrl, {
+          signal: controller.signal,
+          timeoutMs: Math.min(GATEWAY_TIMEOUT_MS, 16000)
+        });
+      }
+      if (Number(response.status || 0) === 429) {
+        const retryAfterSeconds = Number(response.headers['retry-after'] || 0);
+        hostState.rateLimits++;
+        hostState.backoffUntil = Math.max(
+          hostState.backoffUntil,
+          Date.now() + Math.min(120000, Math.max(30000, retryAfterSeconds * 1000))
+        );
+        throw new Error('video post HTTP 429; shared host backoff engaged');
       }
       const status = Number(response.status || 0);
       if (status < 200 || status >= 300) {
@@ -11021,6 +11660,128 @@ async function local2FlashVerifyProfile(profile, context) {
     }));
 }
 
+async function artistLookupGatewayProfileVideos(candidate, { signal = null } = {}) {
+  const artistUrl = gatewayTargetUrl(candidate?.artistUrl).toString();
+  const artistInfo = random40ReservoirArtistInfo(artistUrl);
+  const maximumPages = Math.max(1, Math.min(12, Number(process.env.PONG_ARTIST_LOOKUP_GATEWAY_PAGES || 6)));
+  const maximumVideos = Math.max(5, Math.min(40, Number(process.env.PONG_ARTIST_LOOKUP_GATEWAY_VIDEOS || 20)));
+  const videos = [];
+  const seenVideos = new Set();
+  const seenPosts = new Set();
+  let sourcePagesScanned = 0;
+  let postCandidates = 0;
+
+  const fetchProfilePage = async page => {
+    const primaryUrl = random40ReservoirProfilePageUrl(artistUrl, page);
+    try {
+      return await random40ReservoirFetchHtml(primaryUrl, page === 1 ? 12000 : 9000, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const mirrorUrl = new URL(primaryUrl);
+      if (mirrorUrl.hostname.endsWith('coomerfans.com')) mirrorUrl.hostname = 'onlyfaphouse.com';
+      else if (mirrorUrl.hostname.endsWith('onlyfaphouse.com')) mirrorUrl.hostname = 'coomerfans.com';
+      else throw error;
+      try {
+        return await random40ReservoirFetchHtml(mirrorUrl.toString(), page === 1 ? 12000 : 9000, signal);
+      } catch (_) {
+        // The upstream edge can reject Node transports while the ordinary
+        // browser page remains available. Use a separate muted/off-screen
+        // Chrome profile so recovery never touches the user's tabs.
+        return gatewayArtistLookupBrowserHtml(mirrorUrl.toString(), {
+          signal,
+          timeoutMs: page === 1 ? 30000 : 25000
+        });
+      }
+    }
+  };
+
+  for (let page = 1; page <= maximumPages && videos.length < maximumVideos; page++) {
+    let html;
+    try {
+      html = await fetchProfilePage(page);
+    } catch (error) {
+      if (page === 1) throw error;
+      break;
+    }
+    if (random40ReservoirProfileScore(html).posts <= 0) break;
+    sourcePagesScanned = page;
+
+    // Artist Lookup is an explicit retrieval request, not Local2 discovery.
+    // Resolve media from the requested profile without applying Local2's
+    // 15-video, text, body, or preference acceptance gates. Video-post hints
+    // stay first for speed, while the complete page remains the authority.
+    const pagePostUrls = [];
+    for (const postUrl of [
+      ...local2LikelyVideoPostUrls(html, artistUrl),
+      ...local2VideoPostUrls(html, artistUrl)
+    ]) {
+      const postKey = canonicalVideoPostKey(postUrl);
+      if (!postKey || seenPosts.has(postKey)) continue;
+      seenPosts.add(postKey);
+      pagePostUrls.push(postUrl);
+    }
+    postCandidates += pagePostUrls.length;
+    if (!pagePostUrls.length) continue;
+
+    const remaining = maximumVideos - videos.length;
+    let verified = [];
+    if (gatewayHtmlBackoffRemainingMs() <= 0) {
+      const result = await verifyVideoPostBatch({
+        postUrls: pagePostUrls,
+        stopAt: remaining,
+        perArtistConcurrency: 4,
+        artistInfo
+      }, signal).catch(() => ({ entries: [] }));
+      verified = Array.isArray(result?.entries) ? result.entries : [];
+    }
+    if (!verified.length) {
+      verified = await artistLookupBrowserPostEntries(
+        pagePostUrls,
+        artistInfo,
+        remaining,
+        signal
+      ).catch(() => []);
+    }
+    for (const entry of verified) {
+      const mediaKey = canonicalVideoEntryKey(entry);
+      if (!mediaKey || seenVideos.has(mediaKey)) continue;
+      seenVideos.add(mediaKey);
+      videos.push({
+        videoUrl: entry.videoUrl,
+        postUrl: entry.postUrl,
+        postIndex: Number(entry.postIndex || 0),
+        alternateVideoUrls: Array.isArray(entry.alternateVideoUrls) ? entry.alternateVideoUrls : [],
+        verified: entry.playbackProbeVerified === true,
+        fastStart: entry.playbackFastStart === true
+      });
+      if (videos.length >= maximumVideos) break;
+    }
+
+    // Five is the player's immediate window. Scan one additional listing page
+    // after reaching it so the second-video gesture normally has deferred media
+    // ready, without crawling a full account before publishing the artist.
+    if (videos.length >= 5 && page >= 2) break;
+  }
+
+  return { artistInfo, videos, sourcePagesScanned, postCandidates };
+}
+
+function artistLookupRequestedCandidates(payload, maximum = 8) {
+  const values = [payload?.username, ...(Array.isArray(payload?.aliases) ? payload.aliases : [])];
+  const candidates = [];
+  const seen = new Set();
+  for (const value of values) {
+    const clean = String(value || '').trim().replace(/^@+/, '');
+    if (!/^[a-z0-9_.\- ]{3,100}$/i.test(clean)) continue;
+    const identity = clean.toLowerCase();
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    candidates.push(clean);
+    if (candidates.length >= maximum) break;
+  }
+  return candidates;
+}
+
 let local2FlashMediaProbeActive = 0;
 const local2FlashMediaProbeWaiters = [];
 let local2FlashPlaybackPriorityUntil = 0;
@@ -12026,7 +12787,12 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/background/start') {
       const payload = JSON.parse(await readBody(req) || '{}');
-      json(res, 200, { ok: true, ...(await startSimpCityBackgroundRecall(payload?.url, payload?.channel, payload?.resumeFromSaved !== false)) });
+      json(res, 200, { ok: true, ...(await startSimpCityBackgroundRecall(
+        payload?.url,
+        payload?.channel,
+        payload?.resumeFromSaved !== false,
+        payload?.artistQuery
+      )) });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/simpcity/resume/status') {
@@ -12083,6 +12849,7 @@ const server = http.createServer(async (req, res) => {
       const run = simpCityBackgroundRuns.get(channel);
       json(res, 200, { ok: true, channel, run: run ? {
         id: run.id, state: run.state, targetUrl: run.targetUrl, status: run.status || '',
+        artistQuery: run.artistQuery || '',
         error: run.error || '', profileResume: run.profileResume === true,
         passedProfiles: Number(run.passedProfiles || 0),
         startedAt: run.startedAt, updatedAt: run.updatedAt
@@ -12093,9 +12860,40 @@ const server = http.createServer(async (req, res) => {
       const payload = JSON.parse(await readBody(req) || '{}');
       const username = String(payload?.username || '').trim().replace(/^@+/, '');
       if (!/^[a-z0-9_.-]{3,64}$/i.test(username)) throw new Error('A valid exact TikTok username is required');
-      const profileUrl = `https://www.tiktok.com/@${username}`;
-      const videos = await extractTikTokVideoUrls(profileUrl);
-      json(res, 200, { ok: true, username, profileUrl, videos, count: videos.length });
+      const candidates = artistLookupRequestedCandidates(payload, 6)
+        .filter(value => /^[a-z0-9_.-]{3,64}$/i.test(value));
+      const errors = [];
+      for (const candidate of candidates) {
+        const profileUrl = `https://www.tiktok.com/@${candidate}`;
+        try {
+          const videos = await extractTikTokVideoUrls(profileUrl);
+          if (videos.length) {
+            json(res, 200, {
+              ok: true,
+              username,
+              matchedUsername: candidate,
+              profileUrl,
+              videos,
+              count: videos.length,
+              candidatesChecked: candidates.indexOf(candidate) + 1
+            });
+            return;
+          }
+        } catch (error) {
+          errors.push(`${candidate}: ${String(error?.message || error)}`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 350));
+      }
+      json(res, 200, {
+        ok: true,
+        username,
+        matchedUsername: '',
+        profileUrl: `https://www.tiktok.com/@${username}`,
+        videos: [],
+        count: 0,
+        candidatesChecked: candidates.length,
+        errors: errors.slice(0, 3)
+      });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/artist-lookup/coomer') {
@@ -12104,22 +12902,107 @@ const server = http.createServer(async (req, res) => {
       const key = username.toLowerCase().replace(/[^a-z0-9]+/g, '');
       if (key.length < 3) throw new Error('A valid exact creator username is required');
       const matches = [];
-      for (const host of availableGatewayHosts()) {
-        try {
-          const searchUrl = `https://${host}/?q=${encodeURIComponent(username)}`;
-          const html = await random40ReservoirFetchHtml(searchUrl, 15000);
-          for (const artistUrl of random40ReservoirArtistUrls(html, searchUrl)) {
-            const slug = decodeURIComponent(new URL(artistUrl).pathname.split('/').filter(Boolean).at(-1) || '');
-            if (slug.toLowerCase().replace(/[^a-z0-9]+/g, '') !== key) continue;
-            const candidate = { artistUrl, artistId: random40ReservoirIdentity(artistUrl), sourcePage: 0, profileImageUrl: '' };
-            const controller = new AbortController();
-            const profile = await local2FlashPrepareProfile(candidate, { signal: controller.signal, variant: 'artist-lookup' });
-            const videos = await local2FlashVerifyProfile(profile, { signal: controller.signal, variant: 'artist-lookup', verificationPriority: { priority: 0 } });
-            matches.push({ username: slug, artistUrl, videos });
+      const diagnostics = [];
+      const candidates = artistLookupRequestedCandidates(payload, 6);
+      let successfulSearchesTotal = 0;
+      let profileFetchFailed = false;
+      let browserFallbackUsed = false;
+      for (const candidateName of candidates) {
+        const candidateKey = candidateName.toLowerCase().replace(/[^a-z0-9]+/g, '');
+        const maximumAttempts = 3;
+        for (let attempt = 1; attempt <= maximumAttempts && !matches.length; attempt++) {
+          const artistUrls = new Map();
+          let successfulSearches = 0;
+          const searchResults = await Promise.allSettled(availableGatewayHosts().map(async host => {
+            try {
+              const searchUrl = `https://${host}/?q=${encodeURIComponent(candidateName)}`;
+              const html = await random40ReservoirFetchHtml(searchUrl, 15000);
+              return {
+                host,
+                urls: random40ReservoirArtistUrls(html, searchUrl, { includeRecent: true })
+              };
+            } catch (error) {
+              throw new Error(`${host}: ${String(error?.message || error)}`);
+            }
+          }));
+          for (const result of searchResults) {
+            if (result.status === 'rejected') {
+              diagnostics.push(`${candidateName}/${attempt}: ${String(result.reason?.message || result.reason)}`);
+              continue;
+            }
+            successfulSearches++;
+            successfulSearchesTotal++;
+            for (const artistUrl of result.value.urls) {
+              const slug = decodeURIComponent(new URL(artistUrl).pathname.split('/').filter(Boolean).at(-1) || '');
+              if (slug.toLowerCase().replace(/[^a-z0-9]+/g, '') !== candidateKey) continue;
+              const identity = random40ReservoirIdentity(artistUrl);
+              if (identity && !artistUrls.has(identity)) artistUrls.set(identity, { artistUrl, slug });
+            }
           }
-        } catch (_) {}
+          if (successfulSearches === 0) {
+            try {
+              const searchUrl = `https://onlyfaphouse.com/?q=${encodeURIComponent(candidateName)}`;
+              const html = await gatewayArtistLookupBrowserHtml(searchUrl, { timeoutMs: 30000 });
+              browserFallbackUsed = true;
+              successfulSearches++;
+              successfulSearchesTotal++;
+              for (const artistUrl of random40ReservoirArtistUrls(html, searchUrl, { includeRecent: true })) {
+                const slug = decodeURIComponent(new URL(artistUrl).pathname.split('/').filter(Boolean).at(-1) || '');
+                if (slug.toLowerCase().replace(/[^a-z0-9]+/g, '') !== candidateKey) continue;
+                const identity = random40ReservoirIdentity(artistUrl);
+                if (identity && !artistUrls.has(identity)) artistUrls.set(identity, { artistUrl, slug });
+              }
+            } catch (error) {
+              diagnostics.push(`${candidateName}/${attempt}/browser: ${String(error?.message || error)}`);
+            }
+          }
+          for (const { artistUrl, slug } of artistUrls.values()) {
+            try {
+              const result = await artistLookupGatewayProfileVideos({ artistUrl });
+              if (!result.videos.length) continue;
+              matches.push({
+                username,
+                matchedUsername: slug,
+                artistUrl,
+                videos: result.videos,
+                sourcePagesScanned: result.sourcePagesScanned,
+                postCandidates: result.postCandidates
+              });
+              break;
+            } catch (error) {
+              profileFetchFailed = true;
+              diagnostics.push(`${candidateName}/profile/${attempt}: ${String(error?.message || error)}`);
+            }
+          }
+          // A successful exact-result page with no matching slug is a real
+          // miss; repeating it only makes a large paste crawl for minutes.
+          // Retry when every mirror was transiently unavailable, or when an
+          // exact profile was found but its media page could not be resolved.
+          if (
+            !matches.length &&
+            successfulSearches > 0 &&
+            !artistUrls.size &&
+            attempt >= 2
+          ) break;
+          if (!matches.length && attempt < maximumAttempts) {
+            await new Promise(resolve => setTimeout(resolve, Math.min(3000, attempt * 700)));
+          }
+        }
+        if (matches.length) break;
       }
-      json(res, 200, { ok: true, username, matches, count: matches.length });
+      json(res, 200, {
+        ok: true,
+        username,
+        matches,
+        count: matches.length,
+        candidatesChecked: candidates.length,
+        retryable: !matches.length && (successfulSearchesTotal === 0 || profileFetchFailed),
+        retryAfterMs: !matches.length
+          ? Math.max(0, gatewayHtmlBackoffRemainingMs())
+          : 0,
+        browserFallbackUsed,
+        diagnostics: diagnostics.slice(0, 5)
+      });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/artist-lookup/leakedzone') {
@@ -12127,14 +13010,25 @@ const server = http.createServer(async (req, res) => {
       const username = String(payload?.username || '').trim().replace(/^@+/, '');
       const key = username.toLowerCase().replace(/[^a-z0-9]+/g, '');
       if (key.length < 3) throw new Error('A valid exact creator username is required');
-      const listingUrl = `https://leakedzone.com/creators?search=${encodeURIComponent(username)}`;
-      const discovered = await discoverLeakedZoneCreators(listingUrl);
       const matches = [];
-      for (const creatorUrl of discovered.creators.slice(0, 12)) {
-        const slug = decodeURIComponent(new URL(creatorUrl).pathname.split('/').filter(Boolean)[0] || '');
-        if (slug.toLowerCase().replace(/[^a-z0-9]+/g, '') !== key) continue;
-        const creator = await scrapeLeakedZoneCreator(creatorUrl);
-        matches.push(creator);
+      // LeakedZone's creator filter page does not apply its visible `search`
+      // parameter; it silently returns the global trending list. Creator pages
+      // are canonical root slugs, so probe the exact pasted handle first and
+      // only use punctuation variants when that page does not exist.
+      const requestedCandidates = artistLookupRequestedCandidates(payload, 6);
+      const slugCandidates = [...new Set(requestedCandidates.flatMap(candidate => [
+        candidate,
+        candidate.replace(/[_.\s]+/g, '-'),
+        candidate.replace(/[.\-\s]+/g, '_'),
+        candidate.replace(/[^a-z0-9]+/gi, '')
+      ]).map(value => value.trim()).filter(value => /^[a-z0-9_.-]{3,100}$/i.test(value)))];
+      for (const slug of slugCandidates) {
+        try {
+          const creator = await scrapeLeakedZoneCreator(`https://leakedzone.com/${encodeURIComponent(slug)}`);
+          if (!creator?.videos?.length) continue;
+          matches.push({ ...creator, username, matchedSlug: slug });
+          break;
+        } catch (_) {}
       }
       json(res, 200, { ok: true, username, matches, count: matches.length });
       return;
@@ -12317,7 +13211,7 @@ const server = http.createServer(async (req, res) => {
           return !hash || (!pongPlayedHistoryHashes.has(hash) && !pongProfileCursorHashes.has(hash));
         });
       }
-      const recall = state.pending && (pendingNames.length || visibleAlbums.length)
+      let recall = state.pending && (pendingNames.length || visibleAlbums.length)
         ? {
             id: state.pending.id,
             names: pendingNames,
@@ -12329,6 +13223,33 @@ const server = http.createServer(async (req, res) => {
             channel
           }
         : state.payload;
+      // A creator thread may contain aliases or collaborators in its title.
+      // Artist Lookup must still merge every source into the one pasted-name
+      // bundle, so bind SimpCity output to the exact requested identity while
+      // preserving the extracted label as evidence.
+      const lookupName = channel === 3
+        ? normalizeSimpCityArtistQuery(backgroundRun?.artistQuery)
+        : '';
+      if (lookupName && recall) {
+        const lookupKey = lookupName.toLowerCase().replace(/[^a-z0-9]+/g, '');
+        const bindGroup = group => ({
+          ...group,
+          lookupMatchedName: group?.creatorName || group?.title || '',
+          creatorName: lookupName,
+          creatorKey: lookupKey,
+          pairId: `artist-lookup:${lookupKey}`
+        });
+        recall = {
+          ...recall,
+          names: [lookupName],
+          albums: (recall.albums || []).map(album => ({
+            ...bindGroup(album),
+            pairedGroups: Array.isArray(album?.pairedGroups)
+              ? album.pairedGroups.map(bindGroup)
+              : album?.pairedGroups
+          }))
+        };
+      }
       json(res, 200, {
         ok: true,
         recall,
@@ -12411,7 +13332,26 @@ const server = http.createServer(async (req, res) => {
         payload?.posts,
         state.pending.threadUrl
       );
-      const newCreators = addSimpCityRecallCreators(state, suppliedId, deterministic.creators);
+      const backgroundRun = simpCityBackgroundRuns.get(channel);
+      const artistLookupName = channel === 3 && payload?.orderedPair === true
+        ? normalizeSimpCityArtistQuery(backgroundRun?.artistQuery)
+        : '';
+      // An Artist Lookup result was selected because its thread title/slug
+      // exactly matched the requested handle. Treat that whole thread as one
+      // requested creator. Extracting every collaborator mentioned inside the
+      // posts launched redundant host/Balbums/TikTok jobs and could hold the
+      // next pasted name for more than a minute.
+      const pairedCreators = artistLookupName
+        ? [{
+            primaryName: artistLookupName,
+            aliases: [],
+            usernames: [artistLookupName],
+            postId: String(deterministic.posts[0]?.postId || `artist-lookup-${suppliedId}`),
+            confidence: 1,
+            source: 'artist-lookup-thread'
+          }]
+        : deterministic.creators;
+      const newCreators = addSimpCityRecallCreators(state, suppliedId, pairedCreators);
       state.pending.postsProcessed += deterministic.posts.length;
       state.pending.batchesReceived++;
       state.pending.deterministicCreators += newCreators.length;
@@ -12422,8 +13362,8 @@ const server = http.createServer(async (req, res) => {
         suppliedId,
         deterministic.posts,
         payload?.orderedPair === true
-          ? simpCityPrimaryPairCreator(deterministic.creators)
-          : simpCityProfilePairCreators(deterministic.creators),
+          ? simpCityPrimaryPairCreator(pairedCreators)
+          : simpCityProfilePairCreators(pairedCreators),
         {
           includeAllPosts: payload?.orderedPair === true,
           // Ordered creator-thread scans are now streamed page-by-page. Allow
@@ -12435,6 +13375,7 @@ const server = http.createServer(async (req, res) => {
       // can publish at 20 videos while later host/Balbums/TikTok work continues.
 
       if (
+        !artistLookupName &&
         deterministic.unresolvedPosts.length &&
         state.pending.aiBatchesQueued < SIMPCITY_RECALL_AI_BATCH_LIMIT
       ) {
@@ -12479,7 +13420,7 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, {
         ok: true,
         id: suppliedId,
-        creators: deterministic.creators,
+        creators: pairedCreators,
         albums: [],
         fastPath: true,
         totals: {
@@ -13272,6 +14213,11 @@ const server = http.createServer(async (req, res) => {
           failures: gatewayWarmState.failures,
           available_hosts: gatewayWarmState.availableHosts,
           unavailable_hosts: gatewayWarmState.unavailableHosts,
+          http1_fallback: { ...gatewayHttp1FallbackStats },
+          html_fetch: {
+            ...gatewayHtmlFetchStats,
+            backoffRemainingMs: gatewayHtmlBackoffRemainingMs()
+          },
           error: gatewayWarmState.error
         },
         random40_reservoir: {

@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.72</div>
+    <div class="version-number">26.78</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -2716,14 +2716,14 @@ function getPasteEventIndexForGlobalVideo(globalIndex) {
   });
 }
 
-function syncCurrentPasteIndexFromVisibleVideo() {
+function syncCurrentPasteIndexFromVisibleVideo({ allowPreviewExpand = false } = {}) {
   const eventIndex = getPasteEventIndexForGlobalVideo(getCurrentLoadedGlobalVideoIndex());
 
   if (eventIndex >= 0) {
     currentPasteIndex = eventIndex;
     const event = pasteEvents[eventIndex];
     const localIndex = getCurrentLoadedGlobalVideoIndex() - Number(event?.startIndex || 0);
-    if (localIndex >= 1 && event?.simpCityPreviewExpanded !== true && Array.isArray(event?.simpCityDeferredVideos) && event.simpCityDeferredVideos.length) {
+    if (allowPreviewExpand && localIndex >= 1 && event?.simpCityPreviewExpanded !== true && Array.isArray(event?.simpCityDeferredVideos) && event.simpCityDeferredVideos.length) {
       event.simpCityPreviewExpanded = true;
       const deferred = event.simpCityDeferredVideos.splice(0);
       mergeProgressiveSimpCityGroup({
@@ -3695,12 +3695,44 @@ function makeIndexRange(start, end) {
   return range;
 }
 
+function eromeMediaDescriptor(rawMedia) {
+  if (rawMedia && typeof rawMedia === 'object') {
+    const url = String(
+      rawMedia.videoUrl || rawMedia.mediaUrl || rawMedia.url || rawMedia.src || ''
+    ).trim();
+    return {
+      url,
+      postUrl: String(rawMedia.postUrl || '').trim(),
+      postIndex: Math.max(0, Number(rawMedia.postIndex) || 0),
+      alternateVideoUrls: [...new Set(
+        (Array.isArray(rawMedia.alternateVideoUrls) ? rawMedia.alternateVideoUrls : [])
+          .map(value => String(value || '').trim())
+          .filter(value => value && value !== url)
+      )],
+      verified: rawMedia.verified === true,
+      fastStart: rawMedia.fastStart === true,
+      mediaKey: String(rawMedia.mediaKey || '').trim()
+    };
+  }
+  return {
+    url: String(rawMedia || '').trim(),
+    postUrl: '',
+    postIndex: 0,
+    alternateVideoUrls: [],
+    verified: false,
+    fastStart: false,
+    mediaKey: ''
+  };
+}
+
 function eromeMediaKey(rawUrl) {
+  const descriptor = eromeMediaDescriptor(rawUrl);
+  if (descriptor.mediaKey) return descriptor.mediaKey;
   try {
-    const url = new URL(rawUrl, window.location.href);
+    const url = new URL(descriptor.url, window.location.href);
     return `erome:${url.hostname.toLowerCase()}${decodeURIComponent(url.pathname || '')}`;
   } catch (e) {
-    return `erome:${String(rawUrl || '').trim()}`;
+    return `erome:${descriptor.url}`;
   }
 }
 
@@ -5390,7 +5422,12 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
 
   deckCurrentIndex = targetIndex;
   currentVideoIndex = targetIndex;
-  if (eromeBatchAutoAdvance) syncCurrentPasteIndexFromVisibleVideo();
+  if (eromeBatchAutoAdvance) syncCurrentPasteIndexFromVisibleVideo({
+    // Only explicit forward viewing (swipe/next/video completion) unlocks the
+    // full artist. Readiness promotion and deck restoration may select index
+    // 2 internally but must keep the five-video preview bounded.
+    allowPreviewExpand: direction === 'up' && options.allowPreviewExpand !== false
+  });
   ensureVideoCounter().textContent = getDeckLogicalCounterText(currentVideoIndex);
   const video = target.querySelector('video');
   transferForegroundVideoPriority(video);
@@ -9960,7 +9997,7 @@ function compactSavedEromeVideoGroups(groups) {
     const url = normalizeTrustedGroupUrl(group?.url || group?.postUrl || '');
     const sourceUrl = normalizeTrustedGroupUrl(group?.sourceUrl || group?.artistUrl || group?.artistKey || url);
     const videos = (Array.isArray(group?.videos) ? group.videos : [])
-      .map(video => String(video || '').trim())
+      .map(video => eromeMediaDescriptor(video).url)
       .filter(Boolean);
 
     if (!url || !videos.length) return;
@@ -9993,9 +10030,12 @@ function compactSavedEromeVideoGroups(groups) {
       creatorKey: String(group?.creatorKey || ''),
       simpCityJobId: String(group?.simpCityJobId || ''),
       pairId: String(group?.pairId || ''),
+      sourcePairId: String(group?.sourcePairId || ''),
       mediaKind: String(group?.mediaKind || ''),
       paperclipHidden: group?.paperclipHidden === true,
       preserveGroupOrder: group?.preserveGroupOrder === true,
+      deferredVideos: Array.isArray(group?.deferredVideos) ? group.deferredVideos.slice() : [],
+      previewExpanded: group?.previewExpanded === true,
       videos
     });
   });
@@ -10874,15 +10914,19 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
     const groupSourceTitle = group.sourceTitle || artistNameFromUrl(groupSourceUrl) || 'Erome';
 
     group.videos.forEach((rawUrl, videoIndex) => {
+      const descriptor = eromeMediaDescriptor(rawUrl);
+      const mediaUrl = descriptor.url;
+      if (!mediaUrl) return;
       const isHosted = group.source === 'bunkr' || group.source === 'hosted';
       const isSimpCityMedia = isHosted || group.source === 'direct';
-      const proxiedUrl = isHosted
+      const playbackUrlFor = candidateUrl => isHosted
         ? proxyBase === EROME_PROXY_BASE.replace(/\/+$/, '')
-          ? `${proxyBase}/bunkr.mp4?u=${encodeURIComponent(rawUrl)}`
-          : `${proxyBase}/video-cache/stream?url=${encodeURIComponent(rawUrl)}&profile=bunkr`
+          ? `${proxyBase}/bunkr.mp4?u=${encodeURIComponent(candidateUrl)}`
+          : `${proxyBase}/video-cache/stream?url=${encodeURIComponent(candidateUrl)}&profile=bunkr`
         : group.source === 'direct'
-          ? rawUrl
-          : proxyBase + '/erome.mp4?u=' + encodeURIComponent(rawUrl);
+          ? candidateUrl
+          : proxyBase + '/erome.mp4?u=' + encodeURIComponent(candidateUrl);
+      const proxiedUrl = playbackUrlFor(mediaUrl);
       const mediaKey = eromeMediaKey(rawUrl);
 
       urls.push(proxiedUrl);
@@ -10893,16 +10937,19 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         artistDisplayName: group.title || groupSourceTitle,
         artistKey: groupSourceUrl,
         artistUrl: groupSourceUrl,
-        postUrl: group.url || groupSourceUrl,
+        postUrl: descriptor.postUrl || group.url || groupSourceUrl,
         simpCityJobId: String(group.simpCityJobId || ''),
         simpCityCreatorKey: String(group.creatorKey || ''),
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         simpCityPairId: String(group.pairId || ''),
         simpCitySourcePairId: String(group.sourcePairId || ''),
         simpCityMediaKind: String(group.mediaKind || ''),
-        postIndex: videoIndex,
+        postIndex: Number.isFinite(Number(descriptor.postIndex)) ? descriptor.postIndex : videoIndex,
         scrapedAt,
-        mediaKey
+        mediaKey,
+        alternateVideoUrls: descriptor.alternateVideoUrls.map(playbackUrlFor),
+        verified: descriptor.verified,
+        fastStart: descriptor.fastStart
       });
     });
 
@@ -10927,9 +10974,10 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityMediaKind: String(group.mediaKind || ''),
         simpCityDeferredVideos: Array.isArray(group.deferredVideos) ? group.deferredVideos.slice() : [],
         simpCityPreviewExpanded: group.previewExpanded === true,
-        paperclipHidden: group.paperclipHidden === true || (
-          String(group.mediaKind || '').toLowerCase() === 'tiktok' && Boolean(group.pairId)
-        ),
+        // A TikTok result is hidden only when its paired primary group asks for
+        // that explicitly. TikTok-only artists must remain visible Paperclip
+        // bundles or a successful lookup would be present but unreachable.
+        paperclipHidden: group.paperclipHidden === true,
         loadAll: false,
         ready: true,
         pending: false
@@ -11043,6 +11091,51 @@ function notePongActiveCollectionArtist(event, index = -1) {
   }
 }
 
+let simpCityPreviewDeckRefreshTimer = 0;
+
+function reconcileArtistLookupTikTokVisibility(pairId) {
+  const normalizedPairId = String(pairId || '');
+  if (!normalizedPairId.startsWith('artist-lookup:')) return false;
+  const hasPrimary = pasteEvents.some(event => (
+    String(event?.simpCityPairId || '') === normalizedPairId &&
+    String(event?.simpCityMediaKind || '').toLowerCase() !== 'tiktok' &&
+    Number(event?.count || 0) > 0
+  ));
+  let changed = false;
+  pasteEvents.forEach(event => {
+    if (
+      String(event?.simpCityPairId || '') !== normalizedPairId ||
+      String(event?.simpCityMediaKind || '').toLowerCase() !== 'tiktok'
+    ) return;
+    if (event.paperclipHidden !== hasPrimary) {
+      event.paperclipHidden = hasPrimary;
+      changed = true;
+    }
+  });
+  if (changed) updatePasteNavigationButton();
+  return changed;
+}
+
+function scheduleSimpCityPreviewDeckRefresh(eventIndex) {
+  clearTimeout(simpCityPreviewDeckRefreshTimer);
+  simpCityPreviewDeckRefreshTimer = setTimeout(() => {
+    simpCityPreviewDeckRefreshTimer = 0;
+    if (currentPasteIndex !== eventIndex || !hasActivePlaybackRange()) return;
+    const event = pasteEvents[eventIndex];
+    const bounds = getPasteEventVideoBounds(event);
+    if (!bounds || currentLoadedRangeStart !== bounds.start) return;
+    const desiredEnd = Math.min(bounds.end, bounds.start + getCurrentBatchSize());
+    if (currentLoadedRangeEnd >= desiredEnd) return;
+    const visibleGlobalIndex = getCurrentLoadedGlobalVideoIndex();
+    const restoreIndex = visibleGlobalIndex >= bounds.start && visibleGlobalIndex < bounds.end
+      ? visibleGlobalIndex - bounds.start
+      : 0;
+    activePlaybackRange.offset = 0;
+    window.PongFastNextBatchOnce = true;
+    loadNextBatch(restoreIndex);
+  }, 120);
+}
+
 function mergeProgressiveSimpCityGroup(group, proxyBase) {
   const pairId = String(group?.pairId || '');
   const mediaKind = String(group?.mediaKind || '');
@@ -11053,16 +11146,55 @@ function mergeProgressiveSimpCityGroup(group, proxyBase) {
     String(event?.simpCityPairId || '') === pairId &&
     String(event?.simpCityMediaKind || '') === mediaKind
   ));
-  if (eventIndex < 0) return appendEromeGroupsToCurrentCards([group], proxyBase);
+  if (eventIndex < 0) {
+    const isArtistLookupTikTok = pairId.startsWith('artist-lookup:') && mediaKind.toLowerCase() === 'tiktok';
+    const hasPrimary = isArtistLookupTikTok && pasteEvents.some(event => (
+      String(event?.simpCityPairId || '') === pairId &&
+      String(event?.simpCityMediaKind || '').toLowerCase() !== 'tiktok' &&
+      Number(event?.count || 0) > 0
+    ));
+    const payload = appendEromeGroupsToCurrentCards([{
+      ...group,
+      paperclipHidden: isArtistLookupTikTok ? hasPrimary : group?.paperclipHidden === true
+    }], proxyBase);
+    reconcileArtistLookupTikTokVisibility(pairId);
+    return payload;
+  }
   const event = pasteEvents[eventIndex];
+  if (!Array.isArray(event.simpCityDeferredVideos)) event.simpCityDeferredVideos = [];
   const bounds = getPasteEventVideoBounds(event);
   if (!bounds) return { urls: [], metadata: [], events: [] };
   const existingKeys = new Set();
   for (let index = bounds.start; index < bounds.end; index++) {
     existingKeys.add(String(allVideoMetadata[index]?.mediaKey || allVideoUrls[index] || ''));
   }
-  const newVideos = group.videos.filter(video => !existingKeys.has(eromeMediaKey(video)));
-  if (!newVideos.length) return { urls: [], metadata: [], events: [] };
+  const isArtistLookupPreview = pairId.startsWith('artist-lookup:');
+  const deferredKeys = new Set((event.simpCityDeferredVideos || []).map(eromeMediaKey));
+  const incomingVideos = event.simpCityPreviewExpanded === true
+    ? [...group.videos, ...(Array.isArray(group.deferredVideos) ? group.deferredVideos : [])]
+    : group.videos;
+  let newVideos = incomingVideos.filter(video => {
+    const key = eromeMediaKey(video);
+    return key && !existingKeys.has(key) && !deferredKeys.has(key);
+  });
+  if (isArtistLookupPreview && event.simpCityPreviewExpanded !== true) {
+    const openSlots = Math.max(0, SIMPCITY_PREVIEW_VIDEO_COUNT - Number(event.count || 0));
+    const deferred = [
+      ...newVideos.slice(openSlots),
+      ...(Array.isArray(group.deferredVideos) ? group.deferredVideos : [])
+    ];
+    for (const video of deferred) {
+      const key = eromeMediaKey(video);
+      if (!key || existingKeys.has(key) || deferredKeys.has(key)) continue;
+      deferredKeys.add(key);
+      event.simpCityDeferredVideos.push(video);
+    }
+    newVideos = newVideos.slice(0, openSlots);
+  }
+  if (!newVideos.length) {
+    reconcileArtistLookupTikTokVisibility(pairId);
+    return { urls: [], metadata: [], events: [] };
+  }
   const payload = buildEromeCardImportPayload([{ ...group, videos: newVideos }], proxyBase, 0);
   if (!payload.urls.length) return payload;
   const insertionIndex = bounds.end;
@@ -11092,6 +11224,8 @@ function mergeProgressiveSimpCityGroup(group, proxyBase) {
   updatePasteNavigationButton();
   scheduleSessionSave(700);
   scheduleEromeCheckpointAutosave();
+  scheduleSimpCityPreviewDeckRefresh(eventIndex);
+  reconcileArtistLookupTikTokVisibility(pairId);
   return payload;
 }
 
@@ -18528,6 +18662,47 @@ function normalizeSimpCityCreatorKey(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
+// Alias fallbacks are used only after the exact pasted handle. These entries
+// were identity-verified against creator-owned/profile sources; they are not
+// fuzzy name matches. Related free/VIP/2.0 handles present in the same paste
+// are added automatically below.
+const ARTIST_LOOKUP_VERIFIED_ALIASES = Object.freeze({
+  goblingoddesss: ['goblingoddesssfree', 'goblingoddesss4'],
+  junebugxo3: ['.junebugxo3'],
+  lexiknightx: ['lexiknightx4'],
+  littleellee: ['secretelle'],
+  missskyeevans: ['miss_skye_evans'],
+  murmuriell: ['murmurielll', 'murkameow'],
+  satanpetitcul: ['sav.agoras']
+});
+
+function artistLookupFamilyKey(value) {
+  const raw = String(value || '').trim().replace(/^@+/, '');
+  const withoutTier = raw
+    .replace(/(?:[_.-]?(?:free|vip))$/i, '')
+    .replace(/2[_.-]?0$/i, '');
+  return normalizeSimpCityCreatorKey(withoutTier) || normalizeSimpCityCreatorKey(raw);
+}
+
+function artistLookupCandidateNames(value, allNames = []) {
+  const raw = String(value || '').trim().replace(/^@+/, '');
+  const key = normalizeSimpCityCreatorKey(raw);
+  const familyKey = artistLookupFamilyKey(raw);
+  const candidates = [raw, ...(ARTIST_LOOKUP_VERIFIED_ALIASES[key] || [])];
+  for (const related of allNames) {
+    const clean = String(related || '').trim().replace(/^@+/, '');
+    if (!clean || normalizeSimpCityCreatorKey(clean) === key) continue;
+    if (familyKey && artistLookupFamilyKey(clean) === familyKey) candidates.push(clean);
+  }
+  const seen = new Set();
+  return candidates.filter(candidate => {
+    const candidateKey = String(candidate || '').toLowerCase();
+    if (!candidateKey || seen.has(candidateKey)) return false;
+    seen.add(candidateKey);
+    return true;
+  }).slice(0, 6);
+}
+
 function setSimpCitySkipVisible(visible) {
   const button = document.getElementById('reject-current-artist-button');
   if (button && visible) {
@@ -18837,15 +19012,17 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     if (!response.ok || !data.ok) throw new Error(data.error || `Local HTTP ${response.status}`);
     return data;
   };
+  const artistLookupCandidates = new Map(suppliedCreatorNames.map(rawName => [
+    normalizeSimpCityCreatorKey(rawName),
+    artistLookupCandidateNames(rawName, suppliedCreatorNames)
+  ]));
+  const sourceCandidatesFor = rawName => artistLookupCandidates.get(normalizeSimpCityCreatorKey(rawName)) || [rawName];
 
-  // Queue Artist Lookup only after this exact Open Albums flow has resolved
-  // the reachable Pong server. Keeping the enqueue here prevents the UI and
-  // importer from selecting different endpoints or silently diverging.
+  // Artist Lookup is owned by Pong's isolated PC browser. It does not depend
+  // on an open SimpCity tab or a Tampermonkey controller, so normal browsing
+  // can never be redirected by a background name search.
   if (recallChannel === 3 && suppliedCreatorNames.length && !resumeExisting) {
-    const queued = await postJson('/simpcity/artist-lookup/enqueue', {
-      names: suppliedCreatorNames
-    });
-    videoContainer.innerHTML = `<div class="loading-message">Artist Lookup queued: ${Number(queued.queued || suppliedCreatorNames.length)} artist${suppliedCreatorNames.length === 1 ? '' : 's'}. Searching every source…</div>`;
+    videoContainer.innerHTML = `<div class="loading-message">Artist Lookup started: ${suppliedCreatorNames.length} artist${suppliedCreatorNames.length === 1 ? '' : 's'}. Searching every source in the background…</div>`;
   }
 
   // SimpCity recalls keep five unviewed creator albums ready. Passing one
@@ -18889,7 +19066,10 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       .sort((left, right) => Number(right?.mediaKind === 'tiktok') - Number(left?.mediaKind === 'tiktok'))
       .forEach(rawAlbum => {
       const allReadyVideos = Array.isArray(rawAlbum?.videos) ? rawAlbum.videos.filter(Boolean) : [];
-      const isSimpCityPreview = Boolean(rawAlbum?.pairId || rawAlbum?.simpCityPairId);
+      const creatorKey = normalizeSimpCityCreatorKey(rawAlbum?.creatorKey || rawAlbum?.creatorName);
+      const isSimpCityPreview = Boolean(
+        rawAlbum?.pairId || rawAlbum?.simpCityPairId || (recallChannel === 3 && creatorKey)
+      );
       const previewExpanded = rawAlbum?.previewExpanded === true;
       const readyVideos = isSimpCityPreview && !previewExpanded
         ? allReadyVideos.slice(0, SIMPCITY_PREVIEW_VIDEO_COUNT)
@@ -18907,7 +19087,6 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           }
         } catch (_) {}
       }
-      const creatorKey = normalizeSimpCityCreatorKey(rawAlbum?.creatorKey || rawAlbum?.creatorName);
       // Every source found by Artist Lookup belongs to one stable creator
       // pair. This lets a TikTok result arriving independently attach as the
       // side deck of Coomer/Bunkr/Erome/LeakedZone/SimpCity for that artist.
@@ -18918,9 +19097,21 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       // Progressive deduplication remains album/source-specific. Using the
       // shared creator pair here would incorrectly discard later sources.
       const progressiveKey = String(sourcePairId || `${creatorKey}:${albumUrl}`);
+      const seenAlbumKey = recallChannel === 3 && creatorKey ? `${creatorKey}:${albumUrl}` : albumUrl;
       const progressiveGroups = Array.isArray(rawAlbum?.pairedGroups) && rawAlbum.pairedGroups.length
         ? rawAlbum.pairedGroups
         : [rawAlbum];
+      const queuedPairedGroups = isSimpCityPreview && !previewExpanded
+        ? progressiveGroups.map(group => {
+            const groupVideos = Array.isArray(group?.videos) ? group.videos.filter(Boolean) : [];
+            return {
+              ...group,
+              videos: groupVideos.slice(0, SIMPCITY_PREVIEW_VIDEO_COUNT),
+              deferredVideos: groupVideos.slice(SIMPCITY_PREVIEW_VIDEO_COUNT),
+              previewExpanded: false
+            };
+          })
+        : progressiveGroups;
       const progressiveVersion = progressiveGroups.reduce(
         (sum, group) => sum + (Array.isArray(group?.videos) ? group.videos.length : 0),
         0
@@ -18933,16 +19124,21 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         if (queuedExisting) {
           queuedExisting.videos = previewExpanded ? readyVideos : (queuedExisting.previewExpanded ? readyVideos : queuedExisting.videos);
           if (deferredVideos.length) queuedExisting.deferredVideos = deferredVideos;
-          queuedExisting.pairedGroups = progressiveGroups;
+          queuedExisting.pairedGroups = isSimpCityPreview && queuedExisting.previewExpanded !== true
+            ? progressiveGroups.map(group => {
+                const groupVideos = Array.isArray(group?.videos) ? group.videos.filter(Boolean) : [];
+                return {
+                  ...group,
+                  videos: groupVideos.slice(0, SIMPCITY_PREVIEW_VIDEO_COUNT),
+                  deferredVideos: groupVideos.slice(SIMPCITY_PREVIEW_VIDEO_COUNT),
+                  previewExpanded: false
+                };
+              })
+            : progressiveGroups;
           queuedExisting.collecting = rawAlbum?.collecting === true;
           return;
         }
         if (cardsStarted) {
-          const activeEvent = pasteEvents.find(event => sourcePairId && String(event?.simpCitySourcePairId || event?.simpCityPairId || '') === sourcePairId);
-          if (isSimpCityPreview && activeEvent?.simpCityPreviewExpanded !== true) {
-            activeEvent.simpCityDeferredVideos = [...new Set(progressiveGroups.flatMap(group => group?.videos || []))].slice(SIMPCITY_PREVIEW_VIDEO_COUNT);
-            return;
-          }
           let added = 0;
           progressiveGroups.forEach(group => {
             const imported = mergeProgressiveSimpCityGroup({
@@ -18953,6 +19149,11 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
               creatorKey: creatorKey || group?.creatorKey || '',
               pairId: pairId || group?.pairId || '',
               sourcePairId: sourcePairId || group?.sourcePairId || '',
+              mediaKind: recallChannel === 3 && pairId
+                ? String(group?.mediaKind || '').toLowerCase() === 'tiktok'
+                  ? 'tiktok'
+                  : 'artist-primary'
+                : String(group?.mediaKind || ''),
               simpCityJobId: String(jobId || rawAlbum?.simpCityJobId || '')
             }, bunkrPlaybackBase);
             added += Number(imported?.urls?.length || 0);
@@ -18964,10 +19165,10 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       if (
         !albumUrl ||
         (!readyVideos.length && !isBunkrImportLaunchUrl(albumUrl)) ||
-        seenAlbumUrls.has(albumUrl) ||
+        seenAlbumUrls.has(seenAlbumKey) ||
         (creatorKey && simpCitySkippedCreatorKeys.has(creatorKey))
       ) return;
-      seenAlbumUrls.add(albumUrl);
+      seenAlbumUrls.add(seenAlbumKey);
       const queuedAlbum = {
         ...rawAlbum,
         url: albumUrl,
@@ -18987,10 +19188,17 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         mediaKind: String(rawAlbum?.mediaKind || ''),
         videos: readyVideos,
         deferredVideos,
+        pairedGroups: queuedPairedGroups,
         previewExpanded
       };
-      if (queuedAlbum.mediaKind === 'tiktok') albumQueue.unshift(queuedAlbum);
-      else albumQueue.push(queuedAlbum);
+      const enrichesLoadedArtist = recallChannel === 3 && pairId && pasteEvents.some(event => (
+        String(event?.simpCityPairId || '') === pairId
+      ));
+      if (queuedAlbum.mediaKind === 'tiktok' || (allReadyVideos.length && enrichesLoadedArtist)) {
+        albumQueue.unshift(queuedAlbum);
+      } else {
+        albumQueue.push(queuedAlbum);
+      }
     });
     discoveredAlbums = seenAlbumUrls.size;
     wakeAlbumWorkers();
@@ -19013,12 +19221,14 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   const unviewedAlbumCount = () => {
     const identities = new Set();
     pasteEvents.forEach((event, index) => {
-      const available = !isPasteEventRetiredForPaperclip(event, index) &&
+      const available = !event?.paperclipHidden &&
+        !isPasteEventRetiredForPaperclip(event, index) &&
         !isPasteEventPreviouslyVisitedForPaperclip(event, index);
       if (!available) return;
       if (recallChannel === 3) {
-        // A TikTok side deck still occupies one of the five artist slots even
-        // before that artist's primary source arrives.
+        // Only a bundle Paperclip can actually reach may pause producers.
+        // Hidden late-arriving TikTok side decks otherwise create a permanent
+        // five-item backlog after their primary artist has already been viewed.
         if (event?.simpCityPairId) identities.add(event.simpCityPairId);
       } else if (event?.source === 'bunkr' && isPasteEventViewableForPaperclip(event)) {
         identities.add(event.simpCityPairId || `event:${index}`);
@@ -19079,19 +19289,37 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       if (!imported.urls.length || !imported.events.length) return false;
       updatePasteNavigationButton();
     }
+    if (recallChannel === 3) {
+      const pairIds = new Set(groups.map(group => String(group?.pairId || '')).filter(Boolean));
+      pairIds.forEach(pairId => {
+        const hasPrimary = pasteEvents.some(event => (
+          String(event?.simpCityPairId || '') === pairId &&
+          String(event?.simpCityMediaKind || '').toLowerCase() !== 'tiktok' &&
+          Number(event?.count || 0) > 0
+        ));
+        pasteEvents.forEach(event => {
+          if (
+            String(event?.simpCityPairId || '') === pairId &&
+            String(event?.simpCityMediaKind || '').toLowerCase() === 'tiktok'
+          ) event.paperclipHidden = hasPrimary;
+        });
+      });
+      updatePasteNavigationButton();
+    }
     loadedAlbums++;
     videoCount += imported.urls.length;
     scheduleEromeCheckpointAutosave();
     const warmItems = groups
       .map(group => ({
-        url: group.videos[0],
+        url: eromeMediaDescriptor(group.videos[0]).url,
         artistKey: group.creatorKey || group.sourceUrl || group.url || ''
       }))
       .filter(item => item.url);
     if (warmItems.length) {
       const tiktokEntryUrls = groups
         .filter(group => String(group.mediaKind || '').toLowerCase() === 'tiktok')
-        .flatMap(group => group.videos.slice(0, 5));
+        .flatMap(group => group.videos.slice(0, 5).map(video => eromeMediaDescriptor(video).url))
+        .filter(Boolean);
       postJson('/video-cache/warm', {
         playbackProfile: 'bunkr',
         // Future artists need one prepared entry card. Their complete bundle
@@ -19133,10 +19361,10 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
             paperclipHidden: String(pairedGroup.mediaKind || '').toLowerCase() === 'tiktok',
             preserveGroupOrder: true
           }));
-        // TikTok is a side deck belonging to the creator, never a Paperclip
-        // bundle by itself. Wait for the creator's regular-video group, then
-        // publish both ranges together so the purple side button can switch.
-        if (!pairedGroups.some(group => String(group.mediaKind || '').toLowerCase() !== 'tiktok')) return;
+        // TikTok attaches as the hidden side deck when a regular source exists,
+        // but it must still be a visible artist bundle when it is the only
+        // playable source found for that pasted identity. publishGroup's pair
+        // reconciliation applies that visibility rule after every late merge.
         publishGroup(pairedGroups.sort((left, right) => (
           Number(String(left.mediaKind || '').toLowerCase() === 'tiktok') -
           Number(String(right.mediaKind || '').toLowerCase() === 'tiktok')
@@ -19169,7 +19397,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           mediaKind: album.mediaKind || '',
           simpCityJobId: album.simpCityJobId || '',
           source: album.source || 'bunkr',
-          videos: data.videos
+          videos: data.videos,
+          deferredVideos: Array.isArray(album.deferredVideos) ? album.deferredVideos : [],
+          previewExpanded: album.previewExpanded === true
         });
       }
     } catch (error) {
@@ -19188,7 +19418,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       completedAlbums++;
       updateEromeProgress({
         title: cardsStarted ? 'SimpCity playing while more load' : 'Opening first SimpCity match',
-        detail: `${loadedAlbums} ready · ${completedAlbums}/${Math.max(discoveredAlbums, completedAlbums)} albums checked`,
+        detail: `${unviewedAlbumCount()} artist backlog · ${loadedAlbums} source matches · ${completedAlbums}/${Math.max(discoveredAlbums, completedAlbums)} checked`,
         completed: completedAlbums,
         total: Math.max(1, discoveredAlbums),
         videos: videoCount
@@ -19209,11 +19439,78 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
 
   const parallelArtistLookup = recallChannel === 3 && suppliedCreatorNames.length
     ? Promise.allSettled([
+        // Submit the real authenticated XenForo search form in Pong's muted,
+        // isolated PC browser. Search artists sequentially and retry failures;
+        // this avoids both SimpCity rate-limit bursts and controller-tab races.
+        (async () => {
+          for (const rawName of suppliedCreatorNames) {
+            if (loadGeneration !== bunkrLoadGeneration) return;
+            while (
+              loadGeneration === bunkrLoadGeneration &&
+              cardsStarted &&
+              unviewedAlbumCount() + reservedAlbumSlots >= READY_ALBUM_TARGET
+            ) await sleep(700);
+            if (loadGeneration !== bunkrLoadGeneration) return;
+            let lastError = null;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              try {
+                const started = await postJson('/simpcity/background/start', {
+                  url: 'https://simpcity.cr/search/',
+                  artistQuery: rawName,
+                  channel: 3,
+                  resumeFromSaved: false
+                });
+                const runId = String(started.id || '');
+                if (!runId) throw new Error('Pong did not start the SimpCity artist search');
+                while (loadGeneration === bunkrLoadGeneration) {
+                  const status = await getJson('/simpcity/background/status?channel=3');
+                  const run = status?.run;
+                  if (!run || String(run.id || '') !== runId) {
+                    throw new Error('SimpCity artist search was unexpectedly replaced');
+                  }
+                  const state = String(run.state || '');
+                  // The first matched thread page streams into Recall before
+                  // deeper pages finish. Publish it immediately so Artist
+                  // Lookup does not wait for the complete thread scan.
+                  const liveShared = await fetchSharedSimpCityRecall(endpoint, { channel: 3 });
+                  if (liveShared.recall) enqueueAlbums(liveShared.recall.albums);
+                  if (state === 'complete' || state === 'empty') {
+                    lastError = null;
+                    break;
+                  }
+                  if (state === 'error' || state === 'cancelled') {
+                    throw new Error(run.error || `SimpCity search ${state}`);
+                  }
+                  await sleep(700);
+                }
+                if (!lastError) break;
+              } catch (error) {
+                lastError = error;
+                if (attempt < 2) await sleep((attempt + 1) * 5000);
+              }
+            }
+            if (lastError) console.warn(`SimpCity artist lookup failed for ${rawName}:`, lastError);
+          }
+        })(),
         // Balbums/Bunkr name search runs independently from the authenticated
         // SimpCity queue and streams each matching album into the same player.
         (async () => {
+          const ownersByCandidateKey = new Map();
+          for (const ownerName of suppliedCreatorNames) {
+            for (const candidateName of sourceCandidatesFor(ownerName)) {
+              const candidateKey = normalizeSimpCityCreatorKey(candidateName);
+              if (!candidateKey) continue;
+              if (!ownersByCandidateKey.has(candidateKey)) ownersByCandidateKey.set(candidateKey, []);
+              const owners = ownersByCandidateKey.get(candidateKey);
+              if (!owners.some(value => normalizeSimpCityCreatorKey(value) === normalizeSimpCityCreatorKey(ownerName))) {
+                owners.push(ownerName);
+              }
+            }
+          }
           const started = await postJson('/simpcity/import/names/start', {
-            names: suppliedCreatorNames,
+            names: [...new Set([...ownersByCandidateKey.keys()].map(candidateKey =>
+              [...artistLookupCandidates.values()].flat().find(value => normalizeSimpCityCreatorKey(value) === candidateKey) || candidateKey
+            ))],
             sourceUrl: sourceThreadUrl,
             aiExtracted: false
           });
@@ -19221,7 +19518,18 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           if (!jobId) return;
           while (loadGeneration === bunkrLoadGeneration) {
             const state = await getJson(`/simpcity/import/status?jobId=${encodeURIComponent(jobId)}`);
-            enqueueAlbums(state.albums, jobId);
+            const ownedAlbums = (state.albums || []).flatMap(album => {
+              const candidateKey = normalizeSimpCityCreatorKey(album?.creatorKey || album?.creatorName);
+              const owners = ownersByCandidateKey.get(candidateKey) || [album?.creatorName || candidateKey];
+              return owners.map(ownerName => ({
+                ...album,
+                creatorName: ownerName,
+                creatorKey: normalizeSimpCityCreatorKey(ownerName),
+                pairId: `artist-lookup:${normalizeSimpCityCreatorKey(ownerName)}`,
+                simpCityPairId: `artist-lookup:${normalizeSimpCityCreatorKey(ownerName)}`
+              }));
+            });
+            enqueueAlbums(ownedAlbums, jobId);
             if (['complete', 'cancelled', 'error'].includes(String(state.state || ''))) return;
             await sleep(700);
           }
@@ -19232,13 +19540,16 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           const username = String(rawName || '').trim().replace(/^@+/, '');
           if (!/^[a-z0-9_.-]{3,64}$/i.test(username)) return;
           await sleep(650);
-          const data = await postJson('/tiktok/profile', { username });
+          const data = await postJson('/tiktok/profile', {
+            username,
+            aliases: sourceCandidatesFor(rawName).slice(1)
+          });
           if (!Array.isArray(data.videos) || !data.videos.length) return;
           enqueueAlbums([{
             url: data.profileUrl,
-            title: `TikTok account · ${data.username}`,
-            creatorName: data.username,
-            creatorKey: normalizeSimpCityCreatorKey(data.username),
+            title: `TikTok account · ${username}`,
+            creatorName: username,
+            creatorKey: normalizeSimpCityCreatorKey(username),
             sourceUrl: data.profileUrl,
             source: 'hosted',
             mediaKind: 'tiktok',
@@ -19250,7 +19561,11 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         eromePool(suppliedCreatorNames, 1, async rawName => {
           const username = String(rawName || '').trim().replace(/^@+/, '');
           if (!/^[a-z0-9_.-]{3,100}$/i.test(username)) return;
-          const data = await postJson('/artist-lookup/coomer', { username });
+          await sleep(650);
+          const data = await postJson('/artist-lookup/coomer', {
+            username,
+            aliases: sourceCandidatesFor(rawName).slice(1)
+          });
           for (const match of data.matches || []) {
             if (!Array.isArray(match.videos) || !match.videos.length) continue;
             enqueueAlbums([{
@@ -19270,7 +19585,10 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         eromePool(suppliedCreatorNames, 2, async rawName => {
           const username = String(rawName || '').trim().replace(/^@+/, '');
           if (!/^[a-z0-9_.-]{3,100}$/i.test(username)) return;
-          const data = await postJson('/artist-lookup/leakedzone', { username });
+          const data = await postJson('/artist-lookup/leakedzone', {
+            username,
+            aliases: sourceCandidatesFor(rawName).slice(1)
+          });
           for (const match of data.matches || []) {
             const videos = (match.videos || []).map(detailUrl =>
               `${endpoint}/leakedzone/media?url=${encodeURIComponent(detailUrl)}`
@@ -19294,30 +19612,39 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           const username = String(rawName || '').trim();
           if (!username || !EROME_PROXY_BASE) return;
           const proxyBase = EROME_PROXY_BASE.replace(/\/+$/, '');
-          const searchUrl = `https://www.erome.com/search?q=${encodeURIComponent(username)}`;
-          const listing = await fetchEromeAlbumListData(proxyBase, searchUrl, {
-            attempts: 2,
-            timeoutMs: EROME_FETCH_TIMEOUT_MS,
-            fast: true
-          });
-          await eromePool((listing.albums || []).slice(0, 4), 2, async album => {
-            const data = await fetchEromeScrapeData(proxyBase, album.url, {
-              attempts: 1,
+          for (const candidateName of sourceCandidatesFor(rawName)) {
+            await sleep(250);
+            const searchUrl = `https://www.erome.com/search?q=${encodeURIComponent(candidateName)}`;
+            const listing = await fetchEromeAlbumListData(proxyBase, searchUrl, {
+              attempts: 2,
               timeoutMs: EROME_FETCH_TIMEOUT_MS,
               fast: true
             });
-            const groups = buildEromeImportGroups(data, album.url).map(group => ({
-              ...group,
-              url: group.url || album.url,
-              title: group.title || album.title || `Erome · ${username}`,
-              sourceUrl: searchUrl,
-              sourceTitle: username,
-              creatorName: username,
-              creatorKey: normalizeSimpCityCreatorKey(username),
-              source: 'erome'
-            }));
-            enqueueAlbums(groups);
-          });
+            let candidateMatched = false;
+            await eromePool((listing.albums || []).slice(0, 4), 2, async album => {
+              const data = await fetchEromeScrapeData(proxyBase, album.url, {
+                attempts: 1,
+                timeoutMs: EROME_FETCH_TIMEOUT_MS,
+                fast: true
+              });
+              const expectedKey = normalizeSimpCityCreatorKey(candidateName);
+              const resultTitleKey = normalizeSimpCityCreatorKey(data?.title || '');
+              if (!expectedKey || !resultTitleKey.includes(expectedKey)) return;
+              const groups = buildEromeImportGroups(data, album.url).map(group => ({
+                ...group,
+                url: group.url || album.url,
+                title: group.title || album.title || `Erome · ${username}`,
+                sourceUrl: searchUrl,
+                sourceTitle: username,
+                creatorName: username,
+                creatorKey: normalizeSimpCityCreatorKey(username),
+                source: 'erome'
+              }));
+              if (groups.length) candidateMatched = true;
+              enqueueAlbums(groups);
+            });
+            if (candidateMatched) break;
+          }
         })
       ])
     : Promise.resolve([]);
@@ -19332,7 +19659,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   });
 
   try {
-    if (recallChannel) {
+    if (recallChannel && recallChannel !== 3) {
       while (loadGeneration === bunkrLoadGeneration) {
         const shared = await fetchSharedSimpCityRecall(endpoint, { channel: recallChannel });
         if (!shared.reachable) throw new Error(`Recall ${recallChannel} lost contact with the PC server`);
@@ -19459,7 +19786,7 @@ function normalizeSimpCityRecallPayload(rawNames, rawThreadUrl = '', rawId = '',
     names,
     albums: (Array.isArray(rawAlbums) ? rawAlbums : []).filter(album => album && typeof album === 'object' && album.url),
     aiExtracted: aiExtracted === true,
-    channel: Number(channel) === 2 ? 2 : 1,
+    channel: Number(channel) === 3 ? 3 : Number(channel) === 2 ? 2 : 1,
     live: live === true,
     threadUrl: normalizeEromeLaunchUrl(rawThreadUrl) || 'https://simpcity.cr/',
     savedAt: new Date().toISOString()
@@ -19498,8 +19825,9 @@ async function publishSimpCityRecallToServer(payload) {
 
 async function fetchSharedSimpCityRecall(endpoint, { consume = false, channel = 1 } = {}) {
   try {
+    const normalizedChannel = Number(channel) === 3 ? 3 : Number(channel) === 2 ? 2 : 1;
     const response = await fetch(
-      `${endpoint}/simpcity/recall?channel=${Number(channel) === 2 ? 2 : 1}&consume=${consume ? '1' : '0'}&t=${Date.now()}`,
+      `${endpoint}/simpcity/recall?channel=${normalizedChannel}&consume=${consume ? '1' : '0'}&t=${Date.now()}`,
       { cache: 'no-store' }
     );
     if (!response.ok) return { reachable: false, recall: null, pending: null, background: null, queueCount: 0 };
@@ -21495,7 +21823,7 @@ window.addEventListener('blur',()=>{
     try { names = JSON.parse(search.dataset.names || '[]'); } catch (_) {}
     if (!names.length) return;
     search.disabled = true;
-    results.textContent += '\n\nStarting all-site lookup; SimpCity is queued for Tampermonkey…';
+    results.textContent += '\n\nStarting all-site lookup; Pong will search SimpCity in its private muted browser…';
     try {
       panel.hidden = true;
       await window.PongStartArtistLookup(names);

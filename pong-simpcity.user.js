@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.12.6
+// @version      1.13.2
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -35,7 +35,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.12.1';
+  const SCRIPT_VERSION = '1.13.2';
   const FORUM_CREATOR_CONCURRENCY = 2;
   // Use a conservative source pace. The PC worker still delegates
   // to the server's shared adaptive limiter, so both Recall channels remain
@@ -47,6 +47,7 @@
   const MAX_LINKED_THREADS = 24;
   const MAX_LINKED_THREAD_DEPTH = 2;
   const MAX_LINKED_THREAD_PAGES = 40;
+  const ARTIST_LOOKUP_THREAD_PAGES = 6;
   const endpoints = Array.isArray(globalThis.PONG_LOCAL_ENDPOINTS)
     ? globalThis.PONG_LOCAL_ENDPOINTS
     : ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
@@ -374,10 +375,14 @@
     throw new Error(`search page ${pageNumber} failed: ${lastError}`);
   }
 
-  const listingThreadUrls = (html, baseUrl) => {
+  const lookupIdentity = value => String(value || '')
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const listingThreadUrls = (html, baseUrl, artistQuery = '') => {
     const doc = new DOMParser().parseFromString(html, 'text/html');
     const threads = [];
     const seen = new Set();
+    const lookupKey = lookupIdentity(artistQuery);
     // XenForo result titles are the authoritative visible ordering. Restrict
     // forum/search scans to those rows so sidebar/recent-thread links cannot
     // jump ahead of the first creator in the listing.
@@ -392,10 +397,20 @@
       if (!threadUrl || seen.has(threadUrl)) continue;
       const slug = decodeURIComponent(new URL(threadUrl).pathname.split('/').filter(Boolean)[1] || '');
       if (/\b(?:rules?|guidelines?|who-is-this|request|posting-etiquette|community-rules|help)\b/i.test(slug)) continue;
+      if (lookupKey) {
+        const slugKey = lookupIdentity(slug.replace(/\.\d+$/, ''));
+        const titleKey = lookupIdentity(anchor.textContent || anchor.title || '');
+        if (
+          slugKey !== lookupKey &&
+          titleKey !== lookupKey &&
+          !slugKey.startsWith(lookupKey) &&
+          !titleKey.startsWith(lookupKey)
+        ) continue;
+      }
       seen.add(threadUrl);
       threads.push(threadUrl);
     }
-    return threads;
+    return lookupKey ? threads.slice(0, 2) : threads;
   };
 
   const listingPageCount = html => {
@@ -568,7 +583,7 @@
   const panel = document.createElement('div');
   panel.id = 'pong-simpcity-scraper';
   panel.style.cssText = 'position:fixed;z-index:2147483647;left:10px;right:10px;bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px;background:#10141ef5;border:1px solid #5f78a8;border-radius:12px;color:#fff;font:600 15px system-ui,sans-serif;box-shadow:0 4px 24px #000b';
-  panel.innerHTML = `<span data-status style="flex:1;min-width:180px">v${SCRIPT_VERSION} · streaming PC handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button>`;
+  panel.innerHTML = `<span data-status style="flex:1;min-width:180px">v${SCRIPT_VERSION} · streaming PC handoff</span><button data-scrape="1" style="padding:11px 12px;font:inherit">Pong 1 Scrape</button><button data-scrape="2" style="padding:11px 12px;font:inherit">Pong 2 Scrape</button><button data-scrape="3" hidden aria-hidden="true"></button><button data-copy style="padding:11px;font:inherit">Copy Log</button><button data-close style="padding:11px;font:inherit">×</button>`;
   document.body.appendChild(panel);
   const resumeLabel = document.createElement('label');
   resumeLabel.style.cssText = 'display:flex;align-items:center;gap:5px;font:inherit;white-space:nowrap';
@@ -663,6 +678,7 @@
     diagnostic('Scrape button pressed', `channel=${channel}; runToken=${runToken}`);
     try {
       const requestedSourceUrl = String(globalThis.PONG_SIMPCITY_SOURCE_URL || location.href);
+      const artistLookupQuery = String(globalThis.PONG_SIMPCITY_ARTIST_QUERY || '').trim();
       const resumeSkipProfiles = globalThis.PONG_PC_BACKGROUND_CONTEXT
         ? Math.max(0, Math.floor(Number(globalThis.PONG_SIMPCITY_RESUME_SKIP_PROFILES || 0)))
         : 0;
@@ -736,8 +752,31 @@
       let initialThreads = [];
       if (listingRootUrl) {
         listingHtml = document.documentElement.outerHTML;
-        initialThreads = listingThreadUrls(listingHtml, location.href);
-        if (!initialThreads.length) throw new Error('No creator threads were found in this search');
+        initialThreads = listingThreadUrls(listingHtml, location.href, artistLookupQuery);
+        if (!initialThreads.length) {
+          // A genuine zero-result artist search is a completed empty lookup,
+          // not a scraper failure. Publish the empty generation so channel 3
+          // may advance while real errors remain retryable.
+          const emptyScrapeId = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          await sendToPong('/simpcity/recall/begin', {
+            id: emptyScrapeId,
+            threadUrl: listingRootUrl,
+            channel
+          }, 12000);
+          await sendToPong('/simpcity/recall', {
+            id: emptyScrapeId,
+            channel,
+            schema: 'pong-simpcity-ai-v1',
+            threadUrl: listingRootUrl,
+            names: [],
+            albums: [],
+            aiExtracted: true
+          }, 15000);
+          if (isCurrentRun()) {
+            status.textContent = `Pong ${channel}: 0 immediate creators · 1 source pages · remaining AI streams to Recall`;
+          }
+          return;
+        }
       }
       const first = new URL(rootThreadUrl || initialThreads[0]);
       const scrapeId = crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -814,7 +853,7 @@
           .map(anchor => Number(anchor.getAttribute('href')?.match(/page-(\d+)/i)?.[1] || 1));
         return Math.max(1, ...pages);
       };
-      const scanThread = async ({ url: threadUrl, depth, maxPages = 0, atomic = false, deferSubmit = false, streamFirstPage = false }, currentHtml = '') => {
+      const scanThread = async ({ url: threadUrl, depth, maxPages = 0, atomic = false, deferSubmit = false, streamFirstPage = false, followLinkedThreads = true }, currentHtml = '') => {
         if (!isCurrentRun()) throw Object.assign(new Error('This scrape was superseded'), { status: 409 });
         const firstHtml = currentHtml || await fetchSimpCityPage(threadUrl, 1);
         const discoveredPages = pageCountFromHtml(firstHtml);
@@ -834,7 +873,13 @@
             links: [{ text: '', url: threadUrl, simpcityThread: true }],
             attachments: []
           }, ...firstPosts];
-          queuePosts(probePosts, depth, probePosts.length, true, true);
+          queuePosts(
+            probePosts,
+            followLinkedThreads ? depth : MAX_LINKED_THREAD_DEPTH,
+            probePosts.length,
+            true,
+            true
+          );
         }
         pagesFetched++;
         update();
@@ -855,7 +900,13 @@
                 links: [{ text: '', url: threadUrl, simpcityThread: true }],
                 attachments: []
               }, ...pagePosts];
-              queuePosts(enrichPosts, depth, enrichPosts.length, true, true);
+              queuePosts(
+                enrichPosts,
+                followLinkedThreads ? depth : MAX_LINKED_THREAD_DEPTH,
+                enrichPosts.length,
+                true,
+                true
+              );
             }
             pagesFetched++;
           }
@@ -890,6 +941,7 @@
         let nextCreatorToSubmit = 0;
         let resumeCheckpointChain = Promise.resolve();
         const listingNeedsCreatorScan = listingIsForum || listingIsSearch;
+        const listingIsArtistLookup = listingIsSearch && Boolean(artistLookupQuery);
         let listingDiscoveryComplete = !listingNeedsCreatorScan;
         const wakeCreatorWorkers = () => {
           while (creatorWaiters.length) creatorWaiters.shift()();
@@ -965,14 +1017,16 @@
               if (isCurrentRun()) {
                 status.textContent = `Pong ${channel}: creator ${index + 1}/${Math.max(index + 1, listingContentThreads.length)} · discovering more listings`;
               }
-              try {
-                completedThreads[index] = await scanThread({
-                url: threadUrl,
-                depth: 0,
-                atomic: true,
-                deferSubmit: true,
-                streamFirstPage: true
-              });
+               try {
+                 completedThreads[index] = await scanThread({
+                   url: threadUrl,
+                   depth: 0,
+                   maxPages: listingIsArtistLookup ? ARTIST_LOOKUP_THREAD_PAGES : 0,
+                   atomic: true,
+                   deferSubmit: true,
+                   streamFirstPage: true,
+                   followLinkedThreads: !listingIsArtistLookup
+                 });
               } catch (error) {
                 diagnostic('Creator thread failed', `index=${index + 1}; url=${threadUrl}; ${error?.message || error}`);
                 completedThreads[index] = [];
@@ -981,7 +1035,14 @@
             }
           })
           : [];
-        if (listingIsSearch) {
+        if (listingIsArtistLookup) {
+          // The authenticated XenForo submission already returned the exact
+          // artist result page. Searching its historical pagination repeats
+          // stale result sets and can turn one handle into dozens of listing
+          // requests before the next pasted artist starts. Artist Lookup uses
+          // only this current result page and the two matched threads queued
+          // above; each matched thread retains its six-page media ceiling.
+        } else if (listingIsSearch) {
           const seenListingPages = new Set([listingPageIdentity(location.href)]);
           const pendingListingPages = listingContinuationUrls(listingHtml, location.href, listingRootUrl)
             .filter(pageUrl => !seenListingPages.has(listingPageIdentity(pageUrl)));
@@ -1070,135 +1131,29 @@
       if (isCurrentRun()) status.textContent = `Pong ${channel} failed: ${error?.message || error}`;
     }
   };
+  // The PC worker supports channel 3 even though the visible panel only shows
+  // Recall 1 and Recall 2. Expose a fire-and-forget entry point so the hidden
+  // browser does not depend on a nonexistent channel-3 button.
+  globalThis.PONG_RUN_SIMPCITY_SCRAPE = channel => {
+    void runScrape(Number(channel || 1));
+    return true;
+  };
   buttons.forEach(button => {
-    button.onclick = () => runScrape(Number(button.dataset.scrape) === 2 ? 2 : 1);
+    button.onclick = () => {
+      const requestedChannel = Number(button.dataset.scrape);
+      void runScrape([1, 2, 3].includes(requestedChannel) ? requestedChannel : 1);
+    };
   });
 
-  // Pong Artist Lookup queue. One open SimpCity tab is enough: the userscript
-  // picks up each queued name, submits the authenticated site search, runs the
-  // normal Recall 2 pipeline, then advances to the next name automatically.
-  const LOOKUP_STORAGE_KEY = 'pong-artist-lookup-current-v1';
-  const LOOKUP_CONTROLLER_LEASE_KEY = 'pong-artist-lookup-controller-v1';
-  const LOOKUP_CONTROLLER_PARAM = 'pong_artist_lookup';
-  const LOOKUP_CONTROLLER_WINDOW_NAME = 'pong-artist-lookup-controller-v2';
-  const LOOKUP_CONTROLLER_LEASE_MS = 15_000;
-  const LOOKUP_TAB_ID = sessionStorage.getItem('pong-artist-lookup-tab-id') ||
-    `lookup-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  sessionStorage.setItem('pong-artist-lookup-tab-id', LOOKUP_TAB_ID);
-  const initialControllerToken = new URLSearchParams(location.hash.replace(/^#/, '')).get(LOOKUP_CONTROLLER_PARAM) || '';
-  let lookupControllerToken = sessionStorage.getItem('pong-artist-lookup-controller-token') || '';
-  if (initialControllerToken) {
-    lookupControllerToken = initialControllerToken;
-    sessionStorage.setItem('pong-artist-lookup-controller-token', lookupControllerToken);
-    window.name = LOOKUP_CONTROLLER_WINDOW_NAME;
-    document.title = `Pong Lookup · ${document.title}`;
+  // Artist Lookup is now submitted and scraped by Pong's isolated PC browser.
+  // Remove legacy controller state and never navigate, open, or iframe a user's
+  // normal SimpCity tab for background artist searches.
+  if (!globalThis.PONG_PC_BACKGROUND_CONTEXT) {
+    for (const key of ['pong-artist-lookup-current-v1', 'pong-artist-lookup-controller-v1']) {
+      if (typeof GM_deleteValue === 'function') void GM_deleteValue(key);
+    }
+    sessionStorage.removeItem('pong-artist-lookup-controller-token');
+    sessionStorage.removeItem('pong-artist-lookup-tab-id');
+    if (window.name === 'pong-artist-lookup-controller-v2') window.name = '';
   }
-  const gmGet = async key => typeof GM_getValue === 'function' ? await GM_getValue(key, null) : null;
-  const gmSet = async (key, value) => { if (typeof GM_setValue === 'function') await GM_setValue(key, value); };
-  const gmDelete = async key => { if (typeof GM_deleteValue === 'function') await GM_deleteValue(key); };
-  const isArtistLookupController = () =>
-    window.name === LOOKUP_CONTROLLER_WINDOW_NAME && Boolean(lookupControllerToken);
-  const artistLookupSearchUrl = (query, token = lookupControllerToken) =>
-    `https://simpcity.cr/search/?q=${encodeURIComponent(query)}&o=date#${LOOKUP_CONTROLLER_PARAM}=${encodeURIComponent(token)}`;
-  const touchArtistLookupController = async () => {
-    await gmSet(LOOKUP_CONTROLLER_LEASE_KEY, {
-      tabId: LOOKUP_TAB_ID,
-      token: lookupControllerToken,
-      at: Date.now()
-    });
-  };
-  const submitArtistSearch = query => {
-    location.assign(artistLookupSearchUrl(query));
-  };
-  const waitForRecall2Completion = async () => {
-    const deadline = Date.now() + 30 * 60_000;
-    while (Date.now() < deadline) {
-      const state = await getFromPong('/simpcity/background/status?channel=3').catch(() => null);
-      const run = state?.run;
-      if (run && ['complete', 'empty', 'error', 'cancelled'].includes(String(run.state || ''))) return run;
-      await delay(2000);
-    }
-    throw new Error('Artist Lookup timed out waiting for Recall 2');
-  };
-  const processArtistLookupQueue = async () => {
-    if (globalThis.PONG_PC_BACKGROUND_CONTEXT) return;
-    if (!isArtistLookupController()) {
-      const lease = await gmGet(LOOKUP_CONTROLLER_LEASE_KEY);
-      if (lease?.token && lease?.at && Date.now() - Number(lease.at) < LOOKUP_CONTROLLER_LEASE_MS) {
-        setTimeout(processArtistLookupQueue, 4000);
-        return;
-      }
-      let pendingItem = await gmGet(LOOKUP_STORAGE_KEY);
-      if (!pendingItem?.id) {
-        const next = await getFromPong('/simpcity/artist-lookup/next').catch(() => null);
-        pendingItem = next?.item || null;
-      }
-      if (!pendingItem?.id) {
-        setTimeout(processArtistLookupQueue, 4000);
-        return;
-      }
-      pendingItem = { ...pendingItem, navigated: true };
-      await gmSet(LOOKUP_STORAGE_KEY, pendingItem);
-      const controllerToken = `controller-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      await gmSet(LOOKUP_CONTROLLER_LEASE_KEY, {
-        tabId: LOOKUP_TAB_ID,
-        token: controllerToken,
-        at: Date.now()
-      });
-      const controllerUrl = artistLookupSearchUrl(pendingItem.query, controllerToken);
-      // Run the authenticated navigator inside a hidden same-origin frame.
-      // No browser tab is opened and the user's current SimpCity page never
-      // changes. X-Frame-Options SAMEORIGIN permits this SimpCity-to-SimpCity
-      // controller while still blocking foreign embedding.
-      const controllerFrame = document.createElement('iframe');
-      controllerFrame.name = LOOKUP_CONTROLLER_WINDOW_NAME;
-      controllerFrame.src = controllerUrl;
-      controllerFrame.setAttribute('aria-hidden', 'true');
-      controllerFrame.style.cssText = 'display:none!important;width:0!important;height:0!important;border:0!important';
-      (document.body || document.documentElement).appendChild(controllerFrame);
-      status.textContent = `Pong Artist Lookup: hidden controller started for ${pendingItem.query}`;
-      setTimeout(processArtistLookupQueue, 4000);
-      return;
-    }
-    const controllerLease = await gmGet(LOOKUP_CONTROLLER_LEASE_KEY);
-    if (controllerLease?.token !== lookupControllerToken) {
-      // A stale or copied tab can never inherit navigation authority.
-      window.name = '';
-      lookupControllerToken = '';
-      sessionStorage.removeItem('pong-artist-lookup-controller-token');
-      setTimeout(processArtistLookupQueue, 4000);
-      return;
-    }
-    await touchArtistLookupController();
-    let item = await gmGet(LOOKUP_STORAGE_KEY);
-    if (!item?.id) {
-      const next = await getFromPong('/simpcity/artist-lookup/next').catch(() => null);
-      item = next?.item || null;
-      if (!item?.id) { setTimeout(processArtistLookupQueue, 4000); return; }
-      await gmSet(LOOKUP_STORAGE_KEY, item);
-    }
-    const currentQuery = new URL(location.href).searchParams.get('q') || '';
-    if (!/^\/search\//i.test(location.pathname) || currentQuery.toLowerCase() !== String(item.query).toLowerCase()) {
-      status.textContent = `Pong Artist Lookup: searching ${item.query}`;
-      item = { ...item, navigated: true };
-      await gmSet(LOOKUP_STORAGE_KEY, item);
-      submitArtistSearch(item.query);
-      return;
-    }
-    status.textContent = `Pong Artist Lookup: scanning ${item.query}`;
-    await runScrape(3);
-    await waitForRecall2Completion();
-    await sendToPong('/simpcity/artist-lookup/complete', { id: item.id }, 15000);
-    await gmDelete(LOOKUP_STORAGE_KEY);
-    status.textContent = `Pong Artist Lookup: finished ${item.query}`;
-    setTimeout(processArtistLookupQueue, 1000);
-  };
-  if (isArtistLookupController()) {
-    setInterval(() => touchArtistLookupController().catch(() => {}), 4000);
-  }
-  setTimeout(() => processArtistLookupQueue().catch(error => {
-    diagnostic('Artist Lookup automation failed', error?.message || String(error));
-    status.textContent = `Pong Artist Lookup failed: ${error?.message || error}`;
-    setTimeout(processArtistLookupQueue, 10000);
-  }), 1500);
 })();
