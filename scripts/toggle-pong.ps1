@@ -10,6 +10,8 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $nodeServerPath = Join-Path $repoRoot 'local-ai-server.mjs'
 $preferenceLauncherPath = Join-Path $PSScriptRoot 'run-preference-ai.ps1'
+$serverWatchdogPath = Join-Path $PSScriptRoot 'run-pong-server-watchdog.ps1'
+$serverWatchdogTaskName = 'Pong Local AI Watchdog'
 $pongPorts = @(8787, 8790, 8791)
 $allDependencyPorts = @(8787, 8790, 8791, 11434)
 $ollamaProcessNames = @('ollama.exe', 'ollama app.exe', 'llama-server.exe')
@@ -54,7 +56,7 @@ function Test-IsPongProcess {
   }
 
   $repoPattern = [regex]::Escape($repoRoot)
-  if ($commandLine -match $repoPattern -and $commandLine -match '(?i)(local-ai-server\.mjs|preference_ai_service\.py|lora_inference_server\.py|run-preference-ai\.ps1|run-lora-infer\.ps1|start-local-ai\.bat)') {
+  if ($commandLine -match $repoPattern -and $commandLine -match '(?i)(local-ai-server\.mjs|preference_ai_service\.py|lora_inference_server\.py|run-preference-ai\.ps1|run-pong-server-watchdog\.ps1|run-lora-infer\.ps1|start-local-ai\.bat)') {
     return $true
   }
 
@@ -104,6 +106,13 @@ function Stop-ProcessTree {
 }
 
 function Stop-Pong {
+  try {
+    Stop-ScheduledTask -TaskName $serverWatchdogTaskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $serverWatchdogTaskName -Confirm:$false -ErrorAction SilentlyContinue
+  } catch {
+    # Process-tree shutdown below remains a reliable fallback.
+  }
+
   try {
     Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8787/workload/reset' -Method Post -ContentType 'application/json' -Body '{}' -TimeoutSec 2 | Out-Null
   } catch {
@@ -179,6 +188,9 @@ function Start-Pong {
   if (-not (Test-Path -LiteralPath $preferenceLauncherPath)) {
     throw "Pong preference launcher was not found at $preferenceLauncherPath"
   }
+  if (-not (Test-Path -LiteralPath $serverWatchdogPath)) {
+    throw "Pong server watchdog was not found at $serverWatchdogPath"
+  }
 
   $listeningPorts = @(
     Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
@@ -210,14 +222,31 @@ function Start-Pong {
       -WindowStyle Hidden | Out-Null
   }
 
-  if (8787 -notin $listeningPorts) {
-    $nodeCommand = Get-Command node.exe -ErrorAction Stop
-    Start-Process `
-      -FilePath $nodeCommand.Source `
-      -ArgumentList "`"$nodeServerPath`"" `
-      -WorkingDirectory $repoRoot `
-      -WindowStyle Hidden | Out-Null
-  }
+  $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $watchdogAction = New-ScheduledTaskAction `
+    -Execute $windowsPowerShell `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$serverWatchdogPath`"" `
+    -WorkingDirectory $repoRoot
+  # A distant one-time trigger lets a standard (non-admin) Windows account own
+  # the task. Start-ScheduledTask launches it immediately; the watchdog itself
+  # remains active until Pong is explicitly stopped.
+  $watchdogTrigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At ((Get-Date).Date.AddDays(1).AddHours(23))
+  $watchdogSettings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -MultipleInstances IgnoreNew `
+    -RestartCount 99 `
+    -RestartInterval (New-TimeSpan -Minutes 1)
+  Register-ScheduledTask `
+    -TaskName $serverWatchdogTaskName `
+    -Action $watchdogAction `
+    -Trigger $watchdogTrigger `
+    -Settings $watchdogSettings `
+    -Force | Out-Null
+  Start-ScheduledTask -TaskName $serverWatchdogTaskName
 
   Start-Sleep -Milliseconds 700
 }
