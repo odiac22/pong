@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.69</div>
+    <div class="version-number">26.70</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -19040,7 +19040,18 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   };
   const publishGroup = rawGroups => {
     const groups = (Array.isArray(rawGroups) ? rawGroups : [rawGroups])
-      .filter(group => Array.isArray(group?.videos) && group.videos.length);
+      .filter(group => Array.isArray(group?.videos) && group.videos.length)
+      .map(group => recallChannel === 3 && group?.pairId
+        ? {
+            ...group,
+            // One visible primary event per pasted artist. Every regular
+            // source progressively merges here; TikTok remains its hidden
+            // side-deck event for the same pairId.
+            mediaKind: String(group.mediaKind || '').toLowerCase() === 'tiktok'
+              ? 'tiktok'
+              : 'artist-primary'
+          }
+        : group);
     if (!groups.length) return false;
     let imported;
     if (!cardsStarted) {
@@ -19053,6 +19064,16 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       loadVideosButton.click();
       activateFirstEromeBatch();
       cardsStarted = true;
+    } else if (recallChannel === 3) {
+      imported = { urls: [], metadata: [], events: [] };
+      groups.forEach(group => {
+        const progressive = mergeProgressiveSimpCityGroup(group, bunkrPlaybackBase);
+        imported.urls.push(...(progressive.urls || []));
+        imported.metadata.push(...(progressive.metadata || []));
+        imported.events.push(...(progressive.events || []));
+      });
+      if (!imported.urls.length) return false;
+      updatePasteNavigationButton();
     } else {
       imported = appendEromeGroupsToCurrentCards(groups, bunkrPlaybackBase);
       if (!imported.urls.length || !imported.events.length) return false;
