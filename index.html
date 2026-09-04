@@ -894,6 +894,7 @@
       <textarea id="artist-lookup-input" rows="5" placeholder="Lola Pelligrini\nlola_pelligrini\n—or paste a JSON export" spellcheck="false"></textarea>
       <div class="auth-url-row">
         <button id="artist-lookup-run" type="button">Find artists</button>
+        <button id="artist-lookup-search" type="button" disabled>Search SimpCity + Pong</button>
         <button id="artist-lookup-copy" type="button" disabled>Copy Pong paste</button>
       </div>
       <pre id="artist-lookup-results" aria-live="polite"></pre>
@@ -906,7 +907,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.57</div>
+    <div class="version-number">26.58</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -21227,6 +21228,7 @@ window.addEventListener('blur',()=>{
   const input = document.getElementById('artist-lookup-input');
   const results = document.getElementById('artist-lookup-results');
   const copy = document.getElementById('artist-lookup-copy');
+  const search = document.getElementById('artist-lookup-search');
   let pasteText = '';
   const key = value => String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
   const variants = value => {
@@ -21266,7 +21268,7 @@ window.addEventListener('blur',()=>{
   document.getElementById('artist-lookup-close')?.addEventListener('click', () => { panel.hidden = true; });
   document.getElementById('artist-lookup-run')?.addEventListener('click', () => {
     const artists = extract(input.value);
-    if (!artists.length) { results.textContent = 'No artist names or handles found.'; copy.disabled = true; pasteText = ''; return; }
+    if (!artists.length) { results.textContent = 'No artist names or handles found.'; copy.disabled = true; search.disabled = true; pasteText = ''; return; }
     const blocks = [];
     for (const artist of artists) {
       const searchTerms = variants(artist.name);
@@ -21282,6 +21284,22 @@ window.addEventListener('blur',()=>{
     pasteText = artists.map(artist => variants(artist.name)[0]).join('\n');
     results.textContent = `${artists.length} artist${artists.length === 1 ? '' : 's'} found.\n\n${blocks.join('\n\n')}`;
     copy.disabled = false;
+    search.disabled = false;
+    search.dataset.names = JSON.stringify(artists.map(artist => artist.name));
+  });
+  search?.addEventListener('click', async () => {
+    let names = [];
+    try { names = JSON.parse(search.dataset.names || '[]'); } catch (_) {}
+    if (!names.length) return;
+    search.disabled = true;
+    results.textContent += '\n\nStarting SimpCity + Pong search…';
+    try {
+      panel.hidden = true;
+      await loadSimpCityAsCards([], names, [], false, 0, { source: 'artist-lookup' });
+    } catch (error) {
+      panel.hidden = false;
+      results.textContent += `\nSearch failed: ${error?.message || error}`;
+    } finally { search.disabled = false; }
   });
   copy?.addEventListener('click', async () => { if (pasteText) await navigator.clipboard?.writeText(pasteText); });
 })();
