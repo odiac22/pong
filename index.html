@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.64</div>
+    <div class="version-number">26.65</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -19150,6 +19150,121 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   // Feed those results to the player immediately instead of searching for them twice.
   enqueueAlbums(suppliedAlbums);
 
+  const parallelArtistLookup = recallChannel === 3 && suppliedCreatorNames.length
+    ? Promise.allSettled([
+        // Balbums/Bunkr name search runs independently from the authenticated
+        // SimpCity queue and streams each matching album into the same player.
+        (async () => {
+          const started = await postJson('/simpcity/import/names/start', {
+            names: suppliedCreatorNames,
+            sourceUrl: sourceThreadUrl,
+            aiExtracted: false
+          });
+          const jobId = String(started.jobId || '');
+          if (!jobId) return;
+          while (loadGeneration === bunkrLoadGeneration) {
+            const state = await getJson(`/simpcity/import/status?jobId=${encodeURIComponent(jobId)}`);
+            enqueueAlbums(state.albums, jobId);
+            if (['complete', 'cancelled', 'error'].includes(String(state.state || ''))) return;
+            await sleep(700);
+          }
+        })(),
+        // Exact exported handles are also checked as TikTok usernames. Keep
+        // concurrency deliberately low so a large JSON import cannot burst.
+        eromePool(suppliedCreatorNames, 2, async rawName => {
+          const username = String(rawName || '').trim().replace(/^@+/, '');
+          if (!/^[a-z0-9_.-]{3,64}$/i.test(username)) return;
+          await sleep(650);
+          const data = await postJson('/tiktok/profile', { username });
+          if (!Array.isArray(data.videos) || !data.videos.length) return;
+          enqueueAlbums([{
+            url: data.profileUrl,
+            title: `TikTok account · ${data.username}`,
+            creatorName: data.username,
+            creatorKey: normalizeSimpCityCreatorKey(data.username),
+            sourceUrl: data.profileUrl,
+            source: 'hosted',
+            mediaKind: 'tiktok',
+            videos: data.videos
+          }]);
+        }),
+        // CoomerFans/OnlyFaHouse source search uses the exact exported handle.
+        // One artist at a time avoids recreating Local2's source bursts.
+        eromePool(suppliedCreatorNames, 1, async rawName => {
+          const username = String(rawName || '').trim().replace(/^@+/, '');
+          if (!/^[a-z0-9_.-]{3,100}$/i.test(username)) return;
+          const data = await postJson('/artist-lookup/coomer', { username });
+          for (const match of data.matches || []) {
+            if (!Array.isArray(match.videos) || !match.videos.length) continue;
+            enqueueAlbums([{
+              url: match.artistUrl,
+              title: `CoomerFans · ${match.username}`,
+              creatorName: match.username,
+              creatorKey: normalizeSimpCityCreatorKey(match.username),
+              sourceUrl: match.artistUrl,
+              source: 'direct',
+              mediaKind: 'artist-unified',
+              videos: match.videos
+            }]);
+          }
+        }),
+        // LeakedZone has its own independent two-artist lane. Detail pages are
+        // routed through Pong's playlist endpoint before publication.
+        eromePool(suppliedCreatorNames, 2, async rawName => {
+          const username = String(rawName || '').trim().replace(/^@+/, '');
+          if (!/^[a-z0-9_.-]{3,100}$/i.test(username)) return;
+          const data = await postJson('/artist-lookup/leakedzone', { username });
+          for (const match of data.matches || []) {
+            const videos = (match.videos || []).map(detailUrl =>
+              `${endpoint}/leakedzone/media?url=${encodeURIComponent(detailUrl)}`
+            );
+            if (!videos.length) continue;
+            enqueueAlbums([{
+              url: match.creatorUrl,
+              title: `LeakedZone · ${match.title || username}`,
+              creatorName: match.title || username,
+              creatorKey: normalizeSimpCityCreatorKey(username),
+              sourceUrl: match.creatorUrl,
+              source: 'direct',
+              mediaKind: 'artist-unified',
+              videos
+            }]);
+          }
+        }),
+        // Erome search and album scraping use the deployed proxy, one artist
+        // at a time and only a small first cohort of matching albums.
+        eromePool(suppliedCreatorNames, 1, async rawName => {
+          const username = String(rawName || '').trim();
+          if (!username || !EROME_PROXY_BASE) return;
+          const proxyBase = EROME_PROXY_BASE.replace(/\/+$/, '');
+          const searchUrl = `https://www.erome.com/search?q=${encodeURIComponent(username)}`;
+          const listing = await fetchEromeAlbumListData(proxyBase, searchUrl, {
+            attempts: 2,
+            timeoutMs: EROME_FETCH_TIMEOUT_MS,
+            fast: true
+          });
+          await eromePool((listing.albums || []).slice(0, 4), 2, async album => {
+            const data = await fetchEromeScrapeData(proxyBase, album.url, {
+              attempts: 1,
+              timeoutMs: EROME_FETCH_TIMEOUT_MS,
+              fast: true
+            });
+            const groups = buildEromeImportGroups(data, album.url).map(group => ({
+              ...group,
+              url: group.url || album.url,
+              title: group.title || album.title || `Erome · ${username}`,
+              sourceUrl: searchUrl,
+              sourceTitle: username,
+              creatorName: username,
+              creatorKey: normalizeSimpCityCreatorKey(username),
+              source: 'erome'
+            }));
+            enqueueAlbums(groups);
+          });
+        })
+      ])
+    : Promise.resolve([]);
+
   updateEromeProgress({
     title: 'Connecting SimpCity',
     detail: 'Checking the encrypted PC browser session',
@@ -19253,6 +19368,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     discoveryError = error;
     console.warn('SimpCity import failed:', error);
   } finally {
+    await parallelArtistLookup;
     feedClosed = true;
     simpCityActiveCreatorChoices = [];
     if (loadGeneration === bunkrLoadGeneration) simpCitySkipQueuePurger = null;

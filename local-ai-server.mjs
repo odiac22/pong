@@ -12089,6 +12089,56 @@ const server = http.createServer(async (req, res) => {
       } : null });
       return;
     }
+    if (req.method === 'POST' && url.pathname === '/tiktok/profile') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const username = String(payload?.username || '').trim().replace(/^@+/, '');
+      if (!/^[a-z0-9_.-]{3,64}$/i.test(username)) throw new Error('A valid exact TikTok username is required');
+      const profileUrl = `https://www.tiktok.com/@${username}`;
+      const videos = await extractTikTokVideoUrls(profileUrl);
+      json(res, 200, { ok: true, username, profileUrl, videos, count: videos.length });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/artist-lookup/coomer') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const username = String(payload?.username || '').trim().replace(/^@+/, '');
+      const key = username.toLowerCase().replace(/[^a-z0-9]+/g, '');
+      if (key.length < 3) throw new Error('A valid exact creator username is required');
+      const matches = [];
+      for (const host of availableGatewayHosts()) {
+        try {
+          const searchUrl = `https://${host}/?q=${encodeURIComponent(username)}`;
+          const html = await random40ReservoirFetchHtml(searchUrl, 15000);
+          for (const artistUrl of random40ReservoirArtistUrls(html, searchUrl)) {
+            const slug = decodeURIComponent(new URL(artistUrl).pathname.split('/').filter(Boolean).at(-1) || '');
+            if (slug.toLowerCase().replace(/[^a-z0-9]+/g, '') !== key) continue;
+            const candidate = { artistUrl, artistId: random40ReservoirIdentity(artistUrl), sourcePage: 0, profileImageUrl: '' };
+            const controller = new AbortController();
+            const profile = await local2FlashPrepareProfile(candidate, { signal: controller.signal, variant: 'artist-lookup' });
+            const videos = await local2FlashVerifyProfile(profile, { signal: controller.signal, variant: 'artist-lookup', verificationPriority: { priority: 0 } });
+            matches.push({ username: slug, artistUrl, videos });
+          }
+        } catch (_) {}
+      }
+      json(res, 200, { ok: true, username, matches, count: matches.length });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/artist-lookup/leakedzone') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const username = String(payload?.username || '').trim().replace(/^@+/, '');
+      const key = username.toLowerCase().replace(/[^a-z0-9]+/g, '');
+      if (key.length < 3) throw new Error('A valid exact creator username is required');
+      const listingUrl = `https://leakedzone.com/creators?search=${encodeURIComponent(username)}`;
+      const discovered = await discoverLeakedZoneCreators(listingUrl);
+      const matches = [];
+      for (const creatorUrl of discovered.creators.slice(0, 12)) {
+        const slug = decodeURIComponent(new URL(creatorUrl).pathname.split('/').filter(Boolean)[0] || '');
+        if (slug.toLowerCase().replace(/[^a-z0-9]+/g, '') !== key) continue;
+        const creator = await scrapeLeakedZoneCreator(creatorUrl);
+        matches.push(creator);
+      }
+      json(res, 200, { ok: true, username, matches, count: matches.length });
+      return;
+    }
     if (req.method === 'POST' && url.pathname === '/simpcity/artist-lookup/enqueue') {
       const payload = JSON.parse(await readBody(req) || '{}');
       json(res, 202, { ok: true, ...enqueueSimpCityArtistLookup(payload?.names) });
