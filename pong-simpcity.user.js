@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.12.4
+// @version      1.12.5
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -1080,18 +1080,32 @@
   const LOOKUP_STORAGE_KEY = 'pong-artist-lookup-current-v1';
   const LOOKUP_CONTROLLER_LEASE_KEY = 'pong-artist-lookup-controller-v1';
   const LOOKUP_CONTROLLER_PARAM = 'pong_artist_lookup';
+  const LOOKUP_CONTROLLER_WINDOW_NAME = 'pong-artist-lookup-controller-v2';
   const LOOKUP_CONTROLLER_LEASE_MS = 15_000;
   const LOOKUP_TAB_ID = sessionStorage.getItem('pong-artist-lookup-tab-id') ||
     `lookup-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   sessionStorage.setItem('pong-artist-lookup-tab-id', LOOKUP_TAB_ID);
+  const initialControllerToken = new URLSearchParams(location.hash.replace(/^#/, '')).get(LOOKUP_CONTROLLER_PARAM) || '';
+  let lookupControllerToken = sessionStorage.getItem('pong-artist-lookup-controller-token') || '';
+  if (initialControllerToken) {
+    lookupControllerToken = initialControllerToken;
+    sessionStorage.setItem('pong-artist-lookup-controller-token', lookupControllerToken);
+    window.name = LOOKUP_CONTROLLER_WINDOW_NAME;
+    document.title = `Pong Lookup · ${document.title}`;
+  }
   const gmGet = async key => typeof GM_getValue === 'function' ? await GM_getValue(key, null) : null;
   const gmSet = async (key, value) => { if (typeof GM_setValue === 'function') await GM_setValue(key, value); };
   const gmDelete = async key => { if (typeof GM_deleteValue === 'function') await GM_deleteValue(key); };
-  const isArtistLookupController = () => new URL(location.href).searchParams.get(LOOKUP_CONTROLLER_PARAM) === '1';
-  const artistLookupSearchUrl = query =>
-    `https://simpcity.cr/search/?q=${encodeURIComponent(query)}&o=date&${LOOKUP_CONTROLLER_PARAM}=1`;
+  const isArtistLookupController = () =>
+    window.name === LOOKUP_CONTROLLER_WINDOW_NAME && Boolean(lookupControllerToken);
+  const artistLookupSearchUrl = (query, token = lookupControllerToken) =>
+    `https://simpcity.cr/search/?q=${encodeURIComponent(query)}&o=date#${LOOKUP_CONTROLLER_PARAM}=${encodeURIComponent(token)}`;
   const touchArtistLookupController = async () => {
-    await gmSet(LOOKUP_CONTROLLER_LEASE_KEY, { tabId: LOOKUP_TAB_ID, at: Date.now() });
+    await gmSet(LOOKUP_CONTROLLER_LEASE_KEY, {
+      tabId: LOOKUP_TAB_ID,
+      token: lookupControllerToken,
+      at: Date.now()
+    });
   };
   const submitArtistSearch = query => {
     location.assign(artistLookupSearchUrl(query));
@@ -1110,7 +1124,7 @@
     if (globalThis.PONG_PC_BACKGROUND_CONTEXT) return;
     if (!isArtistLookupController()) {
       const lease = await gmGet(LOOKUP_CONTROLLER_LEASE_KEY);
-      if (lease?.at && Date.now() - Number(lease.at) < LOOKUP_CONTROLLER_LEASE_MS) {
+      if (lease?.token && lease?.at && Date.now() - Number(lease.at) < LOOKUP_CONTROLLER_LEASE_MS) {
         setTimeout(processArtistLookupQueue, 4000);
         return;
       }
@@ -1125,14 +1139,28 @@
       }
       pendingItem = { ...pendingItem, navigated: true };
       await gmSet(LOOKUP_STORAGE_KEY, pendingItem);
-      await touchArtistLookupController();
-      const controllerUrl = artistLookupSearchUrl(pendingItem.query);
+      const controllerToken = `controller-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      await gmSet(LOOKUP_CONTROLLER_LEASE_KEY, {
+        tabId: LOOKUP_TAB_ID,
+        token: controllerToken,
+        at: Date.now()
+      });
+      const controllerUrl = artistLookupSearchUrl(pendingItem.query, controllerToken);
       if (typeof GM_openInTab === 'function') {
         GM_openInTab(controllerUrl, { active: false, insert: true, setParent: true });
       } else {
         window.open(controllerUrl, '_blank', 'noopener,noreferrer');
       }
       status.textContent = `Pong Artist Lookup: background tab started for ${pendingItem.query}`;
+      setTimeout(processArtistLookupQueue, 4000);
+      return;
+    }
+    const controllerLease = await gmGet(LOOKUP_CONTROLLER_LEASE_KEY);
+    if (controllerLease?.token !== lookupControllerToken) {
+      // A stale or copied tab can never inherit navigation authority.
+      window.name = '';
+      lookupControllerToken = '';
+      sessionStorage.removeItem('pong-artist-lookup-controller-token');
       setTimeout(processArtistLookupQueue, 4000);
       return;
     }
@@ -1145,7 +1173,7 @@
       await gmSet(LOOKUP_STORAGE_KEY, item);
     }
     const currentQuery = new URL(location.href).searchParams.get('q') || '';
-    if (!/^\/search\//i.test(location.pathname) || (!item.navigated && currentQuery.toLowerCase() !== String(item.query).toLowerCase())) {
+    if (!/^\/search\//i.test(location.pathname) || currentQuery.toLowerCase() !== String(item.query).toLowerCase()) {
       status.textContent = `Pong Artist Lookup: searching ${item.query}`;
       item = { ...item, navigated: true };
       await gmSet(LOOKUP_STORAGE_KEY, item);
