@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.66</div>
+    <div class="version-number">26.67</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -18834,6 +18834,16 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     return data;
   };
 
+  // Queue Artist Lookup only after this exact Open Albums flow has resolved
+  // the reachable Pong server. Keeping the enqueue here prevents the UI and
+  // importer from selecting different endpoints or silently diverging.
+  if (recallChannel === 3 && suppliedCreatorNames.length && !resumeExisting) {
+    const queued = await postJson('/simpcity/artist-lookup/enqueue', {
+      names: suppliedCreatorNames
+    });
+    videoContainer.innerHTML = `<div class="loading-message">Artist Lookup queued: ${Number(queued.queued || suppliedCreatorNames.length)} artist${suppliedCreatorNames.length === 1 ? '' : 's'}. Searching every source…</div>`;
+  }
+
   // SimpCity recalls keep five unviewed creator albums ready. Passing one
   // artist releases a slot and resumes album resolution automatically.
   const READY_ALBUM_TARGET = 5;
@@ -20916,7 +20926,17 @@ document.addEventListener('keydown', event => {
 installTrainAiSwipe();
 
 document.getElementById('open-erome').addEventListener('click',()=>{
-  loadEromeAsCards();
+  void loadEromeAsCards().catch(error => {
+    console.error('[Albums] Open Albums failed', error);
+    updateEromeProgress({
+      title: 'Open Albums failed',
+      detail: String(error?.message || error),
+      completed: 0,
+      total: 0,
+      videos: 0
+    });
+    alert(`Open Albums failed: ${error?.message || error}`);
+  });
 });
 
 const savedEromeButton = document.getElementById('saved-erome');
@@ -21403,15 +21423,6 @@ window.addEventListener('blur',()=>{
   window.PongStartArtistLookup = async rawNames => {
     const names = [...new Set((Array.isArray(rawNames) ? rawNames : []).map(value => String(value || '').trim()).filter(Boolean))];
     if (!names.length) throw new Error('No artist names were supplied');
-    const endpoint = await getRandom40LocalEndpoint(true);
-    if (!endpoint) throw new Error('The Pong PC server is not running or reachable');
-    const response = await fetch(`${endpoint}/simpcity/artist-lookup/enqueue`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ names })
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.ok) throw new Error(data.error || `Local HTTP ${response.status}`);
     return loadSimpCityAsCards(['https://simpcity.cr/'], names, [], false, 3, { source: 'artist-lookup' });
   };
   const link = (base, value) => `${base}${encodeURIComponent(value)}`;
