@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.12.2
+// @version      1.12.3
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -22,6 +22,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_openInTab
 // @connect      127.0.0.1
 // @connect      192.168.1.124
 // @connect      *
@@ -1071,20 +1072,23 @@
   // picks up each queued name, submits the authenticated site search, runs the
   // normal Recall 2 pipeline, then advances to the next name automatically.
   const LOOKUP_STORAGE_KEY = 'pong-artist-lookup-current-v1';
+  const LOOKUP_CONTROLLER_LEASE_KEY = 'pong-artist-lookup-controller-v1';
+  const LOOKUP_CONTROLLER_PARAM = 'pong_artist_lookup';
+  const LOOKUP_CONTROLLER_LEASE_MS = 15_000;
+  const LOOKUP_TAB_ID = sessionStorage.getItem('pong-artist-lookup-tab-id') ||
+    `lookup-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  sessionStorage.setItem('pong-artist-lookup-tab-id', LOOKUP_TAB_ID);
   const gmGet = async key => typeof GM_getValue === 'function' ? await GM_getValue(key, null) : null;
   const gmSet = async (key, value) => { if (typeof GM_setValue === 'function') await GM_setValue(key, value); };
   const gmDelete = async key => { if (typeof GM_deleteValue === 'function') await GM_deleteValue(key); };
+  const isArtistLookupController = () => new URL(location.href).searchParams.get(LOOKUP_CONTROLLER_PARAM) === '1';
+  const artistLookupSearchUrl = query =>
+    `https://simpcity.cr/search/?q=${encodeURIComponent(query)}&o=date&${LOOKUP_CONTROLLER_PARAM}=1`;
+  const touchArtistLookupController = async () => {
+    await gmSet(LOOKUP_CONTROLLER_LEASE_KEY, { tabId: LOOKUP_TAB_ID, at: Date.now() });
+  };
   const submitArtistSearch = query => {
-    const searchInput = document.querySelector('form input[name="q"], input[name="q"]');
-    const form = searchInput?.closest('form');
-    if (searchInput && form) {
-      searchInput.value = query;
-      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-      if (typeof form.requestSubmit === 'function') form.requestSubmit();
-      else form.submit();
-      return;
-    }
-    location.assign(`https://simpcity.cr/search/?q=${encodeURIComponent(query)}&o=date`);
+    location.assign(artistLookupSearchUrl(query));
   };
   const waitForRecall2Completion = async () => {
     const deadline = Date.now() + 30 * 60_000;
@@ -1098,6 +1102,35 @@
   };
   const processArtistLookupQueue = async () => {
     if (globalThis.PONG_PC_BACKGROUND_CONTEXT) return;
+    if (!isArtistLookupController()) {
+      const lease = await gmGet(LOOKUP_CONTROLLER_LEASE_KEY);
+      if (lease?.at && Date.now() - Number(lease.at) < LOOKUP_CONTROLLER_LEASE_MS) {
+        setTimeout(processArtistLookupQueue, 4000);
+        return;
+      }
+      let pendingItem = await gmGet(LOOKUP_STORAGE_KEY);
+      if (!pendingItem?.id) {
+        const next = await getFromPong('/simpcity/artist-lookup/next').catch(() => null);
+        pendingItem = next?.item || null;
+      }
+      if (!pendingItem?.id) {
+        setTimeout(processArtistLookupQueue, 4000);
+        return;
+      }
+      pendingItem = { ...pendingItem, navigated: true };
+      await gmSet(LOOKUP_STORAGE_KEY, pendingItem);
+      await touchArtistLookupController();
+      const controllerUrl = artistLookupSearchUrl(pendingItem.query);
+      if (typeof GM_openInTab === 'function') {
+        GM_openInTab(controllerUrl, { active: false, insert: true, setParent: true });
+      } else {
+        window.open(controllerUrl, '_blank', 'noopener,noreferrer');
+      }
+      status.textContent = `Pong Artist Lookup: background tab started for ${pendingItem.query}`;
+      setTimeout(processArtistLookupQueue, 4000);
+      return;
+    }
+    await touchArtistLookupController();
     let item = await gmGet(LOOKUP_STORAGE_KEY);
     if (!item?.id) {
       const next = await getFromPong('/simpcity/artist-lookup/next').catch(() => null);
@@ -1121,6 +1154,9 @@
     status.textContent = `Pong Artist Lookup: finished ${item.query}`;
     setTimeout(processArtistLookupQueue, 1000);
   };
+  if (isArtistLookupController()) {
+    setInterval(() => touchArtistLookupController().catch(() => {}), 4000);
+  }
   setTimeout(() => processArtistLookupQueue().catch(error => {
     diagnostic('Artist Lookup automation failed', error?.message || String(error));
     status.textContent = `Pong Artist Lookup failed: ${error?.message || error}`;
