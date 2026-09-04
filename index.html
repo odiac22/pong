@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.79</div>
+    <div class="version-number">26.80</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -1426,6 +1426,11 @@ function normalizeArtistSourceName(value) {
 }
 
 function artistSourceNamesFromRecord(record) {
+  const mediaKind = String(record?.simpCityMediaKind || record?.mediaKind || '').toLowerCase();
+  // TikTok uses the local hosted-media cache for playback, but that transport
+  // is not a Bunkr content source. Its side deck must always identify only the
+  // TikTok videos that belong to it.
+  if (mediaKind === 'tiktok') return ['TikTok'];
   const names = new Set();
   const add = value => {
     const normalized = normalizeArtistSourceName(value);
@@ -10968,6 +10973,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
     const groupSourceUrl = group.sourceUrl || group.url || '';
     const groupSourceTitle = group.sourceTitle || artistNameFromUrl(groupSourceUrl) || 'Erome';
     const groupArtistSources = artistSourceNamesFromRecord(group);
+    const groupPlaybackBase = String(group.playbackBase || proxyBase).replace(/\/+$/, '');
 
     group.videos.forEach((rawUrl, videoIndex) => {
       const descriptor = eromeMediaDescriptor(rawUrl);
@@ -10976,12 +10982,14 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
       const isHosted = group.source === 'bunkr' || group.source === 'hosted';
       const isSimpCityMedia = isHosted || group.source === 'direct';
       const playbackUrlFor = candidateUrl => isHosted
-        ? proxyBase === EROME_PROXY_BASE.replace(/\/+$/, '')
-          ? `${proxyBase}/bunkr.mp4?u=${encodeURIComponent(candidateUrl)}`
-          : `${proxyBase}/video-cache/stream?url=${encodeURIComponent(candidateUrl)}&profile=bunkr`
+        ? String(group.mediaKind || '').toLowerCase() === 'tiktok'
+          ? `${groupPlaybackBase}/video-cache/stream?url=${encodeURIComponent(candidateUrl)}&profile=tiktok`
+          : groupPlaybackBase === EROME_PROXY_BASE.replace(/\/+$/, '')
+          ? `${groupPlaybackBase}/bunkr.mp4?u=${encodeURIComponent(candidateUrl)}`
+          : `${groupPlaybackBase}/video-cache/stream?url=${encodeURIComponent(candidateUrl)}&profile=bunkr`
         : group.source === 'direct'
           ? candidateUrl
-          : proxyBase + '/erome.mp4?u=' + encodeURIComponent(candidateUrl);
+          : groupPlaybackBase + '/erome.mp4?u=' + encodeURIComponent(candidateUrl);
       const proxiedUrl = playbackUrlFor(mediaUrl);
       const mediaKey = eromeMediaKey(rawUrl);
 
@@ -19436,6 +19444,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
             sourcePairId: album.sourcePairId || pairedGroup.sourcePairId || '',
             simpCityJobId: album.simpCityJobId || '',
             paperclipHidden: String(pairedGroup.mediaKind || '').toLowerCase() === 'tiktok',
+            playbackBase: String(pairedGroup.mediaKind || '').toLowerCase() === 'tiktok'
+              ? endpoint
+              : pairedGroup.playbackBase,
             preserveGroupOrder: true
           }));
         // TikTok attaches as the hidden side deck when a regular source exists,
@@ -19474,6 +19485,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           mediaKind: album.mediaKind || '',
           simpCityJobId: album.simpCityJobId || '',
           source: album.source || 'bunkr',
+          playbackBase: String(album.mediaKind || '').toLowerCase() === 'tiktok'
+            ? endpoint
+            : album.playbackBase,
           videos: data.videos,
           deferredVideos: Array.isArray(album.deferredVideos) ? album.deferredVideos : [],
           previewExpanded: album.previewExpanded === true
@@ -19625,6 +19639,19 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           const matchedUsernames = Array.isArray(data.matchedUsernames) && data.matchedUsernames.length
             ? data.matchedUsernames
             : [data.matchedUsername || username].filter(Boolean);
+          // Start downloading the first TikTok immediately. Waiting until its
+          // hidden side deck is published makes a fast swipe race an empty
+          // cache, especially while the other source lanes are busy.
+          postJson('/video-cache/warm', {
+            playbackProfile: 'tiktok',
+            entryUrls: data.videos.slice(0, 2),
+            items: data.videos.slice(0, 2).map(url => ({
+              url,
+              artistKey: normalizeSimpCityCreatorKey(rawName)
+            })),
+            urgent: true,
+            authoritative: false
+          }).catch(() => {});
           enqueueAlbums([{
             url: data.profileUrl,
             title: `TikTok · ${matchedUsernames.map(value => `@${value}`).join(' + ')}`,
@@ -19633,6 +19660,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
             sourceUrl: data.profileUrl,
             source: 'hosted',
             mediaKind: 'tiktok',
+            playbackBase: endpoint,
             artistSources: ['TikTok'],
             videos: data.videos
           }]);

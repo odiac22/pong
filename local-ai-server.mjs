@@ -2888,21 +2888,28 @@ async function discoverTikTokSearchEvidence(rawUsername, rawAliases = [], signal
       .slice(0, 6);
     const query = `site:tiktok.com/@ ${queryNames.map(value => `"${value}"`).join(' OR ')}`;
     let response = await fetchTikTokSearchPage(
-      `https://search.brave.com/search?q=${encodeURIComponent(query)}`,
+      `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
       controller.signal
     );
     if (!response.ok) {
       response = await fetchTikTokSearchPage(
-        `https://search.brave.com/images?q=${encodeURIComponent(`${username} tiktok`)}`,
+        `https://search.brave.com/search?q=${encodeURIComponent(query)}`,
         controller.signal
       );
     }
     if (!response.ok) throw new Error(`TikTok handle search HTTP ${response.status}`);
     const html = response.text;
+    // Search result links are commonly HTML escaped, JSON escaped, or
+    // percent-encoded. Normalize all three before extracting handles/videos.
+    const decodedHtml = decodeHtmlUrl(html)
+      .replace(/\\u002F/gi, '/')
+      .replace(/%3A/gi, ':')
+      .replace(/%2F/gi, '/')
+      .replace(/%40/gi, '@');
     const handles = [];
     const seen = new Set();
     const pattern = /https?:\/\/(?:www\.)?tiktok\.com\/(?:%40|@)([a-z0-9_.-]{3,64})/gi;
-    for (const match of html.matchAll(pattern)) {
+    for (const match of decodedHtml.matchAll(pattern)) {
       const handle = String(match[1] || '').trim();
       const handleKey = tiktokHandleKey(handle);
       if (!handleKey || seen.has(handleKey)) continue;
@@ -2916,7 +2923,6 @@ async function discoverTikTokSearchEvidence(rawUsername, rawAliases = [], signal
       if (handles.length >= 6) break;
     }
     const videosByHandle = {};
-    const decodedHtml = decodeHtmlUrl(html).replace(/\\u002F/gi, '/');
     const videoPattern = /https?:\/\/(?:www\.)?tiktok\.com\/@([a-z0-9_.-]{3,64})\/video\/(\d{12,24})/gi;
     for (const match of decodedHtml.matchAll(videoPattern)) {
       const handle = String(match[1] || '').trim();
@@ -2947,7 +2953,21 @@ async function extractTikTokCandidateProfile(candidate, fallbackVideos = []) {
     try {
       videos = await extractTikTokVideoUrls(profileUrl, controller.signal);
     } catch (profileError) {
-      videos = Array.isArray(fallbackVideos) ? fallbackVideos.filter(Boolean) : [];
+      const indexedVideos = Array.isArray(fallbackVideos)
+        ? [...new Set(fallbackVideos.filter(Boolean))].slice(0, 8)
+        : [];
+      // Search indexes can retain deleted/private TikToks for months. Probe
+      // indexed posts concurrently and publish only URLs that still expose a
+      // playable MP4, otherwise Pong would show a side deck that never loads.
+      const verified = await mapWithConcurrency(indexedVideos, 4, async videoUrl => {
+        try {
+          const resolved = await extractTikTokVideoUrls(videoUrl, controller.signal);
+          return resolved.includes(videoUrl) ? videoUrl : resolved[0] || '';
+        } catch (_) {
+          return '';
+        }
+      });
+      videos = verified.filter(Boolean);
       if (!videos.length) throw profileError;
     }
     return videos.length ? { username: candidate, profileUrl, videos } : null;
@@ -13160,21 +13180,19 @@ const server = http.createServer(async (req, res) => {
       let profiles = requestedResults.filter(Boolean);
       const profileKeys = new Set(profiles.map(profile => tiktokHandleKey(profile.username)));
       const unresolvedCandidates = requestedCandidates.filter(candidate => !profileKeys.has(tiktokHandleKey(candidate)));
-      const suppliedAliasKeys = new Set((Array.isArray(payload?.aliases) ? payload.aliases : []).map(tiktokHandleKey).filter(Boolean));
-      const evidenceCandidates = suppliedAliasKeys.size
-        ? unresolvedCandidates.filter(candidate => suppliedAliasKeys.has(tiktokHandleKey(candidate)))
-        : unresolvedCandidates;
       const evidenceResults = [];
-      for (const candidate of evidenceCandidates) {
+      if (unresolvedCandidates.length) {
         try {
-          const evidence = await discoverTikTokSearchEvidence(candidate);
+          // One combined exact-name + verified-alias query replaces the old
+          // serial 15-second search per alias. Besides avoiding search-engine
+          // bursts, this caps the entire fallback lane at one search timeout.
+          const evidence = await discoverTikTokSearchEvidence(
+            username,
+            requestedCandidates.slice(1)
+          );
           evidenceResults.push(evidence);
-          // One exact/verified-alias query commonly reveals the creator's
-          // other linked handles too. Stop as soon as it yields video evidence
-          // instead of rate-limiting the search engine with redundant queries.
-          if (Object.values(evidence.videosByHandle || {}).some(videoUrls => videoUrls.length)) break;
         } catch (error) {
-          errors.push(`${candidate}/discovery: ${String(error?.message || error)}`);
+          errors.push(`${username}/discovery: ${String(error?.message || error)}`);
         }
       }
       const combinedVideosByHandle = {};
