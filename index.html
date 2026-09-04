@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.68</div>
+    <div class="version-number">26.69</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -10898,6 +10898,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityCreatorKey: String(group.creatorKey || ''),
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         simpCityPairId: String(group.pairId || ''),
+        simpCitySourcePairId: String(group.sourcePairId || ''),
         simpCityMediaKind: String(group.mediaKind || ''),
         postIndex: videoIndex,
         scrapedAt,
@@ -10922,6 +10923,7 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCityCreatorKey: String(group.creatorKey || ''),
         simpCityCreatorName: String(group.creatorName || groupSourceTitle),
         simpCityPairId: String(group.pairId || ''),
+        simpCitySourcePairId: String(group.sourcePairId || ''),
         simpCityMediaKind: String(group.mediaKind || ''),
         simpCityDeferredVideos: Array.isArray(group.deferredVideos) ? group.deferredVideos.slice() : [],
         simpCityPreviewExpanded: group.previewExpanded === true,
@@ -18906,7 +18908,16 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         } catch (_) {}
       }
       const creatorKey = normalizeSimpCityCreatorKey(rawAlbum?.creatorKey || rawAlbum?.creatorName);
-      const progressiveKey = String(rawAlbum?.pairId || `${creatorKey}:${albumUrl}`);
+      // Every source found by Artist Lookup belongs to one stable creator
+      // pair. This lets a TikTok result arriving independently attach as the
+      // side deck of Coomer/Bunkr/Erome/LeakedZone/SimpCity for that artist.
+      const sourcePairId = String(rawAlbum?.pairId || rawAlbum?.simpCityPairId || '');
+      const pairId = recallChannel === 3 && creatorKey
+        ? `artist-lookup:${creatorKey}`
+        : sourcePairId;
+      // Progressive deduplication remains album/source-specific. Using the
+      // shared creator pair here would incorrectly discard later sources.
+      const progressiveKey = String(sourcePairId || `${creatorKey}:${albumUrl}`);
       const progressiveGroups = Array.isArray(rawAlbum?.pairedGroups) && rawAlbum.pairedGroups.length
         ? rawAlbum.pairedGroups
         : [rawAlbum];
@@ -18918,7 +18929,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       if (previousVersion >= progressiveVersion && previousVersion > 0) return;
       seenAlbumVersions.set(progressiveKey, progressiveVersion);
       if (previousVersion > 0) {
-        const queuedExisting = albumQueue.find(item => String(item?.pairId || '') === String(rawAlbum?.pairId || ''));
+        const queuedExisting = albumQueue.find(item => sourcePairId && String(item?.sourcePairId || item?.pairId || '') === sourcePairId);
         if (queuedExisting) {
           queuedExisting.videos = previewExpanded ? readyVideos : (queuedExisting.previewExpanded ? readyVideos : queuedExisting.videos);
           if (deferredVideos.length) queuedExisting.deferredVideos = deferredVideos;
@@ -18927,7 +18938,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           return;
         }
         if (cardsStarted) {
-          const activeEvent = pasteEvents.find(event => String(event?.simpCityPairId || '') === String(rawAlbum?.pairId || ''));
+          const activeEvent = pasteEvents.find(event => sourcePairId && String(event?.simpCitySourcePairId || event?.simpCityPairId || '') === sourcePairId);
           if (isSimpCityPreview && activeEvent?.simpCityPreviewExpanded !== true) {
             activeEvent.simpCityDeferredVideos = [...new Set(progressiveGroups.flatMap(group => group?.videos || []))].slice(SIMPCITY_PREVIEW_VIDEO_COUNT);
             return;
@@ -18940,7 +18951,8 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
               sourceTitle: group?.title,
               creatorName: rawAlbum?.creatorName || group?.creatorName || '',
               creatorKey: creatorKey || group?.creatorKey || '',
-              pairId: rawAlbum?.pairId || group?.pairId || '',
+              pairId: pairId || group?.pairId || '',
+              sourcePairId: sourcePairId || group?.sourcePairId || '',
               simpCityJobId: String(jobId || rawAlbum?.simpCityJobId || '')
             }, bunkrPlaybackBase);
             added += Number(imported?.urls?.length || 0);
@@ -18964,6 +18976,8 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         sourceTitle: String(rawAlbum?.creatorName || rawAlbum?.sourceTitle || rawAlbum?.title || 'SimpCity creator'),
         creatorName: String(rawAlbum?.creatorName || rawAlbum?.sourceTitle || ''),
         creatorKey,
+        pairId,
+        sourcePairId,
         simpCityJobId: String(jobId || rawAlbum?.simpCityJobId || ''),
         source: rawAlbum?.source === 'direct'
           ? 'direct'
@@ -19086,6 +19100,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
             creatorName: album.creatorName || pairedGroup.creatorName || '',
             creatorKey: album.creatorKey || pairedGroup.creatorKey || '',
             pairId: album.pairId || pairedGroup.pairId || '',
+            sourcePairId: album.sourcePairId || pairedGroup.sourcePairId || '',
             simpCityJobId: album.simpCityJobId || '',
             paperclipHidden: String(pairedGroup.mediaKind || '').toLowerCase() === 'tiktok',
             preserveGroupOrder: true
@@ -19121,6 +19136,8 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           sourceTitle: album.creatorName || album.sourceTitle || album.title || 'SimpCity creator',
           creatorName: album.creatorName || album.sourceTitle || '',
           creatorKey: album.creatorKey || '',
+          pairId: album.pairId || '',
+          sourcePairId: album.sourcePairId || '',
           mediaKind: album.mediaKind || '',
           simpCityJobId: album.simpCityJobId || '',
           source: album.source || 'bunkr',

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.12.1
+// @version      1.12.2
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -11,6 +11,8 @@
 // @match        https://www.simpcity.cr/search/*
 // @match        https://simpcity.cr/forums/*
 // @match        https://www.simpcity.cr/forums/*
+// @match        https://simpcity.cr/*
+// @match        https://www.simpcity.cr/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
