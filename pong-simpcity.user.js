@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.11.4
+// @version      1.12.0
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -17,6 +17,9 @@
 // @grant        GM_cookie
 // @grant        GM.cookie
 // @grant        GM_setClipboard
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // @connect      127.0.0.1
 // @connect      192.168.1.124
 // @connect      *
@@ -29,7 +32,7 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.11.4';
+  const SCRIPT_VERSION = '1.12.0';
   const FORUM_CREATOR_CONCURRENCY = 2;
   // Use a conservative source pace. The PC worker still delegates
   // to the server's shared adaptive limiter, so both Recall channels remain
@@ -1061,4 +1064,64 @@
   buttons.forEach(button => {
     button.onclick = () => runScrape(Number(button.dataset.scrape) === 2 ? 2 : 1);
   });
+
+  // Pong Artist Lookup queue. One open SimpCity tab is enough: the userscript
+  // picks up each queued name, submits the authenticated site search, runs the
+  // normal Recall 2 pipeline, then advances to the next name automatically.
+  const LOOKUP_STORAGE_KEY = 'pong-artist-lookup-current-v1';
+  const gmGet = async key => typeof GM_getValue === 'function' ? await GM_getValue(key, null) : null;
+  const gmSet = async (key, value) => { if (typeof GM_setValue === 'function') await GM_setValue(key, value); };
+  const gmDelete = async key => { if (typeof GM_deleteValue === 'function') await GM_deleteValue(key); };
+  const submitArtistSearch = query => {
+    const searchInput = document.querySelector('form input[name="q"], input[name="q"]');
+    const form = searchInput?.closest('form');
+    if (searchInput && form) {
+      searchInput.value = query;
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      if (typeof form.requestSubmit === 'function') form.requestSubmit();
+      else form.submit();
+      return;
+    }
+    location.assign(`https://simpcity.cr/search/?q=${encodeURIComponent(query)}&o=date`);
+  };
+  const waitForRecall2Completion = async () => {
+    const deadline = Date.now() + 30 * 60_000;
+    while (Date.now() < deadline) {
+      const state = await getFromPong('/simpcity/background/status?channel=2').catch(() => null);
+      const run = state?.run;
+      if (run && ['complete', 'empty', 'error', 'cancelled'].includes(String(run.state || ''))) return run;
+      await delay(2000);
+    }
+    throw new Error('Artist Lookup timed out waiting for Recall 2');
+  };
+  const processArtistLookupQueue = async () => {
+    if (globalThis.PONG_PC_BACKGROUND_CONTEXT) return;
+    let item = await gmGet(LOOKUP_STORAGE_KEY);
+    if (!item?.id) {
+      const next = await getFromPong('/simpcity/artist-lookup/next').catch(() => null);
+      item = next?.item || null;
+      if (!item?.id) { setTimeout(processArtistLookupQueue, 4000); return; }
+      await gmSet(LOOKUP_STORAGE_KEY, item);
+    }
+    const currentQuery = new URL(location.href).searchParams.get('q') || '';
+    if (!/^\/search\//i.test(location.pathname) || (!item.navigated && currentQuery.toLowerCase() !== String(item.query).toLowerCase())) {
+      status.textContent = `Pong Artist Lookup: searching ${item.query}`;
+      item = { ...item, navigated: true };
+      await gmSet(LOOKUP_STORAGE_KEY, item);
+      submitArtistSearch(item.query);
+      return;
+    }
+    status.textContent = `Pong Artist Lookup: scanning ${item.query}`;
+    await runScrape(2);
+    await waitForRecall2Completion();
+    await sendToPong('/simpcity/artist-lookup/complete', { id: item.id }, 15000);
+    await gmDelete(LOOKUP_STORAGE_KEY);
+    status.textContent = `Pong Artist Lookup: finished ${item.query}`;
+    setTimeout(processArtistLookupQueue, 1000);
+  };
+  setTimeout(() => processArtistLookupQueue().catch(error => {
+    diagnostic('Artist Lookup automation failed', error?.message || String(error));
+    status.textContent = `Pong Artist Lookup failed: ${error?.message || error}`;
+    setTimeout(processArtistLookupQueue, 10000);
+  }), 1500);
 })();

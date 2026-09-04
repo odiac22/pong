@@ -2497,6 +2497,36 @@ function pauseSimpCitySourceRequests(rawDurationMs = 60_000) {
   return { durationMs, gapMs: simpCitySourceAdaptiveGapMs, pausedUntil: new Date(simpCitySourcePauseUntil).toISOString() };
 }
 const simpCityImportJobs = new Map();
+const simpCityArtistLookupQueue = [];
+let simpCityArtistLookupActive = null;
+
+function simpCityArtistLookupVariants(rawName) {
+  const raw = String(rawName || '').trim().replace(/^[@#]+/, '').slice(0, 100);
+  if (!raw) return [];
+  const ascii = raw.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+  const spaced = ascii.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const compact = spaced.replace(/[^a-z0-9]+/gi, '');
+  return [...new Set([raw, spaced, spaced.replace(/\s+/g, '_'), spaced.replace(/\s+/g, '-'), compact]
+    .map(value => value.trim()).filter(value => value.length >= 3))];
+}
+
+function enqueueSimpCityArtistLookup(rawNames) {
+  const names = (Array.isArray(rawNames) ? rawNames : []).flatMap(simpCityArtistLookupVariants);
+  const existing = new Set([
+    ...simpCityArtistLookupQueue.map(item => item.key),
+    simpCityArtistLookupActive?.key
+  ].filter(Boolean));
+  const queued = [];
+  for (const query of names) {
+    const key = query.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (!key || existing.has(key)) continue;
+    existing.add(key);
+    const item = { id: crypto.randomUUID(), query, key, queuedAt: new Date().toISOString() };
+    simpCityArtistLookupQueue.push(item);
+    queued.push(item);
+  }
+  return { queued: queued.length, pending: simpCityArtistLookupQueue.length, active: simpCityArtistLookupActive };
+}
 const simpCityRecallChannels = new Map([
   [1, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), skipSeenEnabled: false }],
   [2, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), skipSeenEnabled: false }]
@@ -11822,10 +11852,14 @@ const server = http.createServer(async (req, res) => {
           requestUrl.pathname === '/simpcity/resume/status' ||
           requestUrl.pathname === '/simpcity/resume/progress' ||
           requestUrl.pathname === '/simpcity/discovery/backlog' ||
-          requestUrl.pathname === '/simpcity/discovery/permit'
+          requestUrl.pathname === '/simpcity/discovery/permit' ||
+          requestUrl.pathname === '/simpcity/artist-lookup/complete'
         )
       ) ||
-      (req.method === 'GET' && requestUrl.pathname === '/simpcity/background/status')
+      (req.method === 'GET' && (
+        requestUrl.pathname === '/simpcity/background/status' ||
+        requestUrl.pathname === '/simpcity/artist-lookup/next'
+      ))
     ) &&
     req.headers['x-pong-simpcity-controller'] === '1' &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
@@ -12030,6 +12064,27 @@ const server = http.createServer(async (req, res) => {
         passedProfiles: Number(run.passedProfiles || 0),
         startedAt: run.startedAt, updatedAt: run.updatedAt
       } : null });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/artist-lookup/enqueue') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      json(res, 202, { ok: true, ...enqueueSimpCityArtistLookup(payload?.names) });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/simpcity/artist-lookup/next') {
+      if (!simpCityArtistLookupActive) simpCityArtistLookupActive = simpCityArtistLookupQueue.shift() || null;
+      json(res, 200, {
+        ok: true,
+        item: simpCityArtistLookupActive,
+        pending: simpCityArtistLookupQueue.length
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/simpcity/artist-lookup/complete') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const completed = Boolean(simpCityArtistLookupActive && String(payload?.id || '') === simpCityArtistLookupActive.id);
+      if (completed) simpCityArtistLookupActive = null;
+      json(res, 200, { ok: true, completed, pending: simpCityArtistLookupQueue.length });
       return;
     }
 

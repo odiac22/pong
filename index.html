@@ -896,7 +896,7 @@
       <textarea id="artist-lookup-input" rows="5" placeholder="Lola Pelligrini\nlola_pelligrini\n—or paste a JSON export" spellcheck="false"></textarea>
       <div class="auth-url-row">
         <button id="artist-lookup-run" type="button">Find artists</button>
-        <button id="artist-lookup-search" type="button" disabled>Search Bunkr + Pong</button>
+        <button id="artist-lookup-search" type="button" disabled>Search Everything</button>
         <button id="artist-lookup-copy" type="button" disabled>Copy Pong paste</button>
       </div>
       <pre id="artist-lookup-results" aria-live="polite"></pre>
@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.60</div>
+    <div class="version-number">26.61</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -19977,6 +19977,11 @@ async function loadEromeAsCards() {
   console.log('[Albums] parsed import targets', targets);
 
   if (!targets.length) {
+    const artistNames = window.PongParseArtistLookupInput?.(eromeUrlInput?.value || '').map(item => item.name) || [];
+    if (artistNames.length && typeof window.PongStartArtistLookup === 'function') {
+      await window.PongStartArtistLookup(artistNames);
+      return;
+    }
     alert('Paste one or more Erome, Bunkr, Balbums, SimpCity, or LeakedZone URLs first.');
     return;
   }
@@ -21248,11 +21253,14 @@ window.addEventListener('blur',()=>{
       const id = key(clean); if (!id || id.length < 3) return;
       if (!names.has(id)) names.set(id, { name: clean, service });
     };
+    let parsedJson = false;
     try {
       const parsed = JSON.parse(text);
+      parsedJson = true;
       for (const creator of (Array.isArray(parsed?.creators) ? parsed.creators : [])) add(creator?.name || creator?.username, creator?.service || '');
       for (const post of (Array.isArray(parsed?.posts) ? parsed.posts : [])) add(post?.user, post?.service || '');
     } catch (_) {}
+    if (parsedJson) return [...names.values()];
     for (const line of String(text || '').split(/\r?\n/)) {
       const value = line.trim();
       if (!value) continue;
@@ -21261,9 +21269,21 @@ window.addEventListener('blur',()=>{
         const parts = url.pathname.split('/').filter(Boolean);
         const candidate = parts.find((part, index) => /^(?:u|c|creator|model|profile)$/i.test(part) && parts[index + 1]) ? parts[parts.findIndex(part => /^(?:u|c|creator|model|profile)$/i.test(part)) + 1] : parts.at(-1);
         add(candidate, url.hostname);
-      } catch (_) { add(value); }
+      } catch (_) {
+        const commaParts = value.split(/\s*,\s*/).filter(Boolean);
+        const whitespaceParts = value.split(/\s+/).filter(Boolean);
+        const parts = commaParts.length > 1 ? commaParts : whitespaceParts.length > 2 ? whitespaceParts : [value];
+        parts.forEach(part => add(part));
+      }
     }
     return [...names.values()];
+  };
+  window.PongParseArtistLookupInput = extract;
+  window.PongStartArtistLookup = async rawNames => {
+    const names = [...new Set((Array.isArray(rawNames) ? rawNames : []).map(value => String(value || '').trim()).filter(Boolean))];
+    if (!names.length) throw new Error('No artist names were supplied');
+    await postJson('/simpcity/artist-lookup/enqueue', { names });
+    return loadSimpCityAsCards([], names, [], false, 0, { source: 'artist-lookup' });
   };
   const link = (base, value) => `${base}${encodeURIComponent(value)}`;
   document.getElementById('artist-lookup-open')?.addEventListener('click', () => { panel.hidden = false; input.focus(); });
@@ -21294,10 +21314,10 @@ window.addEventListener('blur',()=>{
     try { names = JSON.parse(search.dataset.names || '[]'); } catch (_) {}
     if (!names.length) return;
     search.disabled = true;
-    results.textContent += '\n\nStarting Bunkr/Balbums + Pong search…';
+    results.textContent += '\n\nStarting all-site lookup; SimpCity is queued for Tampermonkey…';
     try {
       panel.hidden = true;
-      await loadSimpCityAsCards([], names, [], false, 0, { source: 'artist-lookup' });
+      await window.PongStartArtistLookup(names);
     } catch (error) {
       panel.hidden = false;
       results.textContent += `\nSearch failed: ${error?.message || error}`;
