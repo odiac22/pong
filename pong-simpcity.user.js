@@ -82,7 +82,10 @@
     if (!globalThis.PONG_PC_BACKGROUND_CONTEXT && Number(channel) !== 3) return;
     while (true) {
       const permit = await sendToPong('/simpcity/discovery/permit', { channel }, 10000);
-      if (!permit?.paused) return;
+      const unseen = Math.max(0, Number(permit?.unseen || 0));
+      // Enforce five client-side too so the active queue adopts the new cap
+      // without requiring a server restart that would discard queued names.
+      if (!permit?.paused && unseen < 5) return;
       diagnostic('Discovery paused', `${permit.unseen} unseen profiles ready in Pong ${channel}`);
       await delay(Math.max(500, Number(permit.waitMs || 1000)));
     }
