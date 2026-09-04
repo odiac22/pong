@@ -362,6 +362,13 @@ const gatewayHtmlFetchStats = {
   concurrency: Math.max(1, Math.min(2, Number(process.env.PONG_GATEWAY_HTML_CONCURRENCY || 2)))
 };
 const gatewayHtmlFetchWaiters = [];
+const gatewayPowerShellFetchStats = {
+  requests: 0,
+  pages: 0,
+  successes: 0,
+  failures: 0,
+  lastStatus: 0
+};
 const gatewayH2Sessions = new Map();
 const lanBrowserSessions = new Map();
 const LAN_BROWSER_SESSION_MS = 4 * 60 * 60 * 1000;
@@ -3660,6 +3667,118 @@ function gatewayArtistLookupBrowserHtmlBatch(rawUrls, { signal = null, timeoutMs
   return run;
 }
 
+function gatewayPowerShellFetchHtmlBatch(rawUrls, { signal = null, timeoutMs = 30000 } = {}) {
+  const urls = [...new Set((rawUrls || []).map(value => gatewayTargetUrl(value).toString()))].slice(0, 10);
+  if (!urls.length) return Promise.resolve([]);
+  if (signal?.aborted) return Promise.reject(new DOMException('gateway native request aborted', 'AbortError'));
+  gatewayPowerShellFetchStats.requests++;
+  gatewayPowerShellFetchStats.pages += urls.length;
+  const script = [
+    '$ErrorActionPreference = "Stop"',
+    '$raw = [Console]::In.ReadToEnd().Trim()',
+    '$json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw))',
+    '$payload = $json | ConvertFrom-Json',
+    '$session = New-Object Microsoft.PowerShell.Commands.WebRequestSession',
+    '$headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"; "Accept-Language" = "en-US,en;q=0.9" }',
+    '$results = @()',
+    '$requestIndex = 0',
+    'foreach ($url in @($payload.urls)) {',
+    '  if ($requestIndex -gt 0) { Start-Sleep -Milliseconds $payload.gapMs }',
+    '  $requestIndex++',
+    '  try {',
+    '    $response = Invoke-WebRequest -UseBasicParsing -Uri $url -WebSession $session -Headers $headers -TimeoutSec $payload.timeoutSeconds',
+    '    $body = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$response.Content))',
+    '    $results += [pscustomobject]@{ url = [string]$url; status = [int]$response.StatusCode; body = $body }',
+    '  } catch {',
+    '    $status = 0',
+    '    try { $status = [int]$_.Exception.Response.StatusCode } catch {}',
+    '    $results += [pscustomobject]@{ url = [string]$url; status = $status; body = ""; error = [string]$_.Exception.Message }',
+    '  }',
+    '}',
+    '[Console]::Out.Write(($results | ConvertTo-Json -Compress))'
+  ].join('; ');
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  const input = Buffer.from(JSON.stringify({
+    urls,
+    timeoutSeconds: Math.max(5, Math.ceil(Number(timeoutMs || 30000) / 1000)),
+    gapMs: 650
+  }), 'utf8').toString('base64');
+  return new Promise((resolve, reject) => {
+    const child = spawn('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded
+    ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const stdout = [];
+    let stdoutBytes = 0;
+    let stderr = '';
+    let settled = false;
+    const finish = (error, value = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const abort = () => {
+      try { child.kill(); } catch (_) {}
+      finish(new DOMException('gateway native request aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch (_) {}
+      finish(new Error('gateway native request timed out'));
+    }, Math.max(8000, timeoutMs + 5000));
+    timer.unref?.();
+    signal?.addEventListener('abort', abort, { once: true });
+    child.stdout.on('data', chunk => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > 16 * 1024 * 1024) {
+        try { child.kill(); } catch (_) {}
+        finish(new Error('gateway native response too large'));
+        return;
+      }
+      stdout.push(chunk);
+    });
+    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    child.once('error', finish);
+    child.once('close', code => {
+      if (settled) return;
+      if (code !== 0) {
+        gatewayPowerShellFetchStats.failures += urls.length;
+        finish(new Error(`gateway native request failed${stderr ? `: ${stderr.slice(0, 300)}` : ''}`));
+        return;
+      }
+      try {
+        const parsed = JSON.parse(Buffer.concat(stdout).toString('utf8') || '[]');
+        const rows = (Array.isArray(parsed) ? parsed : [parsed]).map(row => ({
+          url: String(row?.url || ''),
+          status: Number(row?.status || 0),
+          html: row?.body ? Buffer.from(String(row.body), 'base64').toString('utf8') : '',
+          error: String(row?.error || '')
+        }));
+        for (const row of rows) {
+          gatewayPowerShellFetchStats.lastStatus = row.status;
+          if (row.status >= 200 && row.status < 300 && row.html) gatewayPowerShellFetchStats.successes++;
+          else gatewayPowerShellFetchStats.failures++;
+        }
+        finish(null, rows);
+      } catch (error) {
+        gatewayPowerShellFetchStats.failures += urls.length;
+        finish(error);
+      }
+    });
+    child.stdin.end(input);
+  });
+}
+
+async function gatewayPowerShellFetchHtml(rawUrl, options = {}) {
+  const rows = await gatewayPowerShellFetchHtmlBatch([rawUrl], options);
+  const row = rows[0];
+  if (!row || row.status < 200 || row.status >= 300 || !row.html) {
+    throw new Error(`gateway native HTTP ${Number(row?.status || 0)}`);
+  }
+  return row.html;
+}
+
 function normalizeSimpCityBackgroundUrl(rawValue) {
   try {
     const url = new URL(String(rawValue || '').trim());
@@ -5675,10 +5794,34 @@ async function artistLookupBrowserPostEntries(postUrls, artistInfo, stopAt, sign
   const targets = (postUrls || []).slice(0, 30);
   for (let offset = 0; offset < targets.length; offset += 8) {
     if (signal?.aborted) throw new DOMException('gateway browser request aborted', 'AbortError');
-    const pages = await gatewayArtistLookupBrowserHtmlBatch(
-      targets.slice(offset, offset + 8),
-      { signal, timeoutMs: 25000 }
+    const batch = targets.slice(offset, offset + 8);
+    let pages = await gatewayPowerShellFetchHtmlBatch(
+      batch,
+      { signal, timeoutMs: 20000 }
     ).catch(() => []);
+    const transientTargets = pages
+      .filter(page => Number(page?.status || 0) === 0 || Number(page?.status || 0) === 429 || Number(page?.status || 0) >= 500)
+      .map(page => page.url);
+    if (transientTargets.length) {
+      const retryDelayMs = pages.some(page => Number(page?.status || 0) === 429) ? 60_000 : 30_000;
+      await videoVerifyDelay(retryDelayMs, signal);
+      const retryRows = await gatewayPowerShellFetchHtmlBatch(
+        transientTargets,
+        { signal, timeoutMs: 20000 }
+      ).catch(() => []);
+      const retriedUrls = new Set(retryRows.map(page => page.url));
+      pages = pages.filter(page => !retriedUrls.has(page.url)).concat(retryRows);
+    }
+    const successfulUrls = new Set(
+      pages.filter(page => page?.status >= 200 && page?.status < 300 && page?.html).map(page => page.url)
+    );
+    const browserTargets = batch.filter(url => !successfulUrls.has(gatewayArtistLookupBrowserUrl(url)) && !successfulUrls.has(url));
+    if (browserTargets.length) {
+      pages = pages.concat(await gatewayArtistLookupBrowserHtmlBatch(
+        browserTargets,
+        { signal, timeoutMs: 25000 }
+      ).catch(() => []));
+    }
     for (const page of pages) {
       if (Number(page?.status || 0) < 200 || Number(page?.status || 0) >= 300 || !page?.html) continue;
       for (const [postIndex, videoUrl] of extractVideoUrlsFromHtml(page.html, page.url).entries()) {
@@ -11670,6 +11813,7 @@ async function artistLookupGatewayProfileVideos(candidate, { signal = null } = {
   const seenPosts = new Set();
   let sourcePagesScanned = 0;
   let postCandidates = 0;
+  let fallbackTransportUsed = false;
 
   const fetchProfilePage = async page => {
     const primaryUrl = random40ReservoirProfilePageUrl(artistUrl, page);
@@ -11684,13 +11828,25 @@ async function artistLookupGatewayProfileVideos(candidate, { signal = null } = {
       try {
         return await random40ReservoirFetchHtml(mirrorUrl.toString(), page === 1 ? 12000 : 9000, signal);
       } catch (_) {
-        // The upstream edge can reject Node transports while the ordinary
-        // browser page remains available. Use a separate muted/off-screen
-        // Chrome profile so recovery never touches the user's tabs.
-        return gatewayArtistLookupBrowserHtml(mirrorUrl.toString(), {
-          signal,
-          timeoutMs: page === 1 ? 30000 : 25000
-        });
+        try {
+          // Windows' native web stack receives the ordinary edge response in
+          // cases where both Node transports are challenged. It runs hidden,
+          // carries no credentials, and avoids any browser-tab interaction.
+          const html = await gatewayPowerShellFetchHtml(mirrorUrl.toString(), {
+            signal,
+            timeoutMs: page === 1 ? 25000 : 20000
+          });
+          fallbackTransportUsed = true;
+          return html;
+        } catch (_) {
+          // Final recovery uses a separate muted/off-screen Chrome profile.
+          const html = await gatewayArtistLookupBrowserHtml(mirrorUrl.toString(), {
+            signal,
+            timeoutMs: page === 1 ? 30000 : 25000
+          });
+          fallbackTransportUsed = true;
+          return html;
+        }
       }
     }
   };
@@ -11735,6 +11891,7 @@ async function artistLookupGatewayProfileVideos(candidate, { signal = null } = {
       verified = Array.isArray(result?.entries) ? result.entries : [];
     }
     if (!verified.length) {
+      fallbackTransportUsed = true;
       verified = await artistLookupBrowserPostEntries(
         pagePostUrls,
         artistInfo,
@@ -11761,9 +11918,13 @@ async function artistLookupGatewayProfileVideos(candidate, { signal = null } = {
     // after reaching it so the second-video gesture normally has deferred media
     // ready, without crawling a full account before publishing the artist.
     if (videos.length >= 5 && page >= 2) break;
+    // Native/browser recovery is a last-resort availability path. One listing
+    // page still examines up to thirty exact post pages, but a no-video account
+    // must not hold the single ordered artist lane for several minutes.
+    if (fallbackTransportUsed && page >= 1) break;
   }
 
-  return { artistInfo, videos, sourcePagesScanned, postCandidates };
+  return { artistInfo, videos, sourcePagesScanned, postCandidates, fallbackTransportUsed };
 }
 
 function artistLookupRequestedCandidates(payload, maximum = 8) {
@@ -12907,12 +13068,14 @@ const server = http.createServer(async (req, res) => {
       let successfulSearchesTotal = 0;
       let profileFetchFailed = false;
       let browserFallbackUsed = false;
+      let nativeFallbackUsed = false;
       for (const candidateName of candidates) {
         const candidateKey = candidateName.toLowerCase().replace(/[^a-z0-9]+/g, '');
         const maximumAttempts = 3;
         for (let attempt = 1; attempt <= maximumAttempts && !matches.length; attempt++) {
           const artistUrls = new Map();
           let successfulSearches = 0;
+          let resolvedProfileWithoutVideo = false;
           const searchResults = await Promise.allSettled(availableGatewayHosts().map(async host => {
             try {
               const searchUrl = `https://${host}/?q=${encodeURIComponent(candidateName)}`;
@@ -12942,8 +13105,14 @@ const server = http.createServer(async (req, res) => {
           if (successfulSearches === 0) {
             try {
               const searchUrl = `https://onlyfaphouse.com/?q=${encodeURIComponent(candidateName)}`;
-              const html = await gatewayArtistLookupBrowserHtml(searchUrl, { timeoutMs: 30000 });
-              browserFallbackUsed = true;
+              let html = '';
+              try {
+                html = await gatewayPowerShellFetchHtml(searchUrl, { timeoutMs: 25000 });
+                nativeFallbackUsed = true;
+              } catch (_) {
+                html = await gatewayArtistLookupBrowserHtml(searchUrl, { timeoutMs: 30000 });
+                browserFallbackUsed = true;
+              }
               successfulSearches++;
               successfulSearchesTotal++;
               for (const artistUrl of random40ReservoirArtistUrls(html, searchUrl, { includeRecent: true })) {
@@ -12959,7 +13128,13 @@ const server = http.createServer(async (req, res) => {
           for (const { artistUrl, slug } of artistUrls.values()) {
             try {
               const result = await artistLookupGatewayProfileVideos({ artistUrl });
-              if (!result.videos.length) continue;
+              if (result.fallbackTransportUsed) nativeFallbackUsed = true;
+              if (!result.videos.length) {
+                if (result.sourcePagesScanned > 0 && result.postCandidates > 0) {
+                  resolvedProfileWithoutVideo = true;
+                }
+                continue;
+              }
               matches.push({
                 username,
                 matchedUsername: slug,
@@ -12974,6 +13149,7 @@ const server = http.createServer(async (req, res) => {
               diagnostics.push(`${candidateName}/profile/${attempt}: ${String(error?.message || error)}`);
             }
           }
+          if (!matches.length && resolvedProfileWithoutVideo) break;
           // A successful exact-result page with no matching slug is a real
           // miss; repeating it only makes a large paste crawl for minutes.
           // Retry when every mirror was transiently unavailable, or when an
@@ -13000,6 +13176,7 @@ const server = http.createServer(async (req, res) => {
         retryAfterMs: !matches.length
           ? Math.max(0, gatewayHtmlBackoffRemainingMs())
           : 0,
+        nativeFallbackUsed,
         browserFallbackUsed,
         diagnostics: diagnostics.slice(0, 5)
       });
@@ -14218,6 +14395,7 @@ const server = http.createServer(async (req, res) => {
             ...gatewayHtmlFetchStats,
             backoffRemainingMs: gatewayHtmlBackoffRemainingMs()
           },
+          native_fallback: { ...gatewayPowerShellFetchStats },
           error: gatewayWarmState.error
         },
         random40_reservoir: {
