@@ -894,7 +894,7 @@
       <textarea id="artist-lookup-input" rows="5" placeholder="Lola Pelligrini\nlola_pelligrini\n—or paste a JSON export" spellcheck="false"></textarea>
       <div class="auth-url-row">
         <button id="artist-lookup-run" type="button">Find artists</button>
-        <button id="artist-lookup-search" type="button" disabled>Search SimpCity + Pong</button>
+        <button id="artist-lookup-search" type="button" disabled>Search Bunkr + Pong</button>
         <button id="artist-lookup-copy" type="button" disabled>Copy Pong paste</button>
       </div>
       <pre id="artist-lookup-results" aria-live="polite"></pre>
@@ -907,7 +907,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.58</div>
+    <div class="version-number">26.59</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -21292,7 +21292,7 @@ window.addEventListener('blur',()=>{
     try { names = JSON.parse(search.dataset.names || '[]'); } catch (_) {}
     if (!names.length) return;
     search.disabled = true;
-    results.textContent += '\n\nStarting SimpCity + Pong search…';
+    results.textContent += '\n\nStarting Bunkr/Balbums + Pong search…';
     try {
       panel.hidden = true;
       await loadSimpCityAsCards([], names, [], false, 0, { source: 'artist-lookup' });
