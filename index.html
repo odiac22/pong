@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.67</div>
+    <div class="version-number">26.68</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -8989,7 +8989,9 @@ function getEromeScrapeTargets() {
 
   if (fromHelper.length) return fromHelper;
 
-  const fromEromeInput = collectEromeLaunchUrls(eromeUrlInput ? eromeUrlInput.value : '');
+  // Bare names belong to the universal Artist Lookup flow. Only explicit
+  // source URLs should route Open Albums into the legacy URL importer.
+  const fromEromeInput = collectEromeLaunchUrls(eromeUrlInput ? eromeUrlInput.value : '', false);
 
   if (fromEromeInput.length) return fromEromeInput;
 
