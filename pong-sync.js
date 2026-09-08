@@ -128,6 +128,18 @@
         color: #fff !important;
       }
 
+      .side-save-button.video-skip-button {
+        border-color: rgba(251,113,133,0.38) !important;
+        background: rgba(127,29,29,0.34) !important;
+        color: #fecdd3 !important;
+      }
+
+      .side-save-button.video-skip-button.unplayable {
+        opacity: 0.95 !important;
+        border-color: rgba(251,113,133,0.9) !important;
+        box-shadow: 0 0 0 2px rgba(244,63,94,0.2), 0 8px 24px rgba(0,0,0,0.28) !important;
+      }
+
       .side-save-icon {
         font-size: 12px !important;
         line-height: 1 !important;
@@ -5181,6 +5193,34 @@
       setGitHubToken();
     });
 
+    const skipVideoBtn = document.createElement('button');
+    skipVideoBtn.id = 'skip-current-video-button';
+    skipVideoBtn.className = 'side-save-button video-skip-button';
+    skipVideoBtn.type = 'button';
+    skipVideoBtn.title = 'Skip this video and prevent it from returning to this session';
+    skipVideoBtn.innerHTML = `
+      <span class="side-save-icon">⏭</span>
+      <span class="side-save-label">Skip</span>
+      <span class="side-save-count">Video</span>
+    `;
+    skipVideoBtn.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      window.PongSkipCurrentVideo?.();
+    });
+
+    window.PongUpdateSkipVideoButton = () => {
+      const button = document.getElementById('skip-current-video-button');
+      if (!button) return;
+      const wrapper = getCurrentVideoWrapperOverride();
+      const unplayable = wrapper?.dataset?.unplayable === 'true';
+      button.disabled = !wrapper;
+      button.classList.toggle('unplayable', unplayable);
+      button.title = unplayable
+        ? 'This source exhausted its playback routes. Skip it and keep it out of this session.'
+        : 'Skip this video and prevent it from returning to this session';
+    };
+
     const repairBtn = document.createElement('button');
     repairBtn.id = 'repair-saved-links-button';
     repairBtn.className = 'side-save-button';
@@ -5376,6 +5416,7 @@
     });
 
     panel.appendChild(tokenBtn);
+    panel.appendChild(skipVideoBtn);
     panel.appendChild(repairBtn);
     panel.appendChild(artistBtn);
     panel.appendChild(videoBtn);
@@ -5384,6 +5425,7 @@
     document.body.appendChild(panel);
 
     window.PongUpdateSkipPlayedButton?.();
+    window.PongUpdateSkipVideoButton?.();
     updateSaveCountersOverride();
     ensureCurrentArtistSaveLabelUpdater();
   }

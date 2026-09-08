@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.83</div>
+    <div class="version-number">26.84</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -1245,6 +1245,7 @@ let pongPlaybackBenchmarkState = {
   totalBufferMs: 0
 };
 let viewedVideoKeys = new Set();
+let sessionSkippedVideoKeys = new Set();
 const PONG_SKIP_PLAYED_SESSION_KEY = 'pong_skip_played_enabled_v1';
 let pongSkipPlayedEnabled = (() => {
   try { return sessionStorage.getItem(PONG_SKIP_PLAYED_SESSION_KEY) === '1'; }
@@ -2250,6 +2251,12 @@ function compactSessionVideoMetadata(meta) {
     postIndex: Number(meta.postIndex || 0),
     scrapedAt: meta.scrapedAt || '',
     mediaKey: meta.mediaKey || '',
+    videoUrl: meta.videoUrl || '',
+    originalVideoUrl: meta.originalVideoUrl || '',
+    alternateVideoUrls: Array.isArray(meta.alternateVideoUrls)
+      ? meta.alternateVideoUrls.slice(0, 3)
+      : [],
+    playbackFastStart: meta.playbackFastStart === true,
     simpCityPairId: meta.simpCityPairId || '',
     simpCityMediaKind: meta.simpCityMediaKind || '',
     simpCityCreatorKey: meta.simpCityCreatorKey || '',
@@ -2324,6 +2331,7 @@ function saveSession() {
       eromeBatchAutoAdvance,
       slidingPlaybackRespectsRange,
       viewedVideoKeys: [...viewedVideoKeys],
+      sessionSkippedVideoKeys: [...sessionSkippedVideoKeys],
       sessionSkippedCreatorKeys: typeof simpCitySkippedCreatorKeys !== 'undefined'
         ? [...simpCitySkippedCreatorKeys]
         : []
@@ -2363,6 +2371,9 @@ function loadSession() {
     slidingPlaybackRespectsRange = s.slidingPlaybackRespectsRange === true;
     window.PongSlidingPlaybackRespectsRange = slidingPlaybackRespectsRange;
     viewedVideoKeys = new Set(Array.isArray(s.viewedVideoKeys) ? s.viewedVideoKeys.map(String) : []);
+    sessionSkippedVideoKeys = new Set(
+      Array.isArray(s.sessionSkippedVideoKeys) ? s.sessionSkippedVideoKeys.map(String).filter(Boolean) : []
+    );
     if (typeof simpCitySkippedCreatorKeys !== 'undefined') {
       simpCitySkippedCreatorKeys.clear();
       (Array.isArray(s.sessionSkippedCreatorKeys) ? s.sessionSkippedCreatorKeys : [])
@@ -3823,6 +3834,172 @@ function eromeMediaKey(rawUrl) {
   }
 }
 
+function pongVideoSkipKeys(rawUrl, metadata = {}, playbackUrl = '') {
+  const keys = new Set();
+  const mediaKey = String(metadata?.mediaKey || '').trim().toLowerCase();
+  if (mediaKey) keys.add(mediaKey);
+
+  const values = [
+    rawUrl,
+    playbackUrl,
+    metadata?.videoUrl,
+    metadata?.originalVideoUrl,
+    ...(Array.isArray(metadata?.alternateVideoUrls) ? metadata.alternateVideoUrls : [])
+  ];
+
+  values.forEach(value => {
+    let candidate = String(value || '').trim();
+    if (!candidate) return;
+
+    for (let depth = 0; depth < 5 && candidate; depth++) {
+      const canonical = pongCanonicalPlayedValue(candidate);
+      if (canonical) keys.add(canonical);
+
+      let nested = '';
+      try {
+        const parsed = new URL(candidate, window.location.href);
+        nested = parsed.searchParams.get('url') || parsed.searchParams.get('u') || '';
+      } catch (_) {}
+
+      if (!nested || nested === candidate) {
+        const sourceKey = eromeMediaKey(candidate).toLowerCase();
+        if (sourceKey) keys.add(sourceKey);
+        break;
+      }
+      candidate = nested;
+    }
+  });
+
+  return [...keys];
+}
+
+function isPongVideoSessionSkipped(rawUrl, metadata = {}, playbackUrl = '') {
+  return pongVideoSkipKeys(rawUrl, metadata, playbackUrl)
+    .some(key => sessionSkippedVideoKeys.has(key));
+}
+
+function removePongVideoRecord(globalIndex) {
+  const index = Number(globalIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= allVideoUrls.length) return null;
+
+  const removedUrl = allVideoUrls[index];
+  const removedMetadata = allVideoMetadata[index] || {};
+  const eventIndex = pasteEvents.findIndex(event => {
+    const start = Number(event?.startIndex);
+    const count = Number(event?.count);
+    return Number.isFinite(start) && Number.isFinite(count) && index >= start && index < start + count;
+  });
+  const event = eventIndex >= 0 ? pasteEvents[eventIndex] : null;
+
+  allVideoUrls.splice(index, 1);
+  allVideoMetadata.splice(index, 1);
+
+  pasteEvents.forEach((candidate, candidateIndex) => {
+    const start = Number(candidate?.startIndex || 0);
+    if (candidateIndex === eventIndex) candidate.count = Math.max(0, Number(candidate.count || 0) - 1);
+    if (start > index) candidate.startIndex = start - 1;
+  });
+
+  if (activePlaybackRange) {
+    if (index < activePlaybackRange.start) {
+      activePlaybackRange.start = Math.max(0, activePlaybackRange.start - 1);
+      activePlaybackRange.end = Math.max(activePlaybackRange.start, activePlaybackRange.end - 1);
+    } else if (index < activePlaybackRange.end) {
+      activePlaybackRange.end = Math.max(activePlaybackRange.start, activePlaybackRange.end - 1);
+    }
+  }
+
+  let eventRemoved = false;
+  if (eventIndex >= 0 && Number(event?.count || 0) <= 0) {
+    pasteEvents.splice(eventIndex, 1);
+    eventRemoved = true;
+    if (currentPasteIndex > eventIndex) currentPasteIndex--;
+    else if (currentPasteIndex === eventIndex) currentPasteIndex = Math.min(eventIndex, pasteEvents.length - 1);
+  }
+
+  random40PlaybackUrlOverrides.delete(String(removedUrl || ''));
+  random40ServerVideoCacheTracked.delete(String(removedUrl || ''));
+
+  return { removedUrl, removedMetadata, event, eventIndex, eventRemoved };
+}
+
+function pruneSessionSkippedVideoRecords() {
+  let removed = 0;
+  for (let index = allVideoUrls.length - 1; index >= 0; index--) {
+    if (!isPongVideoSessionSkipped(allVideoUrls[index], allVideoMetadata[index] || {})) continue;
+    if (removePongVideoRecord(index)) removed++;
+  }
+  return removed;
+}
+
+function skipCurrentPongVideo() {
+  const wrapper = getCurrentVideoWrapper();
+  const video = wrapper?.querySelector('video');
+  const localIndex = Number(wrapper?.dataset?.index);
+  const globalIndex = getCurrentLoadedGlobalVideoIndex();
+
+  if (!wrapper || !Number.isInteger(localIndex) || globalIndex < 0 || globalIndex >= allVideoUrls.length) {
+    showSortingIndicator('No current video to skip');
+    return false;
+  }
+
+  const rawUrl = String(allVideoUrls[globalIndex] || wrapper.dataset.originalVideoUrl || '');
+  const metadata = allVideoMetadata[globalIndex] || videoMetadata[localIndex] || {};
+  const playbackUrl = String(video?.currentSrc || video?.src || '');
+  pongVideoSkipKeys(rawUrl, metadata, playbackUrl).forEach(key => sessionSkippedVideoKeys.add(key));
+
+  if (video) silencePongVideo(video);
+  wrapper.dataset.sessionSkipped = 'true';
+  wrapper.dataset.autoRetryDone = 'true';
+
+  const loadedOffset = Math.max(0, Number(currentLoadedRangeStart || 0) - Number(activePlaybackRange?.start || 0));
+  const removed = removePongVideoRecord(globalIndex);
+  if (!removed) return false;
+
+  videoUrls.splice(localIndex, 1);
+  videoMetadata.splice(localIndex, 1);
+  showSortingIndicator('Video skipped · removed from this session');
+
+  if (!allVideoUrls.length) {
+    activePlaybackRange = null;
+    videoContainer.innerHTML = '<div class="loading-message">No more videos loaded</div>';
+    updatePasteNavigationButton();
+    scheduleSessionSave(0);
+    window.PongUpdateSkipVideoButton?.();
+    return true;
+  }
+
+  if (pasteEvents.length) {
+    let targetIndex = removed.event && !removed.eventRemoved
+      ? pasteEvents.indexOf(removed.event)
+      : Math.max(0, Math.min(pasteEvents.length - 1, removed.eventIndex));
+    if (targetIndex < 0) targetIndex = 0;
+    const sameEvent = pasteEvents[targetIndex] === removed.event;
+    setActivePlaybackRangeForPasteEvent(targetIndex, { recordHistory: false });
+    if (sameEvent && activePlaybackRange) {
+      activePlaybackRange.offset = Math.min(loadedOffset, Math.max(0, activePlaybackRange.end - activePlaybackRange.start - 1));
+    }
+    loadNextBatch(sameEvent ? Math.max(0, Math.min(localIndex, getCurrentBatchSize() - 1)) : 0);
+  } else {
+    activePlaybackRange = null;
+    const nextGlobalIndex = Math.min(globalIndex, allVideoUrls.length - 1);
+    currentBatch = Math.floor(nextGlobalIndex / getCurrentBatchSize());
+    loadNextBatch(nextGlobalIndex % getCurrentBatchSize());
+  }
+
+  updatePasteNavigationButton();
+  scheduleSessionSave(0);
+  window.PongUpdateSkipVideoButton?.();
+  return true;
+}
+
+window.PongSkipCurrentVideo = skipCurrentPongVideo;
+window.PongIsCurrentVideoSessionSkipped = () => {
+  const globalIndex = getCurrentLoadedGlobalVideoIndex();
+  if (globalIndex < 0) return false;
+  return isPongVideoSessionSkipped(allVideoUrls[globalIndex], allVideoMetadata[globalIndex] || {});
+};
+
 function pongCanonicalPlayedValue(rawValue) {
   const raw = String(rawValue || '').trim();
   if (!raw) return '';
@@ -5113,7 +5290,7 @@ function videoNetworkRequestIsMakingProgress(video, wrapper, now = Date.now()) {
 function rotateVideoRetrySource(wrapper, video) {
   const originalUrl = String(wrapper?.dataset?.originalVideoUrl || '');
   const currentUrl = String(video?.currentSrc || video?.src || '');
-  if (!originalUrl || !video) return false;
+  if (!originalUrl || !video || wrapper?.dataset?.sessionSkipped === 'true') return false;
 
   if (random40IsPcGrowingCachePlaybackUrl(currentUrl)) {
     const gatewayUrl = random40PcPlaybackGatewayUrl(originalUrl);
@@ -5207,7 +5384,12 @@ function retryVisibleBatchVideoLoads(token) {
 
     const video = wrapper.querySelector('video');
 
-    if (!video || wrapper.dataset.networkSuspended === 'true' || wrapper.dataset.autoRetryDone === 'true') return;
+    if (
+      !video ||
+      wrapper.dataset.networkSuspended === 'true' ||
+      wrapper.dataset.autoRetryDone === 'true' ||
+      wrapper.dataset.sessionSkipped === 'true'
+    ) return;
 
     if (isVideoReadyForInitialPlayback(video)) {
       markVideoAutoRetryDone(video, 'loaded');
@@ -5543,6 +5725,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   ensureVideoCounter().textContent = getDeckLogicalCounterText(currentVideoIndex);
   const video = target.querySelector('video');
   transferForegroundVideoPriority(video);
+  window.PongUpdateSkipVideoButton?.();
   if (DECK_MODE_ENABLED && !visibleBatchRetryTimer) startVisibleBatchAutoRetry();
   updateBatchReadyCounter();
   updateViewedRemainingCounter();
@@ -6540,6 +6723,14 @@ function createVideoElements() {
         wrapper.dataset.directFallbackRestored !== 'true'
       ) {
         if (isRandom40PlaybackActive()) {
+          const cacheRetryCount = Number(wrapper.dataset.pcCacheRetryCount || 0);
+          if (cacheRetryCount >= 2) {
+            wrapper.dataset.unplayable = 'true';
+            wrapper.dataset.autoRetryDone = 'true';
+            window.PongUpdateSkipVideoButton?.();
+            return;
+          }
+          wrapper.dataset.pcCacheRetryCount = String(cacheRetryCount + 1);
           const pcRetryUrl = random40PcFileCacheStreamUrl(originalUrl) || random40PcPlaybackGatewayUrl(originalUrl);
           if (!pcRetryUrl) return;
           delete wrapper.dataset.directFallbackRestored;
@@ -6559,6 +6750,10 @@ function createVideoElements() {
         video.dataset.lastNetworkAttemptAt = String(Date.now());
         video.src = originalUrl;
         try { video.load(); } catch (_) {}
+      } else {
+        wrapper.dataset.unplayable = 'true';
+        wrapper.dataset.autoRetryDone = 'true';
+        window.PongUpdateSkipVideoButton?.();
       }
     });
 
@@ -6581,6 +6776,7 @@ function createVideoElements() {
 
   updateNextBatchButton();
   updateBatchReadyCounter();
+  window.PongUpdateSkipVideoButton?.();
   setupVisibilityObserver();
   warmCurrentBatchVideos();
   startVisibleBatchAutoRetry();
@@ -6641,6 +6837,7 @@ function setupVisibilityObserver() {
     const indexChanged = nextVideoIndex !== currentVideoIndex;
     currentVideoIndex = nextVideoIndex;
     counter.textContent = getVideoCounterText(currentVideoIndex);
+    window.PongUpdateSkipVideoButton?.();
 
     if (indexChanged) scheduleSessionSave(450);
 
@@ -6674,6 +6871,7 @@ function setupVisibilityObserver() {
 
 // ─── Batching ─────────────────────────────────────────────────────────────────
 function loadNextBatch(restoreIndex) {
+  pruneSessionSkippedVideoRecords();
   videoUrls=[]; videoMetadata=[];
   const hasRange = hasActivePlaybackRange();
   const batchSize = getCurrentBatchSize();
@@ -8740,6 +8938,7 @@ function resetPasteEvents(){
   currentPasteIndex=-1;
   resetPaperclipQueue();
   viewedVideoKeys = new Set();
+  sessionSkippedVideoKeys = new Set();
   scheduleRandom40PreloadPool(0);
   updatePasteNavigationButton();
 }
@@ -8987,6 +9186,7 @@ loadVideosButton.addEventListener('click', async ()=>{
   allVideoUrls = shuffledLoad.urls;
   allVideoMetadata = shuffledLoad.metadata.map(meta => meta || {});
   viewedVideoKeys = new Set();
+  sessionSkippedVideoKeys = new Set();
   const shouldUseEromeTwentyCardMode = window.PongEromeAutoAdvanceOnce === true;
   const shouldUseSavedArtistsMode = window.PongSavedArtistsAutoAdvanceOnce === true;
   const shouldUseRandom40AutoAdvanceMode =
@@ -22045,6 +22245,6 @@ window.addEventListener('blur',()=>{
   copy?.addEventListener('click', async () => { if (pasteText) await navigator.clipboard?.writeText(pasteText); });
 })();
 </script>
-<script src="pong-sync.js?v=111"></script>
+<script src="pong-sync.js?v=112"></script>
 </body>
 </html>
