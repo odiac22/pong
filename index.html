@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.82</div>
+    <div class="version-number">26.83</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -19276,8 +19276,13 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         : sourcePairId;
       // Progressive deduplication remains album/source-specific. Using the
       // shared creator pair here would incorrectly discard later sources.
-      const progressiveKey = String(sourcePairId || `${creatorKey}:${albumUrl}`);
-      const seenAlbumKey = recallChannel === 3 && creatorKey ? `${creatorKey}:${albumUrl}` : albumUrl;
+      // Recall 1/2 stream the same creator repeatedly as deeper profile pages
+      // add videos. The creator pair is the stable identity; album URLs are
+      // only sources inside that profile and must never become extra cards.
+      const progressiveKey = String(sourcePairId || pairId || `${creatorKey}:${albumUrl}`);
+      const seenAlbumKey = recallChannel === 3 && creatorKey
+        ? `${creatorKey}:${albumUrl}`
+        : pairId || albumUrl;
       const progressiveGroups = Array.isArray(rawAlbum?.pairedGroups) && rawAlbum.pairedGroups.length
         ? rawAlbum.pairedGroups
         : [rawAlbum];
@@ -19300,7 +19305,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       if (previousVersion >= progressiveVersion && previousVersion > 0) return;
       seenAlbumVersions.set(progressiveKey, progressiveVersion);
       if (previousVersion > 0) {
-        const queuedExisting = albumQueue.find(item => sourcePairId && String(item?.sourcePairId || item?.pairId || '') === sourcePairId);
+        const queuedExisting = albumQueue.find(item => (
+          String(item?.progressiveKey || item?.sourcePairId || item?.pairId || `${item?.creatorKey || ''}:${item?.url || ''}`) === progressiveKey
+        ));
         if (queuedExisting) {
           queuedExisting.videos = previewExpanded ? readyVideos : (queuedExisting.previewExpanded ? readyVideos : queuedExisting.videos);
           if (deferredVideos.length) queuedExisting.deferredVideos = deferredVideos;
@@ -19359,6 +19366,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
         creatorKey,
         pairId,
         sourcePairId,
+        progressiveKey,
         simpCityJobId: String(jobId || rawAlbum?.simpCityJobId || ''),
         source: rawAlbum?.source === 'direct'
           ? 'direct'

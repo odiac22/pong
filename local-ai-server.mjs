@@ -5144,7 +5144,10 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
     state.collectionControllers.get(creatorKey)?.abort?.();
     state.collectionControllers.set(creatorKey, collectionController);
 
-    let publishedRecord = null;
+    // Deeper pages for an ordered creator profile revisit the same creator.
+    // Continue enriching the original record instead of publishing another
+    // top-level profile for every page that contains playable media.
+    let publishedRecord = existingRecord;
     const backgroundTask = simpCityMediaResolveLimit(async () => {
       const signal = collectionController.signal;
       if (
