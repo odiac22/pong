@@ -909,7 +909,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.81</div>
+    <div class="version-number">26.82</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -3713,11 +3713,12 @@ function setupMobileAudioUnlock() {
 }
 
 function unmuteSafely(video) {
+  if (!isPongActiveVideo(video)) { silencePongVideo(video); return; }
   try {
     video.muted = false; video.volume = 1.0;
     if (navigator.userAgent.includes('Firefox')) {
       try { const ctx = new (window.AudioContext || window.webkitAudioContext)(); if (ctx.state === 'suspended') ctx.resume().catch(() => {}); } catch(e) {}
-      setTimeout(() => { if (video.muted) { video.muted = false; video.volume = 0.99; setTimeout(() => { video.volume = 1.0; }, 50); } }, 100);
+      setTimeout(() => { if (isPongActiveVideo(video) && video.muted) { video.muted = false; video.volume = 0.99; setTimeout(() => { if (isPongActiveVideo(video)) video.volume = 1.0; }, 50); } }, 100);
     }
   } catch(e) {}
 }
@@ -4439,9 +4440,29 @@ function getAdaptiveScrubTime(startTime, dx, duration, width) {
   return Math.max(0, Math.min(safeDuration, startTime + smoothRatio * secondsPerScreen));
 }
 
+function isPongActiveVideo(video) {
+  const wrapper = video && video.closest('.video-wrapper');
+  return !!(video?.isConnected && wrapper && wrapper.classList.contains(
+    DECK_MODE_ENABLED ? 'deck-active' : 'most-visible'
+  ));
+}
+
+function silencePongVideo(video) {
+  if (!video) return;
+  video.muted = true;
+  video.volume = 0;
+  video.pause();
+  const wrapper = video.closest('.video-wrapper');
+  if (wrapper) {
+    wrapper.classList.remove('video-playing');
+    delete wrapper.dataset.playIntent;
+  }
+  if (window.currentlyPlayingVideo === video) window.currentlyPlayingVideo = null;
+}
+
 function pauseOtherVideos(activeVideo) {
   document.querySelectorAll('.video-player').forEach(v => {
-    if (v !== activeVideo && !v.paused) v.pause();
+    if (v !== activeVideo) silencePongVideo(v);
 
     if (v !== activeVideo) {
       const otherWrapper = v.closest('.video-wrapper');
@@ -4859,6 +4880,7 @@ function tuneVideoPreloadAround(activeWrapper) {
 }
 
 function prepareVideoForPlayback(video) {
+  if (!isPongActiveVideo(video)) { silencePongVideo(video); return; }
   const wrapper = video && video.closest('.video-wrapper');
   if (!video || !wrapper) return;
 
@@ -4871,10 +4893,12 @@ function prepareVideoForPlayback(video) {
 
 function playVideoCleanly(video) {
   if (!video) return Promise.resolve();
+  if (!isPongActiveVideo(video)) { silencePongVideo(video); return Promise.resolve(); }
   if (video.dataset.playRequestPending === 'true') return Promise.resolve();
 
   video.dataset.playRequestPending = 'true';
   prepareVideoForPlayback(video);
+  applyPlayerAudioPreference(video);
 
   const playPromise = video.play();
 
@@ -4887,6 +4911,7 @@ function playVideoCleanly(video) {
     .catch(() => {})
     .finally(() => {
       video.dataset.playRequestPending = 'false';
+      if (!isPongActiveVideo(video)) silencePongVideo(video);
     });
 }
 
@@ -5487,6 +5512,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
 
   wrappers.forEach(wrapper => {
     const isActive = wrapper === target;
+    if (!isActive) silencePongVideo(wrapper.querySelector('video'));
     wrapper.classList.toggle('deck-active', isActive);
     wrapper.classList.toggle('most-visible', isActive);
     wrapper.setAttribute('data-playable', isActive ? 'true' : 'false');
@@ -6315,6 +6341,7 @@ function createVideoElements() {
     });
 
     video.addEventListener('play', () => {
+      if (!isPongActiveVideo(video)) { silencePongVideo(video); return; }
       wrapper.dataset.everPlayed = 'true';
       markVideoViewed(wrapper);
       prepareVideoForPlayback(video);
@@ -6389,6 +6416,7 @@ function createVideoElements() {
       maybeAutoplayReadyDeckVideo(video, wrapper, 'canplaythrough');
     });
     video.addEventListener('playing', () => {
+      if (!isPongActiveVideo(video)) { silencePongVideo(video); return; }
       video.dataset.hasPlayedFrame = 'true';
       delete video.dataset.foregroundStallWatch;
       video.dataset.foregroundStallRetries = '0';
@@ -6417,6 +6445,7 @@ function createVideoElements() {
       loadingIndicator.style.display='none';
     });
     video.addEventListener('timeupdate', () => {
+      if (!isPongActiveVideo(video) && !video.paused) { silencePongVideo(video); return; }
       pongPlaybackBenchmarkOnTimeUpdate(video, wrapper);
       if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`;
       updateVideoBufferedProgressBar(video);
@@ -6606,6 +6635,7 @@ function setupVisibilityObserver() {
     });
 
     const mostVisibleVideo = mostVisible.querySelector('video');
+    pauseOtherVideos(mostVisibleVideo);
     transferForegroundVideoPriority(mostVisibleVideo);
     const nextVideoIndex = parseInt(mostVisible.dataset.index || 0);
     const indexChanged = nextVideoIndex !== currentVideoIndex;
