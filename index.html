@@ -19274,8 +19274,6 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       const pairId = recallChannel === 3 && creatorKey
         ? `artist-lookup:${creatorKey}`
         : sourcePairId;
-      // Progressive deduplication remains album/source-specific. Using the
-      // shared creator pair here would incorrectly discard later sources.
       // Recall 1/2 stream the same creator repeatedly as deeper profile pages
       // add videos. The creator pair is the stable identity; album URLs are
       // only sources inside that profile and must never become extra cards.
