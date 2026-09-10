@@ -8293,6 +8293,23 @@ async function serveVideoFileCacheMedia(req, res, id) {
     }
     return;
   }
+  const recallOriginStream = record.playbackProfile === 'bunkr' && record.status !== 'ready';
+  if (recallOriginStream) {
+    // Recall/Erome bundles can contain many large clips from the same CDN.
+    // Waiting for each incomplete full-file cache entry made the first prepared
+    // clips fast while later swipes stalled behind the cache queue (and MP4 tail
+    // metadata). The visible reader should stream its exact Range request now;
+    // background cache lanes remain available for upcoming cards.
+    record.deferWhenIdle = true;
+    record.controller?.abort();
+    try {
+      await streamGatewayResponse(req, res, record.sourceUrl);
+    } finally {
+      res.off('close', releaseReader);
+      releaseReader();
+    }
+    return;
+  }
   const knownOversized = Number(record.totalBytes || 0) > VIDEO_FILE_CACHE_MAX_FILE_BYTES;
   if (!knownOversized && (record.status === 'idle' || record.status === 'error')) {
     enqueueVideoFileCacheRecord(record, { resetRetries: true });
