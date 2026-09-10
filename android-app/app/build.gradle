@@ -1,0 +1,32 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.odiac22.pong'
+    compileSdk 35
+    defaultConfig { minSdk 24; targetSdk 35; versionCode 1; versionName '1.0' }
+    flavorDimensions 'instance'
+    productFlavors {
+        pong1 {
+            dimension 'instance'; applicationId 'com.odiac22.pong1'
+            resValue 'string', 'app_name', 'Pong 1'
+            buildConfigField 'String', 'INSTANCE', '"1"'
+        }
+        pong2 {
+            dimension 'instance'; applicationId 'com.odiac22.pong2'
+            resValue 'string', 'app_name', 'Pong 2'
+            buildConfigField 'String', 'INSTANCE', '"2"'
+        }
+    }
+    buildFeatures { buildConfig true }
+    signingConfigs {
+        release {
+            storeFile file(System.getenv('PONG_KEYSTORE_PATH') ?: 'missing.jks')
+            storePassword System.getenv('PONG_KEYSTORE_PASSWORD') ?: ''
+            keyAlias System.getenv('PONG_KEY_ALIAS') ?: 'pong'
+            keyPassword System.getenv('PONG_KEY_PASSWORD') ?: ''
+        }
+    }
+    buildTypes {
+        release { minifyEnabled false; signingConfig signingConfigs.release }
+    }
+}
