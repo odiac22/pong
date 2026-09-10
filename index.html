@@ -3,7 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>Pong V2.2</title>
+  <title>Pong</title>
+  <script>
+    (() => {
+      const instance = new URLSearchParams(location.search).get('pongInstance') === '2' ? '2' : '1';
+      document.title = `Pong ${instance}`;
+      const manifest = document.createElement('link');
+      manifest.rel = 'manifest';
+      manifest.href = `pong-${instance}.webmanifest`;
+      document.head.appendChild(manifest);
+      const icon = document.createElement('link');
+      icon.rel = 'icon';
+      icon.href = `pong-${instance}-icon.svg`;
+      document.head.appendChild(icon);
+    })();
+  </script>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <style>
@@ -278,7 +292,7 @@
     #random-40 { background: rgba(244,114,182,0.20); }
     .url-input button:hover, .url-input button:active { transform: translateY(-1px); background: rgba(255,255,255,0.12); }
     .control-button {
-      position: fixed; bottom: 48px; background: var(--ui-bg);
+      position: fixed; bottom: 34px; background: var(--ui-bg);
       color: var(--ui-text); width: 24px; height: 24px; border-radius: 999px;
       display: flex; align-items: center; justify-content: center;
       z-index: 1000; cursor: pointer; font-size: 15px; font-weight: 750; line-height: 1;
@@ -909,7 +923,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.84</div>
+    <div class="version-number">26.85</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -22244,7 +22258,19 @@ window.addEventListener('blur',()=>{
   });
   copy?.addEventListener('click', async () => { if (pasteText) await navigator.clipboard?.writeText(pasteText); });
 })();
+
+// Read-only telemetry bridge. It intentionally excludes pasted text,
+// credentials, cookies and media bytes.
+window.PongObserverStateBridge = () => ({
+  allVideoUrls, allVideoMetadata, videoUrls, videoMetadata, pasteEvents,
+  currentPasteIndex, currentVideoIndex, currentLoadedRangeStart,
+  currentLoadedRangeEnd, pendingPastes, random40PostFetchQueue,
+  random40PostFetchActive, random40SourceFetchQueue, random40SourceFetchActive,
+  random40PreloadActive, random40State, activeSimpCityRecallContext,
+  loadedSavedMode: window.PongLoadedSavedMode || ''
+});
 </script>
+<script src="pong-observer.js?v=1"></script>
 <script src="pong-sync.js?v=112"></script>
 </body>
 </html>

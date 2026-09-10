@@ -1,0 +1,12 @@
+{
+  "id": "/pong/?pongInstance=2",
+  "name": "Pong 2",
+  "short_name": "Pong 2",
+  "description": "Pong player instance 2 with private live diagnostics",
+  "start_url": "/pong/?pongInstance=2",
+  "scope": "/pong/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#180b2d",
+  "icons": [{ "src": "pong-2-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

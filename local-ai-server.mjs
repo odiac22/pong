@@ -68,6 +68,13 @@ const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD 
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
 const PONG_INDEX_PATH = path.join(process.cwd(), 'index.html');
 const PONG_SYNC_PATH = path.join(process.cwd(), 'pong-sync.js');
+const PONG_STATIC_ASSETS = new Map([
+  ['/pong-observer.js', [path.join(process.cwd(), 'pong-observer.js'), 'text/javascript; charset=utf-8']],
+  ['/pong-1.webmanifest', [path.join(process.cwd(), 'pong-1.webmanifest'), 'application/manifest+json; charset=utf-8']],
+  ['/pong-2.webmanifest', [path.join(process.cwd(), 'pong-2.webmanifest'), 'application/manifest+json; charset=utf-8']],
+  ['/pong-1-icon.svg', [path.join(process.cwd(), 'pong-1-icon.svg'), 'image/svg+xml; charset=utf-8']],
+  ['/pong-2-icon.svg', [path.join(process.cwd(), 'pong-2-icon.svg'), 'image/svg+xml; charset=utf-8']]
+]);
 const PONG_SAVED_LINKS_V2_PATH = path.join(process.cwd(), 'pong-data', 'saved-links-v2.json');
 const PONG_SAVED_LINKS_LEGACY_PATH = path.join(process.cwd(), 'pong-data', 'saved-links.json');
 const PONG_SAVED_EROME_RECOVERY_PATH = path.join(process.cwd(), 'pong-data', 'saved-erome-recovery.json');
@@ -12878,6 +12885,23 @@ const server = http.createServer(async (req, res) => {
       });
       if (req.method === 'HEAD') res.end();
       else res.end(script);
+    } catch (error) {
+      json(res, 500, { error: error.message || String(error) });
+    }
+    return;
+  }
+  if ((req.method === 'GET' || req.method === 'HEAD') && PONG_STATIC_ASSETS.has(requestUrl.pathname)) {
+    try {
+      const [filePath, contentType] = PONG_STATIC_ASSETS.get(requestUrl.pathname);
+      const data = await fs.readFile(filePath);
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Content-Length': data.length,
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'X-Content-Type-Options': 'nosniff'
+      });
+      if (req.method === 'HEAD') res.end();
+      else res.end(data);
     } catch (error) {
       json(res, 500, { error: error.message || String(error) });
     }
