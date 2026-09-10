@@ -232,8 +232,12 @@ const GATEWAY_AGENT = new https.Agent({
 const VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST = Math.max(4, Math.min(96, Number(
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST ||
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY ||
-  64
+  12
 )));
+const VIDEO_VERIFY_START_GAP_MS = Math.max(
+  300,
+  Number(process.env.PONG_VIDEO_VERIFY_START_GAP_MS || 900)
+);
 const VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST = Math.max(1, Math.min(
   VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST,
   Number(process.env.PONG_VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST || 8)
@@ -246,7 +250,7 @@ const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(32, Number(proc
 // verifier while each artist remains capped at eight concurrent checks.
 const VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST = Math.max(1, Math.min(
   16,
-  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 8)
+  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 4)
 ));
 const VIDEO_VERIFY_CACHE_MAX = Math.max(200, Number(process.env.PONG_VIDEO_VERIFY_CACHE_MAX || 6000));
 const VIDEO_VERIFY_CACHE_TTL_MS = Math.max(30000, Number(process.env.PONG_VIDEO_VERIFY_CACHE_TTL_MS || 900000));
@@ -365,7 +369,10 @@ const gatewayHtmlFetchStats = {
   nextStartAt: 0,
   backoffUntil: 0,
   lastStatus: 0,
-  gapMs: Math.max(500, Number(process.env.PONG_GATEWAY_HTML_GAP_MS || 575)),
+  // 1.9.1's 650 ms floor was the last observed setting that sustained long
+  // runs without rate limiting. Keep that proven floor while still allowing
+  // operators to choose a more conservative value through the environment.
+  gapMs: Math.max(650, Number(process.env.PONG_GATEWAY_HTML_GAP_MS || 650)),
   concurrency: Math.max(1, Math.min(2, Number(process.env.PONG_GATEWAY_HTML_CONCURRENCY || 2)))
 };
 const gatewayHtmlFetchWaiters = [];
@@ -548,16 +555,6 @@ function gatewayH2Session(target) {
   });
   gatewayH2Sessions.set(origin, session);
   return session;
-}
-
-function resetGatewayH2Session(rawUrl) {
-  try {
-    const target = gatewayTargetUrl(rawUrl);
-    const origin = `${target.protocol}//${target.host}`;
-    const session = gatewayH2Sessions.get(origin);
-    gatewayH2Sessions.delete(origin);
-    if (session && !session.destroyed) session.destroy();
-  } catch (_) {}
 }
 
 function decodeGatewayH2Body(buffer, encoding) {
@@ -883,8 +880,11 @@ function gatewayHtmlRecordStatus(status) {
   gatewayHtmlFetchStats.consecutiveTransientFailures++;
   const consecutive = gatewayHtmlFetchStats.consecutiveTransientFailures;
   if (value === 429 || consecutive >= 3) {
-    const exponent = Math.min(2, Math.max(0, consecutive - 3));
-    const durationMs = value === 429 ? 120_000 : 60_000 * (2 ** exponent);
+    // Preserve the long, protective pause for a real rate limit. Ordinary
+    // edge 5xx/network rotation is not a rate limit and previously froze every
+    // retained candidate for 1-4 minutes. Use a short adaptive recovery there.
+    const exponent = Math.min(3, Math.max(0, consecutive - 3));
+    const durationMs = value === 429 ? 120_000 : Math.min(30_000, 4_000 * (2 ** exponent));
     gatewayHtmlFetchStats.backoffUntil = Math.max(
       gatewayHtmlFetchStats.backoffUntil,
       Date.now() + durationMs
@@ -924,6 +924,7 @@ function videoVerifyStateForHost(hostname) {
       queue: [],
       active: 0,
       activeByGroup: new Map(),
+      nextStartAt: 0,
       backoffUntil: 0,
       rateLimits: 0,
       completed: 0,
@@ -960,9 +961,14 @@ function pumpVideoVerifyFetchQueue(state) {
     state.active++;
     state.activeByGroup.set(item.groupId, (state.activeByGroup.get(item.groupId) || 0) + 1);
     state.queueWaitTotalMs += Math.max(0, Date.now() - item.enqueuedAt);
+    const startAt = Math.max(Date.now(), Number(state.nextStartAt || 0));
+    state.nextStartAt = startAt + VIDEO_VERIFY_START_GAP_MS;
     Promise.resolve()
       .then(async () => {
-        const waitMs = state.backoffUntil - Date.now();
+        // Admission concurrency controls sockets, while this reservation
+        // controls request rate. Previously 128 sockets could all start at
+        // once and the source expressed its rate limit as HTTP 503.
+        const waitMs = Math.max(startAt, state.backoffUntil) - Date.now();
         if (waitMs > 0) await videoVerifyDelay(waitMs, item.signal);
         return item.task(state);
       })
@@ -1078,7 +1084,11 @@ async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = nu
         return response.body.toString('utf8');
       }
       let transient = status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
-      if (transient) resetGatewayH2Session(rawUrl);
+      // A transient response belongs to this stream, not necessarily the
+      // shared HTTP/2 connection. Destroying the shared session here raced
+      // other active profile streams and could terminate Node with a native
+      // access violation, wiping Local2's in-memory queue. Leave session
+      // retirement to its GOAWAY/close handlers and continue via HTTP/1/native.
       // Some source edges intermittently reject a reused HTTP/2 session while
       // accepting the same browser request over HTTP/1.1. Fail over inside the
       // attempt so Artist Lookup does not report a false empty result or spend
@@ -1095,6 +1105,19 @@ async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = nu
             return fallback.body.toString('utf8');
           }
           transient = status === 408 || status === 425 || status === 429 || status >= 500;
+        } catch (_) {}
+      }
+      // The source edge can reject both Node TLS transports while accepting the
+      // same request from the host browser stack. Use the existing bounded
+      // native transport before engaging the global circuit breaker. This is a
+      // transport fallback only; it does not change candidate or model rules.
+      if (transient && !controller.signal.aborted) {
+        try {
+          const nativeHtml = await gatewayPowerShellFetchHtml(rawUrl, { timeoutMs });
+          if (nativeHtml) {
+            gatewayHtmlRecordStatus(200);
+            return nativeHtml;
+          }
         } catch (_) {}
       }
       lastStatus = status;
@@ -6032,7 +6055,6 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, gro
         !controller.signal.aborted &&
         (!response || Number(response.status || 0) === 408 || Number(response.status || 0) === 425 || Number(response.status || 0) >= 500)
       ) {
-        resetGatewayH2Session(normalizedPostUrl);
         response = await gatewayHttp1BufferFetch(normalizedPostUrl, {
           signal: controller.signal,
           timeoutMs: Math.min(GATEWAY_TIMEOUT_MS, 16000)
@@ -6048,6 +6070,13 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, gro
         throw new Error('video post HTTP 429; shared host backoff engaged');
       }
       const status = Number(response.status || 0);
+      if (status === 503) {
+        // This edge uses 503 for its soft request-rate ceiling. Keep the pause
+        // host-local so the mirror can continue, and let the candidate retry
+        // rather than converting unavailable proof into a permanent reject.
+        hostState.rateLimits++;
+        hostState.backoffUntil = Math.max(hostState.backoffUntil, Date.now() + 12_000);
+      }
       if (status < 200 || status >= 300) {
         throw new Error(`video post HTTP ${status}`);
       }
@@ -6297,6 +6326,7 @@ async function verifyVideoPostBatch(payload, requestSignal) {
   const entries = [];
   const seenVideos = new Set();
   const mediaCandidates = new Set();
+  let transientFailures = 0;
   const desiredFastStart = Math.min(10, stopAt);
   // Do not turn fast-start preference into extra source traffic. The minimum
   // verifier remains a strict 15-real-media check; fast-start is only an
@@ -6334,7 +6364,10 @@ async function verifyVideoPostBatch(payload, requestSignal) {
             groupId,
             priorityControl
           );
-        } catch (_) {
+        } catch (error) {
+          if (/\b(?:429|502|503|504)\b|temporar|timed out|ECONNRESET/i.test(String(error?.message || error))) {
+            transientFailures++;
+          }
           // The alternate mirror is an availability fallback. Try it only when
           // the selected source failed; a successful canonical post response is
           // authoritative even when that post contains no video.
@@ -6385,6 +6418,9 @@ async function verifyVideoPostBatch(payload, requestSignal) {
     ));
   } finally {
     requestSignal?.removeEventListener('abort', abort);
+  }
+  if (entries.length < stopAt && transientFailures > 0 && !requestSignal?.aborted) {
+    throw new Error(`video verification transient HTTP 503 (${transientFailures} source failures)`);
   }
   const selectedEntries = [...entries]
     .sort((a, b) => Number(b?.playbackFastStart === true) - Number(a?.playbackFastStart === true))
@@ -11465,6 +11501,11 @@ async function local2FlashDiscoverPages(pages, context) {
   })));
   const groups = [];
   const seen = new Set();
+  const failures = results.filter(result => result.status === 'rejected');
+  if (failures.length === results.length && failures.length) {
+    const retryable = failures.find(result => /shared backoff|\b(?:429|502|503|504)\b|temporar|fetch failed|ECONNRESET|ETIMEDOUT/i.test(String(result.reason?.message || result.reason || '')));
+    if (retryable) throw retryable.reason;
+  }
   for (const result of results) {
     if (result.status !== 'fulfilled') continue;
     const parsed = local2FlashListingCandidates(
@@ -12607,7 +12648,6 @@ async function local22TurboQualifyCandidateInner(candidate, context, preparedPro
     verificationPriority
   };
   let releaseQualification = null;
-  let releaseSpeculativeAi = null;
   try {
     const classifyPreparedProfile = async () => {
       releaseQualification = await local22TurboAcquireQualificationSlot(
@@ -12636,41 +12676,17 @@ async function local22TurboQualifyCandidateInner(candidate, context, preparedPro
       }
     };
 
-    // Media proof remains authoritative. Only a bounded, high-video-likelihood
-    // fast lane overlaps AI with it; all other profiles prove 15 real videos
-    // before occupying scarce AI admission.
-    releaseSpeculativeAi = local22TurboTryAcquireSpeculativeAiSlot(qualificationPriority);
-    const speculativeDecisionStartedAt = releaseSpeculativeAi ? Date.now() : 0;
-    const speculativeDecisionPromise = releaseSpeculativeAi ? classifyPreparedProfile() : null;
-    const mediaStartedAt = Date.now();
-    const media = await local2FlashVerifyProfile(profile, branchContext);
-    const mediaMs = Date.now() - mediaStartedAt;
-    if (media.length < 15) {
-      if (speculativeDecisionPromise) {
-        // Node fetch cancellation cannot cancel work already admitted by the
-        // Python ThreadingHTTPServer. Aborting here released our admission slot
-        // immediately while the GPU service kept processing the abandoned
-        // request, allowing hundreds of invisible classifications to pile up
-        // across runs. Let the bounded speculative request finish so the Node
-        // and Python admission counts remain synchronized.
-        await speculativeDecisionPromise;
-      } else if (!branchController.signal.aborted) {
-        branchController.abort();
-      }
-      return { accepted: false, reason: `only ${media.length}/15 verified media URLs` };
-    }
-
+    // Run the unchanged personal/hard-safe decision before spending source
+    // requests proving 15 videos. The prior media-first order flooded hundreds
+    // of post pages for profiles the same model would reject moments later.
+    // This changes work order only: a delivered artist must still pass this
+    // exact decision and the exact same 15-distinct-media requirement.
     const decisionStartedAt = Date.now();
-    const decisionResult = speculativeDecisionPromise
-      ? await speculativeDecisionPromise
-      : await classifyPreparedProfile();
-    const decisionMs = speculativeDecisionPromise
-      ? Date.now() - speculativeDecisionStartedAt
-      : Date.now() - decisionStartedAt;
+    const decisionResult = await classifyPreparedProfile();
+    const decisionMs = Date.now() - decisionStartedAt;
     if (decisionResult.error) {
       return {
         accepted: false,
-        mediaQualified: true,
         reason: String(decisionResult.error?.message || decisionResult.error)
       };
     }
@@ -12678,7 +12694,6 @@ async function local22TurboQualifyCandidateInner(candidate, context, preparedPro
     if (!local2FlashDecisionIsSafe(decision)) {
       return {
         accepted: false,
-        mediaQualified: true,
         reason: decision?.reason || 'Local2.2 hard-filter or preference rejection',
         diagnostic: decision
       };
@@ -12688,7 +12703,6 @@ async function local22TurboQualifyCandidateInner(candidate, context, preparedPro
     if (examined < 6) {
       return {
         accepted: false,
-        mediaQualified: true,
         reason: `only ${examined}/6 perceptually distinct hard-filter images`,
         diagnostic: decision
       };
@@ -12696,10 +12710,15 @@ async function local22TurboQualifyCandidateInner(candidate, context, preparedPro
     if (clearBody < LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES) {
       return {
         accepted: false,
-        mediaQualified: true,
         reason: `only ${clearBody}/${LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES} clear body views`,
         diagnostic: decision
       };
+    }
+    const mediaStartedAt = Date.now();
+    const media = await local2FlashVerifyProfile(profile, branchContext);
+    const mediaMs = Date.now() - mediaStartedAt;
+    if (media.length < 15) {
+      return { accepted: false, reason: `only ${media.length}/15 verified media URLs` };
     }
     const prebufferStartedAt = Date.now();
     const prebufferReady = qualificationVariant === 'local22-turbo'
@@ -12732,7 +12751,6 @@ async function local22TurboQualifyCandidateInner(candidate, context, preparedPro
     context.signal?.removeEventListener('abort', abortBranch);
     if (!branchController.signal.aborted) branchController.abort();
     releaseQualification?.();
-    releaseSpeculativeAi?.();
   }
 }
 
@@ -14675,6 +14693,7 @@ const server = http.createServer(async (req, res) => {
           maximum_total_concurrency: VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST * videoVerifyHostStates.size,
           per_artist_concurrency: VIDEO_VERIFY_PER_ARTIST_CONCURRENCY,
           active_per_artist_host: VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST,
+          request_start_gap_ms: VIDEO_VERIFY_START_GAP_MS,
           active: [...videoVerifyHostStates.values()].reduce((sum, state) => sum + state.active, 0),
           queued: [...videoVerifyHostStates.values()].reduce((sum, state) => sum + state.queue.length, 0),
           cached_posts: videoVerifyCache.size,

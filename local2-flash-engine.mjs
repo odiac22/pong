@@ -26,6 +26,30 @@ function cleanPages(values) {
     .filter(value => Number.isInteger(value) && value >= 1 && value <= 3500))];
 }
 
+function transientRetryDelay(error, attempt = 0) {
+  if (error?.name === 'AbortError') return 0;
+  const message = text(error?.message || error, 512);
+  const match = message.match(/(?:backoff|retry)[^(\d]*\(?([\d,]+)\s*ms/i);
+  const explicit = Number(error?.retryAfterMs || match?.[1]?.replace(/,/g, ''));
+  if (Number.isFinite(explicit) && explicit > 0) return Math.min(180000, Math.max(50, explicit + 125));
+  if (/\b(?:HTTP\s*)?(?:429|502|503|504)\b|shared backoff|temporar|fetch failed|ECONNRESET|ETIMEDOUT/i.test(message)) {
+    return Math.min(30000, 1000 * (2 ** Math.min(5, attempt)));
+  }
+  return 0;
+}
+
+function waitForRetry(delayMs, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason || new Error('stopped')); return; }
+    const timer = setTimeout(resolve, Math.max(0, Number(delayMs || 0)));
+    timer.unref?.();
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(signal.reason || new Error('stopped'));
+    }, { once: true });
+  });
+}
+
 export class Local2FlashEngine {
   constructor({
     discoverPages,
@@ -100,6 +124,7 @@ export class Local2FlashEngine {
       )),
       rejected: run.stats.rejected,
       failed: run.stats.failed,
+      transientRetries: run.stats.transientRetries,
       activeCandidates: run.active.size,
       rejectionReasons: Object.fromEntries(
         [...run.stats.rejectionReasons.entries()].sort((a, b) => b[1] - a[1]).slice(0, 16)
@@ -107,6 +132,7 @@ export class Local2FlashEngine {
       timings: { ...run.stats.timings },
       startedAt: run.startedAt,
       firstAcceptedAt: run.firstAcceptedAt || 0,
+      ...(run.error ? { error: run.error } : {}),
       ...(run.diagnostics ? { recentOutcomes: [...run.stats.recentOutcomes] } : {})
     };
   }
@@ -145,6 +171,7 @@ export class Local2FlashEngine {
         productivePages: 0,
         rejected: 0,
         failed: 0,
+        transientRetries: 0,
         rejectionReasons: new Map(),
         recentOutcomes: [],
         timings: {
@@ -224,12 +251,24 @@ export class Local2FlashEngine {
       }
       if (!pages.length) break;
       const discoveryStarted = this.now();
-      const candidates = await this.discoverPages(pages, {
-        signal: run.controller.signal,
-        revision: run.revision,
-        generation: run.generation,
-        variant: this.variant
-      });
+      let candidates;
+      let discoveryAttempt = 0;
+      for (;;) {
+        try {
+          candidates = await this.discoverPages(pages, {
+            signal: run.controller.signal,
+            revision: run.revision,
+            generation: run.generation,
+            variant: this.variant
+          });
+          break;
+        } catch (error) {
+          const retryMs = transientRetryDelay(error, discoveryAttempt++);
+          if (!retryMs || run.controller.signal.aborted) throw error;
+          run.stats.transientRetries++;
+          await waitForRetry(retryMs, run.controller.signal);
+        }
+      }
       run.stats.timings.discoveryMs += this.now() - discoveryStarted;
       run.stats.pages += pages.length;
       const unique = [];
@@ -276,12 +315,24 @@ export class Local2FlashEngine {
       : null;
     timeout?.unref?.();
     try {
-      const result = await this.qualifyCandidate(candidate, {
-        signal: candidateController.signal,
-        revision: run.revision,
-        generation: run.generation,
-        variant: this.variant
-      });
+      let result;
+      let qualifyAttempt = 0;
+      for (;;) {
+        try {
+          result = await this.qualifyCandidate(candidate, {
+            signal: candidateController.signal,
+            revision: run.revision,
+            generation: run.generation,
+            variant: this.variant
+          });
+          break;
+        } catch (error) {
+          const retryMs = transientRetryDelay(error, qualifyAttempt++);
+          if (!retryMs || candidateController.signal.aborted) throw error;
+          run.stats.transientRetries++;
+          await waitForRetry(retryMs, candidateController.signal);
+        }
+      }
       if (this.run !== run || run.controller.signal.aborted) return;
       run.stats.completed++;
       if (result?.mediaQualified === true) {
