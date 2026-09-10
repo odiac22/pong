@@ -129,7 +129,10 @@ const VIDEO_FILE_CACHE_DIR = path.resolve(
 // it must never consume a drive just because several large videos are in flight.
 const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_BYTES || 12 * 1024 * 1024 * 1024));
 const VIDEO_FILE_CACHE_MIN_FREE_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MIN_FREE_BYTES || 8 * 1024 * 1024 * 1024));
-const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 2 * 1024 * 1024 * 1024));
+// Large source files start much faster through byte-range streaming than by
+// waiting for a complete hidden-cache download. Keep full-file buffering for
+// ordinary clips and route larger videos through the existing range proxy.
+const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 256 * 1024 * 1024));
 const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_TTL_MS || 10 * 60 * 1000));
 const VIDEO_FILE_CACHE_VIEWED_TTL_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_VIEWED_TTL_MS || 2 * 60 * 1000));
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
@@ -8277,6 +8280,19 @@ async function serveVideoFileCacheMedia(req, res, id) {
   res.once('close', releaseReader);
   promoteVideoFileCachePlaybackRecord(record);
   record.currentUntil = 0;
+  const failedWithoutBytes = record.status === 'error' && Number(record.bytes || 0) <= 0;
+  if (failedWithoutBytes) {
+    // Do not make the active player wait through the same complete-file cache
+    // retry after that transport has already failed. The range-preserving
+    // gateway is independently usable and is the correct foreground fallback.
+    try {
+      await streamGatewayResponse(req, res, record.sourceUrl);
+    } finally {
+      res.off('close', releaseReader);
+      releaseReader();
+    }
+    return;
+  }
   const knownOversized = Number(record.totalBytes || 0) > VIDEO_FILE_CACHE_MAX_FILE_BYTES;
   if (!knownOversized && (record.status === 'idle' || record.status === 'error')) {
     enqueueVideoFileCacheRecord(record, { resetRetries: true });
