@@ -923,7 +923,7 @@
     <div id="pong-hotspot"></div>
   </div>
 
-    <div class="version-number">26.85</div>
+    <div class="version-number">26.86</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -2988,6 +2988,11 @@ function hideControls() {
 }
 
 function showSortingIndicator(msg) {
+  // Successful background updates should be silent. Keep only actionable
+  // failure/warning feedback in the center of the player.
+  if (!/\b(?:fail(?:ed|ure)?|error|unavailable|offline|cannot|could not|no saved|no more|skipp?ing)\b/i.test(String(msg || ''))) {
+    return;
+  }
   document.querySelectorAll('.sorting-indicator').forEach(el => el.remove());
   const el = document.createElement('div');
   el.className = 'sorting-indicator';
@@ -10819,15 +10824,6 @@ function startSavedEromeBackgroundRefresh(record) {
 
   if (!targetUrl || !EROME_PROXY_BASE) return;
 
-  updateEromeProgress({
-    title: 'Saved Erome Scraper',
-    detail: `${getEromeTargetLabel(targetUrl)} - checking saved links and searching for new albums`,
-    completed: 0,
-    total: 1,
-    videos: countSavedEromeVideos(record?.videoGroups),
-    force: true
-  });
-
   if (savedEromeRefreshJobs.has(targetUrl)) return;
 
   savedEromeRefreshJobs.add(targetUrl);
@@ -10880,14 +10876,8 @@ async function refreshSavedEromeRecordInBackground(record) {
   }
 
   function updateSavedRefreshProgress(phase, detail, completed, total, videos, force = false) {
-    updateEromeProgress({
-      title: phase || 'Saved Erome Refresh',
-      detail,
-      completed,
-      total,
-      videos,
-      force
-    });
+    // Saved-page refreshes run silently in the background without covering playback.
+    void phase; void detail; void completed; void total; void videos; void force;
   }
 
   let lastRefreshPersistAt = 0;

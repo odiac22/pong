@@ -65,7 +65,7 @@ try {
   assert(state, 'Pong browser state was unavailable');
   assert.equal(state.observer, 'connected', state.observerError || 'observer did not connect');
   assert.equal(state.title, `Pong ${instance}`);
-  assert.equal(state.version, '26.85');
+  assert.equal(state.version, '26.86');
   assert.equal(state.hash, '', 'Pairing token must be removed from the visible URL');
   socket.close();
   console.log(JSON.stringify({ ok: true, instance: `pong${instance}`, version: state.version, observer: state.observer }));
