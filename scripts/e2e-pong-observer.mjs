@@ -58,14 +58,15 @@ try {
 
   let state;
   for (let attempt = 0; attempt < 60; attempt++) {
-    state = await evaluate(`(() => ({ ready: document.readyState, observer: document.documentElement.dataset.pongObserver || '', observerError: document.documentElement.dataset.pongObserverError || '', title: document.title, version: document.querySelector('.version-number')?.textContent || '', hash: location.hash }))()`);
+    state = await evaluate(`(() => ({ ready: document.readyState, observer: document.documentElement.dataset.pongObserver || '', observerError: document.documentElement.dataset.pongObserverError || '', title: document.title, label: document.getElementById('pong-instance-label')?.textContent || '', version: document.querySelector('.version-number')?.textContent || '', hash: location.hash }))()`);
     if (state?.observer === 'connected') break;
     await delay(250);
   }
   assert(state, 'Pong browser state was unavailable');
   assert.equal(state.observer, 'connected', state.observerError || 'observer did not connect');
   assert.equal(state.title, `Pong ${instance}`);
-  assert.equal(state.version, '26.86');
+  assert.equal(state.label, `Pong ${instance}`);
+  assert.equal(state.version, '26.87');
   assert.equal(state.hash, '', 'Pairing token must be removed from the visible URL');
   socket.close();
   console.log(JSON.stringify({ ok: true, instance: `pong${instance}`, version: state.version, observer: state.observer }));
