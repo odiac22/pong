@@ -3,7 +3,7 @@ plugins { id 'com.android.application' }
 android {
     namespace 'com.odiac22.pong'
     compileSdk 35
-    defaultConfig { minSdk 24; targetSdk 35; versionCode 1; versionName '1.0' }
+    defaultConfig { minSdk 24; targetSdk 35; versionCode 2693; versionName '26.93' }
     flavorDimensions 'instance'
     productFlavors {
         pong1 {

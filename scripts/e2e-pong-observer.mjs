@@ -71,22 +71,23 @@ try {
   assert.equal(state.observer, 'connected', state.observerError || 'observer did not connect');
   assert.equal(state.title, `Pong ${instance}`);
   assert.equal(state.label, `Pong ${instance}`);
-  assert.equal(state.version, '26.92');
+  assert.equal(state.version, '26.93');
   assert.equal(state.hash, '', 'Pairing token must be removed from the visible URL');
 
   const handoffUrl = await evaluate(`PongLiveObserver.decorateUrl('http://127.0.0.1:8787/pong?pongInstance=${instance}&pongObserverHandoffTest=1')`);
   assert.match(handoffUrl, /#pongObserve=/, 'LAN handoff must carry observer pairing in the URL fragment');
-  await evaluate(`location.assign(${JSON.stringify(handoffUrl)})`);
+  await evaluate(`pongAssignLanLocation(new URL('http://127.0.0.1:8787/pong?pongObserverHandoffTest=1'))`);
   await delay(500);
   for (let attempt = 0; attempt < 60; attempt++) {
     try {
-      state = await evaluate(`(() => ({ observer: document.documentElement.dataset.pongObserver || '', observerError: document.documentElement.dataset.pongObserverError || '', hash: location.hash, handoff: new URLSearchParams(location.search).get('pongObserverHandoffTest') }))()`);
+      state = await evaluate(`(() => ({ observer: document.documentElement.dataset.pongObserver || '', observerError: document.documentElement.dataset.pongObserverError || '', hash: location.hash, handoff: new URLSearchParams(location.search).get('pongObserverHandoffTest'), instance: new URLSearchParams(location.search).get('pongInstance') }))()`);
       if (state?.observer === 'connected' && state?.handoff === '1') break;
     } catch (_) {}
     await delay(250);
   }
   assert.equal(state?.observer, 'connected', state?.observerError || 'observer did not reconnect after LAN handoff');
   assert.equal(state?.hash, '', 'LAN observer pairing token must be removed after handoff');
+  assert.equal(state?.instance, instance, 'LAN handoff must preserve the Pong app instance');
 
   const telemetry = await evaluate(`(() => {
     document.querySelectorAll('.video-wrapper').forEach(node => node.remove());
@@ -148,7 +149,7 @@ try {
         autoStart: new URLSearchParams(location.search).get('pongAutoStart'),
         hash: location.hash
       }))()`);
-      if (refreshed?.observer === 'connected' && refreshed?.version === '26.92') break;
+      if (refreshed?.observer === 'connected' && refreshed?.version === '26.93') break;
     } catch (_) {}
     await delay(250);
   }
@@ -158,7 +159,7 @@ try {
   assert.equal(refreshed?.autoStart, null, 'clean refresh must not restart the previous workflow');
   assert.equal(refreshed?.hash, '', 'observer fragment must be removed after the clean reload');
   socket.close();
-  console.log(JSON.stringify({ ok: true, instance: `pong${instance}`, version: '26.92', observer: refreshed.observer, handoff: true, cleanRefresh: true, telemetry: { artist: telemetry.playback.artist, videos: telemetry.playback.artistVideoCount, playing: telemetry.playback.playing, tiktok: telemetry.ui.tiktokButton.visible } }));
+  console.log(JSON.stringify({ ok: true, instance: `pong${instance}`, version: '26.93', observer: refreshed.observer, handoff: true, cleanRefresh: true, telemetry: { artist: telemetry.playback.artist, videos: telemetry.playback.artistVideoCount, playing: telemetry.playback.playing, tiktok: telemetry.ui.tiktokButton.visible } }));
 } finally {
   chrome.kill();
   await delay(250);
