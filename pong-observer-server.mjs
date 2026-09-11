@@ -6,7 +6,7 @@ const INGEST_TOKEN = String(process.env.PONG_OBSERVER_INGEST_TOKEN || '');
 const ADMIN_TOKEN = String(process.env.PONG_OBSERVER_ADMIN_TOKEN || '');
 const TEST_TOKEN = String(process.env.PONG_OBSERVER_TEST_TOKEN || '');
 const TTL_MS = Math.max(60_000, Number(process.env.PONG_OBSERVER_TTL_MS || 30 * 60_000));
-const MAX_BODY_BYTES = 128 * 1024;
+const MAX_BODY_BYTES = 256 * 1024;
 const MAX_EVENTS = 240;
 const instances = new Map();
 const testInstances = new Map();
@@ -86,6 +86,12 @@ function publicRecord(record) {
     online: Date.now() - record.lastSeenAt < 10_000,
     lastSeenAt: new Date(record.lastSeenAt).toISOString(),
     state: record.state,
+    screenshot: record.screenshot ? {
+      capturedAt: record.screenshot.capturedAt,
+      width: record.screenshot.width,
+      height: record.screenshot.height,
+      bytes: record.screenshot.data.length
+    } : null,
     events: record.events
   };
 }
@@ -113,7 +119,22 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const payload = clean(await readJson(req));
+      const incoming = await readJson(req);
+      const rawFrame = incoming?.frame;
+      let frame = null;
+      if (rawFrame?.jpegBase64 && String(rawFrame.jpegBase64).length <= 190_000) {
+        const data = Buffer.from(String(rawFrame.jpegBase64), 'base64');
+        if (data.length >= 4 && data.length <= 145_000 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+          frame = {
+            capturedAt: String(rawFrame.capturedAt || new Date().toISOString()).slice(0, 80),
+            width: Math.max(1, Math.min(2000, Number(rawFrame.width || 0))),
+            height: Math.max(1, Math.min(3000, Number(rawFrame.height || 0))),
+            data
+          };
+        }
+      }
+      if (incoming && typeof incoming === 'object') delete incoming.frame;
+      const payload = clean(incoming);
       const instanceId = String(payload?.state?.instanceId || '').toLowerCase();
       if (!/^pong[12]$/.test(instanceId)) {
         json(res, 400, { ok: false, error: 'invalid instance' }, origin);
@@ -138,12 +159,36 @@ const server = http.createServer(async (req, res) => {
         appName: instanceId === 'pong2' ? 'Pong 2' : 'Pong 1',
         lastSeenAt: Date.now(),
         state: payload.state,
+        screenshot: frame || previous?.screenshot || null,
         events
       });
       json(res, 200, { ok: true, instanceId, receivedAt: new Date().toISOString() }, origin);
     } catch (error) {
       json(res, 400, { ok: false, error: String(error?.message || error).slice(0, 160) }, origin);
     }
+    return;
+  }
+  if (req.method === 'GET' && /^\/screenshots\/pong[12]$/.test(path)) {
+    if (bearer(req) !== ADMIN_TOKEN) {
+      json(res, 401, { ok: false, error: 'unauthorized' }, origin);
+      return;
+    }
+    prune();
+    const id = path.split('/')[2];
+    const records = [...store.values()].filter(record => record.instanceId === id && record.screenshot);
+    records.sort((a, b) => Number(Boolean(b.state.client?.native)) - Number(Boolean(a.state.client?.native)) || b.lastSeenAt - a.lastSeenAt);
+    const record = records[0];
+    if (!record) {
+      json(res, 404, { ok: false, error: 'not found' }, origin);
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'image/jpeg',
+      'Content-Length': record.screenshot.data.length,
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff'
+    });
+    res.end(record.screenshot.data);
     return;
   }
   if (req.method === 'GET' && (path === '/instances' || /^\/instances\/pong[12]$/.test(path))) {

@@ -69,12 +69,20 @@ test('bridge frames are rejected', async () => {
 });
 
 test('test ingest is isolated from production', async () => {
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x00, 0xff, 0xd9]);
   const response = await fetch(`${base}/test/ingest`, {
-    method: 'POST', headers: auth(isolated), body: JSON.stringify({ state: state('pong2', 'qa'), events: [] })
+    method: 'POST', headers: auth(isolated), body: JSON.stringify({
+      state: state('pong2', 'qa'), events: [],
+      frame: { capturedAt: new Date().toISOString(), width: 360, height: 640, jpegBase64: jpeg.toString('base64') }
+    })
   });
   assert.equal(response.status, 200);
   const production = await fetch(`${base}/instances/pong2`, { headers: auth(admin) });
   assert.equal(production.status, 404);
   const qa = await fetch(`${base}/test/instances/pong2`, { headers: auth(admin) }).then(response => response.json());
   assert.equal(qa.instance.sessionId, 'qa');
+  assert.equal((await fetch(`${base}/test/screenshots/pong2`)).status, 401);
+  const screenshot = await fetch(`${base}/test/screenshots/pong2`, { headers: auth(admin) });
+  assert.equal(screenshot.headers.get('content-type'), 'image/jpeg');
+  assert.deepEqual(Buffer.from(await screenshot.arrayBuffer()), jpeg);
 });

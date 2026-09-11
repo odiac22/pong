@@ -18,6 +18,8 @@
   let eventSequence = 0;
   let sending = false;
   let sendTimer = null;
+  let pendingFrame = null;
+  let latestFrameMeta = null;
 
   function decodePairing(raw) {
     try {
@@ -291,6 +293,7 @@
       sentAt: new Date().toISOString(),
       client: nativeClient || { native: false },
       page: { url: safeUrl(location.href), online: navigator.onLine, topFrame: true, bridge: false },
+      screenshot: latestFrameMeta,
       ui: collectUi(),
       playback: collectPlayback(source),
       workflow: collectWorkflow(source),
@@ -306,6 +309,7 @@
     try {
       const state = collectState();
       const freshEvents = events.filter(event => event.sequence > lastSentEventSequence);
+      const frame = pendingFrame;
       const response = await fetch(String(config.endpoint), {
         method: 'POST',
         mode: 'cors',
@@ -317,10 +321,11 @@
           'Content-Type': 'application/json',
           Authorization: `Bearer ${config.token}`
         },
-        body: JSON.stringify({ state, events: freshEvents })
+        body: JSON.stringify({ state, events: freshEvents, frame })
       });
       if (!response.ok) throw new Error(`observer HTTP ${response.status}`);
       if (freshEvents.length) lastSentEventSequence = freshEvents[freshEvents.length - 1].sequence;
+      if (pendingFrame === frame) pendingFrame = null;
       document.documentElement.dataset.pongObserver = 'connected';
       delete document.documentElement.dataset.pongObserverError;
     } catch (error) {
@@ -399,6 +404,14 @@
       try { localStorage.setItem(CONFIG_KEY, JSON.stringify(next)); } catch (_) {}
       recordEvent('native-connected', { version: nativeClient.version });
       void sendNow();
+      return true;
+    },
+    frame(jpegBase64, width, height) {
+      const data = String(jpegBase64 || '');
+      if (!nativeClient?.native || data.length < 100 || data.length > 190_000 || !/^[A-Za-z0-9+/=]+$/.test(data)) return false;
+      latestFrameMeta = { capturedAt: new Date().toISOString(), width: number(width), height: number(height) };
+      pendingFrame = { ...latestFrameMeta, jpegBase64: data };
+      scheduleSend(25);
       return true;
     },
     snapshot: collectState,

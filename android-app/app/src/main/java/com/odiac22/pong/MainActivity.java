@@ -1,9 +1,16 @@
 package com.odiac22.pong;
 
 import android.app.Activity;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.os.Bundle;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.net.Uri;
+import android.util.Base64;
 import android.view.View;
+import android.view.PixelCopy;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
@@ -11,6 +18,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebResourceRequest;
 import org.json.JSONObject;
+import java.io.ByteArrayOutputStream;
 import java.util.Locale;
 import java.util.UUID;
 
@@ -18,6 +26,13 @@ public class MainActivity extends Activity {
   private WebView web;
   private String observerPair;
   private String deviceId;
+  private final Handler observerHandler = new Handler(Looper.getMainLooper());
+  private final Runnable captureRunnable = new Runnable() {
+    @Override public void run() {
+      captureObserverFrame();
+      observerHandler.postDelayed(this, 10_000);
+    }
+  };
 
   static boolean isPongUrl(Uri url) {
     String host = url.getHost();
@@ -77,7 +92,39 @@ public class MainActivity extends Activity {
       // No JavaScript interface is exposed to third-party pages. Repair pairing after
       // history restoration and origin handoffs even when a fragment was consumed.
       web.evaluateJavascript("window.PongLiveObserver && window.PongLiveObserver.configure(" + JSONObject.quote(observerPair) + "," + client + ")", null);
+      observerHandler.removeCallbacks(captureRunnable);
+      observerHandler.postDelayed(captureRunnable, 1_500);
     } catch (Exception ignored) {}
+  }
+
+  private void deliverObserverFrame(Bitmap full) {
+    Bitmap scaled = null;
+    try {
+      int width = Math.min(360, full.getWidth());
+      int height = Math.max(1, Math.round(full.getHeight() * (width / (float) full.getWidth())));
+      scaled = Bitmap.createScaledBitmap(full, width, height, true);
+      ByteArrayOutputStream output = new ByteArrayOutputStream();
+      scaled.compress(Bitmap.CompressFormat.JPEG, 42, output);
+      String encoded = Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP);
+      web.evaluateJavascript("window.PongLiveObserver && window.PongLiveObserver.frame(" + JSONObject.quote(encoded) + "," + width + "," + height + ")", null);
+    } catch (Exception ignored) {
+    } finally {
+      if (scaled != null && scaled != full) scaled.recycle();
+      full.recycle();
+    }
+  }
+
+  private void captureObserverFrame() {
+    if (web == null || web.getWidth() < 1 || web.getHeight() < 1 || web.getUrl() == null || !isPongUrl(Uri.parse(web.getUrl()))) return;
+    Bitmap full = Bitmap.createBitmap(web.getWidth(), web.getHeight(), Bitmap.Config.RGB_565);
+    if (Build.VERSION.SDK_INT >= 26) {
+      PixelCopy.request(getWindow(), full, result -> {
+        if (result == PixelCopy.SUCCESS) deliverObserverFrame(full); else full.recycle();
+      }, observerHandler);
+      return;
+    }
+    web.draw(new Canvas(full));
+    deliverObserverFrame(full);
   }
 
   @Override public void onCreate(Bundle state) {
@@ -113,6 +160,7 @@ public class MainActivity extends Activity {
   }
   @Override protected void onResume() { super.onResume(); if (web != null) { web.onResume(); connectObserver(); } }
   @Override protected void onPause() {
+    observerHandler.removeCallbacks(captureRunnable);
     if (web != null) {
       web.evaluateJavascript("document.querySelectorAll('video,audio').forEach(v=>v.pause());window.PongLiveObserver && window.PongLiveObserver.send()", null);
       web.onPause();
