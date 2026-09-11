@@ -20384,7 +20384,23 @@ async function startSimpCityRecall(channel = 1) {
   );
   try {
     if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) {
-      const target = new URL('/pong', `${endpoint}/`);
+      // A saved 127.0.0.1 endpoint refers to the Android device inside the APK,
+      // not to the user's PC. Resolve and verify the reachable LAN server before
+      // handing Recall off so the button cannot disappear into a dead WebView
+      // navigation while still looking like it started.
+      const availableEndpoint = await random40TryKnownLocalEndpoint(1800);
+      const handoffEndpoint = availableEndpoint || random40ReachableWarmingEndpoint?.endpoint || '';
+      if (!handoffEndpoint) {
+        window.PongRecallRedXMode = false;
+        window.PongActiveSimpCityRecallChannel = 0;
+        delete document.documentElement.dataset.pongSimpCityActive;
+        delete document.documentElement.dataset.pongRecallChannel;
+        const message = 'Recall could not reach the Pong server on your PC. Start Pong on the PC, then press Recall again.';
+        videoContainer.innerHTML = `<div class="loading-message">${escapeHtmlText(message)}</div>`;
+        alert(message);
+        return;
+      }
+      const target = new URL('/pong', `${handoffEndpoint}/`);
       target.searchParams.set('pongAutoStart', 'scRecall');
       target.searchParams.set('pongRecallChannel', String(channel));
       pongAssignLanLocation(target);
