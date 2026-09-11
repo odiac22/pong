@@ -68,9 +68,7 @@ try {
     if (ready) break;
     await delay(100);
   }
-  await reloaded.evaluate(`window.alert = message => { window.__pongLastAlert = String(message) }; document.getElementById('simpcity-recall-2').click(); true`).catch(() => true);
-  await delay(4500);
-  const clickState = await reloaded.evaluate(`({ href: location.href, alert: window.__pongLastAlert || '', stored: localStorage.getItem('pong_random40_local_endpoint_v1') || '', message: document.querySelector('.loading-message')?.textContent || '', disabled: document.getElementById('simpcity-recall-2')?.disabled })`).catch(error => ({ error: error.message }));
+  void reloaded.evaluate(`window.alert = message => { window.__pongLastAlert = String(message) }; document.getElementById('simpcity-recall-2').click(); true`).catch(() => true);
 
   let landed;
   for (let attempt = 0; attempt < 80; attempt++) {
@@ -85,7 +83,7 @@ try {
   }
   const finalTargets = await targets().catch(() => []);
   reloaded.socket.close();
-  assert(landed, `Recall did not hand off to the reachable PC server: ${JSON.stringify(clickState)}; ${finalTargets.map(item => item.url).join(', ')}`);
+  assert(landed, `Recall did not hand off to the reachable PC server: ${finalTargets.map(item => item.url).join(', ')}`);
   const landedUrl = new URL(landed.url);
   assert.equal(landedUrl.hostname, '192.168.1.124');
   assert.equal(landedUrl.searchParams.get('pongAutoStart'), 'scRecall');
