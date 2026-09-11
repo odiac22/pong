@@ -934,7 +934,7 @@
 
   <div id="pong-instance-label" class="pong-instance-label">Pong 1</div>
   <script>document.getElementById('pong-instance-label').textContent = `Pong ${window.PongInstanceNumber || '1'}`;</script>
-    <div class="version-number">26.90</div>
+    <div class="version-number">26.91</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -1026,6 +1026,12 @@ let pongServerControlEndpoint = '';
 let pongServerControlRunning = null;
 let pongServerControlBusy = false;
 let pongServerControlPollTimer = null;
+
+function pongAssignLanLocation(target) {
+  const raw = target instanceof URL ? target.href : String(target || '');
+  const decorated = globalThis.PongLiveObserver?.decorateUrl?.(raw) || raw;
+  location.assign(decorated);
+}
 const VIDEO_LOAD_RETRY_DELAYS_MS = [3000, 5000, 7000, 10000, 15000, 20000];
 const VIDEO_LOAD_RETRY_POLL_MS = 1000;
 const VIDEO_NETWORK_PROGRESS_TIMEOUT_MS = 20000;
@@ -20365,7 +20371,7 @@ async function startSimpCityRecall(channel = 1) {
     if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) {
       const target = new URL('/pong', `${endpoint}/`);
       target.searchParams.set('pongAutoStart', 'scRecall');
-      location.assign(target.href);
+      pongAssignLanLocation(target);
       return;
     }
     // SC Recall is deliberately server-authoritative. Never reuse a recall
@@ -20500,7 +20506,7 @@ async function loadLeakedZoneAsCards(targets) {
     const target = new URL('/pong', `${endpoint}/`);
     target.searchParams.set('pongAutoStart', 'leakedzone');
     target.hash = `pongLeakedZone=${encodeURIComponent(targets.join('\n'))}`;
-    location.assign(target.href);
+    pongAssignLanLocation(target);
     return;
   }
   const postJson = async (pathname, payload) => {
@@ -21665,7 +21671,7 @@ async function startRandom40Local22(buttonStartedAt = Date.now()) {
     target.searchParams.set('pongStartedAt', String(buttonStartedAt));
     const handoffState = pongEncodeLanHandoffState();
     if (handoffState) target.hash = `pongState=${encodeURIComponent(handoffState)}`;
-    location.assign(target.href);
+    pongAssignLanLocation(target);
     return;
   }
   await startRandom40('local2', buttonStartedAt, { playbackProfile: 'local22' });
@@ -21686,7 +21692,7 @@ async function startRandom40Local2Fast(buttonStartedAt = Date.now()) {
     });
     const handoffState = pongEncodeLanHandoffState();
     if (handoffState) target.hash = `pongState=${encodeURIComponent(handoffState)}`;
-    location.assign(target.href);
+    pongAssignLanLocation(target);
     return;
   }
   await startRandom40('local2', buttonStartedAt, { playbackProfile: 'local2fast' });
@@ -22268,10 +22274,11 @@ window.PongObserverStateBridge = () => ({
   currentLoadedRangeEnd, pendingPastes, random40PostFetchQueue,
   random40PostFetchActive, random40SourceFetchQueue, random40SourceFetchActive,
   random40PreloadActive, random40State, activeSimpCityRecallContext,
+  activeRecallChannel: Number(window.PongActiveSimpCityRecallChannel || 0),
   loadedSavedMode: window.PongLoadedSavedMode || ''
 });
 </script>
-<script src="pong-observer.js?v=1"></script>
+<script src="pong-observer.js?v=2"></script>
 <script src="pong-sync.js?v=112"></script>
 </body>
 </html>

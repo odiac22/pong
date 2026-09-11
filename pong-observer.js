@@ -27,6 +27,20 @@
     }
   }
 
+  function encodePairing(value) {
+    try {
+      const bytes = new TextEncoder().encode(JSON.stringify({
+        endpoint: String(value?.endpoint || ''),
+        token: String(value?.token || '')
+      }));
+      let binary = '';
+      bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+      return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    } catch (_) {
+      return '';
+    }
+  }
+
   function readPairingFromHash() {
     const hash = new URLSearchParams(String(location.hash || '').replace(/^#/, ''));
     const pairing = decodePairing(hash.get('pongObserve'));
@@ -121,6 +135,15 @@
         ? source.videoMetadata[localIndex] || {}
         : {};
     const error = video?.error;
+    const playbackEvent = Array.isArray(source.pasteEvents)
+      ? source.pasteEvents.find(event => {
+          const start = number(event?.startIndex, -1);
+          const count = Math.max(0, number(event?.count));
+          return globalIndex >= start && globalIndex < start + count;
+        }) || source.pasteEvents[number(source.currentPasteIndex, -1)] || null
+      : null;
+    const eventStart = number(playbackEvent?.startIndex, -1);
+    const eventCount = Math.max(0, number(playbackEvent?.count));
     return {
       globalIndex,
       localIndex,
@@ -133,7 +156,10 @@
       source: bounded(metadata.source || ''),
       artistUrl: safeUrl(metadata.artistUrl || metadata.postUrl || ''),
       videoUrl: safeUrl(wrapper?.dataset?.originalVideoUrl || metadata.videoUrl || ''),
+      artistVideoCount: eventCount,
+      artistVideoPosition: eventStart >= 0 && globalIndex >= eventStart ? globalIndex - eventStart + 1 : 0,
       paused: video ? video.paused : true,
+      playing: Boolean(video && !video.paused && !video.ended),
       muted: video ? video.muted : true,
       ended: video ? video.ended : false,
       seeking: video ? video.seeking : false,
@@ -154,12 +180,15 @@
   function collectWorkflow(source) {
     const state = source.random40State || {};
     const recall = source.activeSimpCityRecallContext || {};
+    const recallChannel = number(
+      recall.recallChannel || source.activeRecallChannel || document.documentElement.dataset.pongRecallChannel
+    );
     const progress = document.getElementById('random40-progress');
     const loading = document.querySelector('#video-container > .loading-message');
     return {
-      mode: bounded(state.mode || (recall.recallChannel ? `recall${recall.recallChannel}` : source.loadedSavedMode || 'idle')),
+      mode: bounded(state.mode || (recallChannel ? `recall${recallChannel}` : source.loadedSavedMode || 'idle')),
       playbackProfile: bounded(state.playbackProfile || ''),
-      running: Boolean((source.random40State && !state.done && !state.stop) || recall.recallChannel),
+      running: Boolean((source.random40State && !state.done && !state.stop) || recallChannel),
       stopped: state.stop === true,
       done: state.done === true,
       accepted: number(state.accepted),
@@ -167,7 +196,7 @@
       pages: number(state.pages),
       apiCalls: number(state.api),
       stageTimings: state.stageTimings && typeof state.stageTimings === 'object' ? state.stageTimings : {},
-      recallChannel: number(recall.recallChannel),
+      recallChannel,
       recallTargets: Array.isArray(recall.targets) ? recall.targets.slice(0, 3).map(safeUrl) : [],
       progressTitle: bounded(progress?.querySelector('#random40-title')?.textContent || ''),
       progressDetail: bounded(progress?.querySelector('#random40-detail')?.textContent || ''),
@@ -196,6 +225,9 @@
   function collectUi() {
     const controls = document.querySelector('.controls-overlay');
     const server = document.getElementById('pong-server-toggle');
+    const tiktok = document.getElementById('simpcity-tiktok-button');
+    const tiktokStyle = tiktok ? getComputedStyle(tiktok) : null;
+    const tiktokVisible = Boolean(tiktok && tiktokStyle?.display !== 'none' && tiktokStyle?.visibility !== 'hidden');
     return {
       visible: document.visibilityState,
       focused: document.hasFocus(),
@@ -205,6 +237,13 @@
       serverText: bounded(server?.textContent || ''),
       counter: bounded(document.getElementById('video-counter')?.textContent || ''),
       paperclip: bounded(document.getElementById('paste-nav-button')?.dataset?.count || ''),
+      tiktokButton: {
+        present: Boolean(tiktok),
+        visible: tiktokVisible,
+        active: Boolean(tiktok?.classList.contains('active')),
+        disabled: Boolean(tiktok?.disabled),
+        label: bounded(tiktok?.getAttribute('aria-label') || tiktok?.textContent || '')
+      },
       version: bounded(document.querySelector('.version-number')?.textContent || '')
     };
   }
@@ -225,6 +264,7 @@
     return JSON.stringify([
       state.playback.artist,
       state.playback.videoUrl,
+      state.playback.artistVideoCount,
       state.playback.paused,
       state.playback.readyState,
       state.playback.networkState,
@@ -234,6 +274,7 @@
       state.workflow.progressDetail,
       state.queues.artists,
       state.queues.videos,
+      state.ui.tiktokButton.visible,
       state.ui.serverState
     ]);
   }
@@ -329,7 +370,13 @@
     }, true);
     addEventListener('online', () => recordEvent('network-online'));
     addEventListener('offline', () => recordEvent('network-offline'));
-    document.addEventListener('visibilitychange', () => recordEvent('visibility', { state: document.visibilityState }));
+    document.addEventListener('visibilitychange', () => {
+      recordEvent('visibility', { state: document.visibilityState });
+      // Android can suspend WebView timers immediately after it becomes hidden.
+      // Start the final snapshot request synchronously instead of waiting for
+      // the scheduled heartbeat that may never run in the background.
+      void sendNow();
+    });
   }
 
   globalThis.PongLiveObserver = {
@@ -338,7 +385,20 @@
     enabled: Boolean(config?.endpoint && config?.token),
     snapshot: collectState,
     event: recordEvent,
-    send: sendNow
+    send: sendNow,
+    decorateUrl(rawUrl) {
+      if (!config?.endpoint || !config?.token) return String(rawUrl || '');
+      try {
+        const target = new URL(String(rawUrl || ''), location.href);
+        const hash = new URLSearchParams(String(target.hash || '').replace(/^#/, ''));
+        const encoded = encodePairing(config);
+        if (encoded) hash.set('pongObserve', encoded);
+        target.hash = hash.toString();
+        return target.href;
+      } catch (_) {
+        return String(rawUrl || '');
+      }
+    }
   };
 
   installEventCapture();

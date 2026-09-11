@@ -58,7 +58,12 @@ try {
 
   let state;
   for (let attempt = 0; attempt < 60; attempt++) {
-    state = await evaluate(`(() => ({ ready: document.readyState, observer: document.documentElement.dataset.pongObserver || '', observerError: document.documentElement.dataset.pongObserverError || '', title: document.title, label: document.getElementById('pong-instance-label')?.textContent || '', version: document.querySelector('.version-number')?.textContent || '', hash: location.hash }))()`);
+    try {
+      state = await evaluate(`(() => ({ ready: document.readyState, observer: document.documentElement.dataset.pongObserver || '', observerError: document.documentElement.dataset.pongObserverError || '', title: document.title, label: document.getElementById('pong-instance-label')?.textContent || '', version: document.querySelector('.version-number')?.textContent || '', hash: location.hash }))()`);
+    } catch (_) {
+      await delay(250);
+      continue;
+    }
     if (state?.observer === 'connected') break;
     await delay(250);
   }
@@ -66,10 +71,68 @@ try {
   assert.equal(state.observer, 'connected', state.observerError || 'observer did not connect');
   assert.equal(state.title, `Pong ${instance}`);
   assert.equal(state.label, `Pong ${instance}`);
-  assert.equal(state.version, '26.89');
+  assert.equal(state.version, '26.91');
   assert.equal(state.hash, '', 'Pairing token must be removed from the visible URL');
+
+  const handoffUrl = await evaluate(`PongLiveObserver.decorateUrl('http://127.0.0.1:8787/pong?pongInstance=${instance}&pongObserverHandoffTest=1')`);
+  assert.match(handoffUrl, /#pongObserve=/, 'LAN handoff must carry observer pairing in the URL fragment');
+  await evaluate(`location.assign(${JSON.stringify(handoffUrl)})`);
+  await delay(500);
+  for (let attempt = 0; attempt < 60; attempt++) {
+    try {
+      state = await evaluate(`(() => ({ observer: document.documentElement.dataset.pongObserver || '', observerError: document.documentElement.dataset.pongObserverError || '', hash: location.hash, handoff: new URLSearchParams(location.search).get('pongObserverHandoffTest') }))()`);
+      if (state?.observer === 'connected' && state?.handoff === '1') break;
+    } catch (_) {}
+    await delay(250);
+  }
+  assert.equal(state?.observer, 'connected', state?.observerError || 'observer did not reconnect after LAN handoff');
+  assert.equal(state?.hash, '', 'LAN observer pairing token must be removed after handoff');
+
+  const telemetry = await evaluate(`(() => {
+    document.querySelectorAll('.video-wrapper').forEach(node => node.remove());
+    const wrapper = document.createElement('div');
+    wrapper.className = 'video-wrapper deck-active';
+    wrapper.dataset.index = '0';
+    wrapper.dataset.originalVideoUrl = 'https://media.example/test.mp4';
+    const video = document.createElement('video');
+    Object.defineProperties(video, {
+      paused: { configurable: true, value: false },
+      ended: { configurable: true, value: false },
+      duration: { configurable: true, value: 42 },
+      currentTime: { configurable: true, value: 3 },
+      readyState: { configurable: true, value: 4 },
+      networkState: { configurable: true, value: 1 }
+    });
+    wrapper.appendChild(video);
+    document.body.appendChild(wrapper);
+    const tiktok = document.getElementById('simpcity-tiktok-button');
+    tiktok.style.display = 'block';
+    tiktok.classList.add('active');
+    tiktok.textContent = 'TikTok';
+    window.PongObserverStateBridge = () => ({
+      allVideoUrls: ['https://media.example/test.mp4'],
+      allVideoMetadata: [{ artistDisplayName: 'Observer Test Artist', artistKey: 'observer-test', source: 'erome' }],
+      videoUrls: ['https://media.example/test.mp4'], videoMetadata: [],
+      pasteEvents: [{ startIndex: 0, count: 17, source: 'erome' }],
+      currentPasteIndex: 0, currentVideoIndex: 0, currentLoadedRangeStart: 0, currentLoadedRangeEnd: 17,
+      pendingPastes: [], random40PostFetchQueue: [], random40PostFetchActive: 0,
+      random40SourceFetchQueue: [], random40SourceFetchActive: 0, random40PreloadActive: 0,
+      random40State: null, activeSimpCityRecallContext: null, activeRecallChannel: 1, loadedSavedMode: ''
+    });
+    const snapshot = PongLiveObserver.snapshot();
+    void PongLiveObserver.send();
+    return snapshot;
+  })()`);
+  assert.equal(telemetry.playback.artist, 'Observer Test Artist');
+  assert.equal(telemetry.playback.artistVideoCount, 17);
+  assert.equal(telemetry.playback.playing, true);
+  assert.equal(telemetry.playback.paused, false);
+  assert.equal(telemetry.workflow.mode, 'recall1');
+  assert.equal(telemetry.ui.tiktokButton.visible, true);
+  assert.equal(telemetry.ui.tiktokButton.active, true);
+  await delay(500);
   socket.close();
-  console.log(JSON.stringify({ ok: true, instance: `pong${instance}`, version: state.version, observer: state.observer }));
+  console.log(JSON.stringify({ ok: true, instance: `pong${instance}`, version: '26.91', observer: state.observer, handoff: true, telemetry: { artist: telemetry.playback.artist, videos: telemetry.playback.artistVideoCount, playing: telemetry.playback.playing, tiktok: telemetry.ui.tiktokButton.visible } }));
 } finally {
   chrome.kill();
   await delay(250);
