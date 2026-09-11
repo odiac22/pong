@@ -17,6 +17,7 @@
     "test:leakedzone": "node --test leakedzone-import.test.mjs",
     "test:video-skip": "node --test scripts/test-video-skip.mjs",
     "test:video-skip:e2e": "node scripts/e2e-video-skip.mjs",
+    "test:observer": "node --test pong-observer-server.test.mjs",
     "test:observer:e2e": "node scripts/e2e-pong-observer.mjs"
   },
   "dependencies": {

@@ -6,12 +6,14 @@
   const MAX_EVENTS = 60;
   const MAX_STRING = 900;
   const params = new URLSearchParams(location.search);
+  // Sync iframes share storage with the player, but are never player sessions.
+  if (window.top !== window || params.get('pongStateBridge') === '1') return;
   const requestedInstance = String(params.get('pongInstance') || '').trim();
   const instanceId = requestedInstance === '2' ? 'pong2' : 'pong1';
   const appName = instanceId === 'pong2' ? 'Pong 2' : 'Pong 1';
   const sessionId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const events = [];
-  let lastStateSignature = '';
+  let nativeClient = null;
   let lastSentEventSequence = 0;
   let eventSequence = 0;
   let sending = false;
@@ -66,7 +68,7 @@
     return null;
   }
 
-  const config = loadConfig();
+  let config = loadConfig();
   document.documentElement.dataset.pongInstance = instanceId;
   document.title = appName;
 
@@ -99,7 +101,7 @@
   }
 
   function activeWrapper() {
-    return document.querySelector('.video-wrapper.deck-active, .video-wrapper.most-visible, .video-wrapper[data-playable="true"]');
+    return document.querySelector('.video-wrapper.deck-active') || document.querySelector('.video-wrapper.most-visible');
   }
 
   function currentGlobalIndex(wrapper) {
@@ -158,8 +160,9 @@
       videoUrl: safeUrl(wrapper?.dataset?.originalVideoUrl || metadata.videoUrl || ''),
       artistVideoCount: eventCount,
       artistVideoPosition: eventStart >= 0 && globalIndex >= eventStart ? globalIndex - eventStart + 1 : 0,
-      paused: video ? video.paused : true,
-      playing: Boolean(video && !video.paused && !video.ended),
+      status: !video ? 'idle' : error ? 'error' : video.ended ? 'ended' : video.paused ? 'paused' : video.readyState < 3 ? 'buffering' : 'playing',
+      paused: video ? video.paused : null,
+      playing: Boolean(video && !video.paused && !video.ended && video.readyState >= 3),
       muted: video ? video.muted : true,
       ended: video ? video.ended : false,
       seeking: video ? video.seeking : false,
@@ -186,7 +189,7 @@
     const progress = document.getElementById('random40-progress');
     const loading = document.querySelector('#video-container > .loading-message');
     return {
-      mode: bounded(state.mode || (recallChannel ? `recall${recallChannel}` : source.loadedSavedMode || 'idle')),
+      mode: bounded(recallChannel ? `recall${recallChannel}` : state.mode || source.loadedSavedMode || 'idle'),
       playbackProfile: bounded(state.playbackProfile || ''),
       running: Boolean((source.random40State && !state.done && !state.stop) || recallChannel),
       stopped: state.stop === true,
@@ -232,10 +235,10 @@
       visible: document.visibilityState,
       focused: document.hasFocus(),
       standalone: matchMedia('(display-mode: standalone)').matches,
-      controlsVisible: controls ? getComputedStyle(controls).display !== 'none' && !controls.classList.contains('hidden') : false,
+      controlsVisible: controls ? getComputedStyle(controls).display !== 'none' && getComputedStyle(controls).opacity !== '0' && !document.body.classList.contains('controls-hidden') && !controls.classList.contains('hidden') : false,
       serverState: bounded(server?.dataset?.state || ''),
       serverText: bounded(server?.textContent || ''),
-      counter: bounded(document.getElementById('video-counter')?.textContent || ''),
+      counter: bounded(activeWrapper()?.querySelector('.video-counter')?.textContent || document.getElementById('video-counter')?.textContent || ''),
       paperclip: bounded(document.getElementById('paste-nav-button')?.dataset?.count || ''),
       tiktokButton: {
         present: Boolean(tiktok),
@@ -286,7 +289,8 @@
       appName,
       sessionId,
       sentAt: new Date().toISOString(),
-      page: { url: safeUrl(location.href), online: navigator.onLine },
+      client: nativeClient || { native: false },
+      page: { url: safeUrl(location.href), online: navigator.onLine, topFrame: true, bridge: false },
       ui: collectUi(),
       playback: collectPlayback(source),
       workflow: collectWorkflow(source),
@@ -297,15 +301,18 @@
   async function sendNow() {
     if (!config?.endpoint || !config?.token || sending) return;
     sending = true;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
     try {
       const state = collectState();
-      const signature = stateSignature(state);
       const freshEvents = events.filter(event => event.sequence > lastSentEventSequence);
       const response = await fetch(String(config.endpoint), {
         method: 'POST',
         mode: 'cors',
         cache: 'no-store',
         credentials: 'omit',
+        signal: controller.signal,
+        keepalive: true,
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${config.token}`
@@ -313,13 +320,14 @@
         body: JSON.stringify({ state, events: freshEvents })
       });
       if (!response.ok) throw new Error(`observer HTTP ${response.status}`);
-      lastStateSignature = signature;
       if (freshEvents.length) lastSentEventSequence = freshEvents[freshEvents.length - 1].sequence;
       document.documentElement.dataset.pongObserver = 'connected';
+      delete document.documentElement.dataset.pongObserverError;
     } catch (error) {
       document.documentElement.dataset.pongObserver = 'disconnected';
       document.documentElement.dataset.pongObserverError = bounded(error?.message || error, 180);
     } finally {
+      clearTimeout(timeout);
       sending = false;
     }
   }
@@ -382,7 +390,17 @@
   globalThis.PongLiveObserver = {
     instanceId,
     appName,
-    enabled: Boolean(config?.endpoint && config?.token),
+    get enabled() { return Boolean(config?.endpoint && config?.token); },
+    configure(pairing, client) {
+      const next = decodePairing(pairing);
+      if (!next?.endpoint || !next?.token || String(client?.instance) !== requestedInstance) return false;
+      config = next;
+      nativeClient = { native: true, instance: String(client.instance), deviceId: bounded(client.deviceId, 100), version: bounded(client.version, 40) };
+      try { localStorage.setItem(CONFIG_KEY, JSON.stringify(next)); } catch (_) {}
+      recordEvent('native-connected', { version: nativeClient.version });
+      void sendNow();
+      return true;
+    },
     snapshot: collectState,
     event: recordEvent,
     send: sendNow,

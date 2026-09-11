@@ -23,6 +23,7 @@ if (-not $hostName -or -not $userName -or -not (Test-Path -LiteralPath $keyPath)
 }
 
 $path = if ($Instance -eq 'all') { '/instances' } else { "/instances/$Instance" }
-$raw = & ssh -i $keyPath -p $port "$userName@$hostName" "curl -fsS http://127.0.0.1:8799$path"
+$remote = 'set -a; . /etc/pong-observer.env; set +a; curl -fsS -H "Authorization: Bearer $PONG_OBSERVER_ADMIN_TOKEN" http://127.0.0.1:8799' + $path
+$raw = & ssh -i $keyPath -p $port "$userName@$hostName" $remote
 if ($LASTEXITCODE -ne 0) { throw 'Pong live observer could not be reached.' }
 $raw | ConvertFrom-Json | ConvertTo-Json -Depth 12

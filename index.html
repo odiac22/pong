@@ -934,7 +934,7 @@
 
   <div id="pong-instance-label" class="pong-instance-label">Pong 1</div>
   <script>document.getElementById('pong-instance-label').textContent = `Pong ${window.PongInstanceNumber || '1'}`;</script>
-    <div class="version-number">26.93</div>
+    <div class="version-number">26.94</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -3181,7 +3181,8 @@ function pongApplyLanHandoffState() {
     const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
     const state = JSON.parse(new TextDecoder().decode(bytes));
     pongApplySharedOriginState(state, { preferIncoming: true });
-    history.replaceState(null, '', `${location.pathname}${location.search}`);
+    const remainingHash = String(location.hash || '').slice(1).split('&').filter(part => !part.startsWith('pongState=')).join('&');
+    history.replaceState(null, '', `${location.pathname}${location.search}${remainingHash ? '#' + remainingHash : ''}`);
     return true;
   } catch (_) {
     return false;
@@ -20385,6 +20386,7 @@ async function startSimpCityRecall(channel = 1) {
     if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) {
       const target = new URL('/pong', `${endpoint}/`);
       target.searchParams.set('pongAutoStart', 'scRecall');
+      target.searchParams.set('pongRecallChannel', String(channel));
       pongAssignLanLocation(target);
       return;
     }
@@ -22059,7 +22061,7 @@ document.addEventListener('DOMContentLoaded',()=>{
       overlay.classList.add('hidden');
       overlay.style.display = 'none';
     }
-    setTimeout(startSimpCityRecall, 0);
+    setTimeout(() => startSimpCityRecall(Number(new URLSearchParams(location.search).get('pongRecallChannel')) === 2 ? 2 : 1), 0);
   }
   if (autoStartMode === 'leakedzone') {
     const overlay = document.getElementById('pong-overlay');
@@ -22292,7 +22294,7 @@ window.PongObserverStateBridge = () => ({
   loadedSavedMode: window.PongLoadedSavedMode || ''
 });
 </script>
-<script src="pong-observer.js?v=2"></script>
+<script src="pong-observer.js?v=3"></script>
 <script src="pong-sync.js?v=112"></script>
 </body>
 </html>

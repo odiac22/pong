@@ -4,20 +4,18 @@ const HOST = process.env.PONG_OBSERVER_HOST || '127.0.0.1';
 const PORT = Math.max(1, Math.min(65535, Number(process.env.PONG_OBSERVER_PORT || 8799)));
 const INGEST_TOKEN = String(process.env.PONG_OBSERVER_INGEST_TOKEN || '');
 const ADMIN_TOKEN = String(process.env.PONG_OBSERVER_ADMIN_TOKEN || '');
+const TEST_TOKEN = String(process.env.PONG_OBSERVER_TEST_TOKEN || '');
 const TTL_MS = Math.max(60_000, Number(process.env.PONG_OBSERVER_TTL_MS || 30 * 60_000));
 const MAX_BODY_BYTES = 128 * 1024;
 const MAX_EVENTS = 240;
 const instances = new Map();
+const testInstances = new Map();
 
 if (!INGEST_TOKEN || !ADMIN_TOKEN) throw new Error('Pong observer tokens are required');
 
-function isLoopback(address) {
-  return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(String(address || ''));
-}
-
 function corsHeaders(origin = '') {
   const allowed = /^https:\/\/odiac22\.github\.io$/i.test(origin) ||
-    /^https?:\/\/(?:localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(?::\d+)?$/i.test(origin);
+    /^https?:\/\/(?:localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(?::\d+)?$/i.test(origin);
   return {
     'Access-Control-Allow-Origin': allowed ? origin : 'https://odiac22.github.io',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
@@ -73,14 +71,17 @@ function clean(value, depth = 0) {
 
 function prune() {
   const now = Date.now();
-  for (const [id, record] of instances) {
-    if (now - record.lastSeenAt > TTL_MS) instances.delete(id);
+  for (const store of [instances, testInstances]) {
+    for (const [id, record] of store) {
+      if (now - record.lastSeenAt > TTL_MS) store.delete(id);
+    }
   }
 }
 
 function publicRecord(record) {
   return {
     instanceId: record.instanceId,
+    sessionId: record.state.sessionId,
     appName: record.appName,
     online: Date.now() - record.lastSeenAt < 10_000,
     lastSeenAt: new Date(record.lastSeenAt).toISOString(),
@@ -92,6 +93,9 @@ function publicRecord(record) {
 const server = http.createServer(async (req, res) => {
   const origin = String(req.headers.origin || '');
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const testing = url.pathname.startsWith('/test/');
+  const path = testing ? url.pathname.slice(5) : url.pathname;
+  const store = testing ? testInstances : instances;
   if (req.method === 'OPTIONS') {
     res.writeHead(204, corsHeaders(origin));
     res.end();
@@ -102,8 +106,9 @@ const server = http.createServer(async (req, res) => {
     json(res, 200, { ok: true, storage: 'memory-only', instances: instances.size, ttlMs: TTL_MS }, origin);
     return;
   }
-  if (req.method === 'POST' && url.pathname === '/ingest') {
-    if (bearer(req) !== INGEST_TOKEN) {
+  if (req.method === 'POST' && path === '/ingest') {
+    const requiredToken = testing ? TEST_TOKEN : INGEST_TOKEN;
+    if (!requiredToken || bearer(req) !== requiredToken) {
       json(res, 401, { ok: false, error: 'unauthorized' }, origin);
       return;
     }
@@ -114,10 +119,21 @@ const server = http.createServer(async (req, res) => {
         json(res, 400, { ok: false, error: 'invalid instance' }, origin);
         return;
       }
-      const previous = instances.get(instanceId);
+      const sessionId = String(payload?.state?.sessionId || '').slice(0, 160);
+      if (!sessionId || payload?.state?.page?.topFrame === false || payload?.state?.page?.bridge === true) {
+        json(res, 400, { ok: false, error: 'player session required' }, origin);
+        return;
+      }
+      prune();
+      const key = `${instanceId}:${sessionId}`;
+      if (!store.has(key) && store.size >= 100) {
+        json(res, 429, { ok: false, error: 'too many sessions' }, origin);
+        return;
+      }
+      const previous = store.get(key);
       const incomingEvents = Array.isArray(payload.events) ? payload.events : [];
       const events = [...(previous?.events || []), ...incomingEvents].slice(-MAX_EVENTS);
-      instances.set(instanceId, {
+      store.set(key, {
         instanceId,
         appName: instanceId === 'pong2' ? 'Pong 2' : 'Pong 1',
         lastSeenAt: Date.now(),
@@ -130,19 +146,23 @@ const server = http.createServer(async (req, res) => {
     }
     return;
   }
-  if (req.method === 'GET' && (url.pathname === '/instances' || /^\/instances\/pong[12]$/.test(url.pathname))) {
-    if (!isLoopback(req.socket.remoteAddress) && bearer(req) !== ADMIN_TOKEN) {
+  if (req.method === 'GET' && (path === '/instances' || /^\/instances\/pong[12]$/.test(path))) {
+    // A reverse proxy also connects from loopback. Never use its address as authentication.
+    if (bearer(req) !== ADMIN_TOKEN) {
       json(res, 401, { ok: false, error: 'unauthorized' }, origin);
       return;
     }
     prune();
-    const id = url.pathname.split('/')[2] || '';
+    const id = path.split('/')[2] || '';
+    const records = [...store.values()].filter(record => !id || record.instanceId === id);
+    // Retain all sessions, and prefer the actual native app over a desktop preview.
+    records.sort((a, b) => Number(Boolean(b.state.client?.native)) - Number(Boolean(a.state.client?.native)) || b.lastSeenAt - a.lastSeenAt);
     if (id) {
-      const record = instances.get(id);
-      json(res, record ? 200 : 404, record ? { ok: true, instance: publicRecord(record) } : { ok: false, error: 'not found' }, origin);
+      const record = records[0];
+      json(res, record ? 200 : 404, record ? { ok: true, instance: publicRecord(record), sessions: records.map(publicRecord) } : { ok: false, error: 'not found' }, origin);
       return;
     }
-    json(res, 200, { ok: true, instances: [...instances.values()].map(publicRecord) }, origin);
+    json(res, 200, { ok: true, instances: ['pong1', 'pong2'].map(id => records.find(record => record.instanceId === id)).filter(Boolean).map(publicRecord), sessions: records.map(publicRecord) }, origin);
     return;
   }
   json(res, 404, { ok: false, error: 'not found' }, origin);
