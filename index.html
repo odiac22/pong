@@ -20385,21 +20385,22 @@ async function startSimpCityRecall(channel = 1) {
   try {
     if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) {
       // A saved 127.0.0.1 endpoint refers to the Android device inside the APK,
-      // not to the user's PC. Resolve and verify the reachable LAN server before
-      // handing Recall off so the button cannot disappear into a dead WebView
-      // navigation while still looking like it started.
-      const availableEndpoint = await random40TryKnownLocalEndpoint(1800);
-      const handoffEndpoint = availableEndpoint || random40ReachableWarmingEndpoint?.endpoint || '';
-      if (!handoffEndpoint) {
-        window.PongRecallRedXMode = false;
-        window.PongActiveSimpCityRecallChannel = 0;
-        delete document.documentElement.dataset.pongSimpCityActive;
-        delete document.documentElement.dataset.pongRecallChannel;
-        const message = 'Recall could not reach the Pong server on your PC. Start Pong on the PC, then press Recall again.';
-        videoContainer.innerHTML = `<div class="loading-message">${escapeHtmlText(message)}</div>`;
-        alert(message);
-        return;
-      }
+      // not to the user's PC. Rewrite loopback deterministically before the
+      // navigation. Do not gate navigation on a cross-origin LAN probe: newer
+      // WebViews may block that probe even though the top-level LAN page itself
+      // is allowed and reachable.
+      let handoffEndpoint = endpoint;
+      try {
+        const endpointUrl = new URL(endpoint);
+        if (['127.0.0.1', 'localhost'].includes(endpointUrl.hostname)) {
+          handoffEndpoint = random40NormalizeLocalEndpoint(
+            RANDOM40_LOCAL_ENDPOINTS.find(candidate => {
+              try { return !['127.0.0.1', 'localhost'].includes(new URL(candidate).hostname); }
+              catch (_) { return false; }
+            }) || RANDOM40_LOCAL_ENDPOINTS[RANDOM40_LOCAL_ENDPOINTS.length - 1]
+          );
+        }
+      } catch (_) {}
       const target = new URL('/pong', `${handoffEndpoint}/`);
       target.searchParams.set('pongAutoStart', 'scRecall');
       target.searchParams.set('pongRecallChannel', String(channel));

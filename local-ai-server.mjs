@@ -475,6 +475,7 @@ function json(res, status, payload) {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,X-Pong-SimpCity-Controller',
+    'Access-Control-Allow-Private-Network': 'true',
     'Content-Type': 'application/json',
     'Cache-Control': 'no-store'
   });
@@ -486,6 +487,7 @@ function gatewayCorsHeaders() {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,HEAD,POST,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,Range,If-None-Match,If-Modified-Since,X-Pong-SimpCity-Controller',
+    'Access-Control-Allow-Private-Network': 'true',
     'Access-Control-Expose-Headers': 'Accept-Ranges,Content-Length,Content-Range,Content-Type,ETag,Last-Modified',
     'Cache-Control': 'no-store'
   };
