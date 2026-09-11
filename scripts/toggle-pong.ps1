@@ -192,35 +192,8 @@ function Start-Pong {
     throw "Pong server watchdog was not found at $serverWatchdogPath"
   }
 
-  $listeningPorts = @(
-    Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-      Where-Object { $_.LocalPort -in $allDependencyPorts } |
-      Select-Object -ExpandProperty LocalPort -Unique
-  )
-
-  if (11434 -notin $listeningPorts) {
-    $ollamaCommand = Get-Command ollama.exe -ErrorAction SilentlyContinue
-    $ollamaPath = if ($ollamaCommand) {
-      $ollamaCommand.Source
-    } else {
-      Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe'
-    }
-    if (-not (Test-Path -LiteralPath $ollamaPath)) {
-      throw 'Ollama was not found.'
-    }
-    Start-Process -FilePath $ollamaPath -ArgumentList 'serve' -WindowStyle Hidden | Out-Null
-  }
-
   $env:PONG_LORA_PRELOAD = '0'
   $env:PONG_LORA_AUTOTRAIN = '0'
-
-  if (8791 -notin $listeningPorts) {
-    Start-Process `
-      -FilePath (Join-Path $PSHOME 'powershell.exe') `
-      -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$preferenceLauncherPath`"" `
-      -WorkingDirectory $repoRoot `
-      -WindowStyle Hidden | Out-Null
-  }
 
   $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
   $watchdogAction = New-ScheduledTaskAction `

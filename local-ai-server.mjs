@@ -204,8 +204,11 @@ const TRAIN_AI_AUDIT_PATH = path.join(LOCAL_AI_DIR, 'train-ai-verdict-audit.json
 const FINETUNE_IMAGE_DIR = path.join(LOCAL_AI_DIR, 'training-images');
 const FINETUNE_RUN_SCRIPT = path.join(process.cwd(), 'scripts', 'run-lora-train.ps1');
 const LORA_INFERENCE_RUN_SCRIPT = path.join(process.cwd(), 'scripts', 'run-lora-infer.ps1');
+const AI_WORKER_MANAGER_SCRIPT = path.join(process.cwd(), 'scripts', 'manage-pong-ai-workers.ps1');
 const LORA_INFERENCE_URL = (process.env.PONG_LORA_INFERENCE_URL || 'http://127.0.0.1:8790').replace(/\/+$/, '');
 const PREFERENCE_AI_URL = (process.env.PONG_PREFERENCE_AI_URL || 'http://127.0.0.1:8791').replace(/\/+$/, '');
+const AI_WORKER_AUTOSLEEP_ENABLED = process.platform === 'win32' && process.env.PONG_AI_WORKER_AUTOSLEEP !== '0';
+const AI_WORKER_IDLE_MS = Math.max(60_000, Number(process.env.PONG_AI_WORKER_IDLE_MS || 15 * 60_000));
 const LORA_ADAPTER_DIR = path.join(LOCAL_AI_DIR, 'qwen-lora', 'latest');
 const FINETUNE_AUTO_RUN = process.env.PONG_LORA_AUTOTRAIN !== '0';
 const FINETUNE_MAX_IMAGE_BYTES = Number(process.env.PONG_LORA_MAX_IMAGE_BYTES || 12 * 1024 * 1024);
@@ -334,7 +337,12 @@ let pendingFineTuneTimer = null;
 let pendingFineTuneTrigger = '';
 let preferenceAiLastHealth = null;
 let preferenceAiLastHealthAt = 0;
-let ollamaWarmPromise = null;
+const ollamaWarmPromises = new Map();
+let aiWorkerLastActivityAt = Date.now();
+let aiWorkerEnsurePromise = null;
+let aiWorkerStopPromise = null;
+let aiWorkerLifecycleState = AI_WORKER_AUTOSLEEP_ENABLED ? 'unknown' : 'externally-managed';
+let aiWorkerLastError = '';
 const gatewayWarmState = {
   ready: false,
   degraded: false,
@@ -9125,7 +9133,132 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 3000, control
   }
 }
 
+function markAiWorkerActivity() {
+  aiWorkerLastActivityAt = Date.now();
+  if (aiWorkerLifecycleState === 'sleeping') aiWorkerLifecycleState = 'waking';
+}
+
+function runAiWorkerManager(action, timeoutMs = 120000) {
+  if (!AI_WORKER_AUTOSLEEP_ENABLED) return Promise.resolve({ ok: true, action: 'externally-managed' });
+  return new Promise((resolve, reject) => {
+    const child = spawn('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', AI_WORKER_MANAGER_SCRIPT,
+      '-Action', action, '-WaitSeconds', String(Math.max(1, Math.ceil(timeoutMs / 1000)))
+    ], {
+      cwd: process.cwd(),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let output = '';
+    let errorOutput = '';
+    const timer = setTimeout(() => child.kill(), timeoutMs);
+    child.stdout.on('data', chunk => { output = (output + chunk).slice(-64 * 1024); });
+    child.stderr.on('data', chunk => { errorOutput = (errorOutput + chunk).slice(-64 * 1024); });
+    child.once('error', error => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('exit', code => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(errorOutput.trim() || output.trim() || `AI worker ${action.toLowerCase()} failed`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(output.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}'));
+      } catch (_) {
+        resolve({ ok: true, action: action.toLowerCase() });
+      }
+    });
+  });
+}
+
+async function ensureAiWorkersReady(visionModel = '') {
+  markAiWorkerActivity();
+  if (!AI_WORKER_AUTOSLEEP_ENABLED) return preferenceAiHealth(true);
+  if (aiWorkerEnsurePromise) {
+    const health = await aiWorkerEnsurePromise;
+    if (visionModel) warmOllamaVisionModel(visionModel).catch(error => {
+      aiWorkerLastError = String(error?.message || error).slice(0, 300);
+    });
+    return health;
+  }
+  aiWorkerEnsurePromise = (async () => {
+    aiWorkerLifecycleState = 'waking';
+    aiWorkerLastError = '';
+    await runAiWorkerManager('Start', 45000);
+    const deadline = Date.now() + 180000;
+    let health = null;
+    while (Date.now() < deadline) {
+      try {
+        health = await fetchJsonWithTimeout(`${PREFERENCE_AI_URL}/health`, {}, 2500);
+      } catch (_) {
+        health = null;
+      }
+      if (health?.ok && health?.ready) break;
+      await new Promise(resolve => setTimeout(resolve, 750));
+    }
+    if (!health?.ready) throw new Error('personal preference worker did not become ready');
+    preferenceAiLastHealth = health;
+    preferenceAiLastHealthAt = Date.now();
+    aiWorkerLifecycleState = 'running';
+    markAiWorkerActivity();
+    return health;
+  })().catch(error => {
+    aiWorkerLifecycleState = 'error';
+    aiWorkerLastError = String(error?.message || error).slice(0, 300);
+    throw error;
+  }).finally(() => {
+    aiWorkerEnsurePromise = null;
+  });
+  const health = await aiWorkerEnsurePromise;
+  // Model loading is useful but not a prerequisite for the deterministic and
+  // personal-classifier stages. Warm the model needed by the requested flow
+  // without delaying its first deterministic work.
+  if (visionModel) warmOllamaVisionModel(visionModel).catch(error => {
+    aiWorkerLastError = String(error?.message || error).slice(0, 300);
+  });
+  return health;
+}
+
+function aiWorkerHasActiveWork() {
+  let local2FastActive = false;
+  let local22Active = false;
+  try { local2FastActive = Boolean(local2FlashEngine?.snapshot?.().active); } catch (_) {}
+  try { local22Active = Boolean(local22TurboEngine?.snapshot?.().active); } catch (_) {}
+  return activeClassifyRequests > 0 || foregroundClassifyRequests > 0 ||
+    ollamaVisionActive > 0 || ollamaVisionQueue.length > 0 ||
+    activeWorkloadControllers.size > 0 || Boolean(fineTuneProcess) ||
+    local2FastActive || local22Active;
+}
+
+async function sleepAiWorkersIfIdle() {
+  if (!AI_WORKER_AUTOSLEEP_ENABLED || aiWorkerStopPromise || aiWorkerEnsurePromise) return false;
+  if (aiWorkerHasActiveWork() || Date.now() - aiWorkerLastActivityAt < AI_WORKER_IDLE_MS) return false;
+  aiWorkerStopPromise = (async () => {
+    aiWorkerLifecycleState = 'stopping';
+    await runAiWorkerManager('Stop', 20000);
+    preferenceAiLastHealth = null;
+    preferenceAiLastHealthAt = Date.now();
+    ollamaWarmPromises.clear();
+    ollamaVisionDisabled = false;
+    ollamaFailureReason = '';
+    ollamaFailureByModel.clear();
+    aiWorkerLifecycleState = 'sleeping';
+    aiWorkerLastError = '';
+    return true;
+  })().catch(error => {
+    aiWorkerLifecycleState = 'error';
+    aiWorkerLastError = String(error?.message || error).slice(0, 300);
+    return false;
+  }).finally(() => {
+    aiWorkerStopPromise = null;
+  });
+  return aiWorkerStopPromise;
+}
+
 async function preferenceAiHealth(force = false) {
+  if (AI_WORKER_AUTOSLEEP_ENABLED && aiWorkerLifecycleState === 'sleeping') return null;
   if (!force && preferenceAiLastHealth && Date.now() - preferenceAiLastHealthAt < 4000) {
     return preferenceAiLastHealth;
   }
@@ -9140,7 +9273,9 @@ async function preferenceAiHealth(force = false) {
 }
 
 async function preferenceAiRequest(pathname, payload, timeoutMs = 90000, control = {}) {
-  const health = await preferenceAiHealth();
+  markAiWorkerActivity();
+  let health = await preferenceAiHealth();
+  if (!health?.ready && AI_WORKER_AUTOSLEEP_ENABLED) health = await ensureAiWorkersReady();
   if (!health?.ready) throw new Error('personal preference service unavailable');
   return fetchJsonWithTimeout(`${PREFERENCE_AI_URL}${pathname}`, {
     method: 'POST',
@@ -10109,25 +10244,30 @@ function requestedVisionModel(raw) {
   return String(raw || OLLAMA_VISION_MODEL).trim() || OLLAMA_VISION_MODEL;
 }
 
-async function ollamaAvailable(modelName = OLLAMA_VISION_MODEL) {
+async function ollamaAvailable(modelName = OLLAMA_VISION_MODEL, wake = true) {
   const selectedModel = requestedVisionModel(modelName);
-  try {
+  const probe = async () => {
     const response = await fetch(`${OLLAMA_URL}/api/tags`);
     if (!response.ok) return false;
     const payload = await response.json();
     return Array.isArray(payload.models) && payload.models.some(model => model?.name === selectedModel);
-  } catch (_) {
-    return false;
-  }
+  };
+  try { return await probe(); } catch (_) {}
+  if (!wake || !AI_WORKER_AUTOSLEEP_ENABLED) return false;
+  try {
+    await ensureAiWorkersReady(selectedModel);
+    return await probe();
+  } catch (_) { return false; }
 }
 
-function warmOllamaVisionModel() {
-  if (ollamaWarmPromise) return ollamaWarmPromise;
-  ollamaWarmPromise = fetchJsonWithTimeout(`${OLLAMA_URL}/api/generate`, {
+function warmOllamaVisionModel(modelName = OLLAMA_VISION_MODEL) {
+  const selectedModel = requestedVisionModel(modelName);
+  if (ollamaWarmPromises.has(selectedModel)) return ollamaWarmPromises.get(selectedModel);
+  const warmPromise = fetchJsonWithTimeout(`${OLLAMA_URL}/api/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: OLLAMA_VISION_MODEL,
+      model: selectedModel,
       prompt: 'Return {"ready":true}.',
       stream: false,
       format: 'json',
@@ -10140,10 +10280,11 @@ function warmOllamaVisionModel() {
       }
     })
   }, 90000).catch(error => {
-    ollamaWarmPromise = null;
+    ollamaWarmPromises.delete(selectedModel);
     throw error;
   });
-  return ollamaWarmPromise;
+  ollamaWarmPromises.set(selectedModel, warmPromise);
+  return warmPromise;
 }
 
 function ollamaAbortError() {
@@ -10998,6 +11139,7 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
 async function classify(payload, signal = null, control = {}) {
   const generation = workloadGeneration;
   const foreground = control?.background !== true;
+  markAiWorkerActivity();
   activeClassifyRequests++;
   if (foreground) {
     foregroundClassifyRequests++;
@@ -11018,6 +11160,7 @@ async function classify(payload, signal = null, control = {}) {
       if (!foregroundClassifyRequests) scheduleRandom40AcceptedReservoir(900);
     }
     lastClassifyAt = Date.now();
+    markAiWorkerActivity();
     if (!activeClassifyRequests && pendingFineTuneTrigger && !pendingFineTuneTimer) {
       scheduleFineTuneWhenIdle(pendingFineTuneTrigger);
     }
@@ -14098,6 +14241,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/local2-fast/start') {
+        await ensureAiWorkersReady(LOCAL2_QWEN_MODEL);
         await local2Adapter.stop({ clearAudit: true }).catch(() => {});
         await local22TurboEngine.stop().catch(() => {});
         enterLocalDiscoveryForeground();
@@ -14178,6 +14322,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/local22-turbo/start') {
+        await ensureAiWorkersReady(LOCAL2_QWEN_MODEL);
         await local2Adapter.stop({ clearAudit: true }).catch(() => {});
         await local2FlashEngine.stop().catch(() => {});
         enterLocalDiscoveryForeground();
@@ -14253,6 +14398,7 @@ const server = http.createServer(async (req, res) => {
         ? JSON.parse(await readBody(req))
         : {};
       if (req.method === 'POST' && url.pathname === '/local2/start' && Array.isArray(body.pages)) {
+        await ensureAiWorkersReady(LOCAL2_QWEN_MODEL);
         await local2FlashEngine.stop().catch(() => {});
         await local22TurboEngine.stop().catch(() => {});
         await local2Adapter.stop({ clearAudit: true }).catch(() => {});
@@ -14645,14 +14791,16 @@ const server = http.createServer(async (req, res) => {
       const acceptedReady = random40AcceptedIsReady();
       // Core AI readiness stays usable for Train AI and Local2 even while a
       // newly revised Local1 accepted pool is rebuilding in the background.
-      const productionReady = Boolean(preferenceAi?.ready && gatewayWarmState.ready);
+      const productionReady = Boolean(
+        gatewayWarmState.ready && (preferenceAi?.ready || AI_WORKER_AUTOSLEEP_ENABLED)
+      );
       json(res, 200, {
         ok: true,
         app: 'pong-local-ai',
         model: MODEL,
         vision_model: OLLAMA_VISION_MODEL,
-        alternate_vision_models: ['qwen3-vl:4b'],
-        ollama_ready: !ollamaVisionDisabled && await ollamaAvailable(OLLAMA_VISION_MODEL),
+        alternate_vision_models: [LOCAL2_QWEN_MODEL],
+        ollama_ready: !ollamaVisionDisabled && await ollamaAvailable(OLLAMA_VISION_MODEL, false),
         ollama_disabled: ollamaVisionDisabled,
         ollama_failure: ollamaFailureReason,
         ollama_failures_by_model: Object.fromEntries(ollamaFailureByModel),
@@ -14663,6 +14811,16 @@ const server = http.createServer(async (req, res) => {
         },
         ready: productionReady,
         degraded: Boolean(gatewayWarmState.degraded),
+        ai_workers: {
+          autosleep: AI_WORKER_AUTOSLEEP_ENABLED,
+          state: aiWorkerLifecycleState,
+          idle_timeout_ms: AI_WORKER_IDLE_MS,
+          idle_for_ms: Math.max(0, Date.now() - aiWorkerLastActivityAt),
+          active: aiWorkerHasActiveWork(),
+          waking: Boolean(aiWorkerEnsurePromise),
+          stopping: Boolean(aiWorkerStopPromise),
+          last_error: aiWorkerLastError
+        },
         gateway: {
           ready: gatewayWarmState.ready,
           degraded: gatewayWarmState.degraded,
@@ -15063,6 +15221,10 @@ server.listen(PORT, HOST, () => {
       .catch(error => console.error(`Video file cache maintenance failed: ${error.message || error}`));
   }, 5000);
   videoFileCacheMaintenanceTimer.unref();
+  const aiWorkerIdleTimer = setInterval(() => {
+    sleepAiWorkersIfIdle().catch(() => {});
+  }, 15000);
+  aiWorkerIdleTimer.unref();
   const reservoirKeepWarmTimer = setInterval(() => {
     if (!RANDOM40_RESERVOIR_ENABLED || foregroundClassifyRequests > 0) return;
     if (random40AcceptedCurrentItems().length < RANDOM40_ACCEPTED_TARGET || !random40AcceptedIsReady()) {
@@ -15079,15 +15241,21 @@ server.listen(PORT, HOST, () => {
   const reportPreferenceReady = async () => {
     const health = await preferenceAiHealth(true);
     if (health?.ready) {
+      if (AI_WORKER_AUTOSLEEP_ENABLED) aiWorkerLifecycleState = 'running';
       console.log(`Personal preference AI fully warmed via ${PREFERENCE_AI_URL}`);
       const revision = random40PreferenceRevisionFromHealth(health);
       if (revision) {
         random40SyncPreferenceRevision(revision);
         await random40RefreshRejectedIdentities(revision);
       }
-      warmOllamaVisionModel()
-        .then(() => console.log(`Ollama vision model kept warm: ${OLLAMA_VISION_MODEL}`))
-        .catch(error => console.error(`Ollama vision warmup failed: ${error.message || error}`));
+      // Autosleep callers warm the exact model their flow needs. Avoid loading
+      // the smaller review model beside Local2's larger model and consuming GPU
+      // memory until the idle shutdown fires.
+      if (!AI_WORKER_AUTOSLEEP_ENABLED) {
+        warmOllamaVisionModel()
+          .then(() => console.log(`Ollama vision model kept warm: ${OLLAMA_VISION_MODEL}`))
+          .catch(error => console.error(`Ollama vision warmup failed: ${error.message || error}`));
+      }
       return;
     }
     setTimeout(reportPreferenceReady, 2000).unref?.();
