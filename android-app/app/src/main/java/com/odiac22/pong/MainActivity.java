@@ -30,7 +30,10 @@ public class MainActivity extends Activity {
   private final Runnable captureRunnable = new Runnable() {
     @Override public void run() {
       captureObserverFrame();
-      observerHandler.postDelayed(this, 10_000);
+      // Keep the remote frame close to the playback telemetry. Ten-second
+      // captures routinely missed videos that began playing just before the
+      // app was backgrounded.
+      observerHandler.postDelayed(this, 1_500);
     }
   };
 
@@ -93,7 +96,7 @@ public class MainActivity extends Activity {
       // history restoration and origin handoffs even when a fragment was consumed.
       web.evaluateJavascript("window.PongLiveObserver && window.PongLiveObserver.configure(" + JSONObject.quote(observerPair) + "," + client + ")", null);
       observerHandler.removeCallbacks(captureRunnable);
-      observerHandler.postDelayed(captureRunnable, 1_500);
+      observerHandler.postDelayed(captureRunnable, 500);
     } catch (Exception ignored) {}
   }
 
@@ -106,7 +109,7 @@ public class MainActivity extends Activity {
       ByteArrayOutputStream output = new ByteArrayOutputStream();
       scaled.compress(Bitmap.CompressFormat.JPEG, 42, output);
       String encoded = Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP);
-      web.evaluateJavascript("window.PongLiveObserver && window.PongLiveObserver.frame(" + JSONObject.quote(encoded) + "," + width + "," + height + ")", null);
+      web.evaluateJavascript("window.PongLiveObserver && (window.PongLiveObserver.frame(" + JSONObject.quote(encoded) + "," + width + "," + height + "),window.PongLiveObserver.send())", null);
     } catch (Exception ignored) {
     } finally {
       if (scaled != null && scaled != full) scaled.recycle();
@@ -162,6 +165,7 @@ public class MainActivity extends Activity {
   @Override protected void onPause() {
     observerHandler.removeCallbacks(captureRunnable);
     if (web != null) {
+      captureObserverFrame();
       web.evaluateJavascript("document.querySelectorAll('video,audio').forEach(v=>v.pause());window.PongLiveObserver && window.PongLiveObserver.send()", null);
       web.onPause();
     }
