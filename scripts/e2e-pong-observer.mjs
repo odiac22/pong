@@ -71,7 +71,7 @@ try {
   assert.equal(state.observer, 'connected', state.observerError || 'observer did not connect');
   assert.equal(state.title, `Pong ${instance}`);
   assert.equal(state.label, `Pong ${instance}`);
-  assert.equal(state.version, '26.91');
+  assert.equal(state.version, '26.92');
   assert.equal(state.hash, '', 'Pairing token must be removed from the visible URL');
 
   const handoffUrl = await evaluate(`PongLiveObserver.decorateUrl('http://127.0.0.1:8787/pong?pongInstance=${instance}&pongObserverHandoffTest=1')`);
@@ -131,8 +131,34 @@ try {
   assert.equal(telemetry.ui.tiktokButton.visible, true);
   assert.equal(telemetry.ui.tiktokButton.active, true);
   await delay(500);
+
+  await evaluate(`(() => {
+    localStorage.setItem('pong_session_v1', JSON.stringify({ allVideoUrls: ['https://media.example/stale.mp4'], currentVideoIndex: 9 }));
+    document.querySelector('.refresh-button').click();
+  })()`);
+  await delay(500);
+  let refreshed;
+  for (let attempt = 0; attempt < 80; attempt++) {
+    try {
+      refreshed = await evaluate(`(() => ({
+        observer: document.documentElement.dataset.pongObserver || '',
+        version: document.querySelector('.version-number')?.textContent || '',
+        session: localStorage.getItem('pong_session_v1'),
+        wrappers: document.querySelectorAll('.video-wrapper').length,
+        autoStart: new URLSearchParams(location.search).get('pongAutoStart'),
+        hash: location.hash
+      }))()`);
+      if (refreshed?.observer === 'connected' && refreshed?.version === '26.92') break;
+    } catch (_) {}
+    await delay(250);
+  }
+  assert.equal(refreshed?.observer, 'connected', 'observer must survive a clean refresh');
+  assert.equal(refreshed?.session, null, 'clean refresh must not recreate the prior playback session');
+  assert.equal(refreshed?.wrappers, 0, 'clean refresh must return to an empty Pong deck');
+  assert.equal(refreshed?.autoStart, null, 'clean refresh must not restart the previous workflow');
+  assert.equal(refreshed?.hash, '', 'observer fragment must be removed after the clean reload');
   socket.close();
-  console.log(JSON.stringify({ ok: true, instance: `pong${instance}`, version: '26.91', observer: state.observer, handoff: true, telemetry: { artist: telemetry.playback.artist, videos: telemetry.playback.artistVideoCount, playing: telemetry.playback.playing, tiktok: telemetry.ui.tiktokButton.visible } }));
+  console.log(JSON.stringify({ ok: true, instance: `pong${instance}`, version: '26.92', observer: refreshed.observer, handoff: true, cleanRefresh: true, telemetry: { artist: telemetry.playback.artist, videos: telemetry.playback.artistVideoCount, playing: telemetry.playback.playing, tiktok: telemetry.ui.tiktokButton.visible } }));
 } finally {
   chrome.kill();
   await delay(250);

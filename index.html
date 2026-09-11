@@ -934,7 +934,7 @@
 
   <div id="pong-instance-label" class="pong-instance-label">Pong 1</div>
   <script>document.getElementById('pong-instance-label').textContent = `Pong ${window.PongInstanceNumber || '1'}`;</script>
-    <div class="version-number">26.91</div>
+    <div class="version-number">26.92</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -9078,6 +9078,12 @@ function createGearButton(){
   };
 
   mk('refresh-button','↺','Clean refresh',async()=>{
+    // The pagehide handler normally persists the active artist. Without this
+    // guard it recreated the session immediately after clearSession(), so a
+    // clean refresh reopened the exact same video and workflow.
+    window.PongSuppressSessionSaveUntil = Date.now() + 60_000;
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = null;
     await cleanRefreshPongWorkload();
     resetPasteEvents();
     clearSession();
@@ -9089,7 +9095,12 @@ function createGearButton(){
     url.searchParams.delete('pongPlaybackProfile');
     url.searchParams.delete('pongStartedAt');
     url.searchParams.set('pongRefresh', String(Date.now()));
-    window.location.replace(url.href);
+    // Discard one-shot import/session fragments. The observer then adds only
+    // its private pairing fragment, which it removes as soon as the new page
+    // loads.
+    url.hash = '';
+    const refreshedUrl = globalThis.PongLiveObserver?.decorateUrl?.(url.href) || url.href;
+    window.location.replace(refreshedUrl);
   });
 
   mk('duration-sort-button','◷','Sort by duration',sortVideosByDuration);
