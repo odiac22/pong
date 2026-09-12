@@ -287,13 +287,18 @@
     #saved-erome { background: rgba(251,191,36,0.18); }
     #random-40-local { background: rgba(244,114,182,0.20); }
     #random-40-local2 { background: rgba(168,85,247,0.20); }
+    #test-ai { background: rgba(34,197,94,0.18); }
+    #test-ai-swipe-tint {
+      position: fixed; inset: 0; z-index: 48; pointer-events: none;
+      opacity: 0; transition: opacity 140ms ease; background: transparent;
+    }
     #simpcity-recall-1, #simpcity-recall-2 { background: rgba(56,189,248,0.20); }
     #random-40-nano { background: rgba(14,165,233,0.20); }
     #train-ai { background: linear-gradient(135deg,rgba(236,72,153,0.28),rgba(139,92,246,0.28)); }
     #random-40 { background: rgba(244,114,182,0.20); }
     .url-input button:hover, .url-input button:active { transform: translateY(-1px); background: rgba(255,255,255,0.12); }
     .control-button {
-      position: fixed; bottom: 34px; background: var(--ui-bg);
+      position: fixed; bottom: 48px; background: var(--ui-bg);
       color: var(--ui-text); width: 24px; height: 24px; border-radius: 999px;
       display: flex; align-items: center; justify-content: center;
       z-index: 1000; cursor: pointer; font-size: 15px; font-weight: 750; line-height: 1;
@@ -314,8 +319,7 @@
     .auto-scroll-button { left: 192px; font-size: 7px; font-weight: 900; letter-spacing: 0; }
     .auto-scroll-button.on { background: rgba(34,197,94,0.30) !important; opacity: 0.78 !important; }
     .erome-checkpoint-button { left: 222px; font-size: 6px; font-weight: 900; letter-spacing: 0; background: rgba(37,99,235,0.34) !important; opacity: 0.68; }
-    .reset-ai-stats-button { left: 252px; font-size: 9px; font-weight: 900; letter-spacing: 0; background: rgba(127,29,29,0.32) !important; }
-    .clear-played-history-button { left: 282px; font-size: 6px; font-weight: 900; letter-spacing: 0; background: rgba(37,99,235,0.34) !important; opacity: 0.68; }
+    .clear-played-history-button { left: 252px; font-size: 6px; font-weight: 900; letter-spacing: 0; background: rgba(37,99,235,0.34) !important; opacity: 0.68; }
     .next-batch-button {
       position: fixed; left: 46px; top: 50%; transform: translateY(-50%);
       width: 30px; height: 30px; background: var(--ui-bg); opacity: 0.44;
@@ -356,9 +360,9 @@
     }
     .paste-prev-button:hover, .paste-prev-button:active { opacity: 0.85; transform: translateY(-50%) scale(1.06); }
     .paste-nav-button {
-      position: fixed; left: 12px; top: calc(50% + 42px); transform: translateY(-50%);
-      width: 28px; height: 28px; background: var(--ui-bg); opacity: 0.44;
-      font-size: 13px; border-radius: 999px; display: flex; align-items: center;
+      position: fixed; left: 12px; top: calc(50% + 30px); transform: translateY(-50%);
+      width: 38px; height: 38px; background: var(--ui-bg); opacity: 0.56;
+      font-size: 19px; border-radius: 999px; display: flex; align-items: center;
       justify-content: center; z-index: 1000; cursor: pointer; border: 1px solid var(--ui-border);
       box-shadow: 0 8px 24px rgba(0,0,0,0.28); transition: all 0.18s ease; color: var(--ui-text);
       -webkit-tap-highlight-color: transparent;
@@ -559,6 +563,13 @@
     #artist-lookup-results { white-space: pre-wrap; max-height: 42vh; overflow: auto; margin: 14px 0; font-size: 12px; }
     #artist-lookup-search { background: rgba(59,130,246,.28); color: #dbeafe; }
     #artist-lookup-copy { background: rgba(34,197,94,.22); color: #dcfce7; }
+    #artist-lookup-open {
+      background: linear-gradient(180deg, rgba(51,65,85,.94), rgba(15,23,42,.96));
+      border-color: rgba(100,116,139,.58);
+      color: #dbe4ef;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 5px 14px rgba(0,0,0,.24);
+    }
+    #artist-lookup-open:active { background: rgba(15,23,42,.98); }
     #erome-iframe-container { width: 100%; flex: 1; overflow: auto; margin: 0 0 8px; border-radius: 8px; background: #05070a; }
     #erome-iframe-container iframe { width: 100%; height: 100%; border: none; }
     #erome-scrape-progress {
@@ -710,7 +721,7 @@
 .save-actions-panel {
   position: fixed;
   left: 12px;
-  top: calc(50% + 78px);
+  top: calc(50% + 76px);
   transform: translateY(0);
   z-index: 1200;
   display: flex;
@@ -934,7 +945,7 @@
 
   <div id="pong-instance-label" class="pong-instance-label">Pong 1</div>
   <script>document.getElementById('pong-instance-label').textContent = `Pong ${window.PongInstanceNumber || '1'}`;</script>
-    <div class="version-number">26.95</div>
+    <div class="version-number">27.11</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -946,15 +957,17 @@
         <button id="load-videos">Load Videos</button>
         <button id="open-erome">Open Albums</button>
         <button id="artist-lookup-open" type="button">Artist Lookup</button>
-        <button id="saved-erome">Saved Erome</button>
         <button id="random-40-local2">R40 Local 2</button>
         <button id="random-40-local">R40 Local 2.2</button>
+        <button id="test-ai">Test AI</button>
         <button id="simpcity-recall-1">Recall 1</button>
         <button id="simpcity-recall-2">Recall 2</button>
+        <button id="saved-erome">Saved Erome</button>
         <button id="train-ai">Train AI</button>
       </div>
     </div>
   </div>
+  <div id="test-ai-swipe-tint" aria-hidden="true"></div>
 
   <div id="train-ai-panel" class="train-ai-panel" hidden>
     <section class="train-ai-shell" aria-label="Train personal AI">
@@ -1297,8 +1310,78 @@ let random40PreloadContainer = null;
 let random40PreloadMap = new Map();
 let random40PlaybackUrlOverrides = new Map();
 const RANDOM40_PLAYBACK_OVERRIDE_MAX = 4000;
+function pongCanonicalRawMediaUrl(rawUrl, metadata = {}) {
+  let candidate = String(
+    metadata?.canonicalMediaUrl ||
+    metadata?.originalVideoUrl ||
+    rawUrl ||
+    ''
+  ).trim();
+  if (!candidate) return '';
+
+  // Recall stores a browser playback URL separately from the source URL. Peel
+  // only Pong-owned wrappers; ordinary media query parameters named `url` or
+  // `u` must remain untouched, including signed CDN parameters.
+  for (let depth = 0; depth < 6; depth++) {
+    let parsed;
+    try { parsed = new URL(candidate, window.location.href); }
+    catch (_) { return candidate; }
+    const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    const nestedKey = pathname === '/video-cache/stream' || pathname === '/proxy'
+      ? 'url'
+      : /\/(?:bunkr|erome)\.mp4$/i.test(pathname)
+        ? 'u'
+        : '';
+    if (!nestedKey) {
+      const host = parsed.hostname.toLowerCase();
+      const privateHttpHost = /https?:/.test(parsed.protocol) && (
+        host === 'localhost' ||
+        host === '127.0.0.1' ||
+        host === '0.0.0.0' ||
+        host === '::1' ||
+        host === '[::1]' ||
+        /^192\.168\./.test(host) ||
+        /^10\./.test(host) ||
+        /^172\.(?:1[6-9]|2\d|3[01])\./.test(host)
+      );
+      return privateHttpHost ? '' : parsed.href;
+    }
+    const nested = String(parsed.searchParams.get(nestedKey) || '').trim();
+    if (!nested || nested === candidate) return '';
+    candidate = nested;
+  }
+  return '';
+}
+
+function pongCanonicalMediaUrlForGlobalIndex(globalIndex, fallbackUrl = '') {
+  const index = Number(globalIndex);
+  const metadata = Number.isInteger(index) ? allVideoMetadata[index] || {} : {};
+  return pongCanonicalRawMediaUrl(metadata.originalVideoUrl || fallbackUrl, metadata);
+}
+
+function pongCanonicalMediaUrlForWrapper(wrapper) {
+  const stored = String(wrapper?.dataset?.canonicalMediaUrl || '');
+  if (stored) return pongCanonicalRawMediaUrl(stored);
+  const localIndex = Number(wrapper?.dataset?.index);
+  const metadata = Number.isInteger(localIndex) ? videoMetadata[localIndex] || {} : {};
+  return pongCanonicalRawMediaUrl(wrapper?.dataset?.originalVideoUrl || '', metadata);
+}
+
+function random40PlaybackOverrideFor(rawUrl, metadata = {}) {
+  const source = String(rawUrl || '');
+  const canonical = pongCanonicalRawMediaUrl(source, metadata);
+  return random40PlaybackUrlOverrides.get(canonical) || random40PlaybackUrlOverrides.get(source) || '';
+}
+
+function random40ForgetPlaybackOverride(rawUrl, metadata = {}) {
+  const source = String(rawUrl || '');
+  const canonical = pongCanonicalRawMediaUrl(source, metadata);
+  if (canonical) random40PlaybackUrlOverrides.delete(canonical);
+  if (source && source !== canonical) random40PlaybackUrlOverrides.delete(source);
+}
+
 function random40RememberPlaybackOverride(originalUrl, playbackUrl) {
-  const key = String(originalUrl || '');
+  const key = pongCanonicalRawMediaUrl(originalUrl) || String(originalUrl || '');
   if (!key || !playbackUrl) return;
   random40PlaybackUrlOverrides.delete(key);
   random40PlaybackUrlOverrides.set(key, playbackUrl);
@@ -2287,10 +2370,15 @@ function compactSessionVideoMetadata(meta) {
     mediaKey: meta.mediaKey || '',
     videoUrl: meta.videoUrl || '',
     originalVideoUrl: meta.originalVideoUrl || '',
+    canonicalMediaUrl: meta.canonicalMediaUrl || meta.originalVideoUrl || '',
     alternateVideoUrls: Array.isArray(meta.alternateVideoUrls)
       ? meta.alternateVideoUrls.slice(0, 3)
       : [],
     playbackFastStart: meta.playbackFastStart === true,
+    testAi: meta.testAi === true,
+    testAiWouldAccept: meta.testAiWouldAccept === true,
+    testAiVerdict: meta.testAiVerdict || '',
+    testAiReason: meta.testAiReason || '',
     simpCityPairId: meta.simpCityPairId || '',
     simpCityMediaKind: meta.simpCityMediaKind || '',
     simpCityCreatorKey: meta.simpCityCreatorKey || '',
@@ -2647,7 +2735,7 @@ function renderEromeSlidingWindow(activeLocalIndex, removeLocalIndex, direction 
 
   eromeSlidingRenderPending = true;
   deckRestoreIndex = restoreIndex;
-  videoContainer.innerHTML = '<div class="loading-message">Loading next video...</div>';
+  replacePongVideoContainerHtml('<div class="loading-message">Loading next video...</div>');
 
   setTimeout(() => {
     try {
@@ -2706,11 +2794,7 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   wrapper.dataset.networkSuspended = 'true';
   wrapper.dataset.recyclingSource = 'true';
   delete wrapper.dataset.deckNextWarm;
-  try {
-    video.pause();
-    video.removeAttribute('src');
-    video.load();
-  } catch (_) {}
+  detachPongVideoForTransition(video);
 
   delete wrapper.dataset.viewed;
   delete wrapper.dataset.everPlayed;
@@ -2724,6 +2808,7 @@ function recycleNextEromeVideoIntoWrapper(removeLocalIndex) {
   delete wrapper.dataset.directFallbackRestored;
   delete wrapper.dataset.alternateRetryIndex;
   wrapper.dataset.originalVideoUrl = nextUrl;
+  wrapper.dataset.canonicalMediaUrl = pongCanonicalRawMediaUrl(nextUrl, nextMetadata);
   wrapper.dataset.suspendedVideoSrc = random40PlaybackUrl(nextUrl);
   wrapper.dataset.readyPlayable = 'false';
   wrapper.dataset.autoRetryStartedAt = String(Date.now());
@@ -3048,6 +3133,7 @@ const PONG_GITHUB_ORIGIN = 'https://odiac22.github.io';
 let pongSharedStateBridge = null;
 let pongSharedStateSyncTimer = null;
 let pongSharedStateLastSignature = '';
+let pongSavedLinksSyncTail = Promise.resolve();
 
 function pongSharedStateOriginAllowed(rawOrigin) {
   try {
@@ -3301,6 +3387,43 @@ function getCurrentVideoUrl() {
   return null;
 }
 
+function getCurrentArtistSaveContext() {
+  const visibleIndex = typeof syncCurrentPasteIndexFromVisibleVideo === 'function'
+    ? syncCurrentPasteIndexFromVisibleVideo()
+    : currentPasteIndex;
+  const event = pasteEvents?.[visibleIndex] || pasteEvents?.[currentPasteIndex] || {};
+  const globalIndex = typeof getCurrentLoadedGlobalVideoIndex === 'function'
+    ? getCurrentLoadedGlobalVideoIndex()
+    : currentVideoIndex;
+  const metadata = allVideoMetadata?.[globalIndex] || parsedVideoMetadataCache?.[globalIndex] || {};
+  const currentUrl = getCurrentVideoUrl();
+  const identity = String(
+    event.artistKey || event.simpCityCreatorKey || event.bundleKey || event.artistDisplayName ||
+    metadata.artistKey || metadata.simpCityCreatorKey || metadata.bundleKey || metadata.artistDisplayName ||
+    metadata.artistName || extractArtistKeyFromUrl(currentUrl) || ''
+  ).trim().toLowerCase();
+  const artistKey = identity ? `artist:${identity}` : '';
+  const eventStart = Number(event.startIndex);
+  const eventCount = Number(event.count);
+  let videos = [];
+  if (Number.isInteger(eventStart) && eventStart >= 0 && Number.isInteger(eventCount) && eventCount > 0) {
+    videos = (allVideoUrls || []).slice(eventStart, eventStart + eventCount).filter(Boolean);
+  }
+  if (!videos.length && artistKey) {
+    videos = (allVideoUrls || videoUrls || []).filter((url, index) => {
+      const meta = allVideoMetadata?.[index] || {};
+      const candidate = String(meta.artistKey || meta.simpCityCreatorKey || meta.bundleKey || meta.artistDisplayName || meta.artistName || '').trim().toLowerCase();
+      return candidate && `artist:${candidate}` === artistKey;
+    });
+  }
+  if (!videos.length && currentUrl) videos = [currentUrl];
+  return {
+    artistKey,
+    artistName: String(event.artistDisplayName || event.artistName || metadata.artistDisplayName || metadata.artistName || identity || '').trim(),
+    videos: [...new Set(videos)]
+  };
+}
+
 function extractArtistKeyFromUrl(rawUrl) {
   if (!rawUrl) return null;
 
@@ -3382,7 +3505,7 @@ function addSavedVideos(urls, artistKey) {
   return added;
 }
 
-function saveCurrentVideoLink() {
+async function saveCurrentVideoLink() {
   const url = getCurrentVideoUrl();
 
   if (!url) {
@@ -3394,12 +3517,14 @@ function saveCurrentVideoLink() {
   const added = addSavedVideos([url], artistKey);
 
   updateSaveCounters();
+  await pongSyncSavedLinksWithPc({ push: true });
+  updateSaveCounters();
 
   if (added) showSortingIndicator('Saved current video 💾');
   else showSortingIndicator('Video already saved');
 }
 
-function saveCurrentArtistVideos() {
+async function saveCurrentArtistVideos() {
   const currentUrl = getCurrentVideoUrl();
 
   if (!currentUrl) {
@@ -3407,17 +3532,15 @@ function saveCurrentArtistVideos() {
     return;
   }
 
-  const artistKey = extractArtistKeyFromUrl(currentUrl);
+  const context = getCurrentArtistSaveContext();
+  const artistKey = context.artistKey || extractArtistKeyFromUrl(currentUrl);
 
   if (!artistKey) {
     showSortingIndicator('Could not detect artist from this URL');
     return;
   }
 
-  const sourceUrls = allVideoUrls && allVideoUrls.length ? allVideoUrls : videoUrls;
-  const artistVideos = [...new Set(
-    sourceUrls.filter(url => extractArtistKeyFromUrl(url) === artistKey)
-  )];
+  const artistVideos = context.videos;
 
   if (!artistVideos.length) {
     showSortingIndicator('No artist videos found');
@@ -3433,6 +3556,7 @@ function saveCurrentArtistVideos() {
 
   savedArtists[artistKey] = {
     artistKey,
+    artistName: context.artistName || existing?.artistName || artistKey,
     videos: mergedVideos,
     savedAt: existing?.savedAt || new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -3442,6 +3566,8 @@ function saveCurrentArtistVideos() {
 
   const addedVideoCount = addSavedVideos(artistVideos, artistKey);
 
+  updateSaveCounters();
+  await pongSyncSavedLinksWithPc({ push: true });
   updateSaveCounters();
 
   if (addedVideoCount > 0) {
@@ -3957,8 +4083,8 @@ function removePongVideoRecord(globalIndex) {
     else if (currentPasteIndex === eventIndex) currentPasteIndex = Math.min(eventIndex, pasteEvents.length - 1);
   }
 
-  random40PlaybackUrlOverrides.delete(String(removedUrl || ''));
-  random40ServerVideoCacheTracked.delete(String(removedUrl || ''));
+  random40ForgetPlaybackOverride(removedUrl, removedMetadata);
+  random40ForgetServerVideoCacheRecord(removedUrl, removedMetadata);
 
   return { removedUrl, removedMetadata, event, eventIndex, eventRemoved };
 }
@@ -4002,7 +4128,7 @@ function skipCurrentPongVideo() {
 
   if (!allVideoUrls.length) {
     activePlaybackRange = null;
-    videoContainer.innerHTML = '<div class="loading-message">No more videos loaded</div>';
+    replacePongVideoContainerHtml('<div class="loading-message">No more videos loaded</div>');
     updatePasteNavigationButton();
     scheduleSessionSave(0);
     window.PongUpdateSkipVideoButton?.();
@@ -4330,10 +4456,10 @@ async function prunePongPlayedCards() {
   const targetIndex = Math.max(0, nextEvents.findIndex((event, index) => getPasteEventPaperclipKey(event, index) === currentKey));
   if (!nextEvents.length) {
     activePlaybackRange = null;
-    videoContainer.innerHTML = '<div class="loading-message">All previously played items were skipped.</div>';
+    replacePongVideoContainerHtml('<div class="loading-message">All previously played items were skipped.</div>');
   } else {
     setActivePlaybackRangeForPasteEvent(targetIndex, { recordHistory: false });
-    videoContainer.innerHTML = '<div class="loading-message">Skipping previously played items...</div>';
+    replacePongVideoContainerHtml('<div class="loading-message">Skipping previously played items...</div>');
     loadNextBatch(0);
   }
   updatePasteNavigationButton();
@@ -4419,7 +4545,7 @@ function restoreCurrentPongPlayedCards(scopeHash) {
   if (!activePlaybackRange || !videoUrls.length) {
     videoUrls = [];
     videoMetadata = [];
-    videoContainer.innerHTML = '<div class="loading-message">Restoring this link...</div>';
+    replacePongVideoContainerHtml('<div class="loading-message">Restoring this link...</div>');
     setActivePlaybackRangeForPasteEvent(firstEventIndex, { recordHistory: false });
     loadNextBatch(0);
   }
@@ -4666,15 +4792,141 @@ function isPongActiveVideo(video) {
 
 function silencePongVideo(video) {
   if (!video) return;
-  video.muted = true;
-  video.volume = 0;
-  video.pause();
-  const wrapper = video.closest('.video-wrapper');
+  try { video.muted = true; } catch (_) {}
+  try { video.defaultMuted = true; } catch (_) {}
+  try { video.volume = 0; } catch (_) {}
+  try { video.pause(); } catch (_) {}
+  const wrapper = video.closest?.('.video-wrapper');
   if (wrapper) {
     wrapper.classList.remove('video-playing');
     delete wrapper.dataset.playIntent;
   }
   if (window.currentlyPlayingVideo === video) window.currentlyPlayingVideo = null;
+}
+
+function pongSavedLinksEndpoint() {
+  if (location.port === '8787') return location.origin;
+  try { return random40NormalizeLocalEndpoint(random40StoredLocalEndpoint()); } catch (_) { return ''; }
+}
+
+function pongApplyAuthoritativeSavedLinks(data) {
+  if (!data || typeof data !== 'object') return false;
+  pongApplySharedOriginState({
+    [SAVED_VIDEOS_KEY]: JSON.stringify(data.savedVideos || {}),
+    [SAVED_ARTISTS_KEY]: JSON.stringify(data.savedArtists || {})
+  });
+  return true;
+}
+
+function pongSyncSavedLinksWithPc({ push = false } = {}) {
+  const endpoint = pongSavedLinksEndpoint();
+  if (!endpoint) return Promise.resolve(false);
+  const task = async () => {
+    try {
+      const response = push
+        ? await fetch(`${endpoint}/saved-links/save`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+            body: JSON.stringify({ data: {
+              savedVideos: loadSavedMap(SAVED_VIDEOS_KEY),
+              savedArtists: loadSavedMap(SAVED_ARTISTS_KEY)
+            } })
+          })
+        : await fetch(`${endpoint}/saved-links/state?t=${Date.now()}`, { cache: 'no-store' });
+      if (!response.ok) return false;
+      const payload = await response.json();
+      const applied = pongApplyAuthoritativeSavedLinks(payload?.data);
+      if (!applied || push) return applied;
+      // Startup reconciliation is two-way: first merge the PC collection into
+      // this app, then merge any app-only items back into the same PC store.
+      const reconcileResponse = await fetch(`${endpoint}/saved-links/save`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+        body: JSON.stringify({ data: {
+          savedVideos: loadSavedMap(SAVED_VIDEOS_KEY),
+          savedArtists: loadSavedMap(SAVED_ARTISTS_KEY)
+        } })
+      });
+      if (!reconcileResponse.ok) return false;
+      const reconciled = await reconcileResponse.json();
+      return pongApplyAuthoritativeSavedLinks(reconciled?.data);
+    } catch (error) {
+      console.warn('Shared saved-items sync unavailable:', error);
+      return false;
+    }
+  };
+  pongSavedLinksSyncTail = pongSavedLinksSyncTail.catch(() => false).then(task);
+  return pongSavedLinksSyncTail;
+}
+
+function pongVideoSourceGeneration(video) {
+  const value = Number(video?.dataset?.pongSourceGeneration || 0);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function advancePongVideoSourceGeneration(video) {
+  if (!video?.dataset) return 0;
+  const current = pongVideoSourceGeneration(video);
+  const next = current >= Number.MAX_SAFE_INTEGER - 1 ? 1 : current + 1;
+  video.dataset.pongSourceGeneration = String(next);
+  // A play() promise belongs to the source generation that created it. Clear
+  // its visible ownership now; its guarded finalizer must not clear a newer
+  // request after this reusable video node receives another source.
+  video.dataset.playRequestPending = 'false';
+  delete video.dataset.playRequestGeneration;
+  delete video.dataset.playRequestToken;
+  return next;
+}
+
+function detachPongVideoForTransition(video) {
+  if (!video) return false;
+  advancePongVideoSourceGeneration(video);
+  silencePongVideo(video);
+  try { video.autoplay = false; } catch (_) {}
+  try { video.preload = 'none'; } catch (_) {}
+  // Invalidate a pending HTTPS -> loopback TikTok blob fetch before this node
+  // is detached. Otherwise its late callback can reconnect media to an element
+  // that no longer belongs to the visible artist.
+  try {
+    video.dataset.pongBlobRequestId = String(Number(video.dataset.pongBlobRequestId || 0) + 1);
+    video.dataset.foregroundLoadWatch = `detached-${Date.now()}`;
+  } catch (_) {}
+  const hls = video.__pongHls;
+  video.__pongHls = null;
+  try {
+    hls?.destroy?.();
+  } catch (_) {}
+  const blobUrl = video.__pongBlobUrl;
+  video.__pongBlobUrl = '';
+  if (blobUrl) {
+    try { URL.revokeObjectURL(blobUrl); } catch (_) {}
+  }
+  // A <source> child continues to own a network request even after the video
+  // element src attribute is cleared. Clear both forms before removal.
+  try {
+    video.querySelectorAll?.('source').forEach(source => source.removeAttribute('src'));
+    video.removeAttribute('src');
+    if ('srcObject' in video) video.srcObject = null;
+    video.load();
+  } catch (_) {}
+  // Some WebViews deliver a late play resolution during load(). Reassert the
+  // terminal transition state after the source graph has been dismantled.
+  silencePongVideo(video);
+  return true;
+}
+
+function detachPongVideosIn(root) {
+  if (!root) return 0;
+  const videos = [];
+  if (root.matches?.('video')) videos.push(root);
+  root.querySelectorAll?.('video').forEach(video => videos.push(video));
+  [...new Set(videos)].forEach(video => detachPongVideoForTransition(video));
+  return videos.length;
+}
+
+function replacePongVideoContainerHtml(html = '', detachRoot = videoContainer) {
+  // MutationObserver sees removals immediately. Teardown must therefore finish
+  // before innerHTML detaches the old deck, never in the subsequent renderer.
+  detachPongVideosIn(detachRoot);
+  videoContainer.innerHTML = String(html ?? '');
 }
 
 function pauseOtherVideos(activeVideo) {
@@ -5111,8 +5363,17 @@ function prepareVideoForPlayback(video) {
 function playVideoCleanly(video) {
   if (!video) return Promise.resolve();
   if (!isPongActiveVideo(video)) { silencePongVideo(video); return Promise.resolve(); }
-  if (video.dataset.playRequestPending === 'true') return Promise.resolve();
+  const sourceGeneration = pongVideoSourceGeneration(video);
+  if (
+    video.dataset.playRequestPending === 'true' &&
+    video.dataset.playRequestGeneration === String(sourceGeneration)
+  ) return Promise.resolve();
 
+  const requestSequence = Math.max(0, Number(video.dataset.playRequestSequence || 0)) + 1;
+  const requestToken = `${sourceGeneration}:${requestSequence}`;
+  video.dataset.playRequestSequence = String(requestSequence);
+  video.dataset.playRequestGeneration = String(sourceGeneration);
+  video.dataset.playRequestToken = requestToken;
   video.dataset.playRequestPending = 'true';
   prepareVideoForPlayback(video);
   applyPlayerAudioPreference(video);
@@ -5120,14 +5381,22 @@ function playVideoCleanly(video) {
   const playPromise = video.play();
 
   if (!playPromise || typeof playPromise.catch !== 'function') {
-    video.dataset.playRequestPending = 'false';
+    if (video.dataset.playRequestToken === requestToken) {
+      video.dataset.playRequestPending = 'false';
+      delete video.dataset.playRequestGeneration;
+      delete video.dataset.playRequestToken;
+    }
     return Promise.resolve();
   }
 
   return playPromise
     .catch(() => {})
     .finally(() => {
+      if (video.dataset.playRequestToken !== requestToken) return;
       video.dataset.playRequestPending = 'false';
+      delete video.dataset.playRequestGeneration;
+      delete video.dataset.playRequestToken;
+      if (pongVideoSourceGeneration(video) !== sourceGeneration) return;
       if (!isPongActiveVideo(video)) silencePongVideo(video);
     });
 }
@@ -5314,8 +5583,8 @@ function videoNetworkRequestIsMakingProgress(video, wrapper, now = Date.now()) {
   const initialAttemptGrace = attemptCount === 0 &&
     attemptAt > 0 &&
     now - attemptAt < progressTimeoutMs;
-  const originalUrl = String(wrapper?.dataset?.originalVideoUrl || '');
-  const serverRecord = originalUrl ? random40ServerVideoCacheTracked.get(originalUrl) : null;
+  const originalUrl = pongCanonicalMediaUrlForWrapper(wrapper);
+  const serverRecord = originalUrl ? random40ServerVideoCacheRecordFor(originalUrl) : null;
   const currentUrl = String(video.currentSrc || video.src || '');
   // Tail-indexed MP4s can keep filling the PC cache without producing a
   // browser progress event until their final metadata bytes arrive. Preserve
@@ -5350,7 +5619,7 @@ function rotateVideoRetrySource(wrapper, video) {
     wrapper.dataset.serverCacheBypassed = 'true';
     delete wrapper.dataset.serverCacheRecoveryRequested;
     delete wrapper.dataset.serverCachePromoting;
-    random40PlaybackUrlOverrides.delete(originalUrl);
+    random40ForgetPlaybackOverride(originalUrl);
     video.src = originalUrl;
     return true;
   }
@@ -5375,7 +5644,7 @@ function rotateVideoRetrySource(wrapper, video) {
     wrapper.dataset.directFallbackRestored !== 'true'
   ) {
     wrapper.dataset.directFallbackRestored = 'true';
-    random40PlaybackUrlOverrides.delete(originalUrl);
+    random40ForgetPlaybackOverride(originalUrl);
     video.src = originalUrl;
     return true;
   }
@@ -6037,6 +6306,67 @@ function shouldUseDeckSwipe(event) {
     !isDeckSwipeBlockedTarget(target);
 }
 
+function testAiModeActive() {
+  return random40State?.testAi === true && random40State?.playbackProfile === 'testai';
+}
+
+function renderTestAiSwipeTint(dx = 0) {
+  const tint = document.getElementById('test-ai-swipe-tint');
+  if (!tint) return;
+  const distance = Math.abs(Number(dx || 0));
+  tint.style.background = dx < 0 ? 'rgb(34,197,94)' : dx > 0 ? 'rgb(239,68,68)' : 'transparent';
+  tint.style.opacity = String(Math.min(0.46, distance / 210));
+}
+
+function clearTestAiSwipeTint() {
+  renderTestAiSwipeTint(0);
+}
+
+function recordTestAiArtistChoice(label) {
+  if (!testAiModeActive()) return false;
+  const globalIndex = getCurrentLoadedGlobalVideoIndex();
+  const metadata = globalIndex >= 0 ? allVideoMetadata[globalIndex] || {} : {};
+  const artistUrl = random40NormalizeArtistUrl(metadata.artistUrl || '');
+  const artistIdentity = random40ArtistIdentity(artistUrl || metadata.artistKey || '');
+  if (!artistIdentity) return false;
+  if (!random40State.testAiLabeledArtists) random40State.testAiLabeledArtists = new Set();
+  if (random40State.testAiLabeledArtists.has(artistIdentity)) return false;
+  random40State.testAiLabeledArtists.add(artistIdentity);
+  const aiLabel = metadata.testAiWouldAccept === true ? 'accept' : 'reject';
+  const record = {
+    workflow: 'test-ai',
+    auditedAt: new Date().toISOString(),
+    artistUrl,
+    artistName: metadata.artistDisplayName || metadata.artistName || random40ArtistNameFromUrl(artistUrl),
+    manualLabel: label,
+    aiLabel,
+    agreed: label === aiLabel,
+    aiReason: String(metadata.testAiReason || ''),
+    verifiedVideoCount: allVideoMetadata.filter(item =>
+      random40ArtistIdentity(item?.artistUrl || item?.artistKey || '') === artistIdentity
+    ).length
+  };
+  try {
+    const key = 'pong_test_ai_audit_v1';
+    const previous = JSON.parse(localStorage.getItem(key) || '[]');
+    localStorage.setItem(key, JSON.stringify([record, ...(Array.isArray(previous) ? previous : [])].slice(0, 500)));
+  } catch (_) {}
+  if (random40State.localEndpoint) {
+    void fetch(`${random40State.localEndpoint}/audit/train-ai`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(record)
+    }).catch(() => {});
+  }
+  showSortingIndicator(
+    `${label === 'accept' ? 'You accepted' : 'You rejected'} · AI ${aiLabel}${record.agreed ? ' · agree' : ' · disagree'}`
+  );
+  if (typeof window.PongNavigateToNextPasteEvent === 'function') {
+    window.PongNavigateToNextPasteEvent();
+  }
+  return true;
+}
+
 function stopDeckSwipeEvent(event) {
   if (event.cancelable) event.preventDefault();
   event.stopPropagation();
@@ -6047,6 +6377,7 @@ function beginDeckSwipe(event, source) {
   if (!shouldUseDeckSwipe(event)) return;
   if (source === 'pointer' && event.pointerType && event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
 
+  clearTestAiSwipeTint();
   const point = getDeckSwipePoint(event);
   deckSwipeGesture = {
     source,
@@ -6076,12 +6407,13 @@ function moveDeckSwipe(event, source) {
   deckSwipeGesture.lastY = point.clientY;
 
   if (!deckSwipeGesture.active) {
+    const testAiSwipe = testAiModeActive();
     const context = getSimpCityTikTokContext();
-    const horizontalActivation = context.sideActive ? 72 : context.tiktokIndex >= 0 ? 44 : 14;
+    const horizontalActivation = testAiSwipe ? 14 : context.sideActive ? 72 : context.tiktokIndex >= 0 ? 44 : 14;
     if (absX > horizontalActivation && absX > absY * 1.18) {
-      const canOpenTikTok = dx < 0 && !context.sideActive && context.tiktokIndex >= 0;
-      const canReturnFromTikTok = dx > 0 && context.sideActive;
-      if (!canOpenTikTok && !canReturnFromTikTok) {
+      const canOpenTikTok = !testAiSwipe && dx < 0 && !context.sideActive && context.tiktokIndex >= 0;
+      const canReturnFromTikTok = !testAiSwipe && dx > 0 && context.sideActive;
+      if (!testAiSwipe && !canOpenTikTok && !canReturnFromTikTok) {
         deckSwipeGesture.rejected = true;
         return;
       }
@@ -6093,6 +6425,8 @@ function moveDeckSwipe(event, source) {
       deckSwipeGesture.active = true;
     }
   }
+
+  if (deckSwipeGesture.axis === 'horizontal' && testAiModeActive()) renderTestAiSwipeTint(dx);
 
   stopDeckSwipeEvent(event);
 }
@@ -6106,23 +6440,33 @@ function endDeckSwipe(event, source) {
   const dy = (point.clientY || deckSwipeGesture.lastY) - deckSwipeGesture.startY;
   const axis = deckSwipeGesture.axis || 'vertical';
   const context = getSimpCityTikTokContext();
-  const horizontalDistance = context.sideActive ? 120 : context.tiktokIndex >= 0 ? 72 : 28;
+  const testAiSwipe = testAiModeActive();
+  const horizontalDistance = testAiSwipe ? 72 : context.sideActive ? 120 : context.tiktokIndex >= 0 ? 72 : 28;
   const horizontalHeldLongEnough = !context.sideActive || Date.now() - Number(deckSwipeGesture.startedAt || 0) >= 180;
   const shouldNavigate = deckSwipeGesture.active && (
     axis === 'horizontal' ? Math.abs(dx) >= horizontalDistance && horizontalHeldLongEnough : Math.abs(dy) >= 24
   );
   deckSwipeGesture = null;
 
-  if (!shouldNavigate) return;
+  if (!shouldNavigate) {
+    clearTestAiSwipeTint();
+    return;
+  }
 
   stopDeckSwipeEvent(event);
 
   const now = Date.now();
-  if (now - lastDeckSwipeAt < 180) return;
+  if (now - lastDeckSwipeAt < 180) {
+    clearTestAiSwipeTint();
+    return;
+  }
   lastDeckSwipeAt = now;
 
   if (axis === 'horizontal') {
-    if (dx < 0) enterSimpCityTikTokSideDeck();
+    if (testAiSwipe) {
+      clearTestAiSwipeTint();
+      recordTestAiArtistChoice(dx < 0 ? 'accept' : 'reject');
+    } else if (dx < 0) enterSimpCityTikTokSideDeck();
     else leaveSimpCityTikTokSideDeck();
   } else if (dy < 0) goToNextDeckVideo();
   else goToPreviousDeckVideo();
@@ -6132,6 +6476,7 @@ function cancelDeckSwipe(event, source) {
   if (!deckSwipeGesture || deckSwipeGesture.source !== source) return;
   if (source === 'pointer' && deckSwipeGesture.pointerId !== event.pointerId) return;
   deckSwipeGesture = null;
+  clearTestAiSwipeTint();
 }
 
 function setupDeckSwipeController() {
@@ -6295,16 +6640,7 @@ function createVideoElements() {
   // Paperclip navigation replaces the rendered deck. Explicitly detach every
   // prior media source first so Android closes its old HTTP range readers
   // instead of leaving hundreds of invisible cache streams alive.
-  videoContainer.querySelectorAll('video').forEach(video => {
-    try {
-      video.pause();
-      if (video.__pongBlobUrl) URL.revokeObjectURL(video.__pongBlobUrl);
-      video.__pongBlobUrl = '';
-      video.removeAttribute('src');
-      video.load();
-    } catch (_) {}
-  });
-  videoContainer.innerHTML = '';
+  replacePongVideoContainerHtml('');
   videoContainer.classList.toggle('deck-mode', DECK_MODE_ENABLED);
   deckOrder = [];
   deckHistory = [];
@@ -6321,6 +6657,7 @@ function createVideoElements() {
     const wrapper = document.createElement('div');
     wrapper.className = 'video-wrapper'; wrapper.dataset.index = index;
     wrapper.dataset.originalVideoUrl = url;
+    wrapper.dataset.canonicalMediaUrl = pongCanonicalRawMediaUrl(url, videoMetadata[index] || {});
     wrapper.dataset.readyPlayable = 'false';
     wrapper.dataset.autoRetryStartedAt = String(Date.now());
 
@@ -6710,8 +7047,8 @@ function createVideoElements() {
         // known source immediately and preserve the user's play intent.
         const shouldResume = wrapper.classList.contains('deck-active') &&
           (wrapper.dataset.playIntent === 'true' || window.currentlyPlayingVideo === video);
-        random40PlaybackUrlOverrides.delete(originalUrl);
-        random40ServerVideoCacheTracked.delete(originalUrl);
+        random40ForgetPlaybackOverride(originalUrl);
+        random40ForgetServerVideoCacheRecord(originalUrl);
         delete wrapper.dataset.serverCachePlaybackSrc;
         delete wrapper.dataset.serverCachePromoting;
         delete wrapper.dataset.gatewayFallbackTried;
@@ -6785,7 +7122,7 @@ function createVideoElements() {
           return;
         }
         wrapper.dataset.directFallbackRestored = 'true';
-        random40PlaybackUrlOverrides.delete(originalUrl);
+        random40ForgetPlaybackOverride(originalUrl);
         delete video.dataset.lastNetworkProgressAt;
         video.dataset.lastNetworkAttemptAt = String(Date.now());
         video.src = originalUrl;
@@ -6946,7 +7283,7 @@ function loadNextBatch(restoreIndex) {
 
   if (videoUrls.length>0) {
     deckRestoreIndex = restoreIndex != null ? Number(restoreIndex) : 0;
-    videoContainer.innerHTML='<div class="loading-message">Loading videos...</div>';
+    replacePongVideoContainerHtml('<div class="loading-message">Loading videos...</div>');
     const renderDelay = window.PongFastNextBatchOnce ? 0 : 300;
     window.PongFastNextBatchOnce = false;
     setTimeout(()=>{
@@ -6967,7 +7304,7 @@ function loadNextBatch(restoreIndex) {
     },renderDelay);
   } else {
     videoContainer.classList.remove('deck-mode');
-    videoContainer.innerHTML='<div class="loading-message">No more videos</div>';
+    replacePongVideoContainerHtml('<div class="loading-message">No more videos</div>');
     removeNextBatchButton();
   }
 }
@@ -7243,7 +7580,7 @@ function reloadUnwatchedVideos(){
   videoUrls=unplayed;
   videoMetadata=Array(videoUrls.length).fill(null).map(()=>({}));
   showSortingIndicator(`Reloading ${unplayed.length} unplayed videos`);
-  videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
+  replacePongVideoContainerHtml('<div class="loading-message">Loading...</div>');
   setTimeout(()=>{
     createVideoElements();
     if (!DECK_MODE_ENABLED) videoContainer.scrollTo(0,0);
@@ -7271,11 +7608,12 @@ function prioritizeCachedVideosForPasteEvent(event) {
   const items = [];
   for (let globalIndex = bounds.start; globalIndex < bounds.end; globalIndex++) {
     const url = String(allVideoUrls[globalIndex] || '');
-    const tracked = random40ServerVideoCacheTracked.get(url);
-    const playbackUrl = random40PlaybackUrlOverrides.get(url);
+    const metadata = allVideoMetadata[globalIndex] || {};
+    const tracked = random40ServerVideoCacheRecordFor(url, metadata);
+    const playbackUrl = random40PlaybackOverrideFor(url, metadata);
     items.push({
       url,
-      metadata: allVideoMetadata[globalIndex],
+      metadata,
       cached: tracked?.ready === true || random40IsPcFileCachePlaybackUrl(playbackUrl)
     });
   }
@@ -7463,7 +7801,7 @@ function getRandom40PreloadBundleStats(event, index = -1) {
     for (let globalIndex = bounds.start; globalIndex < bounds.end; globalIndex++) {
       const url = String(allVideoUrls[globalIndex] || '');
       if (!url) continue;
-      const record = random40ServerVideoCacheTracked.get(url);
+      const record = random40ServerVideoCacheRecordFor(url, allVideoMetadata[globalIndex] || {});
       if (!record) continue;
       total++;
       if (record.ready === true) ready++;
@@ -7568,13 +7906,14 @@ function random40ReleaseProvenPreloadMedia(record) {
 }
 
 function random40PlaybackUrl(rawUrl) {
-  const key = String(rawUrl || '');
-  const serverRecord = random40ServerVideoCacheTracked.get(key);
-  return random40PlaybackUrlOverrides.get(key) ||
+  const fallbackUrl = String(rawUrl || '');
+  const key = pongCanonicalRawMediaUrl(fallbackUrl) || fallbackUrl;
+  const serverRecord = random40ServerVideoCacheRecordFor(key);
+  return random40PlaybackOverrideFor(key) ||
     (serverRecord?.ready === true ? serverRecord.playbackUrl : '') ||
     (isRandom40PlaybackActive()
       ? random40PcFileCacheStreamUrl(key)
-      : '') || rawUrl;
+      : '') || fallbackUrl;
 }
 
 function random40InstallPlaybackFallback(record) {
@@ -7586,7 +7925,7 @@ function random40InstallPlaybackFallback(record) {
   record.attempts = 0;
   random40RememberPlaybackOverride(record.url, record.fallbackUrl);
   document.querySelectorAll('.video-wrapper').forEach(wrapper => {
-    if (wrapper.dataset.originalVideoUrl !== record.url) return;
+    if (pongCanonicalMediaUrlForWrapper(wrapper) !== pongCanonicalRawMediaUrl(record.url)) return;
     const visibleVideo = wrapper.querySelector('video');
     if (
       !visibleVideo ||
@@ -7643,7 +7982,7 @@ function random40RetryOrFailPreload(record, { allowGateway = true } = {}) {
     record.attempts = 0;
     record.restoredDirectAfterGateway = true;
     record.retryAt = Date.now() + 250;
-    random40PlaybackUrlOverrides.delete(record.url);
+    random40ForgetPlaybackOverride(record.url);
     try {
       record.video.removeAttribute('src');
       record.video.load();
@@ -7658,7 +7997,7 @@ function random40RetryOrFailPreload(record, { allowGateway = true } = {}) {
       record.video.load();
     } catch (_) {}
   } else if (record.status === 'error' && record.usingGateway) {
-    random40PlaybackUrlOverrides.delete(record.url);
+    random40ForgetPlaybackOverride(record.url);
   }
 }
 
@@ -7766,7 +8105,7 @@ function random40RenderedVideoForPreload(globalIndex, url) {
   const localIndex = Number(globalIndex) - Number(currentLoadedRangeStart || 0);
   if (!Number.isInteger(localIndex) || localIndex < 0 || globalIndex >= currentLoadedRangeEnd) return null;
   const wrapper = document.querySelector(`.video-wrapper[data-index="${localIndex}"]`);
-  if (!wrapper || String(wrapper.dataset.originalVideoUrl || '') !== String(url || '')) return null;
+  if (!wrapper || pongCanonicalMediaUrlForWrapper(wrapper) !== pongCanonicalRawMediaUrl(url)) return null;
   return wrapper.querySelector('video');
 }
 
@@ -7782,12 +8121,9 @@ function random40DisposePreloadRecord(record, { removeVideo = true } = {}) {
   const wrapper = video?.closest?.('.video-wrapper');
   if (wrapper && document.body.contains(wrapper)) return;
   if (!random40RecordOwnsHiddenVideo(record) && document.body.contains(video)) return;
-  try {
-    video.pause();
-    video.removeAttribute('src');
-    video.load();
-    video.remove();
-  } catch (_) {}
+  if (!video) return;
+  detachPongVideoForTransition(video);
+  try { video.remove(); } catch (_) {}
 }
 
 function random40PreloadVideo(bundleKey, globalIndex, url, { priority = 1, order = 0 } = {}) {
@@ -8081,11 +8417,11 @@ function runRandom40PreloadPool() {
   const serverCacheCurrentUrls = [];
   const serverCacheEntryUrls = [];
   const activeWrapper = document.querySelector('.video-wrapper.deck-active');
-  const activeOriginalUrl = String(activeWrapper?.dataset?.originalVideoUrl || '');
+  const activeOriginalUrl = pongCanonicalMediaUrlForWrapper(activeWrapper);
   const activePlaybackUrl = String(
     activeWrapper?.querySelector('video')?.currentSrc ||
     activeWrapper?.querySelector('video')?.src ||
-    random40PlaybackUrlOverrides.get(activeOriginalUrl) ||
+    random40PlaybackOverrideFor(activeOriginalUrl) ||
     ''
   );
   // The active uncached card already owns a foreground proxy/source stream.
@@ -8116,7 +8452,8 @@ function runRandom40PreloadPool() {
       ? Math.min(bounds.end, candidateStart + (current ? currentPreloadReserve : backgroundReserve))
       : bounds.end;
     for (let globalIndex = candidateStart; globalIndex < candidateEnd; globalIndex++) {
-      const url = String(allVideoUrls[globalIndex] || '');
+      const playbackUrl = String(allVideoUrls[globalIndex] || '');
+      const url = pongCanonicalMediaUrlForGlobalIndex(globalIndex, playbackUrl);
       if (
         !url ||
         (deferActiveCache && url === activeOriginalUrl) ||
@@ -8700,8 +9037,8 @@ function getBestCachedResumeOffsetForEvent(event) {
     const url = String(allVideoUrls[index] || '');
     const metadata = allVideoMetadata[index] || {};
     if (metadata.local2PlaybackProfile !== 'local22') continue;
-    const record = random40ServerVideoCacheTracked.get(url);
-    const override = random40PlaybackUrlOverrides.get(url);
+    const record = random40ServerVideoCacheRecordFor(url, metadata);
+    const override = random40PlaybackOverrideFor(url, metadata);
     const score = record?.ready === true
       ? 3
       : record?.growingReady === true
@@ -8718,20 +9055,45 @@ function getBestCachedResumeOffsetForEvent(event) {
   return bestOffset;
 }
 
+function prewarmRecallPasteEventForTransition(event, resumeOffset = 0) {
+  if (!isBunkrPasteEvent(event) || !random40ServerVideoCacheEndpoint()) return false;
+  const bounds = getPasteEventVideoBounds(event);
+  if (!bounds) return false;
+  const artistKey = getPasteEventPaperclipKey(event, pasteEvents.indexOf(event)) ||
+    String(event.simpCityCreatorKey || event.artistKey || event.artistUrl || '');
+  const entryUrls = [];
+  const items = [];
+  for (
+    let globalIndex = bounds.start;
+    globalIndex < Math.min(bounds.end, bounds.start + SIMPCITY_PREVIEW_VIDEO_COUNT);
+    globalIndex++
+  ) {
+    const rawUrl = pongCanonicalMediaUrlForGlobalIndex(globalIndex, allVideoUrls[globalIndex]);
+    if (!rawUrl || entryUrls.includes(rawUrl)) continue;
+    entryUrls.push(rawUrl);
+    items.push({ url: rawUrl, artistKey });
+  }
+  const activeIndex = Math.max(
+    bounds.start,
+    Math.min(bounds.end - 1, bounds.start + Math.max(0, Number(resumeOffset || 0)))
+  );
+  const activeUrl = pongCanonicalMediaUrlForGlobalIndex(activeIndex, allVideoUrls[activeIndex]);
+  if (activeUrl && !items.some(item => item.url === activeUrl)) items.unshift({ url: activeUrl, artistKey });
+  if (!activeUrl && !entryUrls.length) return false;
+  return random40WarmServerVideoCache(items, {
+    activeUrl,
+    currentUrls: activeUrl ? [activeUrl, ...entryUrls.filter(url => url !== activeUrl)] : entryUrls,
+    entryUrls,
+    playbackProfile: isSimpCityTikTokEvent(event) ? 'tiktok' : 'bunkr',
+    urgent: false,
+    authoritative: false
+  });
+}
+
 function displayPasteEventAtIndex(index, { recordHistory = true } = {}) {
   const targetEvent = pasteEvents[index];
-  const currentEvent = pasteEvents[currentPasteIndex];
   if (!isSimpCityTikTokEvent(targetEvent)) simpCityTikTokReturnState = null;
   rememberCurrentPasteEventVideoPosition();
-  if (isBunkrPasteEvent(targetEvent) || isBunkrPasteEvent(currentEvent)) {
-    document.querySelectorAll('.video-wrapper video').forEach(video => {
-      try {
-        video.pause();
-        video.removeAttribute('src');
-        video.load();
-      } catch (_) {}
-    });
-  }
   setActivePlaybackRangeForPasteEvent(index, { recordHistory });
   updateSimpCityTikTokButton();
   const targetCount = Math.max(1, Number(targetEvent?.count || BATCH_SIZE));
@@ -8746,6 +9108,7 @@ function displayPasteEventAtIndex(index, { recordHistory = true } = {}) {
     0,
     Math.min(targetCount - 1, requestedResumeOffset)
   );
+  void prewarmRecallPasteEventForTransition(targetEvent, resumeOffset);
   const batchSize = Math.max(1, getCurrentBatchSize());
   const resumeBatchOffset = Math.floor(resumeOffset / batchSize) * batchSize;
   const resumeLocalIndex = resumeOffset - resumeBatchOffset;
@@ -8761,7 +9124,7 @@ function displayPasteEventAtIndex(index, { recordHistory = true } = {}) {
   window.PongFastNextBatchOnce = true;
   deckCurrentIndex = resumeLocalIndex;
   deckRestoreIndex = resumeLocalIndex;
-  videoContainer.innerHTML='<div class="loading-message">Loading...</div>';
+  replacePongVideoContainerHtml('<div class="loading-message">Loading...</div>');
   setTimeout(()=>{
     loadNextBatch(resumeLocalIndex);
     updatePasteNavigationButton();
@@ -8865,6 +9228,8 @@ function stopRandom40WorkflowForRefresh() {
   if (random40State && !random40State.done) {
     random40State.stop = true;
     random40State.done = true;
+    random40State.abortController?.abort();
+    void random40StopLocal2ServerRun(random40State);
     try { random40PersistStageTimings(); } catch (_) {}
   }
   clearTimeout(random40ProgressHideTimer);
@@ -8890,7 +9255,7 @@ function stopBrowserWorkloadForRefresh() {
   const queuedSourceTasks = random40SourceFetchQueue.splice(0);
   queuedSourceTasks.forEach(item => item.reject?.(new Error('Clean refresh')));
   pongWorkloadAbortControllers.forEach(controller => {
-    try { controller.abort(); } catch (_) {}
+    try { controller.abort(new Error('Pong workload stopped for refresh')); } catch (_) {}
   });
   pongWorkloadAbortControllers.clear();
 
@@ -9177,18 +9542,6 @@ function createGearButton(){
   });
   document.body.appendChild(eromeCheckpointBtn);
   updateEromeCheckpointButton();
-
-  const resetAiStatsBtn = document.createElement('div');
-  resetAiStatsBtn.className = 'control-button reset-ai-stats-button';
-  resetAiStatsBtn.innerHTML = 'X';
-  resetAiStatsBtn.title = 'Reset Random 40 AI stats';
-  resetAiStatsBtn.setAttribute('aria-label','Reset Random 40 AI stats');
-  resetAiStatsBtn.addEventListener('click', e => {
-    e.preventDefault();
-    e.stopPropagation();
-    resetRandom40AiStatsBaseline();
-  });
-  document.body.appendChild(resetAiStatsBtn);
 
   const clearPlayedHistoryBtn = document.createElement('div');
   clearPlayedHistoryBtn.className = 'control-button clear-played-history-button';
@@ -11306,6 +11659,9 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         postIndex: Number.isFinite(Number(descriptor.postIndex)) ? descriptor.postIndex : videoIndex,
         scrapedAt,
         mediaKey,
+        videoUrl: proxiedUrl,
+        originalVideoUrl: mediaUrl,
+        canonicalMediaUrl: mediaUrl,
         alternateVideoUrls: descriptor.alternateVideoUrls.map(playbackUrlFor),
         verified: descriptor.verified,
         fastStart: descriptor.fastStart
@@ -11616,7 +11972,7 @@ function activateFirstEromeBatch() {
     scheduleSessionSave(700);
 
     window.PongFastNextBatchOnce = true;
-    videoContainer.innerHTML = '<div class="loading-message">Loading videos...</div>';
+    replacePongVideoContainerHtml('<div class="loading-message">Loading videos...</div>');
     setTimeout(() => loadNextBatch(0), 80);
   }, 500);
 }
@@ -11750,6 +12106,50 @@ let random40PlaybackReadyAcked = false;
 let random40PlaybackReadyExpectedBundles = new Set();
 let random40GatewayEndpoint = '';
 let random40ReachableWarmingEndpoint = null;
+
+function random40Local2ServerStopPath(runState) {
+  if (String(runState?.mode || '').toLowerCase() !== 'local2') return '';
+  if (runState.playbackProfile === 'local2fast') return '/local2-fast/stop';
+  if (runState.playbackProfile === 'local22') return '/local22-turbo/stop';
+  if (runState.playbackProfile === 'testai') return '/test-ai/stop';
+  return '';
+}
+
+async function random40StopLocal2ServerRun(runState = random40State) {
+  const stopPath = random40Local2ServerStopPath(runState);
+  const rawEndpoint = String(runState?.localEndpoint || '').trim();
+  if (!runState || !stopPath || !rawEndpoint) return false;
+  const endpoint = random40NormalizeLocalEndpoint(rawEndpoint);
+  if (runState.local2ServerStopped) return true;
+  if (runState.local2ServerStopPromise) return runState.local2ServerStopPromise;
+
+  const startPromise = runState.local2ServerStartPromise;
+  const stopPromise = (async () => {
+    // A stop sent while /start is still waking the workers can otherwise arrive
+    // first and leave the newly started foreground lane holding autosleep open.
+    if (startPromise) {
+      try { await startPromise; } catch (_) {}
+    }
+    try {
+      const response = await fetch(`${endpoint}${stopPath}`, {
+        method: 'POST',
+        cache: 'no-store',
+        keepalive: true
+      });
+      return response.ok;
+    } catch (_) {
+      return false;
+    }
+  })();
+  runState.local2ServerStopPromise = stopPromise;
+
+  const stopped = await stopPromise;
+  if (stopped) runState.local2ServerStopped = true;
+  if (runState.local2ServerStopPromise === stopPromise) {
+    runState.local2ServerStopPromise = null;
+  }
+  return stopped;
+}
 let random40ProgressHideTimer = null;
 let random40ServerVideoCachePollTimer = null;
 let random40ServerVideoCacheHeartbeatTimer = null;
@@ -11766,6 +12166,19 @@ const RANDOM40_SERVER_VIDEO_CACHE_WARM_MIN_MS = 900;
 // this rolling window as navigation advances.
 const RANDOM40_SERVER_VIDEO_CACHE_BATCH = 60;
 const RANDOM40_SERVER_VIDEO_CACHE_STATUS_BATCH = 240;
+
+function random40ServerVideoCacheRecordFor(rawUrl, metadata = {}) {
+  const source = String(rawUrl || '');
+  const canonical = pongCanonicalRawMediaUrl(source, metadata);
+  return random40ServerVideoCacheTracked.get(canonical) || random40ServerVideoCacheTracked.get(source) || null;
+}
+
+function random40ForgetServerVideoCacheRecord(rawUrl, metadata = {}) {
+  const source = String(rawUrl || '');
+  const canonical = pongCanonicalRawMediaUrl(source, metadata);
+  if (canonical) random40ServerVideoCacheTracked.delete(canonical);
+  if (source && source !== canonical) random40ServerVideoCacheTracked.delete(source);
+}
 
 function clampRandom40PanelPosition(left, top, rect) {
   const margin = 8;
@@ -11883,8 +12296,11 @@ function ensureRandom40ProgressEl() {
       const stoppingState = random40State;
       stoppingState.stop = true;
       stoppingState.abortController?.abort();
-      await random40ReleasePlaybackProtection(stoppingState);
       updateRandom40Progress({ detail: 'Stopping after current work...', force: true });
+      await Promise.all([
+        random40StopLocal2ServerRun(stoppingState),
+        random40ReleasePlaybackProtection(stoppingState)
+      ]);
     }
   });
   return el;
@@ -11930,7 +12346,7 @@ function updateRandom40Progress({ detail, accepted, videos, pages, api, force } 
   const videoCount = Number.isFinite(Number(videos)) ? Number(videos) : Number(state.videos || 0);
   const pageCount = Number.isFinite(Number(pages)) ? Number(pages) : Number(state.pages || 0);
   const apiCount = Number.isFinite(Number(api)) ? Number(api) : Number(state.api || 0);
-  const modeLabel = random40ModeLabel(state.mode);
+  const modeLabel = state.testAi ? 'Test AI' : random40ModeLabel(state.mode);
   const pct = Math.max(2, Math.min(100, Math.round((acceptedCount / RANDOM40_TARGET_ACCEPTED) * 100)));
 
   clearTimeout(random40ProgressHideTimer);
@@ -12138,6 +12554,10 @@ function random40PcPlaybackGatewayUrl(rawUrl) {
 function random40PcFileCacheStreamUrl(rawUrl) {
   const endpoint = random40ServerVideoCacheEndpoint();
   if (!endpoint || !rawUrl) return '';
+  // Test AI receives freshly signed URLs from the VPS. The growing disk cache
+  // can hold Android at duration 0, so use CDN-direct playback and preserve the
+  // normal mirror/proxy recovery path for a real media error.
+  if (random40State?.playbackProfile === 'testai') return '';
   // Flash Local2 preloads the original HTTPS URL immediately while the PC
   // downloads the same file in parallel. A partially growing LAN stream can
   // wait forever for MP4 tail metadata; switch only after the local file is
@@ -12305,6 +12725,7 @@ function random40SwapRenderedVideoSource(wrapper, playbackUrl, { forceActive = f
   const resumeAt = Number(video.currentTime || 0);
   const wasMuted = video.muted;
   const priorVolume = video.volume;
+  const sourceGeneration = advancePongVideoSourceGeneration(video);
   wrapper.dataset.serverCachePromoting = 'true';
   delete wrapper.dataset.gatewayFallbackTried;
   delete wrapper.dataset.directFallbackRestored;
@@ -12312,14 +12733,17 @@ function random40SwapRenderedVideoSource(wrapper, playbackUrl, { forceActive = f
   video.dataset.lastNetworkAttemptAt = String(Date.now());
 
   const restorePlaybackState = () => {
+    if (pongVideoSourceGeneration(video) !== sourceGeneration) return false;
+    if (!random40PlaybackUrlsMatch(String(video.currentSrc || video.src || ''), playbackUrl)) return false;
     video.muted = wasMuted;
     video.volume = priorVolume;
     if (resumeAt > 0 && Number.isFinite(video.duration)) {
       try { video.currentTime = Math.min(resumeAt, Math.max(0, video.duration - 0.05)); } catch (_) {}
     }
+    return true;
   };
   const resumeIfNeeded = () => {
-    restorePlaybackState();
+    if (!restorePlaybackState()) return;
     delete wrapper.dataset.serverCachePromoting;
     if (
       resumePlayback &&
@@ -12338,9 +12762,11 @@ function random40SwapRenderedVideoSource(wrapper, playbackUrl, { forceActive = f
 
 function random40ApplyServerCachePlaybackUrl(originalUrl, playbackUrl, { forceActive = false } = {}) {
   if (!originalUrl || !playbackUrl) return false;
+  const canonicalUrl = pongCanonicalRawMediaUrl(originalUrl);
+  if (!canonicalUrl) return false;
   let changed = false;
   document.querySelectorAll('.video-wrapper').forEach(wrapper => {
-    if (String(wrapper.dataset.originalVideoUrl || '') !== String(originalUrl)) return;
+    if (pongCanonicalMediaUrlForWrapper(wrapper) !== canonicalUrl) return;
     if (wrapper.dataset.serverCacheBypassed === 'true') return;
     if (wrapper.dataset.networkSuspended === 'true') wrapper.dataset.suspendedVideoSrc = playbackUrl;
     const recoverActive = forceActive || (
@@ -12356,8 +12782,8 @@ function random40ApplyServerCachePlaybackUrl(originalUrl, playbackUrl, { forceAc
 
 function random40PromoteWrapperToServerCache(wrapper, { forceActive = false } = {}) {
   if (wrapper?.dataset?.serverCacheBypassed === 'true') return false;
-  const originalUrl = String(wrapper?.dataset?.originalVideoUrl || '');
-  const record = originalUrl ? random40ServerVideoCacheTracked.get(originalUrl) : null;
+  const originalUrl = pongCanonicalMediaUrlForWrapper(wrapper);
+  const record = originalUrl ? random40ServerVideoCacheRecordFor(originalUrl) : null;
   const video = wrapper?.querySelector?.('video');
   const noMetadataRecovery = forceActive &&
     Number(video?.readyState || 0) === 0 &&
@@ -12376,20 +12802,21 @@ function random40PromoteWrapperToServerCache(wrapper, { forceActive = false } = 
 }
 
 function random40ForegroundPlaybackUrl(rawUrl) {
-  const key = String(rawUrl || '');
-  if (!random40ServerVideoCacheEndpoint()) return key;
-  const serverRecord = random40ServerVideoCacheTracked.get(key);
+  const fallbackUrl = String(rawUrl || '');
+  const key = pongCanonicalRawMediaUrl(fallbackUrl) || fallbackUrl;
+  if (!random40ServerVideoCacheEndpoint()) return fallbackUrl;
+  const serverRecord = random40ServerVideoCacheRecordFor(key);
   if ((serverRecord?.ready === true || serverRecord?.growingReady === true) && serverRecord.playbackUrl) {
     return serverRecord.playbackUrl;
   }
-  if (pongLocal2FastPlaybackActive()) return key;
+  if (pongLocal2FastPlaybackActive()) return fallbackUrl;
   if (pongLocal22TurboPlaybackActive()) {
     // Start the visible card immediately from its proven HTTPS source. The PC
     // concurrently completes upcoming cards and becomes the source only when
     // a file is ready or this direct request genuinely stalls.
-    return key;
+    return fallbackUrl;
   }
-  return random40PcPlaybackGatewayUrl(key) || key;
+  return random40PcPlaybackGatewayUrl(key) || fallbackUrl;
 }
 
 function random40KeepReadyCacheCardAttached(wrapper) {
@@ -12410,6 +12837,15 @@ function random40KeepReadyCacheCardAttached(wrapper) {
 function random40ApplyServerVideoCacheRecords(records, endpoint = random40ServerVideoCacheEndpoint()) {
   if (!endpoint || !Array.isArray(records)) return;
   let changed = false;
+  // A warm/status response can contain hundreds of records. Build this lookup
+  // once instead of parsing every Pong wrapper URL for every returned record.
+  const metadataIndexByCanonicalUrl = new Map();
+  allVideoUrls.forEach((candidate, index) => {
+    const canonical = pongCanonicalMediaUrlForGlobalIndex(index, candidate);
+    if (canonical && !metadataIndexByCanonicalUrl.has(canonical)) {
+      metadataIndexByCanonicalUrl.set(canonical, index);
+    }
+  });
   for (const record of records) {
     if (!record?.id) continue;
     const playbackUrl = record.playbackPath
@@ -12417,7 +12853,7 @@ function random40ApplyServerVideoCacheRecords(records, endpoint = random40Server
       : String(record.playbackUrl || '');
     const urls = Array.isArray(record.urls) ? record.urls : [];
     for (const url of urls) {
-      const key = String(url || '');
+      const key = pongCanonicalRawMediaUrl(url);
       if (!key) continue;
       const playable = record.playable === true || record.ready === true;
       const previous = random40ServerVideoCacheTracked.get(key);
@@ -12425,7 +12861,7 @@ function random40ApplyServerVideoCacheRecords(records, endpoint = random40Server
       const byteProgressAt = bytes > Number(previous?.bytes || 0)
         ? Date.now()
         : Number(previous?.byteProgressAt || 0);
-      const metadataIndex = allVideoUrls.indexOf(key);
+      const metadataIndex = metadataIndexByCanonicalUrl.get(key) ?? -1;
       const playbackMetadata = metadataIndex >= 0 ? allVideoMetadata[metadataIndex] || {} : {};
       const encodedBytesPerSecond = Math.max(0, Number(playbackMetadata.bytesPerSecond || 0));
       const estimatedBufferedSeconds = encodedBytesPerSecond > 0 ? bytes / encodedBytesPerSecond : 0;
@@ -12456,21 +12892,21 @@ function random40ApplyServerVideoCacheRecords(records, endpoint = random40Server
         // their decoder metadata is ready before the user swipes.
         if (record.ready === true) {
           document.querySelectorAll('.video-wrapper').forEach(wrapper => {
-            if (String(wrapper.dataset.originalVideoUrl || '') !== key) return;
+            if (pongCanonicalMediaUrlForWrapper(wrapper) !== key) return;
             if (!random40KeepReadyCacheCardAttached(wrapper)) return;
             const video = wrapper.querySelector('video');
             if (restoreDeckVideoNetwork(wrapper, video)) changed = true;
           });
         }
-      } else if (playbackUrl && random40PlaybackUrlsMatch(random40PlaybackUrlOverrides.get(key), playbackUrl)) {
-        random40PlaybackUrlOverrides.delete(key);
+      } else if (playbackUrl && random40PlaybackUrlsMatch(random40PlaybackOverrideFor(key), playbackUrl)) {
+        random40ForgetPlaybackOverride(key);
         document.querySelectorAll('.video-wrapper').forEach(wrapper => {
-          if (String(wrapper.dataset.originalVideoUrl || '') !== key) return;
+          if (pongCanonicalMediaUrlForWrapper(wrapper) !== key) return;
           delete wrapper.dataset.serverCachePlaybackSrc;
           if (
             wrapper.dataset.networkSuspended === 'true' &&
             random40PlaybackUrlsMatch(wrapper.dataset.suspendedVideoSrc, playbackUrl)
-          ) wrapper.dataset.suspendedVideoSrc = key;
+          ) wrapper.dataset.suspendedVideoSrc = wrapper.dataset.originalVideoUrl || key;
         });
       }
     }
@@ -12488,8 +12924,8 @@ function random40StartServerVideoCacheTimers() {
   // session so later artists do not remain stuck on their origin/TikTok URL.
   document.querySelectorAll('.video-wrapper').forEach(wrapper => {
     if (wrapper.dataset.serverCacheBypassed === 'true') return;
-    const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
-    const streamUrl = random40ForegroundPlaybackUrl(originalUrl);
+    const playbackSourceUrl = String(wrapper.dataset.originalVideoUrl || '');
+    const streamUrl = random40ForegroundPlaybackUrl(playbackSourceUrl);
     if (!streamUrl) return;
     if (wrapper.dataset.networkSuspended === 'true') {
       wrapper.dataset.suspendedVideoSrc = streamUrl;
@@ -12532,8 +12968,8 @@ async function random40PollServerVideoCache() {
   random40ServerVideoCachePollCursor = (start + take) % pendingIds.length;
   const activeWrapper = document.querySelector('.video-wrapper.deck-active');
   const activeVideo = activeWrapper?.querySelector('video');
-  const activeOriginalUrl = String(activeWrapper?.dataset?.originalVideoUrl || '');
-  const activeRecord = activeOriginalUrl ? random40ServerVideoCacheTracked.get(activeOriginalUrl) : null;
+  const activeOriginalUrl = pongCanonicalMediaUrlForWrapper(activeWrapper);
+  const activeRecord = activeOriginalUrl ? random40ServerVideoCacheRecordFor(activeOriginalUrl) : null;
   const activePlaybackDemand = Boolean(activeVideo && (
     !activeVideo.paused || activeWrapper?.dataset?.playIntent === 'true'
   ));
@@ -12560,15 +12996,15 @@ async function random40PollServerVideoCache() {
       for (const [originalUrl, record] of [...random40ServerVideoCacheTracked.entries()]) {
         if (!missingIds.has(String(record?.id || ''))) continue;
         random40ServerVideoCacheTracked.delete(originalUrl);
-        const override = random40PlaybackUrlOverrides.get(originalUrl);
-        if (random40IsPcFileCachePlaybackUrl(override)) random40PlaybackUrlOverrides.delete(originalUrl);
+        const override = random40PlaybackOverrideFor(originalUrl);
+        if (random40IsPcFileCachePlaybackUrl(override)) random40ForgetPlaybackOverride(originalUrl);
         document.querySelectorAll('.video-wrapper').forEach(wrapper => {
-          if (String(wrapper.dataset.originalVideoUrl || '') !== originalUrl) return;
+          if (pongCanonicalMediaUrlForWrapper(wrapper) !== originalUrl) return;
           delete wrapper.dataset.serverCachePlaybackSrc;
           if (
             wrapper.dataset.networkSuspended === 'true' &&
             random40IsPcFileCachePlaybackUrl(wrapper.dataset.suspendedVideoSrc)
-          ) wrapper.dataset.suspendedVideoSrc = originalUrl;
+          ) wrapper.dataset.suspendedVideoSrc = wrapper.dataset.originalVideoUrl || originalUrl;
         });
       }
       scheduleRandom40PreloadPool(0);
@@ -12585,6 +13021,7 @@ async function random40WarmServerVideoCache(urls, {
   deferredUrl = '',
   currentUrls = [],
   entryUrls = [],
+  playbackProfile = '',
   urgent = false,
   authoritative = false
 } = {}) {
@@ -12594,8 +13031,19 @@ async function random40WarmServerVideoCache(urls, {
   const uniqueUrls = [];
   const manifestItems = [];
   const manifestByUrl = new Map();
+  const canonicalizeValue = value => {
+    const metadata = value && typeof value === 'object' ? value : {};
+    const supplied = String(
+      metadata.canonicalMediaUrl ||
+      metadata.originalVideoUrl ||
+      metadata.url ||
+      value ||
+      ''
+    );
+    return pongCanonicalRawMediaUrl(supplied, metadata);
+  };
   const addUrl = (value, artistKey = '') => {
-    const raw = String(value?.url || value || '');
+    const raw = canonicalizeValue(value);
     if (!raw) return;
     if (!uniqueUrls.includes(raw)) uniqueUrls.push(raw);
     const key = String(value?.artistKey || value?.bundleKey || artistKey || '');
@@ -12611,16 +13059,30 @@ async function random40WarmServerVideoCache(urls, {
         manifestItems.push(item);
       }
     }
+    return raw;
   };
-  addUrl(activeUrl);
-  entryUrls.forEach(addUrl);
-  currentUrls.forEach(addUrl);
+  const canonicalActiveUrl = addUrl(activeUrl) || '';
+  const canonicalDeferredUrl = canonicalizeValue(deferredUrl);
+  const canonicalEntryUrls = [...new Set((Array.isArray(entryUrls) ? entryUrls : [])
+    .map(canonicalizeValue)
+    .filter(Boolean))];
+  const canonicalCurrentUrls = [...new Set((Array.isArray(currentUrls) ? currentUrls : [])
+    .map(canonicalizeValue)
+    .filter(Boolean))];
+  canonicalEntryUrls.forEach(addUrl);
+  canonicalCurrentUrls.forEach(addUrl);
   (Array.isArray(urls) ? urls : []).forEach(addUrl);
-  if (!uniqueUrls.length && !deferredUrl) return false;
+  if (!uniqueUrls.length && !canonicalDeferredUrl) return false;
   let manifestSignature = '';
   if (authoritative) {
     let hash = 2166136261;
-    for (const value of [activeUrl, deferredUrl, ...entryUrls, ...currentUrls, ...uniqueUrls]) {
+    for (const value of [
+      canonicalActiveUrl,
+      canonicalDeferredUrl,
+      ...canonicalEntryUrls,
+      ...canonicalCurrentUrls,
+      ...uniqueUrls
+    ]) {
       const text = String(value || '');
       for (let index = 0; index < text.length; index++) {
         hash ^= text.charCodeAt(index);
@@ -12629,7 +13091,7 @@ async function random40WarmServerVideoCache(urls, {
       hash ^= 10;
       hash = Math.imul(hash, 16777619);
     }
-    manifestSignature = `${uniqueUrls.length}:${currentUrls.length}:${hash >>> 0}`;
+    manifestSignature = `${uniqueUrls.length}:${canonicalCurrentUrls.length}:${hash >>> 0}`;
     if (
       manifestSignature === random40ServerVideoCacheManifestSignature ||
       manifestSignature === random40ServerVideoCacheManifestInFlightSignature
@@ -12637,7 +13099,7 @@ async function random40WarmServerVideoCache(urls, {
     random40ServerVideoCacheManifestInFlightSignature = manifestSignature;
   }
   if (
-    !activeUrl && !authoritative && !urgent &&
+    !canonicalActiveUrl && !authoritative && !urgent &&
     now - random40ServerVideoCacheLastWarmAt < RANDOM40_SERVER_VIDEO_CACHE_WARM_MIN_MS
   ) return false;
   random40ServerVideoCacheLastWarmAt = now;
@@ -12652,11 +13114,11 @@ async function random40WarmServerVideoCache(urls, {
       cache: 'no-store',
       signal: controller.signal,
       body: JSON.stringify({
-        playbackProfile: pongLocal22PlaybackActive() ? 'local22' : 'current',
-        activeUrl: activeUrl || '',
-        deferredUrl: deferredUrl || '',
-        entryUrls: entryUrls.slice(0, 20),
-        currentUrls: currentUrls.slice(0, 80),
+        playbackProfile: playbackProfile || (pongLocal22PlaybackActive() ? 'local22' : 'current'),
+        activeUrl: canonicalActiveUrl,
+        deferredUrl: canonicalDeferredUrl,
+        entryUrls: canonicalEntryUrls.slice(0, 20),
+        currentUrls: canonicalCurrentUrls.slice(0, 80),
         urls: manifestItems.length === uniqueUrls.length
           ? []
           : uniqueUrls.slice(0, RANDOM40_SERVER_VIDEO_CACHE_BATCH),
@@ -12687,11 +13149,11 @@ function random40WarmServerVideoCacheForActiveWrapper(
   { urgent = false } = {}
 ) {
   if (!wrapper || !isPongServerCachedPlaybackActive()) return false;
-  const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
+  const originalUrl = pongCanonicalMediaUrlForWrapper(wrapper);
   if (!originalUrl) return false;
   const video = wrapper.querySelector('video');
   const activePlaybackUrl = String(
-    video?.currentSrc || video?.src || random40PlaybackUrlOverrides.get(originalUrl) || ''
+    video?.currentSrc || video?.src || random40PlaybackOverrideFor(originalUrl) || ''
   );
   const activeIsCompleteCache = random40IsPcFileCachePlaybackUrl(activePlaybackUrl);
   // Local2.2 deliberately keeps one PC-side hedge advancing beside Android's
@@ -12758,6 +13220,14 @@ function random40ResetServerVideoCacheOnClose() {
   resetRandom40ServerVideoCacheClientState();
 }
 
+function random40StopActiveRunOnPageHide() {
+  const stoppingState = random40State;
+  if (!stoppingState) return;
+  stoppingState.stop = true;
+  stoppingState.abortController?.abort();
+  void random40StopLocal2ServerRun(stoppingState);
+}
+
 // Closing one tab releases only its client state. The shared cache is scrubbed
 // by the server after no Pong instance has sent a heartbeat for the idle window.
 window.addEventListener('pagehide', () => {
@@ -12765,6 +13235,7 @@ window.addEventListener('pagehide', () => {
   saveSession();
 });
 window.addEventListener('pagehide', random40ResetServerVideoCacheOnClose);
+window.addEventListener('pagehide', random40StopActiveRunOnPageHide);
 window.addEventListener('pageshow', () => {
   document.querySelectorAll('.video-wrapper').forEach(wrapper => {
     const video = wrapper.querySelector('video');
@@ -12928,7 +13399,13 @@ function random40ScheduleSourceFetch(task, options = {}) {
 }
 
 async function random40FetchTextNow(rawUrl, options = {}) {
-  const pcGatewayUrl = random40PcGatewayUrl(rawUrl);
+  const rawPcGatewayUrl = random40PcGatewayUrl(rawUrl);
+  // Profile/listing/post HTML needs the adaptive HTML transport, including its
+  // native fallback. The plain /proxy route is reserved for streaming media;
+  // using it for documents turned transient source 503s into false failures.
+  const pcGatewayUrl = rawPcGatewayUrl
+    ? `${rawPcGatewayUrl}${rawPcGatewayUrl.includes('?') ? '&' : '?'}mode=html`
+    : '';
   const localOnly = Boolean(pcGatewayUrl && (
     random40IsLocalMode(random40State?.mode) ||
     trainAiState?.open
@@ -13523,10 +14000,7 @@ function random40AccuracyText() {
   const nano = summary.nano.accuracy == null ? '--' : `${summary.nano.accuracy}%`;
   const local = summary.local.accuracy == null ? '--' : `${summary.local.accuracy}%`;
   const local2 = summary.local2.accuracy == null ? '--' : `${summary.local2.accuracy}%`;
-  const nanoTime = summary.nano.avgFirstVideoSeconds == null ? '--' : `${summary.nano.avgFirstVideoSeconds}s`;
-  const localTime = summary.local.avgFirstVideoSeconds == null ? '--' : `${summary.local.avgFirstVideoSeconds}s`;
-  const local2Time = summary.local2.avgFirstVideoSeconds == null ? '--' : `${summary.local2.avgFirstVideoSeconds}s`;
-  return `Nano ${nano}\nLocal ${local}\nLocal2 ${local2}\n\nNano ${nanoTime}\nLocal ${localTime}\nLocal2 ${local2Time}`;
+  return `Nano ${nano}\nLocal ${local}\nLocal2 ${local2}`;
 }
 
 function random40AccuracyReport() {
@@ -16854,7 +17328,8 @@ async function random40TakeLocal2Candidates(localEndpoint, count, runState, endp
     for (const item of delivered) {
       const artistUrl = random40NormalizeArtistUrl(item?.artist?.url || '');
       const artistIdentity = random40ArtistIdentity(artistUrl);
-      if (!artistUrl || !artistIdentity || !random40Local2CandidateIsHardSafe(item)) continue;
+      const testAiCandidate = endpointPath === '/test-ai' && item?.decision?.testAi === true;
+      if (!artistUrl || !artistIdentity || (!testAiCandidate && !random40Local2CandidateIsHardSafe(item))) continue;
       if (runState.seenArtists.has(artistIdentity) || runState.rejectedArtistUrls.has(artistIdentity)) continue;
       const artistName = String(item?.artist?.name || random40ArtistNameFromUrl(artistUrl) || 'artist').slice(0, 256);
       const reviewImageUrls = [...new Set((item?.decision?.evidence?.decisionImageUrls || [])
@@ -16877,6 +17352,10 @@ async function random40TakeLocal2Candidates(localEndpoint, count, runState, endp
             .filter(Boolean))],
           playbackProbeVerified: true,
           playbackFastStart: media.fastStart === true,
+          testAi: testAiCandidate,
+          testAiWouldAccept: item?.decision?.aiWouldAccept === true,
+          testAiVerdict: String(item?.decision?.aiVerdict || 'reject'),
+          testAiReason: String(item?.decision?.aiOriginalReason || item?.decision?.reason || '').slice(0, 240),
           local2PlaybackProfile: endpointPath === '/local22-turbo' ? 'local22' : '',
           serverPrebufferReady: media.serverPrebufferReady === true,
           totalBytes: Math.max(0, Number(media.totalBytes || 0)),
@@ -16981,7 +17460,9 @@ async function random40RunCleanLocal2(runState, localEndpoint, {
       runState.verdictAudit.push({
         artistUrl: artist.artistUrl,
         artistName: artist.artistName,
-        decision: 'accept',
+        decision: runState.testAi
+          ? (artist.decision?.aiWouldAccept === true ? 'accept' : 'reject')
+          : 'accept',
         confidence: Number(artist.decision?.confidence || 0),
         reason: String(artist.decision?.reason || ''),
         actualVideos: batch.entries.filter(entry => random40ArtistIdentity(entry.artistUrl) === artist.artistIdentity).length,
@@ -18069,8 +18550,11 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
     const stoppingState = random40State;
     stoppingState.stop = true;
     stoppingState.abortController?.abort();
-    await random40ReleasePlaybackProtection(stoppingState);
     updateRandom40Progress({ detail: 'Stopping after current work...', force: true });
+    await Promise.all([
+      random40StopLocal2ServerRun(stoppingState),
+      random40ReleasePlaybackProtection(stoppingState)
+    ]);
     return;
   }
   if (random40NormalizeMode(mode) === 'local2') resetPongPlaybackBenchmark();
@@ -18081,7 +18565,10 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
     const completedState = random40State;
     completedState.stop = true;
     completedState.abortController?.abort();
-    await random40ReleasePlaybackProtection(completedState);
+    await Promise.all([
+      random40StopLocal2ServerRun(completedState),
+      random40ReleasePlaybackProtection(completedState)
+    ]);
   }
   // Preserve prior URLs/history, but retire their forward-navigation/preload
   // work before a new run. The Previous button can still revisit history; old
@@ -18107,6 +18594,8 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
   random40State = {
     mode: runMode,
     playbackProfile: String(options.playbackProfile || ''),
+    testAi: options.testAi === true,
+    testAiLabeledArtists: new Set(),
     localEndpoint: '',
     startedAt: Number(buttonStartedAt || Date.now()),
     firstVideoRecordedAt: 0,
@@ -18131,10 +18620,13 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
     stop: false,
     done: false,
     abortController: new AbortController(),
+    local2ServerStartPromise: null,
+    local2ServerStopPromise: null,
+    local2ServerStopped: false,
     seenPages: new Set(),
     seenArtists: new Set(),
     rejectedArtistUrls: new Set(
-      random40LoadRejectedArtists()
+      (options.testAi === true ? [] : random40LoadRejectedArtists())
         .filter(item => runMode !== 'local2' || random40IsDirectFeedbackRecord(item))
         .map(item => random40ArtistIdentity(item.artistUrl))
         .filter(Boolean)
@@ -18192,20 +18684,61 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
   }
 
   try {
-    if (runState.playbackProfile === 'local2fast') {
+    if (runState.playbackProfile === 'testai') {
       const sourcePages = RANDOM40_PAIR_BENCHMARK
         ? random40PairBenchmarkPagePlan(runState.benchmarkPages[0], 12)
         : runState.benchmarkPages;
-      await fetch(`${localEndpoint}/local2-fast/start`, {
+      if (runState.stop) return;
+      runState.local2ServerStartPromise = fetch(`${localEndpoint}/test-ai/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         cache: 'no-store',
         body: JSON.stringify({
           pages: sourcePages,
           seed: Number(RANDOM40_BENCHMARK_PARAMS.get('pongSeed') || 0),
-          diagnostics: true
+          diagnostics: false
         })
       });
+      await runState.local2ServerStartPromise;
+      await random40RunCleanLocal2(runState, localEndpoint, {
+        deadlineMs: 0,
+        endpointPath: '/test-ai',
+        label: 'Test AI'
+      });
+      if (random40State !== runState) return;
+      runState.done = true;
+      updateRandom40Progress({
+        detail: `${runState.stop ? 'Stopped' : 'Done'}: ${runState.accepted} test artists, ${runState.videos} verified videos`,
+        accepted: runState.accepted,
+        videos: runState.videos,
+        pages: runState.pages,
+        api: runState.api,
+        force: true
+      });
+      random40PersistStageTimings();
+      hideRandom40Progress(2500);
+      return;
+    }
+    if (runState.playbackProfile === 'local2fast') {
+      const sourcePages = RANDOM40_PAIR_BENCHMARK
+        ? random40PairBenchmarkPagePlan(runState.benchmarkPages[0], 12)
+        : runState.benchmarkPages;
+      if (runState.stop) return;
+      runState.local2ServerStartPromise = fetch(`${localEndpoint}/local2-fast/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({
+          pages: sourcePages,
+          seed: Number(RANDOM40_BENCHMARK_PARAMS.get('pongSeed') || 0),
+          // Full per-image AI diagnostics can make candidate polling responses
+          // several megabytes and cause visible touch lag in the Android
+          // WebView. Normal button runs retain aggregate counters; detailed
+          // outcomes are enabled only for explicit benchmark/audit runs.
+          diagnostics: RANDOM40_PAIR_BENCHMARK || RANDOM40_BENCHMARK_LIVE_SCAN
+        })
+      });
+      await runState.local2ServerStartPromise;
       await random40RunCleanLocal2(runState, localEndpoint, {
         endpointPath: '/local2-fast',
         label: 'Local 2'
@@ -18229,7 +18762,8 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
       const sourcePages = RANDOM40_PAIR_BENCHMARK
         ? random40PairBenchmarkPagePlan(runState.benchmarkPages[0], 12)
         : runState.benchmarkPages;
-      await fetch(`${localEndpoint}/local22-turbo/start`, {
+      if (runState.stop) return;
+      runState.local2ServerStartPromise = fetch(`${localEndpoint}/local22-turbo/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         cache: 'no-store',
@@ -18238,9 +18772,10 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
           seed: Number(RANDOM40_BENCHMARK_PARAMS.get('pongSeed') || 0),
           // Memory-only diagnostics make real button runs auditable without
           // changing discovery, qualification, acceptance, or playback.
-          diagnostics: true
+          diagnostics: RANDOM40_PAIR_BENCHMARK || RANDOM40_BENCHMARK_LIVE_SCAN
         })
       });
+      await runState.local2ServerStartPromise;
       await random40RunCleanLocal2(runState, localEndpoint, {
         // Keep the fast server pipeline alive for the entire button run. The
         // former two-minute cutoff stopped healthy in-flight work after the
@@ -18265,7 +18800,7 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
         hideRandom40Progress(2500);
         return;
       }
-      await fetch(`${localEndpoint}/local22-turbo/stop`, { method: 'POST', cache: 'no-store' }).catch(() => null);
+      await random40StopLocal2ServerRun(runState);
       updateRandom40Progress({
         detail: 'Local2.2 fast lane was empty; switching to live scan...',
         accepted: runState.accepted,
@@ -18922,6 +19457,8 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
       await random40ReleasePlaybackProtection(runState);
     }
     updateRandom40Progress({ detail: `Random 40 failed: ${err.message}`, force: true });
+  } finally {
+    await random40StopLocal2ServerRun(runState);
   }
 }
 
@@ -19211,10 +19748,7 @@ async function skipCurrentSimpCityCreator(event) {
   if (canNavigateToNextPasteEvent()) {
     navigateToNextPasteEvent();
   } else {
-    document.querySelectorAll('.video-wrapper video').forEach(video => {
-      try { video.pause(); video.removeAttribute('src'); video.load(); } catch (_) {}
-    });
-    videoContainer.innerHTML = '<div class="loading-message">Skipped creator. Waiting for the next SimpCity match...</div>';
+    replacePongVideoContainerHtml('<div class="loading-message">Skipped creator. Waiting for the next SimpCity match...</div>');
   }
 }
 
@@ -19397,10 +19931,6 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   // running during long recall sessions, even though Random40 is not active.
   random40StartServerVideoCacheTimers();
   if (!resumeExisting) {
-    document.querySelectorAll('video').forEach(video => {
-      try { video.pause(); } catch (_) {}
-      video.removeAttribute('src');
-    });
     allVideoUrls = [];
     allVideoMetadata = [];
     videoUrls = [];
@@ -19410,7 +19940,10 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     activePlaybackRange = null;
     resetPasteEvents();
     clearSession();
-    videoContainer.innerHTML = `<div class="loading-message">Starting latest SC Recall: ${escapeHtmlText(getEromeTargetLabel(targets[0] || 'SimpCity'))}</div>`;
+    replacePongVideoContainerHtml(
+      `<div class="loading-message">Starting latest SC Recall: ${escapeHtmlText(getEromeTargetLabel(targets[0] || 'SimpCity'))}</div>`,
+      document
+    );
   }
   const postJson = async (pathname, payload) => {
     const response = await fetch(`${endpoint}${pathname}`, {
@@ -19438,7 +19971,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   // on an open SimpCity tab or a Tampermonkey controller, so normal browsing
   // can never be redirected by a background name search.
   if (recallChannel === 3 && suppliedCreatorNames.length && !resumeExisting) {
-    videoContainer.innerHTML = `<div class="loading-message">Artist Lookup started: ${suppliedCreatorNames.length} artist${suppliedCreatorNames.length === 1 ? '' : 's'}. Searching every source in the background…</div>`;
+    replacePongVideoContainerHtml(`<div class="loading-message">Artist Lookup started: ${suppliedCreatorNames.length} artist${suppliedCreatorNames.length === 1 ? '' : 's'}. Searching every source in the background…</div>`);
   }
 
   // SimpCity recalls keep five unviewed creator albums ready. Passing one
@@ -19732,25 +20265,24 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     videoCount += imported.urls.length;
     scheduleEromeCheckpointAutosave();
     const warmItems = groups
-      .map(group => ({
-        url: eromeMediaDescriptor(group.videos[0]).url,
+      .flatMap(group => group.videos.slice(0, SIMPCITY_PREVIEW_VIDEO_COUNT).map(video => ({
+        url: pongCanonicalRawMediaUrl(eromeMediaDescriptor(video).url),
         artistKey: group.creatorKey || group.sourceUrl || group.url || ''
-      }))
+      })))
       .filter(item => item.url);
     if (warmItems.length) {
-      const tiktokEntryUrls = groups
-        .filter(group => String(group.mediaKind || '').toLowerCase() === 'tiktok')
-        .flatMap(group => group.videos.slice(0, 5).map(video => eromeMediaDescriptor(video).url))
-        .filter(Boolean);
+      const previewEntryUrls = [...new Set(warmItems.map(item => item.url))];
       postJson('/video-cache/warm', {
         playbackProfile: 'bunkr',
-        // Future artists need one prepared entry card. Their complete bundle
-        // is submitted only when Paperclip makes that artist active, avoiding
-        // hundreds of speculative downloads ahead of the viewer.
+        // Every Recall artist gets its five-card preview at entry priority.
+        // Once selected, the normal active/current request still promotes the
+        // visible card above these future entries.
         items: warmItems,
-        entryUrls: tiktokEntryUrls,
+        entryUrls: previewEntryUrls,
         urgent: false,
         authoritative: false
+      }).then(payload => {
+        random40ApplyServerVideoCacheRecords(payload?.records, endpoint);
       }).catch(() => {});
     }
     return true;
@@ -19979,15 +20511,18 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
           // Start downloading the first TikTok immediately. Waiting until its
           // hidden side deck is published makes a fast swipe race an empty
           // cache, especially while the other source lanes are busy.
+          const tiktokWarmItems = data.videos.slice(0, 2).map(url => ({
+            url: pongCanonicalRawMediaUrl(url),
+            artistKey: normalizeSimpCityCreatorKey(rawName)
+          })).filter(item => item.url);
           postJson('/video-cache/warm', {
             playbackProfile: 'tiktok',
-            entryUrls: data.videos.slice(0, 2),
-            items: data.videos.slice(0, 2).map(url => ({
-              url,
-              artistKey: normalizeSimpCityCreatorKey(rawName)
-            })),
+            entryUrls: tiktokWarmItems.map(item => item.url),
+            items: tiktokWarmItems,
             urgent: true,
             authoritative: false
+          }).then(payload => {
+            random40ApplyServerVideoCacheRecords(payload?.records, endpoint);
           }).catch(() => {});
           enqueueAlbums([{
             url: data.profileUrl,
@@ -20311,10 +20846,6 @@ async function fetchSharedSimpCityRecall(endpoint, { consume = false, channel = 
 
 function clearActiveSimpCityRecallDeck(message = 'Checking latest SC Recall...') {
   bunkrLoadGeneration++;
-  document.querySelectorAll('video').forEach(video => {
-    try { video.pause(); } catch (_) {}
-    video.removeAttribute('src');
-  });
   allVideoUrls = [];
   allVideoMetadata = [];
   videoUrls = [];
@@ -20324,7 +20855,7 @@ function clearActiveSimpCityRecallDeck(message = 'Checking latest SC Recall...')
   activePlaybackRange = null;
   resetPasteEvents();
   clearSession();
-  videoContainer.innerHTML = `<div class="loading-message">${escapeHtmlText(message)}</div>`;
+  replacePongVideoContainerHtml(`<div class="loading-message">${escapeHtmlText(message)}</div>`, document);
 }
 
 function loadSimpCityRecall() {
@@ -20417,7 +20948,7 @@ async function startSimpCityRecall(channel = 1) {
     const recallEndpoint = location.port === '8787' ? location.origin : endpoint;
     let shared = await fetchSharedSimpCityRecall(recallEndpoint, { channel });
     if (shared.background?.state === 'waiting_for_login') {
-      videoContainer.innerHTML = `<div class="loading-message">Finish SimpCity login here; the PC scrape will resume automatically</div>`;
+      replacePongVideoContainerHtml(`<div class="loading-message">Finish SimpCity login here; the PC scrape will resume automatically</div>`);
       openSimpCityLoginOverlay(recallEndpoint);
       let connected = false;
       for (let attempt = 0; attempt < 900; attempt++) {
@@ -20447,7 +20978,7 @@ async function startSimpCityRecall(channel = 1) {
     for (let attempt = 0; attempt < 20; attempt++) {
       if (shared.recall || shared.pending) break;
       if (!['starting', 'running'].includes(shared.background?.state)) break;
-      videoContainer.innerHTML = `<div class="loading-message">Recall ${channel} is starting... waiting for its first result</div>`;
+      replacePongVideoContainerHtml(`<div class="loading-message">Recall ${channel} is starting... waiting for its first result</div>`);
       await sleep(750);
       shared = await fetchSharedSimpCityRecall(recallEndpoint, { channel });
     }
@@ -20469,7 +21000,7 @@ async function startSimpCityRecall(channel = 1) {
       const message = latestWasEmpty
         ? `Recall ${channel} finished but found no creator names or playable media. The previous videos were cleared.`
         : `No Recall ${channel} scrape is active. Press Pong ${channel} Scrape in the SimpCity script first.`;
-      videoContainer.innerHTML = `<div class="loading-message">${escapeHtmlText(message)}</div>`;
+      replacePongVideoContainerHtml(`<div class="loading-message">${escapeHtmlText(message)}</div>`);
       alert(message);
       return;
     }
@@ -20543,14 +21074,41 @@ async function loadLeakedZoneAsCards(targets) {
     return;
   }
   const postJson = async (pathname, payload) => {
-    const response = await fetch(`${endpoint}${pathname}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.ok) throw new Error(data.error || `Local HTTP ${response.status}`);
-    return data;
+    let lastError = null;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const controller = new AbortController();
+      const releaseController = trackPongWorkloadController(controller);
+      const timer = setTimeout(
+        () => controller.abort(new Error('LeakedZone request timed out')),
+        45000
+      );
+      try {
+        const response = await fetch(`${endpoint}${pathname}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok) throw new Error(data.error || `Local HTTP ${response.status}`);
+        return data;
+      } catch (error) {
+        lastError = error;
+        if (loadGeneration !== bunkrLoadGeneration) {
+          throw new Error('LeakedZone import was stopped by a newer Pong action');
+        }
+        if (attempt < 4) await sleep(600 * attempt);
+      } finally {
+        clearTimeout(timer);
+        releaseController();
+      }
+    }
+    const message = String(lastError?.message || lastError || '').trim();
+    throw new Error(
+      /abort|signal|fetch|network/i.test(message)
+        ? 'LeakedZone temporarily lost the Pong server connection; retry the import'
+        : message || 'LeakedZone request failed'
+    );
   };
   const creatorQueue = [];
   const creatorWaiters = [];
@@ -20847,14 +21405,17 @@ async function loadBunkrAsCards(targets) {
     // before spending bandwidth on second videos.  It remains background
     // priority until Paperclip makes that album active.
     if (location.protocol !== 'https:' && Array.isArray(group.videos)) {
+      const entryItems = group.videos.slice(0, 1).map(video => ({
+        url: pongCanonicalRawMediaUrl(eromeMediaDescriptor(video).url),
+        artistKey: group.sourceUrl || group.url || ''
+      })).filter(item => item.url);
       postJson('/video-cache/warm', {
         playbackProfile: 'bunkr',
-        items: group.videos.slice(0, 1).map(url => ({
-          url,
-          artistKey: group.sourceUrl || group.url || ''
-        })),
+        items: entryItems,
         urgent: false,
         authoritative: false
+      }).then(payload => {
+        random40ApplyServerVideoCacheRecords(payload?.records, endpoint);
       }).catch(() => {});
     }
     showSortingIndicator(
@@ -21731,8 +22292,26 @@ async function startRandom40Local2Fast(buttonStartedAt = Date.now()) {
   await startRandom40('local2', buttonStartedAt, { playbackProfile: 'local2fast' });
 }
 
+async function startTestAi(buttonStartedAt = Date.now()) {
+  const endpoint = random40NormalizeLocalEndpoint(
+    random40StoredLocalEndpoint() || RANDOM40_LOCAL_ENDPOINTS[RANDOM40_LOCAL_ENDPOINTS.length - 1]
+  );
+  if (location.protocol === 'https:' && /^http:\/\//i.test(endpoint)) {
+    const target = new URL('/pong', `${endpoint}/`);
+    target.searchParams.set('pongAutoStart', 'testai');
+    target.searchParams.set('pongPlaybackProfile', 'testai');
+    target.searchParams.set('pongStartedAt', String(buttonStartedAt));
+    const handoffState = pongEncodeLanHandoffState();
+    if (handoffState) target.hash = `pongState=${encodeURIComponent(handoffState)}`;
+    pongAssignLanLocation(target);
+    return;
+  }
+  await startRandom40('local2', buttonStartedAt, { playbackProfile: 'testai', testAi: true });
+}
+
 document.getElementById('random-40-local')?.addEventListener('click',()=>startRandom40Local22(Date.now()));
 document.getElementById('random-40-local2')?.addEventListener('click',()=>startRandom40Local2Fast(Date.now()));
+document.getElementById('test-ai')?.addEventListener('click',()=>startTestAi(Date.now()));
 document.getElementById('simpcity-recall-1')?.addEventListener('click', () => startSimpCityRecall(1));
 document.getElementById('simpcity-recall-2')?.addEventListener('click', () => startSimpCityRecall(2));
 document.getElementById('random-40-nano')?.addEventListener('click',()=>startRandom40('nano', Date.now()));
@@ -21859,7 +22438,9 @@ document.getElementById('auth-close').addEventListener('click',()=>{
 document.addEventListener('DOMContentLoaded',()=>{
   installPongSharedOriginBridge();
   void pongRestoreGitHubTokenFromPc();
+  void pongSyncSavedLinksWithPc().then(() => updateSaveCounters());
   if (new URLSearchParams(location.search).get('pongStateBridge') === '1') {
+    detachPongVideosIn(document.body);
     document.body.replaceChildren();
     document.documentElement.style.background = 'transparent';
     return;
@@ -22071,6 +22652,15 @@ document.addEventListener('DOMContentLoaded',()=>{
     }
     const startedAt = Number(new URLSearchParams(location.search).get('pongStartedAt')) || Date.now();
     setTimeout(() => startRandom40('local2', startedAt, { playbackProfile: 'local2fast' }), 0);
+  }
+  if (autoStartMode === 'testai') {
+    const overlay = document.getElementById('pong-overlay');
+    if (overlay) {
+      overlay.classList.add('hidden');
+      overlay.style.display = 'none';
+    }
+    const startedAt = Number(new URLSearchParams(location.search).get('pongStartedAt')) || Date.now();
+    setTimeout(() => startRandom40('local2', startedAt, { playbackProfile: 'testai', testAi: true }), 0);
   }
   if (autoStartMode === 'scRecall') {
     const overlay = document.getElementById('pong-overlay');

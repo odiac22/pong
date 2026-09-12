@@ -140,6 +140,9 @@ public class MainActivity extends Activity {
       getPreferences(MODE_PRIVATE).edit().putString("observer-device", deviceId).apply();
     }
     web = new WebView(this); setContentView(web);
+    if (Build.VERSION.SDK_INT >= 26) {
+      web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+    }
     WebSettings s = web.getSettings();
     s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); s.setDatabaseEnabled(true);
     s.setMediaPlaybackRequiresUserGesture(true); s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
@@ -161,13 +164,14 @@ public class MainActivity extends Activity {
       web.loadUrl(decoratePongUrl("https://odiac22.github.io/pong/"));
     }
   }
-  @Override protected void onResume() { super.onResume(); if (web != null) { web.onResume(); connectObserver(); } }
+  @Override protected void onResume() { super.onResume(); if (web != null) { web.onResume(); web.resumeTimers(); connectObserver(); } }
   @Override protected void onPause() {
     observerHandler.removeCallbacks(captureRunnable);
     if (web != null) {
       captureObserverFrame();
       web.evaluateJavascript("document.querySelectorAll('video,audio').forEach(v=>v.pause());window.PongLiveObserver && window.PongLiveObserver.send()", null);
-      web.onPause();
+      // Keep JavaScript, queue polling, and media preloading alive while another
+      // Android app is in front. Media itself is paused above, so no audio leaks.
     }
     super.onPause();
   }
