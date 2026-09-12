@@ -29,6 +29,7 @@ public class MainActivity extends Activity {
   private String observerPair;
   private String deviceId;
   private SharedPreferences appState;
+  private boolean activityVisible = false;
   private final Handler observerHandler = new Handler(Looper.getMainLooper());
   private final Runnable captureRunnable = new Runnable() {
     @Override public void run() {
@@ -114,11 +115,13 @@ public class MainActivity extends Activity {
 
   private void persistWebSession() {
     if (web == null) return;
-    rememberPongUrl(web.getUrl());
-    web.evaluateJavascript(
-      "try{typeof snapshotRenderedPlaybackPositions==='function'&&snapshotRenderedPlaybackPositions({immediate:true});typeof saveSession==='function'&&saveSession()}catch(e){}",
-      null
-    );
+    try {
+      rememberPongUrl(web.getUrl());
+      web.evaluateJavascript(
+        "try{typeof snapshotRenderedPlaybackPositions==='function'&&snapshotRenderedPlaybackPositions({immediate:true});typeof saveSession==='function'&&saveSession()}catch(e){}",
+        null
+      );
+    } catch (Exception ignored) {}
   }
 
   private void connectObserver() {
@@ -139,6 +142,7 @@ public class MainActivity extends Activity {
   private void deliverObserverFrame(Bitmap full) {
     Bitmap scaled = null;
     try {
+      if (!activityVisible || web == null) return;
       int width = Math.min(360, full.getWidth());
       int height = Math.max(1, Math.round(full.getHeight() * (width / (float) full.getWidth())));
       scaled = Bitmap.createScaledBitmap(full, width, height, true);
@@ -157,9 +161,13 @@ public class MainActivity extends Activity {
     if (web == null || web.getWidth() < 1 || web.getHeight() < 1 || web.getUrl() == null || !isPongUrl(Uri.parse(web.getUrl()))) return;
     Bitmap full = Bitmap.createBitmap(web.getWidth(), web.getHeight(), Bitmap.Config.RGB_565);
     if (Build.VERSION.SDK_INT >= 26) {
-      PixelCopy.request(getWindow(), full, result -> {
-        if (result == PixelCopy.SUCCESS) deliverObserverFrame(full); else full.recycle();
-      }, observerHandler);
+      try {
+        PixelCopy.request(getWindow(), full, result -> {
+          if (result == PixelCopy.SUCCESS && activityVisible) deliverObserverFrame(full); else full.recycle();
+        }, observerHandler);
+      } catch (Exception ignored) {
+        full.recycle();
+      }
       return;
     }
     web.draw(new Canvas(full));
@@ -205,11 +213,11 @@ public class MainActivity extends Activity {
       web.loadUrl(resumablePongUrl(lastUrl));
     }
   }
-  @Override protected void onResume() { super.onResume(); if (web != null) { web.onResume(); web.resumeTimers(); connectObserver(); } }
+  @Override protected void onResume() { super.onResume(); activityVisible = true; if (web != null) { web.onResume(); web.resumeTimers(); connectObserver(); } }
   @Override protected void onPause() {
+    activityVisible = false;
     observerHandler.removeCallbacks(captureRunnable);
     if (web != null) {
-      captureObserverFrame();
       persistWebSession();
       web.evaluateJavascript("document.querySelectorAll('video,audio').forEach(v=>v.pause());window.PongLiveObserver && window.PongLiveObserver.send()", null);
       // Keep JavaScript, queue polling, and media preloading alive while another
@@ -218,7 +226,7 @@ public class MainActivity extends Activity {
     super.onPause();
   }
   @Override protected void onStop() { persistWebSession(); super.onStop(); }
-  @Override protected void onDestroy() { persistWebSession(); observerHandler.removeCallbacks(captureRunnable); super.onDestroy(); }
+  @Override protected void onDestroy() { observerHandler.removeCallbacks(captureRunnable); super.onDestroy(); }
   @Override protected void onSaveInstanceState(Bundle out) { web.saveState(out); super.onSaveInstanceState(out); }
   @Override public void onBackPressed() { if (web.canGoBack()) web.goBack(); else super.onBackPressed(); }
 }
