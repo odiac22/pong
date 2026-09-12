@@ -24,6 +24,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
+  private static final String DEFAULT_PONG_URL = "http://192.168.1.124:8787/pong";
   private WebView web;
   private String observerPair;
   private String deviceId;
@@ -92,13 +93,13 @@ public class MainActivity extends Activity {
   private String resumablePongUrl(String rawUrl) {
     try {
       Uri source = Uri.parse(rawUrl);
-      if (!isPongUrl(source)) return "https://odiac22.github.io/pong/";
+      if (!isPongUrl(source)) return DEFAULT_PONG_URL;
       // Auto-start parameters are one-shot commands. Reopening them would start
       // a new run instead of restoring the deck saved on this same origin.
       Uri.Builder builder = source.buildUpon().clearQuery().fragment(null);
       return decoratePongUrl(builder.build().toString());
     } catch (Exception ignored) {
-      return "https://odiac22.github.io/pong/";
+      return DEFAULT_PONG_URL;
     }
   }
 
@@ -200,7 +201,7 @@ public class MainActivity extends Activity {
     });
     web.setWebChromeClient(new WebChromeClient());
     if (state == null || web.restoreState(state) == null) {
-      String lastUrl = appState.getString("last-pong-url", "https://odiac22.github.io/pong/");
+      String lastUrl = appState.getString("last-pong-url", DEFAULT_PONG_URL);
       web.loadUrl(resumablePongUrl(lastUrl));
     }
   }
