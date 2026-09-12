@@ -17,6 +17,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebResourceRequest;
+import android.content.SharedPreferences;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.util.Locale;
@@ -26,6 +27,7 @@ public class MainActivity extends Activity {
   private WebView web;
   private String observerPair;
   private String deviceId;
+  private SharedPreferences appState;
   private final Handler observerHandler = new Handler(Looper.getMainLooper());
   private final Runnable captureRunnable = new Runnable() {
     @Override public void run() {
@@ -77,12 +79,45 @@ public class MainActivity extends Activity {
     try {
       Uri source = Uri.parse(rawUrl);
       if (!isPongUrl(source)) return rawUrl;
-      Uri.Builder builder = source.buildUpon().encodedQuery(replaceParameter(source.getEncodedQuery(), "pongInstance", BuildConfig.INSTANCE));
+      String query = replaceParameter(source.getEncodedQuery(), "pongInstance", BuildConfig.INSTANCE);
+      query = replaceParameter(query, "pongNative", "1");
+      Uri.Builder builder = source.buildUpon().encodedQuery(query);
       if (observerPair != null && !observerPair.isEmpty()) {
         builder.encodedFragment(replaceParameter(source.getEncodedFragment(), "pongObserve", observerPair));
       }
       return builder.build().toString();
     } catch (Exception ignored) { return rawUrl; }
+  }
+
+  private String resumablePongUrl(String rawUrl) {
+    try {
+      Uri source = Uri.parse(rawUrl);
+      if (!isPongUrl(source)) return "https://odiac22.github.io/pong/";
+      // Auto-start parameters are one-shot commands. Reopening them would start
+      // a new run instead of restoring the deck saved on this same origin.
+      Uri.Builder builder = source.buildUpon().clearQuery().fragment(null);
+      return decoratePongUrl(builder.build().toString());
+    } catch (Exception ignored) {
+      return "https://odiac22.github.io/pong/";
+    }
+  }
+
+  private void rememberPongUrl(String rawUrl) {
+    if (appState == null || rawUrl == null) return;
+    try {
+      if (isPongUrl(Uri.parse(rawUrl))) {
+        appState.edit().putString("last-pong-url", resumablePongUrl(rawUrl)).apply();
+      }
+    } catch (Exception ignored) {}
+  }
+
+  private void persistWebSession() {
+    if (web == null) return;
+    rememberPongUrl(web.getUrl());
+    web.evaluateJavascript(
+      "try{typeof snapshotRenderedPlaybackPositions==='function'&&snapshotRenderedPlaybackPositions({immediate:true});typeof saveSession==='function'&&saveSession()}catch(e){}",
+      null
+    );
   }
 
   private void connectObserver() {
@@ -134,10 +169,11 @@ public class MainActivity extends Activity {
     super.onCreate(state);
     getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
     observerPair = getString(R.string.observer_pair);
-    deviceId = getPreferences(MODE_PRIVATE).getString("observer-device", "");
+    appState = getSharedPreferences("pong-app-state", MODE_PRIVATE);
+    deviceId = appState.getString("observer-device", "");
     if (deviceId.isEmpty()) {
       deviceId = UUID.randomUUID().toString();
-      getPreferences(MODE_PRIVATE).edit().putString("observer-device", deviceId).apply();
+      appState.edit().putString("observer-device", deviceId).apply();
     }
     web = new WebView(this); setContentView(web);
     if (Build.VERSION.SDK_INT >= 26) {
@@ -157,11 +193,15 @@ public class MainActivity extends Activity {
         view.post(() -> view.loadUrl(decorated));
         return true;
       }
-      @Override public void onPageFinished(WebView view, String url) { connectObserver(); }
+      @Override public void onPageFinished(WebView view, String url) {
+        rememberPongUrl(url);
+        connectObserver();
+      }
     });
     web.setWebChromeClient(new WebChromeClient());
     if (state == null || web.restoreState(state) == null) {
-      web.loadUrl(decoratePongUrl("https://odiac22.github.io/pong/"));
+      String lastUrl = appState.getString("last-pong-url", "https://odiac22.github.io/pong/");
+      web.loadUrl(resumablePongUrl(lastUrl));
     }
   }
   @Override protected void onResume() { super.onResume(); if (web != null) { web.onResume(); web.resumeTimers(); connectObserver(); } }
@@ -169,12 +209,15 @@ public class MainActivity extends Activity {
     observerHandler.removeCallbacks(captureRunnable);
     if (web != null) {
       captureObserverFrame();
+      persistWebSession();
       web.evaluateJavascript("document.querySelectorAll('video,audio').forEach(v=>v.pause());window.PongLiveObserver && window.PongLiveObserver.send()", null);
       // Keep JavaScript, queue polling, and media preloading alive while another
       // Android app is in front. Media itself is paused above, so no audio leaks.
     }
     super.onPause();
   }
+  @Override protected void onStop() { persistWebSession(); super.onStop(); }
+  @Override protected void onDestroy() { persistWebSession(); observerHandler.removeCallbacks(captureRunnable); super.onDestroy(); }
   @Override protected void onSaveInstanceState(Bundle out) { web.saveState(out); super.onSaveInstanceState(out); }
   @Override public void onBackPressed() { if (web.canGoBack()) web.goBack(); else super.onBackPressed(); }
 }
