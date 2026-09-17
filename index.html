@@ -237,6 +237,100 @@
       transition: opacity 0.3s ease; pointer-events: none;
     }
     .audio-notification.fade-out { opacity: 0; }
+    .pong-face-swap-button.active {
+      color: #f5d0fe; border-color: rgba(232,121,249,0.7);
+      background: rgba(126,34,206,0.38); opacity: 0.82;
+    }
+    .pong-face-swap-wrap {
+      position: fixed !important; left: 12px !important; top: calc(50% - 118px) !important;
+      transform: translateY(-50%); z-index: 1201; display: flex; align-items: center;
+      pointer-events: auto;
+    }
+    .pong-face-swap-button {
+      width: 28px; min-height: 28px; height: 28px; padding: 2px 1px;
+      font-size: 6px; font-weight: 900; line-height: 1;
+      border-color: rgba(216,180,254,0.48); background: rgba(88,28,135,0.38);
+    }
+    .pong-face-swap-button.busy { animation: pongSwapPulse 0.9s ease-in-out infinite alternate; }
+    .pong-face-swap-menu {
+      position: absolute; left: 36px; top: 50%; transform: translateY(-50%); z-index: 1300; display: none;
+      grid-template-rows: repeat(2, minmax(54px, auto)); grid-auto-flow: column; grid-auto-columns: 82px;
+      gap: 5px; width: min(410px, calc(100vw - 58px)); max-width: calc(100vw - 58px);
+      padding: 5px; overflow-x: auto; overscroll-behavior: contain;
+      border: 1px solid rgba(216,180,254,0.38); border-radius: 10px;
+      background: rgba(30,12,46,0.94); box-shadow: 0 10px 28px rgba(0,0,0,0.46);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    }
+    .pong-face-swap-menu.open { display: grid; }
+    .pong-face-swap-menu-choice {
+      width: 82px; min-height: 54px; padding: 4px; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 3px; border-radius: 8px; color: #f5f3ff;
+      border: 1px solid rgba(216,180,254,0.24); background: rgba(126,34,206,0.24);
+      font-size: 8px; font-weight: 850; text-align: center; white-space: nowrap; overflow: hidden;
+    }
+    .pong-face-swap-menu-choice.selected { border-color: rgba(232,121,249,0.82); background: rgba(126,34,206,0.48); }
+    .pong-face-swap-menu-choice img {
+      width: 28px; height: 28px; flex: 0 0 28px; border-radius: 7px;
+      object-fit: cover; background: #020617; border: 1px solid rgba(255,255,255,0.16);
+    }
+    @keyframes pongSwapPulse { from { opacity: 0.34; } to { opacity: 0.9; } }
+    #pong-face-swap-picker {
+      position: fixed; inset: 0; z-index: 12000; display: grid; place-items: center;
+      padding: 16px; box-sizing: border-box; background: rgba(0,0,0,0.76);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    }
+    #pong-face-swap-picker[hidden] { display: none; }
+    .pong-face-swap-shell {
+      width: min(420px, calc(100vw - 28px)); max-height: min(680px, calc(100vh - 32px));
+      overflow: hidden; display: flex; flex-direction: column; border-radius: 18px;
+      background: rgba(9,14,20,0.96); border: 1px solid rgba(255,255,255,0.15);
+      box-shadow: 0 24px 70px rgba(0,0,0,0.64);
+    }
+    .pong-face-swap-head { display: flex; align-items: center; gap: 8px; padding: 12px 13px 8px; }
+    .pong-face-swap-title { flex: 1; font-size: 14px; font-weight: 850; }
+    #pong-face-swap-close {
+      width: 32px; height: 32px; border-radius: 999px; color: #e2e8f0;
+      background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.13);
+    }
+    #pong-face-swap-status { padding: 0 13px 9px; color: rgba(255,255,255,0.58); font-size: 10px; }
+    #pong-face-swap-list { overflow-y: auto; padding: 0 10px 12px; display: grid; gap: 7px; }
+    .pong-face-choice {
+      min-height: 54px; width: 100%; display: flex; align-items: center; gap: 10px;
+      padding: 6px 9px; border-radius: 12px; text-align: left; color: #eef2ff;
+      background: rgba(255,255,255,0.055); border: 1px solid rgba(255,255,255,0.10);
+    }
+    .pong-face-choice.selected { border-color: rgba(232,121,249,0.72); background: rgba(126,34,206,0.23); }
+    .pong-face-choice img {
+      width: 42px; height: 42px; flex: 0 0 42px; border-radius: 50%; object-fit: cover;
+      background: #020617; border: 1px solid rgba(255,255,255,0.15);
+    }
+    .pong-face-choice-name { font-size: 12px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; }
+    .pong-face-choice-meta { margin-top: 2px; color: rgba(255,255,255,0.48); font-size: 9px; }
+    #pong-face-swap-loading {
+      position: fixed; left: 16px; top: 46px; transform: none;
+      z-index: 11950; width: 76px; padding: 4px 6px 5px;
+      box-sizing: border-box; border-radius: 8px; pointer-events: auto;
+      cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none;
+      color: #faf5ff; background: rgba(18,8,28,0.78);
+      border: 1px solid rgba(232,121,249,0.36); box-shadow: 0 5px 16px rgba(0,0,0,0.36);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      opacity: 1; transition: opacity 180ms ease;
+    }
+    #pong-face-swap-loading[hidden] { display: none; }
+    #pong-face-swap-loading.dragging { cursor: grabbing; transition: none; }
+    #pong-face-swap-loading.done { opacity: 0; }
+    #pong-face-swap-loading.ready { color: #bbf7d0; border-color: rgba(74,222,128,0.7); background: rgba(20,83,45,0.82); }
+    .pong-face-swap-loading-title { font-size: 8px; font-weight: 900; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pong-face-swap-loading-detail { display: none; }
+    .pong-face-swap-loading-track {
+      height: 2px; margin-top: 3px; overflow: hidden; border-radius: 999px;
+      background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.08);
+    }
+    .pong-face-swap-loading-fill {
+      width: 0%; height: 100%; border-radius: inherit;
+      background: linear-gradient(90deg,#a855f7,#e879f9,#67e8f9);
+      box-shadow: 0 0 16px rgba(232,121,249,0.48); transition: width 180ms ease;
+    }
     .time-indicator {
       position: absolute; bottom: 40px; right: 10px;
       background: rgba(0,0,0,0.75); color: white; font-size: 14px;
@@ -938,6 +1032,23 @@
     </div>
   </div>
 
+  <div id="pong-face-swap-picker" hidden>
+    <section class="pong-face-swap-shell" aria-label="Choose approved face">
+      <header class="pong-face-swap-head">
+        <div class="pong-face-swap-title">Face Swap</div>
+        <button id="pong-face-swap-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div id="pong-face-swap-status">Loading approved faces…</div>
+      <div id="pong-face-swap-list"></div>
+    </section>
+  </div>
+
+  <div id="pong-face-swap-loading" hidden aria-live="polite">
+    <div class="pong-face-swap-loading-title">Preparing face swap</div>
+    <div class="pong-face-swap-loading-detail">Starting GPU stream…</div>
+    <div class="pong-face-swap-loading-track"><div class="pong-face-swap-loading-fill"></div></div>
+  </div>
+
   <div id="pong-overlay">
     <canvas id="pong-canvas"></canvas>
     <div id="pong-hotspot"></div>
@@ -945,7 +1056,7 @@
 
   <div id="pong-instance-label" class="pong-instance-label">Pong 1</div>
   <script>document.getElementById('pong-instance-label').textContent = `Pong ${window.PongInstanceNumber || '1'}`;</script>
-    <div class="version-number">27.14</div>
+    <div class="version-number">27.38</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
 
@@ -1243,6 +1354,11 @@ function pongLocal22TurboPlaybackActive() {
   return new URLSearchParams(location.search).get('pongPlaybackProfile') === 'local22';
 }
 function pongDeckPreloadRadius() {
+  // Saved collections often contain many clips on the same CDN. Opening eleven
+  // media readers at once made every one of them slow and amplified dead-link
+  // retries. Keep the visible card plus three forward cards attached; the
+  // window advances on every swipe, so upcoming clips remain continuously warm.
+  if (['savedVideos', 'savedArtists', 'erome'].includes(String(window.PongLoadedSavedMode || ''))) return 3;
   // Bunkr media commonly shares one CDN host.  Attaching six videos from the
   // active album consumed every per-host connection and left queued albums
   // with links but no prepared entry video.  Keep active + two attached.
@@ -2300,9 +2416,9 @@ function schedulePlaybackPositionsSave(delay = 900) {
 function rememberVideoPlaybackPosition(video, wrapper, { immediate = false } = {}) {
   if (!video || !wrapper) return;
   const key = playbackPositionKey(wrapper, video);
-  const time = Math.max(0, Number(video.currentTime || 0));
+  const time = pongFaceSwapAbsoluteTime(wrapper, video);
   if (!key || !Number.isFinite(time)) return;
-  const duration = Math.max(0, Number(video.duration || 0));
+  const duration = pongFaceSwapFullDuration(wrapper, video);
   if (video.ended || (duration > 0 && time >= duration - 0.15)) delete playbackPositions[key];
   else playbackPositions[key] = { time, duration, updatedAt: Date.now() };
   if (immediate) persistPlaybackPositions();
@@ -2311,6 +2427,20 @@ function rememberVideoPlaybackPosition(video, wrapper, { immediate = false } = {
 
 function restoreVideoPlaybackPosition(video, wrapper, { force = false } = {}) {
   if (!video || !wrapper || !Number.isFinite(video.duration) || video.duration <= 0) return false;
+  // A held face-swap reader initially exposes only its short warm fragment.
+  // Seeking that fragment to a saved *original-video* position clamps it near
+  // the fragment end, then Chromium rebases the clock when activation appends
+  // more fragments.  The visible result is a backwards jump just after the
+  // card begins playing.  Swap sessions own their absolute timeline and seek
+  // through seekPongVideoTo(); never apply the ordinary CDN resume helper to
+  // either a prepared or active swap reader.
+  if (
+    wrapper.dataset.pongFaceSwapActive === 'true' ||
+    wrapper.dataset.pongFaceSwapBusy === 'true' ||
+    wrapper.dataset.pongFaceSwapPreloadSessionId ||
+    video.__pongSwapOriginal ||
+    video.__pongSwapPreloadedOriginal
+  ) return false;
   const key = playbackPositionKey(wrapper, video);
   const record = key ? playbackPositions[key] : null;
   const savedTime = Number(record?.time || 0);
@@ -3685,6 +3815,1891 @@ function installSavedPlaybackHold(button, playbackFn) {
   button.addEventListener('contextmenu', event => event.preventDefault());
 }
 
+const PONG_FACE_SWAP_FACE_KEY = 'pong_face_swap_selected_v1';
+const PONG_FACE_SWAP_ENABLED_KEY = 'pong_face_swap_enabled_v1';
+const PONG_FACE_SWAP_PANEL_POSITION_KEY = 'pong_face_swap_panel_position_v1';
+// v2 stores inline thumbnail data. Do not hydrate the picker from the older
+// URL-only cache, which would immediately recreate the 18-request HTTP/1.1
+// connection race before the refreshed /faces response arrives.
+const PONG_FACE_SWAP_FACES_CACHE_KEY = 'pong_face_swap_faces_cache_v2';
+// Face swap is intentionally session-only. A reload, app close, or fresh
+// paste always begins with the original video until the user chooses a face.
+try {
+  localStorage.removeItem(PONG_FACE_SWAP_FACE_KEY);
+  localStorage.removeItem(PONG_FACE_SWAP_ENABLED_KEY);
+} catch (_) {}
+const pongFaceSwapState = {
+  faces: [],
+  selectedFaceId: '',
+  enabled: false,
+  loading: false,
+  priming: false,
+  prefetchErrors: [],
+  prefetches: new Map(),
+  prefetchTimer: null,
+  prefetchGeneration: 0,
+  prefetchReadyFaceId: '',
+  seekGeneration: 0,
+  pendingSeekTarget: null,
+  seekEntry: null,
+  // A persistent swipe pauses the old reader but leaves its stream attached
+  // until the promoted target has painted. This keeps DELETE/remove-src/load
+  // out of the navigation-critical path; /activate retires the prior producer.
+  outgoingWrappers: new Set()
+};
+
+// A rolling six-card lead matches the fast-swipe use case without creating
+// thirteen competing decoders/encoders. Each card prepares only its first
+// playable fragment; activation continues that same stream in place.
+const PONG_FACE_SWAP_PREFETCH_COUNT = 6;
+// Android WebView can prepare several server-side sessions cheaply, but every
+// attached <video> consumes a media reader/decoder and (on the LAN HTTP/1.1
+// path) one of a very small number of per-origin sockets.  Keep only the next
+// card and exact next Paperclip destination attached; the remaining sessions
+// stay prepared on the PC without competing with visible playback.
+const PONG_FACE_SWAP_ATTACHMENT_COUNT = 2;
+const PONG_FACE_SWAP_PAPERCLIP_PREFETCH_COUNT = 1;
+// Prepare one closed one-second GOP for each future card.  Chromium/WebView
+// leaves shorter held fMP4 streams at HAVE_NOTHING even when their moof/mdat is
+// complete; the measured reliable decode boundary is 24 frames / one second.
+// The promoted stream continues in place, so no second request or re-encode is
+// needed when the user swipes to it.
+// Android WebView can decode a complete one-second fMP4 fragment, but that is
+// not enough runway once a speculative half-rate session is promoted back to
+// full-quality foreground inference.  Two seconds prevents an immediate
+// rebuffer while preserving the already-open reader for a fast first frame.
+const PONG_FACE_SWAP_PREBUFFER_SECONDS = 2.00;
+const PONG_FACE_SWAP_PRIME_DEADLINE_MS = 30_000;
+
+function pongFaceSwapChannel() {
+  // The override is used only by the isolated headless QA flow so its
+  // foreground session cannot stop a real Pong 1/Pong 2 phone session.
+  if (window.PongFaceSwapChannelOverride === 'test') return 'test';
+  return window.PongInstanceNumber === '2' ? 'pong2' : 'pong1';
+}
+
+function pongFaceSwapSourceKey(faceId, source, startSeconds = 0) {
+  let normalized = String(source || '');
+  try { normalized = new URL(normalized, location.href).href; } catch (_) {}
+  return `${String(faceId || '')}|${Math.max(0, Number(startSeconds || 0)).toFixed(2)}|${normalized}`;
+}
+
+function cleanupPongFaceSwapAttachmentListeners(entry) {
+  const video = entry?.video;
+  const listeners = entry?.attachmentListeners;
+  if (video && listeners) {
+    video.removeEventListener('loadeddata', listeners.ready);
+    video.removeEventListener('canplay', listeners.ready);
+    video.removeEventListener('error', listeners.error);
+  }
+  if (entry) entry.attachmentListeners = null;
+}
+
+function pongFaceSwapAttachedPrefetchCount(excludedEntry = null) {
+  let count = 0;
+  pongFaceSwapState.prefetches.forEach(entry => {
+    if (entry !== excludedEntry && entry?.attached && !entry?.adopted) count++;
+  });
+  return count;
+}
+
+function detachPongFaceSwapPrefetch(entry) {
+  const wrapper = entry?.wrapper;
+  const video = entry?.video || wrapper?.querySelector?.('video');
+  if (!video || entry?.adopted) return;
+  const ownsWrapper = Boolean(
+    wrapper && wrapper.dataset.pongFaceSwapPreloadSessionId === entry.sessionId
+  );
+  const original = video.__pongSwapPreloadedOriginal;
+  cleanupPongFaceSwapAttachmentListeners(entry);
+  if (ownsWrapper) {
+    delete wrapper.dataset.pongFaceSwapPreloadSessionId;
+    delete wrapper.dataset.pongFaceSwapPreloadReady;
+  }
+  delete video.__pongSwapPreloadedOriginal;
+  entry.attached = false;
+  entry.browserReady = false;
+  entry.video = null;
+  if (original?.source && ownsWrapper && wrapper.isConnected && wrapper.dataset.pongFaceSwapActive !== 'true') {
+    if (original.networkSuspended) {
+      wrapper.dataset.networkSuspended = 'true';
+      wrapper.dataset.suspendedVideoSrc = original.suspendedVideoSrc || original.source;
+      video.preload = 'none';
+      try {
+        video.removeAttribute('src');
+        video.load();
+      } catch (_) {}
+    } else {
+      setPongVideoSource(video, original.source);
+      video.preload = original.preload || 'auto';
+      try { video.load(); } catch (_) {}
+    }
+    video.muted = Boolean(original.muted);
+    video.volume = original.muted ? 0 : Math.max(0, Math.min(1, Number(original.volume || 0)));
+  } else {
+    try {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    } catch (_) {}
+    if (video.dataset.pongFaceSwapHeld === 'true') video.remove();
+  }
+}
+
+function attachPongFaceSwapPrefetch(entry, wrapper = entry?.wrapper, { allowHidden = false } = {}) {
+  if (!entry?.sessionId || !entry.streamUrl || entry.adopted) return false;
+  if (entry.attached && entry.video) return true;
+  if (pongFaceSwapAttachedPrefetchCount(entry) >= PONG_FACE_SWAP_ATTACHMENT_COUNT) return false;
+  let video = wrapper?.querySelector?.('video') || null;
+  let playable = null;
+  if (wrapper && video && wrapper.isConnected) {
+    if (wrapper.dataset.pongFaceSwapActive === 'true') return false;
+    playable = pongFaceSwapPlayableSource(wrapper, video);
+    if (!playable?.source || pongFaceSwapSourceKey(entry.faceId, playable.source, entry.startSeconds) !== entry.key) return false;
+  } else if (allowHidden) {
+    wrapper = null;
+    video = document.createElement('video');
+    video.dataset.pongFaceSwapHeld = 'true';
+    video.style.cssText = 'display:none!important;width:1px;height:1px;position:fixed;left:-9999px;top:-9999px';
+    video.playsInline = true;
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
+    document.body.appendChild(video);
+    playable = { source: entry.source, startSeconds: entry.startSeconds, original: null };
+  } else {
+    return false;
+  }
+  const metadataIndex = Number(wrapper?.dataset?.index || entry.wrapperIndex || 0);
+  const nativeDuration = Number(video.duration || 0);
+  const metadataDuration = Number(videoMetadata?.[metadataIndex]?.duration || 0);
+  const fullDuration = Number(
+    playable.original?.fullDuration || entry.fullDuration || nativeDuration || metadataDuration || 0
+  );
+  entry.wrapper = wrapper;
+  entry.video = video;
+  entry.original = entry.original || {
+    source: playable.source,
+    // The swap stream's zero point is the timestamp requested when this entry
+    // was created, not whatever timestamp the still-playing CDN video reached
+    // by the time its prepared reader was attached.
+    startSeconds: Math.max(0, Number(entry.startSeconds || 0)),
+    fullDuration,
+    muted: wrapper ? Boolean(video.muted) : true,
+    volume: wrapper ? Math.max(0, Math.min(1, Number(video.volume || 0))) : 0,
+    wasPlaying: wrapper ? (!video.paused && !video.ended) : false,
+    preload: String(video.preload || 'none'),
+    networkSuspended: wrapper?.dataset?.networkSuspended === 'true',
+    suspendedVideoSrc: String(wrapper?.dataset?.suspendedVideoSrc || '')
+  };
+  video.__pongSwapPreloadedOriginal = entry.original;
+  if (wrapper) {
+    wrapper.dataset.pongFaceSwapPreloadSessionId = entry.sessionId;
+    delete wrapper.dataset.pongFaceSwapPreloadReady;
+  }
+  // The already-open swap stream *is* this card's warm network attachment.
+  // Leaving the old suspended marker set makes foreground promotion restore
+  // the original URL and throw the prepared swap session away on every swipe.
+  if (wrapper) {
+    delete wrapper.dataset.networkSuspended;
+    delete wrapper.dataset.suspendedVideoSrc;
+  }
+  entry.attached = true;
+  entry.browserReady = false;
+  try { video.pause(); } catch (_) {}
+  video.muted = true;
+  video.volume = 0;
+  const separator = entry.streamUrl.includes('?') ? '&' : '?';
+  const attachedStreamHref = new URL(`${entry.streamUrl}${separator}attach=1`, location.origin).href;
+  const ownsAttachedStream = () => {
+    const current = String(video.currentSrc || '');
+    if (!current) return false;
+    try {
+      const parsed = new URL(current, location.href);
+      return parsed.pathname === new URL(entry.streamUrl, location.origin).pathname;
+    } catch (_) {
+      return current.includes(`/pong-swap/sessions/${encodeURIComponent(entry.sessionId)}/stream`);
+    }
+  };
+  const markReady = () => {
+    if (entry.video !== video || entry.adopted) return;
+    // A recycled Paperclip element can still report readyState 4 and emit a
+    // stale canplay from its original CDN source immediately after src changes.
+    // Only the prepared swap reader may satisfy browserReady; otherwise start()
+    // would "adopt" the old video and show unswapped frames under a swap session.
+    entry.browserReady = ownsAttachedStream() && Number(video.readyState || 0) >= 2;
+    entry.browserReadyAt = entry.browserReady ? Date.now() : 0;
+    if (entry.browserReady && entry.wrapper?.dataset?.pongFaceSwapPreloadSessionId === entry.sessionId) {
+      entry.wrapper.dataset.pongFaceSwapPreloadReady = 'true';
+    }
+  };
+  const markError = () => {
+    if (entry.video !== video || entry.adopted) return;
+    entry.attachmentError = String(video.error?.message || `media error ${video.error?.code || ''}`).trim();
+    entry.browserReady = false;
+  };
+  entry.attachmentListeners = { ready: markReady, error: markError };
+  video.addEventListener('loadeddata', markReady);
+  video.addEventListener('canplay', markReady);
+  video.addEventListener('error', markError);
+  // Setting src on an auto-preload media element already starts one request.
+  // Calling load() immediately afterwards aborts that request and opens a
+  // second HTTP/1.1 connection—the exact reconnect bubble this held reader is
+  // meant to eliminate, and particularly costly in Android WebView.
+  video.preload = 'auto';
+  advancePongVideoSourceGeneration(video);
+  video.src = attachedStreamHref;
+  // Do not synchronously inspect readyState here: it still describes the old
+  // resource until the media element's new selection task reaches this stream.
+  return true;
+}
+
+function claimPongFaceSwapAttachedVideo(source, wrapper) {
+  if (!pongFaceSwapState.enabled || !pongFaceSwapState.selectedFaceId || !source || !wrapper) return null;
+  const key = pongFaceSwapSourceKey(pongFaceSwapState.selectedFaceId, source, 0);
+  const entry = pongFaceSwapState.prefetches.get(key);
+  const video = entry?.video;
+  if (!entry?.attached || entry.adopted || !video || video.dataset.pongFaceSwapHeld !== 'true') return null;
+  entry.wrapper = wrapper;
+  entry.wrapperIndex = Number(wrapper.dataset.index || 0);
+  video.dataset.pongFaceSwapHeld = 'false';
+  video.style.cssText = '';
+  wrapper.dataset.pongFaceSwapPreloadSessionId = entry.sessionId;
+  if (entry.browserReady) wrapper.dataset.pongFaceSwapPreloadReady = 'true';
+  video.__pongSwapPreloadedOriginal = entry.original;
+  return { entry, video };
+}
+
+function stopPongFaceSwapPrefetch(entry) {
+  if (!entry?.sessionId || entry.adopted) return;
+  detachPongFaceSwapPrefetch(entry);
+  fetch(`/pong-swap/sessions/${encodeURIComponent(entry.sessionId)}?defer=1`, {
+    method: 'DELETE', cache: 'no-store'
+  }).catch(() => {});
+}
+
+function clearPongFaceSwapPrefetches() {
+  clearTimeout(pongFaceSwapState.prefetchTimer);
+  pongFaceSwapState.prefetchTimer = null;
+  pongFaceSwapState.prefetchGeneration++;
+  pongFaceSwapState.prefetches.forEach(stopPongFaceSwapPrefetch);
+  pongFaceSwapState.prefetches.clear();
+  pongFaceSwapState.prefetchReadyFaceId = '';
+  pongFaceSwapState.seekGeneration++;
+  pongFaceSwapState.pendingSeekTarget = null;
+  if (pongFaceSwapState.seekEntry) {
+    const seekEntry = pongFaceSwapState.seekEntry;
+    pongFaceSwapState.seekEntry = null;
+    retirePongFaceSwapSeekEntry(seekEntry);
+  }
+}
+
+async function createPongFaceSwapPrefetchForSource(
+  source,
+  faceId,
+  generation,
+  wrapperIndex = -1,
+  wrapper = null,
+  {
+    attachRequested = false,
+    allowHidden = false,
+    startSeconds = 0,
+    prebufferSeconds = PONG_FACE_SWAP_PREBUFFER_SECONDS
+  } = {}
+) {
+  if (!source || generation !== pongFaceSwapState.prefetchGeneration) return null;
+  const requestedStartSeconds = Number(startSeconds);
+  const normalizedStartSeconds = Number.isFinite(requestedStartSeconds)
+    ? Math.max(0, requestedStartSeconds)
+    : 0;
+  const requestedPrebufferSeconds = Number(prebufferSeconds);
+  const normalizedPrebufferSeconds = Number.isFinite(requestedPrebufferSeconds)
+    ? Math.max(0.25, Math.min(5, requestedPrebufferSeconds))
+    : PONG_FACE_SWAP_PREBUFFER_SECONDS;
+  const key = pongFaceSwapSourceKey(faceId, source, normalizedStartSeconds);
+  const existing = pongFaceSwapState.prefetches.get(key);
+  if (existing) {
+    existing.attachRequested = existing.attachRequested || Boolean(attachRequested);
+    existing.allowHidden = existing.allowHidden || Boolean(allowHidden);
+    if (wrapper) {
+      existing.wrapper = wrapper;
+      existing.wrapperIndex = Number(wrapperIndex);
+    }
+    if (existing.attachRequested && existing.sessionId && !existing.attached) {
+      attachPongFaceSwapPrefetch(existing, wrapper || existing.wrapper, {
+        allowHidden: existing.allowHidden
+      });
+    }
+    return existing;
+  }
+  const entry = {
+    key,
+    faceId,
+    source,
+    startSeconds: normalizedStartSeconds,
+    prebufferSeconds: normalizedPrebufferSeconds,
+    wrapperIndex: Number(wrapperIndex),
+    wrapper,
+    sessionId: '',
+    streamUrl: '',
+    ready: false,
+    browserReady: false,
+    attachRequested: Boolean(attachRequested),
+    allowHidden: Boolean(allowHidden),
+    adopted: false,
+    createdAt: Date.now()
+  };
+  pongFaceSwapState.prefetches.set(key, entry);
+  try {
+    const response = await fetch('/pong-swap/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({
+        channel: pongFaceSwapChannel(),
+        sourceUrl: source,
+        faceId,
+        startSeconds: normalizedStartSeconds,
+        prefetch: true,
+        prebufferSeconds: normalizedPrebufferSeconds
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.session?.id || !payload?.streamUrl) {
+      throw new Error(payload?.detail || `HTTP ${response.status}`);
+    }
+    entry.sessionId = payload.session.id;
+    entry.streamUrl = payload.streamUrl;
+    // Open the one bounded WebView reader while the PC is still producing the
+    // first fragment.  It remains the same reader after activation; waiting
+    // for server-ready before opening it would reintroduce a network bubble.
+    if (entry.attachRequested) {
+      attachPongFaceSwapPrefetch(entry, entry.wrapper, { allowHidden: entry.allowHidden });
+    }
+    const poll = async () => {
+      // A later scheduling pass may add a newly loaded card while this session
+      // is still encoding. Keep polling this entry as long as it remains in the
+      // desired map; a global generation change alone does not invalidate it.
+      if (entry.adopted) return;
+      if (pongFaceSwapState.prefetches.get(key) !== entry) return;
+      try {
+        const statusResponse = await fetch(`/pong-swap/sessions/${encodeURIComponent(entry.sessionId)}?t=${Date.now()}`, { cache: 'no-store' });
+        const statusPayload = await statusResponse.json().catch(() => ({}));
+        if (!statusResponse.ok || statusPayload?.session?.error) throw new Error(statusPayload?.session?.error || `HTTP ${statusResponse.status}`);
+        entry.frames = Number(statusPayload?.session?.frames || 0);
+        const sourceDuration = Number(statusPayload?.session?.duration || 0);
+        if (Number.isFinite(sourceDuration) && sourceDuration > 0) {
+          entry.fullDuration = sourceDuration;
+          if (entry.original) entry.original.fullDuration = sourceDuration;
+          if (entry.video?.__pongSwapPreloadedOriginal) {
+            entry.video.__pongSwapPreloadedOriginal.fullDuration = sourceDuration;
+          }
+          if (entry.wrapper?.isConnected) {
+            entry.wrapper.dataset.pongFaceSwapFullDuration = String(sourceDuration);
+            updatePongFaceSwapProgress(entry.wrapper, entry.video);
+          }
+        }
+        // `firstByteAt` can be only the MP4 init segment. Adopt exclusively
+        // after the server has observed an actual moof+mdat media fragment.
+        entry.ready = statusPayload?.session?.prepared === true;
+        if (entry.ready) {
+          if (entry.attachRequested && !entry.attached) {
+            attachPongFaceSwapPrefetch(entry, entry.wrapper, { allowHidden: entry.allowHidden });
+          }
+          return;
+        }
+      } catch (error) {
+        pongFaceSwapState.prefetchErrors.push({
+          at: Date.now(), key, sessionId: entry.sessionId,
+          error: String(error?.message || error || 'prefetch failed')
+        });
+        if (pongFaceSwapState.prefetchErrors.length > 20) pongFaceSwapState.prefetchErrors.shift();
+        pongFaceSwapState.prefetches.delete(key);
+        stopPongFaceSwapPrefetch(entry);
+        return;
+      }
+      setTimeout(poll, 260);
+    };
+    void poll();
+    return entry;
+  } catch (error) {
+    pongFaceSwapState.prefetchErrors.push({
+      at: Date.now(), key, sessionId: entry.sessionId,
+      error: String(error?.message || error || 'prefetch create failed')
+    });
+    if (pongFaceSwapState.prefetchErrors.length > 20) pongFaceSwapState.prefetchErrors.shift();
+    pongFaceSwapState.prefetches.delete(key);
+    stopPongFaceSwapPrefetch(entry);
+    return null;
+  }
+}
+
+async function createPongFaceSwapPrefetch(wrapper, faceId, generation, options = {}) {
+  const video = wrapper?.querySelector?.('video');
+  if (!wrapper || !video || !wrapper.isConnected || generation !== pongFaceSwapState.prefetchGeneration) return null;
+  const playable = pongFaceSwapPlayableSource(wrapper, video);
+  if (!playable?.source) return null;
+  return createPongFaceSwapPrefetchForSource(
+    playable.source,
+    faceId,
+    generation,
+    Number(wrapper.dataset.index || 0),
+    wrapper,
+    options
+  );
+}
+
+async function waitForPongFaceSwapPrefetchReady(entry, generation, timeoutMs = 60_000, requireBrowser = false) {
+  if (!entry) return false;
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs || 0));
+  while (Date.now() < deadline) {
+    if (
+      generation !== pongFaceSwapState.prefetchGeneration ||
+      entry.adopted ||
+      pongFaceSwapState.prefetches.get(entry.key) !== entry
+    ) return false;
+    if (entry.ready && (!requireBrowser || entry.browserReady)) return true;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  return Boolean(entry.ready && (!requireBrowser || entry.browserReady));
+}
+
+function attachExistingPongFaceSwapPrefetch(wrapper) {
+  if (!pongFaceSwapState.enabled || !pongFaceSwapState.selectedFaceId || !wrapper?.isConnected) return false;
+  const video = wrapper.querySelector?.('video');
+  const playable = pongFaceSwapPlayableSource(wrapper, video);
+  if (!playable?.source) return false;
+  const key = pongFaceSwapSourceKey(pongFaceSwapState.selectedFaceId, playable.source, 0);
+  wrapper.dataset.pongFaceSwapRebindKey = key;
+  const entry = pongFaceSwapState.prefetches.get(key);
+  if (!entry || entry.adopted) {
+    wrapper.dataset.pongFaceSwapRebindStatus = entry?.adopted ? 'adopted' : 'miss';
+    return false;
+  }
+  entry.wrapper = wrapper;
+  entry.wrapperIndex = Number(wrapper.dataset.index || 0);
+  const attached = entry.attachRequested
+    ? attachPongFaceSwapPrefetch(entry, wrapper, { allowHidden: false })
+    : false;
+  wrapper.dataset.pongFaceSwapRebindStatus = attached
+    ? (entry.browserReady ? 'attached-ready' : 'attached-waiting')
+    : entry.ready ? 'server-ready' : 'waiting';
+  return attached;
+}
+
+function getPongFaceSwapNextPaperclipSources(limit = PONG_FACE_SWAP_PAPERCLIP_PREFETCH_COUNT) {
+  if (!Array.isArray(pasteEvents) || pasteEvents.length < 2 || !Array.isArray(allVideoUrls)) return [];
+  const excludedIdentity = getCurrentPaperclipArtistIdentity();
+  const eventIndex = resolveNextPaperclipEventIndex(excludedIdentity);
+  const event = eventIndex >= 0 ? pasteEvents[eventIndex] : null;
+  const bounds = getPasteEventVideoBounds(event);
+  if (!bounds || bounds.start >= bounds.end) return [];
+  const results = [];
+  for (let globalIndex = bounds.start; globalIndex < bounds.end && results.length < Math.max(1, Number(limit || 1)); globalIndex++) {
+    const metadata = allVideoMetadata[globalIndex] || {};
+    const cardPlaybackUrl = String(allVideoUrls[globalIndex] || '');
+    const canonical = pongCanonicalMediaUrlForGlobalIndex(globalIndex, cardPlaybackUrl);
+    if (!cardPlaybackUrl && !canonical) continue;
+    results.push({
+      // The canonical URL is for cache identity only. Erome's canonical CDN
+      // URL requires a Referer and expires; the card URL already contains the
+      // working Worker/LAN transport that Pong uses for visible playback.
+      source: random40PlaybackOverrideFor(canonical || cardPlaybackUrl, metadata) ||
+        random40PlaybackUrl(cardPlaybackUrl || canonical),
+      eventIndex,
+      globalIndex
+    });
+  }
+  return results;
+}
+
+function schedulePongFaceSwapPrefetch(delay = 280) {
+  if (pongFaceSwapState.priming) return;
+  clearTimeout(pongFaceSwapState.prefetchTimer);
+  if (!pongFaceSwapState.enabled || !pongFaceSwapState.selectedFaceId) {
+    clearPongFaceSwapPrefetches();
+    return;
+  }
+  // Nothing speculative may compete with the selected foreground stream until
+  // WebView has actually presented that face's first frame. `loadeddata` alone
+  // is too early: it only proves decoding, not that the user can see the swap.
+  if (pongFaceSwapState.prefetchReadyFaceId !== pongFaceSwapState.selectedFaceId) return;
+  const generation = ++pongFaceSwapState.prefetchGeneration;
+  pongFaceSwapState.prefetchTimer = setTimeout(async () => {
+    pongFaceSwapState.prefetchTimer = null;
+    if (generation !== pongFaceSwapState.prefetchGeneration || !pongFaceSwapState.enabled) return;
+    const wrappers = typeof getDeckWrappers === 'function'
+      ? getDeckWrappers()
+      : [...document.querySelectorAll('.video-wrapper')];
+    const active = pongFaceSwapCurrentWrapper();
+    if (typeof ensureDeckOrder === 'function') ensureDeckOrder();
+    const orderedWrappers = Array.isArray(deckOrder) && deckOrder.length
+      ? deckOrder.map(index => getDeckWrapper(index)).filter(Boolean)
+      : wrappers;
+    const activePosition = Math.max(0, orderedWrappers.indexOf(active));
+    const forwardWrappers = [
+      ...orderedWrappers.slice(activePosition + 1),
+      ...orderedWrappers.slice(0, activePosition)
+    ];
+    const candidates = forwardWrappers
+      .filter(wrapper => wrapper?.isConnected && wrapper.dataset.viewed !== 'true')
+      .slice(0, PONG_FACE_SWAP_PREFETCH_COUNT);
+    const desiredKeys = new Set();
+    // Paperclip creates and activates a new deck in separate microtasks. Its
+    // first card may already have a rebound preload but not yet be adopted by
+    // startPongFaceSwap. Protect that active key from this pass's stale-prune.
+    if (active) {
+      const activeVideo = active.querySelector('video');
+      const activePlayable = pongFaceSwapPlayableSource(active, activeVideo);
+      if (activePlayable?.source) {
+        const activeKey = pongFaceSwapSourceKey(
+          pongFaceSwapState.selectedFaceId,
+          activePlayable.source,
+          0
+        );
+        // primePongFaceSwap intentionally leaves the visible original attached
+        // while this session is prepared. Protect that unattached session too;
+        // otherwise this scheduler pass could prune the exact stream the user
+        // is waiting for before startPongFaceSwap has a chance to adopt it.
+        if (pongFaceSwapState.prefetches.has(activeKey)) desiredKeys.add(activeKey);
+      }
+    }
+    const paperclipSources = getPongFaceSwapNextPaperclipSources();
+    // Submit preloads in playback order and wait for each small lead buffer.
+    // Creating every producer at once let the OS lock scheduler prepare card
+    // 3 before card 2. Interleave the next artist after the two immediately
+    // adjacent clips, then fill the rest of the rolling look-ahead window.
+    const orderedJobs = [
+      ...candidates.slice(0, 2).map(wrapper => ({ wrapper })),
+      ...paperclipSources.map(paperclip => ({ paperclip })),
+      ...candidates.slice(2).map(wrapper => ({ wrapper }))
+    ];
+    const desiredAttachmentKeys = new Set();
+    const immediateWrapper = candidates[0] || null;
+    const fallbackSecondWrapper = paperclipSources.length ? null : (candidates[1] || null);
+    const immediatePaperclip = paperclipSources[0] || null;
+    for (const job of orderedJobs) {
+      if (generation !== pongFaceSwapState.prefetchGeneration || !pongFaceSwapState.enabled) return;
+      let entry = null;
+      if (job.wrapper) {
+        const video = job.wrapper.querySelector('video');
+        const playable = pongFaceSwapPlayableSource(job.wrapper, video);
+        if (!playable?.source) continue;
+        const key = pongFaceSwapSourceKey(pongFaceSwapState.selectedFaceId, playable.source, 0);
+        desiredKeys.add(key);
+        const attachRequested = job.wrapper === immediateWrapper || job.wrapper === fallbackSecondWrapper;
+        if (attachRequested) desiredAttachmentKeys.add(key);
+        entry = await createPongFaceSwapPrefetch(
+          job.wrapper,
+          pongFaceSwapState.selectedFaceId,
+          generation,
+          { attachRequested }
+        );
+      } else if (job.paperclip?.source) {
+        const key = pongFaceSwapSourceKey(pongFaceSwapState.selectedFaceId, job.paperclip.source, 0);
+        desiredKeys.add(key);
+        const attachRequested = job.paperclip === immediatePaperclip;
+        if (attachRequested) desiredAttachmentKeys.add(key);
+        entry = await createPongFaceSwapPrefetchForSource(
+          job.paperclip.source,
+          pongFaceSwapState.selectedFaceId,
+          generation,
+          -1,
+          null,
+          { attachRequested, allowHidden: attachRequested }
+        );
+      }
+      if (entry) await waitForPongFaceSwapPrefetchReady(entry, generation);
+    }
+    pongFaceSwapState.prefetches.forEach((entry, key) => {
+      if (entry.adopted) return;
+      if (!desiredKeys.has(key)) {
+        pongFaceSwapState.prefetches.delete(key);
+        stopPongFaceSwapPrefetch(entry);
+        return;
+      }
+      // A Paperclip deck can claim its hidden, already-decoded reader and begin
+      // foreground playback before startPongFaceSwap's /activate request has
+      // returned.  During that short promotion window the entry is still in
+      // the speculative map.  Never let this scheduler pass detach the reader
+      // merely because the active card is not one of the *future* attachment
+      // slots; doing so restores the original CDN URL underneath the pending
+      // foreground adoption and leaves an active swap session off-screen.
+      const activeOwnsAttachment = Boolean(
+        active && entry.wrapper === active && entry.attached &&
+        active.dataset.pongFaceSwapPreloadSessionId === entry.sessionId
+      );
+      entry.attachRequested = desiredAttachmentKeys.has(key) || activeOwnsAttachment;
+      if (!entry.attachRequested && entry.attached) detachPongFaceSwapPrefetch(entry);
+    });
+  }, Math.max(0, Number(delay || 0)));
+}
+
+function setPongFaceSwapPersistentEnabled(enabled) {
+  pongFaceSwapState.enabled = Boolean(enabled);
+  pongFaceSwapState.prefetchReadyFaceId = '';
+  try {
+    localStorage.removeItem(PONG_FACE_SWAP_ENABLED_KEY);
+    localStorage.removeItem(PONG_FACE_SWAP_FACE_KEY);
+  } catch (_) {}
+  if (pongFaceSwapState.enabled) {
+    updatePongFaceSwapLoading(`enabled-${Date.now()}`, 5, 'Swap on');
+  } else {
+    clearPongFaceSwapPrefetches();
+    // Explicitly turning swap off must also release any paused readers that
+    // were retained only to bridge a persistent-swipe activation.
+    retirePongFaceSwapOutgoingWrappers({
+      // The Original/off handlers restore the foreground reader themselves.
+      // Do not detach it first if a very fast back-swipe left it staged.
+      exceptWrapper: pongFaceSwapCurrentWrapper(),
+      serverAlreadyRetired: false
+    });
+    hidePongFaceSwapLoading();
+  }
+  updatePongFaceSwapButton();
+}
+
+function clearPongFaceSwapTransitionOverlay(wrapper) {
+  const overlay = wrapper?.__pongFaceSwapTransitionOverlay;
+  if (!overlay) return;
+  wrapper.__pongFaceSwapTransitionOverlay = null;
+  overlay.querySelectorAll('video').forEach(video => {
+    try {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    } catch (_) {}
+  });
+  overlay.remove();
+}
+
+function createPongFaceSwapTransitionOverlay(wrapper, video, source, startSeconds, options = {}) {
+  if (!wrapper || !video || !source) return null;
+  clearPongFaceSwapTransitionOverlay(wrapper);
+  const overlay = document.createElement('div');
+  overlay.className = 'pong-face-swap-transition-overlay';
+  overlay.style.cssText = [
+    'position:absolute', 'inset:0', 'z-index:4', 'background:#000',
+    'pointer-events:none', 'overflow:hidden'
+  ].join(';');
+  const snapshot = document.createElement('canvas');
+  const width = Math.max(1, Number(video.videoWidth || 1));
+  const height = Math.max(1, Number(video.videoHeight || 1));
+  snapshot.width = width;
+  snapshot.height = height;
+  snapshot.style.cssText = 'width:100%;height:100%;object-fit:contain;background:#000';
+  try { snapshot.getContext('2d', { alpha: false })?.drawImage(video, 0, 0, width, height); } catch (_) {}
+  overlay.appendChild(snapshot);
+
+  // A seek begins on an already-swapped frame. Replaying the original source
+  // while the replacement is prepared would visibly undo the selected
+  // identity, so retain this captured swapped frame until the new stream
+  // presents its first decoded frame.
+  if (options.freezeFrameOnly === true) {
+    wrapper.appendChild(overlay);
+    wrapper.__pongFaceSwapTransitionOverlay = overlay;
+    return overlay;
+  }
+
+  // A silent original-source clone keeps motion visible while the actual,
+  // listener-rich player opens the swapped stream underneath it. The canvas
+  // above guarantees there is never a black flash if the clone needs metadata.
+  const clone = document.createElement('video');
+  clone.className = 'pong-face-swap-transition-video';
+  clone.style.cssText = [
+    'position:absolute', 'inset:0', 'width:100%', 'height:100%',
+    'object-fit:contain', 'background:#000', 'opacity:0', 'pointer-events:none'
+  ].join(';');
+  clone.playsInline = true;
+  clone.setAttribute('playsinline', '');
+  clone.setAttribute('webkit-playsinline', '');
+  clone.preload = 'auto';
+  clone.muted = true;
+  clone.volume = 0;
+  const revealClone = () => {
+    if (wrapper.__pongFaceSwapTransitionOverlay !== overlay) return;
+    clone.style.opacity = '1';
+    snapshot.style.visibility = 'hidden';
+    void clone.play().catch(() => {});
+  };
+  clone.addEventListener('loadedmetadata', () => {
+    try {
+      clone.currentTime = Math.min(
+        Math.max(0, Number(startSeconds || 0)),
+        Number.isFinite(clone.duration) ? Math.max(0, clone.duration - 0.05) : Number(startSeconds || 0)
+      );
+    } catch (_) {}
+  }, { once: true });
+  clone.addEventListener('loadeddata', revealClone, { once: true });
+  overlay.appendChild(clone);
+  wrapper.appendChild(overlay);
+  wrapper.__pongFaceSwapTransitionOverlay = overlay;
+  clone.src = source;
+  return overlay;
+}
+
+function resetPongFaceSwapForFreshLoad() {
+  pongFaceSwapState.selectedFaceId = '';
+  setPongFaceSwapPersistentEnabled(false);
+  document.querySelectorAll('.video-wrapper').forEach(wrapper => {
+    clearPongFaceSwapTransitionOverlay(wrapper);
+    delete wrapper.dataset.pongFaceSwapAutoPending;
+    if (
+      wrapper.dataset.pongFaceSwapActive === 'true' ||
+      wrapper.dataset.pongFaceSwapBusy === 'true'
+    ) {
+      void stopPongFaceSwapForWrapper(wrapper, { restore: true });
+    }
+  });
+  hidePongFaceSwapLoading();
+  document.getElementById('pong-face-swap-menu')?.classList.remove('open');
+}
+
+async function primePongFaceSwap(faceId) {
+  const active = pongFaceSwapCurrentWrapper();
+  const activeVideo = active?.querySelector?.('video');
+  if (!active || !activeVideo) return startPongFaceSwap(faceId);
+  if (pongFaceSwapState.priming) return false;
+  pongFaceSwapState.priming = true;
+  const forcePlaying = active.dataset.userPaused === 'true'
+    ? false
+    : ((!activeVideo.paused && !activeVideo.ended) || active.dataset.playIntent === 'true' || window.autoplayEnabled
+        ? true
+        : undefined);
+  try {
+    clearTimeout(pongFaceSwapState.prefetchTimer);
+    pongFaceSwapState.prefetchTimer = null;
+    ++pongFaceSwapState.prefetchGeneration;
+    // A face change makes every prepared stream for the old identity useless.
+    // Retire those sessions before competing for GPU time with the selected
+    // video's first frame.
+    pongFaceSwapState.prefetches.forEach((entry, key) => {
+      if (entry?.faceId === faceId || entry?.adopted) return;
+      pongFaceSwapState.prefetches.delete(key);
+      stopPongFaceSwapPrefetch(entry);
+    });
+    const primeUiGeneration = `prime-${Date.now()}`;
+    updatePongFaceSwapLoading(primeUiGeneration, 12, 'Swap loading', 'Original keeps playing');
+    const playable = pongFaceSwapPlayableSource(active, activeVideo);
+    if (!playable?.source) return false;
+    // Anchor the live stream to the frame visible when the user chose the face.
+    // The original overlay may continue briefly, but the swap must keep this
+    // exact timeline instead of silently starting again at a later timestamp.
+    const primeStartSeconds = Math.max(0, Number(playable.startSeconds || 0));
+    // Open the selected stream immediately. Waiting for a full speculative
+    // fragment serialized GPU preparation and WebView decoding, even though
+    // the engine emitted its first bytes several seconds earlier. A silent
+    // original overlay below keeps playback visually continuous until the
+    // first swapped frame is actually presented.
+    return await startPongFaceSwap(faceId, {
+      forcePlaying,
+      startSeconds: primeStartSeconds,
+      keepOriginalVisible: true
+    });
+  } finally {
+    pongFaceSwapState.priming = false;
+  }
+}
+
+function ensurePongFaceSwapLoadingMovable(overlay) {
+  if (!overlay || overlay.dataset.movableReady === 'true') return;
+  overlay.dataset.movableReady = 'true';
+  const clampPosition = (left, top) => ({
+    left: Math.max(4, Math.min(window.innerWidth - overlay.offsetWidth - 4, Number(left || 0))),
+    top: Math.max(4, Math.min(window.innerHeight - overlay.offsetHeight - 4, Number(top || 0)))
+  });
+  try {
+    const saved = JSON.parse(localStorage.getItem(PONG_FACE_SWAP_PANEL_POSITION_KEY) || 'null');
+    if (saved && Number.isFinite(Number(saved.left)) && Number.isFinite(Number(saved.top))) {
+      const position = clampPosition(saved.left, saved.top);
+      overlay.style.left = `${position.left}px`;
+      overlay.style.top = `${position.top}px`;
+    }
+  } catch (_) {}
+  let drag = null;
+  overlay.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = overlay.getBoundingClientRect();
+    drag = { id: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top };
+    overlay.classList.add('dragging');
+    try { overlay.setPointerCapture(event.pointerId); } catch (_) {}
+  });
+  overlay.addEventListener('pointermove', event => {
+    if (!drag || drag.id !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const position = clampPosition(event.clientX - drag.offsetX, event.clientY - drag.offsetY);
+    overlay.style.left = `${position.left}px`;
+    overlay.style.top = `${position.top}px`;
+  });
+  const finishDrag = event => {
+    if (!drag || drag.id !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    drag = null;
+    overlay.classList.remove('dragging');
+    try {
+      localStorage.setItem(PONG_FACE_SWAP_PANEL_POSITION_KEY, JSON.stringify({
+        left: parseFloat(overlay.style.left) || overlay.getBoundingClientRect().left,
+        top: parseFloat(overlay.style.top) || overlay.getBoundingClientRect().top
+      }));
+    } catch (_) {}
+  };
+  overlay.addEventListener('pointerup', finishDrag);
+  overlay.addEventListener('pointercancel', finishDrag);
+}
+
+function pongFaceSwapLoadingElement() {
+  const overlay = document.getElementById('pong-face-swap-loading');
+  ensurePongFaceSwapLoadingMovable(overlay);
+  return overlay;
+}
+
+function updatePongFaceSwapLoading(generation, percent, title, detail = '') {
+  const overlay = pongFaceSwapLoadingElement();
+  if (!overlay) return;
+  if (generation) overlay.dataset.generation = generation;
+  overlay.hidden = false;
+  overlay.classList.remove('done');
+  overlay.classList.toggle('ready', Number(percent || 0) >= 100);
+  const titleNode = overlay.querySelector('.pong-face-swap-loading-title');
+  const detailNode = overlay.querySelector('.pong-face-swap-loading-detail');
+  const fill = overlay.querySelector('.pong-face-swap-loading-fill');
+  if (titleNode && title) titleNode.textContent = title;
+  if (detailNode) detailNode.textContent = detail;
+  if (fill) fill.style.width = `${Math.max(0, Math.min(100, Number(percent || 0)))}%`;
+}
+
+function hidePongFaceSwapLoading(generation, delay = 0) {
+  const overlay = pongFaceSwapLoadingElement();
+  if (!overlay || (generation && overlay.dataset.generation !== generation)) return;
+  const finish = () => {
+    if (generation && overlay.dataset.generation !== generation) return;
+    if (pongFaceSwapState.enabled) {
+      const wrapper = pongFaceSwapCurrentWrapper();
+      const active = wrapper?.dataset?.pongFaceSwapActive === 'true' &&
+        wrapper?.dataset?.pongFaceSwapBusy !== 'true';
+      overlay.hidden = false;
+      overlay.classList.remove('done');
+      overlay.classList.toggle('ready', active);
+      const titleNode = overlay.querySelector('.pong-face-swap-loading-title');
+      const fill = overlay.querySelector('.pong-face-swap-loading-fill');
+      if (titleNode) titleNode.textContent = active ? 'Swap ready' : 'Swap on';
+      if (fill) fill.style.width = active ? '100%' : '5%';
+      return;
+    }
+    overlay.classList.add('done');
+    setTimeout(() => {
+      if (generation && overlay.dataset.generation !== generation) return;
+      overlay.hidden = true;
+      overlay.classList.remove('done');
+      overlay.classList.remove('ready');
+    }, 190);
+  };
+  if (delay > 0) setTimeout(finish, delay);
+  else finish();
+}
+
+function monitorPongFaceSwapEncoding(wrapper, sessionId, generation) {
+  const startedAt = Date.now();
+  const poll = async () => {
+    if (
+      !wrapper?.isConnected ||
+      wrapper.dataset.pongFaceSwapGeneration !== generation ||
+      wrapper.dataset.pongFaceSwapSessionId !== sessionId ||
+      wrapper.dataset.pongFaceSwapBusy !== 'true'
+    ) return;
+    try {
+      const response = await fetch(`/pong-swap/sessions/${encodeURIComponent(sessionId)}?t=${Date.now()}`, { cache: 'no-store' });
+      const payload = await response.json().catch(() => ({}));
+      const session = payload?.session || {};
+      if (session.error) return;
+      const frames = Math.max(0, Number(session.frames || 0));
+      if (Number(session.firstByteAt || 0) > 0) {
+        updatePongFaceSwapLoading(generation, 84, 'First swapped frame encoded', 'Sending it to Pong…');
+      } else if (frames > 0) {
+        updatePongFaceSwapLoading(generation, Math.min(78, 36 + frames * 3), 'Swapping first frame', `${frames} frame${frames === 1 ? '' : 's'} processed`);
+      } else {
+        const elapsed = Math.max(0, (Date.now() - startedAt) / 1000);
+        updatePongFaceSwapLoading(generation, Math.min(34, 18 + elapsed * 4), 'Preparing face model', 'Waiting for the first swapped frame…');
+      }
+    } catch (_) {}
+    setTimeout(poll, 220);
+  };
+  void poll();
+}
+
+function maybeApplyPersistentPongFaceSwap(wrapper = pongFaceSwapCurrentWrapper()) {
+  if (pongFaceSwapState.priming || !pongFaceSwapState.enabled || !pongFaceSwapState.selectedFaceId || !wrapper) return false;
+  if (!wrapper.classList.contains('deck-active') && !wrapper.classList.contains('most-visible')) return false;
+  if (
+    wrapper.dataset.pongFaceSwapBusy === 'true' ||
+    (wrapper.dataset.pongFaceSwapActive === 'true' && wrapper.dataset.pongFaceSwapFaceId === pongFaceSwapState.selectedFaceId) ||
+    wrapper.dataset.pongFaceSwapAutoPending === 'true'
+  ) return false;
+  wrapper.dataset.pongFaceSwapAutoPending = 'true';
+  setTimeout(async () => {
+    try {
+      const video = wrapper.querySelector('video');
+      const hasPreparedSwap = Boolean(
+        wrapper.dataset.pongFaceSwapPreloadSessionId &&
+        wrapper.dataset.pongFaceSwapPreloadReady === 'true'
+      );
+      if (!hasPreparedSwap) {
+        const playable = pongFaceSwapPlayableSource(wrapper, video);
+        if (!playable?.source) return;
+        const key = pongFaceSwapSourceKey(pongFaceSwapState.selectedFaceId, playable.source, 0);
+        let entry = pongFaceSwapState.prefetches.get(key);
+        if (!entry) {
+          const generation = ++pongFaceSwapState.prefetchGeneration;
+          entry = await createPongFaceSwapPrefetchForSource(
+            playable.source,
+            pongFaceSwapState.selectedFaceId,
+            generation,
+            Number(wrapper.dataset.index || 0),
+            null
+          );
+        }
+        const deadline = Date.now() + PONG_FACE_SWAP_PRIME_DEADLINE_MS;
+        while (
+          entry && !entry.ready && Date.now() < deadline &&
+          pongFaceSwapState.enabled && wrapper.isConnected &&
+          (wrapper.classList.contains('deck-active') || wrapper.classList.contains('most-visible'))
+        ) await new Promise(resolve => setTimeout(resolve, 80));
+      }
+      if (
+        pongFaceSwapState.enabled &&
+        wrapper.isConnected &&
+        (wrapper.classList.contains('deck-active') || wrapper.classList.contains('most-visible'))
+      ) {
+        await startPongFaceSwap(pongFaceSwapState.selectedFaceId, {
+          // `false` is an explicit override inside startPongFaceSwap. Passing
+          // Boolean(autoplayEnabled) here therefore paused an already-decoded
+          // prepared reader whenever global autoplay was off, even though the
+          // newly active card should inherit its visible playback intent. Only
+          // force a pause for a real per-card user pause; otherwise preserve a
+          // positive intent or let the prepared active-card fallback decide.
+          forcePlaying: wrapper.dataset.userPaused === 'true'
+            ? false
+            : ((window.autoplayEnabled || wrapper.dataset.playIntent === 'true') ? true : undefined)
+        });
+      }
+    } finally {
+      delete wrapper.dataset.pongFaceSwapAutoPending;
+    }
+  }, 0);
+  return true;
+}
+
+function pongFaceSwapCurrentWrapper() {
+  return document.querySelector('.video-wrapper.deck-active') ||
+    document.querySelector('.video-wrapper.most-visible') ||
+    document.querySelector('.video-wrapper[data-playable="true"]');
+}
+
+function updatePongFaceSwapButton() {
+  const button = document.getElementById('pong-face-swap-button');
+  if (!button) return;
+  const wrapper = pongFaceSwapCurrentWrapper();
+  const active = wrapper?.dataset?.pongFaceSwapActive === 'true';
+  const busy = wrapper?.dataset?.pongFaceSwapBusy === 'true';
+  button.classList.toggle('active', active || pongFaceSwapState.enabled);
+  button.classList.toggle('busy', busy);
+  const label = button.querySelector('.side-save-label');
+  if (label) label.textContent = busy ? 'Wait' : active ? 'Swap On' : pongFaceSwapState.enabled ? 'Swap Auto' : 'Swap';
+}
+
+function ensurePongFaceSwapButton(panel) {
+  if (!panel) return;
+  const existing = document.getElementById('pong-face-swap-button');
+  if (existing) {
+    const existingWrap = existing.closest('.pong-face-swap-wrap');
+    if (existingWrap && existingWrap.parentElement !== document.body) document.body.appendChild(existingWrap);
+    return;
+  }
+  const wrap = document.createElement('div');
+  wrap.className = 'pong-face-swap-wrap';
+  const button = document.createElement('button');
+  button.id = 'pong-face-swap-button';
+  button.className = 'side-save-button pong-face-swap-button';
+  button.type = 'button';
+  button.innerHTML = '<span class="side-save-label">Swap</span>';
+  button.title = 'Choose an approved PC face for this video';
+  const menu = document.createElement('div');
+  menu.id = 'pong-face-swap-menu';
+  menu.className = 'pong-face-swap-menu';
+  button.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    void togglePongFaceSwapMenu(menu);
+  });
+  wrap.append(button, menu);
+  document.body.appendChild(wrap);
+  updatePongFaceSwapButton();
+}
+
+function setPongFaceSwapThumbnail(image, face) {
+  const inlineSource = String(face?.thumbnailDataUrl || '');
+  const fallbackSource = String(face?.thumbnailUrl || '');
+  image.src = inlineSource || fallbackSource;
+  image.addEventListener('error', () => {
+    if (inlineSource && fallbackSource && image.dataset.usedUrlFallback !== 'true') {
+      image.dataset.usedUrlFallback = 'true';
+      image.src = fallbackSource;
+      return;
+    }
+    if (!fallbackSource || image.dataset.retried === 'true') return;
+    image.dataset.retried = 'true';
+    const separator = fallbackSource.includes('?') ? '&' : '?';
+    image.src = `${fallbackSource}${separator}retry=${Date.now()}`;
+  });
+}
+
+function renderPongFaceSwapMenu(menu) {
+  if (!menu) return;
+  menu.replaceChildren();
+  const original = document.createElement('button');
+  original.type = 'button';
+  original.className = `pong-face-swap-menu-choice${pongFaceSwapState.enabled ? '' : ' selected'}`;
+  original.textContent = 'Original';
+  original.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    closePongFaceSwapMenu(menu);
+    setPongFaceSwapPersistentEnabled(false);
+    const wrapper = pongFaceSwapCurrentWrapper();
+    if (wrapper?.dataset?.pongFaceSwapActive === 'true') {
+      void stopPongFaceSwapForWrapper(wrapper, { restore: true, announce: true });
+    }
+  });
+  menu.appendChild(original);
+  pongFaceSwapState.faces.forEach(face => {
+    const choice = document.createElement('button');
+    choice.type = 'button';
+    choice.className = `pong-face-swap-menu-choice${pongFaceSwapState.enabled && face.id === pongFaceSwapState.selectedFaceId ? ' selected' : ''}`;
+    const image = document.createElement('img');
+    image.loading = 'lazy';
+    image.decoding = 'async';
+    image.fetchPriority = 'low';
+    image.alt = '';
+    setPongFaceSwapThumbnail(image, face);
+    const name = document.createElement('span');
+    name.textContent = face.name;
+    choice.append(image, name);
+    choice.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      pongFaceSwapState.selectedFaceId = face.id;
+      setPongFaceSwapPersistentEnabled(true);
+      // Face thumbnails and the swap stream use the same HTTP origin. Android
+      // WebView has a small per-origin connection pool; leaving seventeen
+      // hidden thumbnail requests alive after a choice made the live POST and
+      // first stream wait behind cosmetic images for several seconds. Remove
+      // the closed menu immediately so its in-flight image requests are
+      // cancelled before the latency-sensitive session request is issued.
+      closePongFaceSwapMenu(menu);
+      void primePongFaceSwap(face.id);
+    });
+    menu.appendChild(choice);
+  });
+}
+
+function closePongFaceSwapMenu(menu = document.getElementById('pong-face-swap-menu')) {
+  if (!menu) return;
+  menu.classList.remove('open');
+  menu.querySelectorAll('img').forEach(image => {
+    image.removeAttribute('src');
+  });
+  // Reopening always renders from the in-memory face list, so retaining the
+  // hidden choice grid provides no benefit and can retain pending decoders.
+  menu.replaceChildren();
+}
+
+async function togglePongFaceSwapMenu(menu) {
+  if (!menu) return;
+  if (menu.classList.contains('open')) {
+    closePongFaceSwapMenu(menu);
+    return;
+  }
+  document.getElementById('random40-reject-menu')?.classList.remove('open');
+  menu.classList.add('open');
+  // Begin model/engine warm-up before thumbnail requests enter Android
+  // WebView's small per-origin connection pool. This is idempotent server-side
+  // and lets the user spend menu-selection time hiding a true cold start.
+  void warmPongFaceSwapEngine();
+  const cachedFaces = loadCachedPongFaceSwapFaces();
+  if (cachedFaces.length) {
+    pongFaceSwapState.faces = cachedFaces;
+    renderPongFaceSwapMenu(menu);
+  } else {
+    menu.textContent = 'Loading…';
+  }
+  try {
+    const faces = await fetchPongFaceSwapFaces();
+    pongFaceSwapState.faces = faces;
+    if (menu.classList.contains('open')) renderPongFaceSwapMenu(menu);
+  } catch (error) {
+    if (!cachedFaces.length) menu.textContent = `Unavailable: ${pongFaceSwapFriendlyError(error)}`;
+  }
+}
+
+function loadCachedPongFaceSwapFaces() {
+  if (pongFaceSwapState.faces.length) return pongFaceSwapState.faces;
+  try {
+    const value = JSON.parse(sessionStorage.getItem(PONG_FACE_SWAP_FACES_CACHE_KEY) || '[]');
+    return Array.isArray(value)
+      ? value.filter(face => face?.id && face?.name && (face?.thumbnailDataUrl || face?.thumbnailUrl))
+      : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function cachePongFaceSwapFaces(faces) {
+  try { sessionStorage.setItem(PONG_FACE_SWAP_FACES_CACHE_KEY, JSON.stringify(faces)); } catch (_) {}
+}
+
+function pongFaceSwapFriendlyError(error) {
+  if (error?.name === 'AbortError') return 'Face service took too long. Tap Swap to retry.';
+  return String(error?.message || error || 'Face list unavailable');
+}
+
+let pongFaceSwapWarmPromise = null;
+
+function warmPongFaceSwapEngine() {
+  if (pongFaceSwapWarmPromise) return pongFaceSwapWarmPromise;
+  const request = fetch('/pong-swap/warm', {
+    method: 'POST',
+    cache: 'no-store'
+  }).then(async response => {
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.detail || `HTTP ${response.status}`);
+    return payload;
+  }).catch(() => null);
+  pongFaceSwapWarmPromise = request.finally(() => {
+    if (pongFaceSwapWarmPromise === request || pongFaceSwapWarmPromise) {
+      pongFaceSwapWarmPromise = null;
+    }
+  });
+  return pongFaceSwapWarmPromise;
+}
+
+async function fetchPongFaceSwapFaces() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetch(`/pong-swap/faces?t=${Date.now()}`, {
+      cache: 'no-store', signal: controller.signal
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.detail || `HTTP ${response.status}`);
+    const faces = Array.isArray(payload.faces) ? payload.faces : [];
+    cachePongFaceSwapFaces(faces);
+    return faces;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function pongFaceSwapPlayableSource(wrapper, video) {
+  const original = video?.__pongSwapOriginal;
+  if (original?.source) {
+    return {
+      source: original.source,
+      startSeconds: Math.max(0, Number(original.startSeconds || 0) + Number(video.currentTime || 0)),
+      original
+    };
+  }
+  const preloaded = video?.__pongSwapPreloadedOriginal;
+  if (preloaded?.source) {
+    return {
+      source: preloaded.source,
+      startSeconds: Math.max(0, Number(preloaded.startSeconds || 0)),
+      original: preloaded
+    };
+  }
+  const candidates = [
+    wrapper?.dataset?.serverCachePlaybackSrc,
+    video?.currentSrc,
+    video?.src,
+    wrapper?.dataset?.suspendedVideoSrc,
+    wrapper?.dataset?.originalVideoUrl
+  ];
+  const source = candidates.find(value => (
+    value &&
+    !/^blob:/i.test(value) &&
+    !/^data:/i.test(value) &&
+    !/\/pong-swap\/sessions\/[^/]+\/stream(?:[?#]|$)/i.test(value)
+  ));
+  if (!source) return null;
+  try {
+    return {
+      source: new URL(source, location.href).href,
+      startSeconds: Math.max(0, Number(video.currentTime || 0)),
+      original: null
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function pongFaceSwapFullDuration(wrapper, video) {
+  const original = video?.__pongSwapOriginal;
+  const stored = Number(original?.fullDuration || wrapper?.dataset?.pongFaceSwapFullDuration || 0);
+  if (Number.isFinite(stored) && stored > 0) return stored;
+  const nativeDuration = Number(video?.duration || 0);
+  return Number.isFinite(nativeDuration) && nativeDuration > 0 ? nativeDuration : 0;
+}
+
+function pongFaceSwapAbsoluteTime(wrapper, video) {
+  const relative = Math.max(0, Number(video?.currentTime || 0));
+  const original = video?.__pongSwapOriginal;
+  if (!original || wrapper?.dataset?.pongFaceSwapActive !== 'true') return relative;
+  const absolute = Math.max(0, Number(original.startSeconds || 0) + relative);
+  const fullDuration = pongFaceSwapFullDuration(wrapper, video);
+  return fullDuration > 0 ? Math.min(fullDuration, absolute) : absolute;
+}
+
+function pongFaceSwapProgressState(wrapper, video) {
+  const duration = pongFaceSwapFullDuration(wrapper, video);
+  const pending = Number(wrapper?.dataset?.pongFaceSwapPendingSeek);
+  const currentTime = Number.isFinite(pending)
+    ? Math.max(0, duration > 0 ? Math.min(duration, pending) : pending)
+    : pongFaceSwapAbsoluteTime(wrapper, video);
+  return { currentTime, duration };
+}
+
+function updatePongFaceSwapProgress(wrapper, video) {
+  if (!wrapper || !video) return;
+  const progress = pongFaceSwapProgressState(wrapper, video);
+  const progressFill = wrapper.querySelector('.video-progress-fill');
+  const durationText = wrapper.querySelector('.video-duration');
+  if (progressFill && progress.duration > 0) {
+    progressFill.style.width = `${Math.max(0, Math.min(100, (progress.currentTime / progress.duration) * 100))}%`;
+  }
+  if (durationText && progress.duration > 0) durationText.textContent = formatTime(progress.duration);
+}
+
+function retirePongFaceSwapSeekEntry(entry) {
+  if (!entry?.sessionId || entry.adopted) return;
+  fetch(`/pong-swap/sessions/${encodeURIComponent(entry.sessionId)}?defer=1`, {
+    method: 'DELETE', cache: 'no-store'
+  }).catch(() => {});
+}
+
+async function preparePongFaceSwapSeek(request) {
+  const { wrapper, video, target, faceId, generation, shouldPlay } = request;
+  let entry = null;
+  try {
+    const playable = pongFaceSwapPlayableSource(wrapper, video);
+    if (!playable?.source) return false;
+    const response = await fetch('/pong-swap/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({
+        channel: pongFaceSwapChannel(),
+        sourceUrl: playable.source,
+        faceId,
+        startSeconds: target,
+        prefetch: true,
+        prebufferSeconds: PONG_FACE_SWAP_PREBUFFER_SECONDS
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.session?.id || !payload?.streamUrl) {
+      throw new Error(payload?.detail || `HTTP ${response.status}`);
+    }
+    entry = {
+      key: pongFaceSwapSourceKey(faceId, playable.source, target),
+      faceId,
+      source: playable.source,
+      startSeconds: target,
+      sessionId: payload.session.id,
+      streamUrl: payload.streamUrl,
+      ready: payload.session?.prepared === true,
+      browserReady: false,
+      attached: false,
+      adopted: false,
+      seek: true,
+      wrapper,
+      createdAt: Date.now()
+    };
+    if (generation !== pongFaceSwapState.seekGeneration) {
+      retirePongFaceSwapSeekEntry(entry);
+      return false;
+    }
+    const priorEntry = pongFaceSwapState.seekEntry;
+    pongFaceSwapState.seekEntry = entry;
+    if (priorEntry && priorEntry !== entry) retirePongFaceSwapSeekEntry(priorEntry);
+    if (
+      generation !== pongFaceSwapState.seekGeneration ||
+      !wrapper.isConnected ||
+      wrapper.dataset.pongFaceSwapActive !== 'true'
+    ) {
+      retirePongFaceSwapSeekEntry(entry);
+      return false;
+    }
+    // Promote and attach immediately. Waiting for the server's complete
+    // prebuffer and only then assigning the visible video made seek preparation
+    // and WebView decoding strictly serial (roughly 8–10 seconds in the Android
+    // benchmark). The frozen transition overlay keeps the current frame visible
+    // while the already-open HTTP response receives and decodes the first new
+    // fragment, so GPU preparation and browser decoding overlap.
+    if (pongFaceSwapState.pendingSeekTarget === request) pongFaceSwapState.pendingSeekTarget = null;
+    const adopted = await startPongFaceSwap(faceId, {
+      startSeconds: target,
+      forcePlaying: shouldPlay,
+      prefetchedEntry: entry,
+      preserveCurrentUntilActivation: true,
+      keepOriginalVisible: true
+    });
+    if (!adopted) retirePongFaceSwapSeekEntry(entry);
+    return adopted;
+  } catch (error) {
+    if (entry) retirePongFaceSwapSeekEntry(entry);
+    if (generation === pongFaceSwapState.seekGeneration) {
+      pongFaceSwapState.pendingSeekTarget = null;
+      delete wrapper.dataset.pongFaceSwapPendingSeek;
+      updatePongFaceSwapProgress(wrapper, video);
+      showSortingIndicator(`Face-swap seek unavailable: ${error.message || error}`);
+    }
+    return false;
+  } finally {
+    if (pongFaceSwapState.seekEntry === entry) pongFaceSwapState.seekEntry = null;
+  }
+}
+
+function flushPendingPongFaceSwapSeek(wrapper, video) {
+  const request = pongFaceSwapState.pendingSeekTarget;
+  if (!request || request.wrapper !== wrapper || request.running) return false;
+  if (wrapper.dataset.pongFaceSwapBusy === 'true' || wrapper.dataset.pongFaceSwapActive !== 'true') return false;
+  request.running = true;
+  void preparePongFaceSwapSeek(request);
+  return true;
+}
+
+async function seekPongVideoTo(wrapper, video, targetSeconds) {
+  if (!wrapper || !video) return false;
+  const fullDuration = pongFaceSwapFullDuration(wrapper, video);
+  const target = Math.max(0, fullDuration > 0
+    ? Math.min(Number(targetSeconds || 0), Math.max(0, fullDuration - 0.05))
+    : Number(targetSeconds || 0));
+  if (wrapper.dataset.pongFaceSwapActive !== 'true') {
+    try { video.currentTime = target; return true; } catch (_) { return false; }
+  }
+  const faceId = String(wrapper.dataset.pongFaceSwapFaceId || pongFaceSwapState.selectedFaceId || '');
+  if (!faceId) return false;
+  const shouldPlay = !video.paused && !video.ended;
+  const generation = ++pongFaceSwapState.seekGeneration;
+  const priorEntry = pongFaceSwapState.seekEntry;
+  if (priorEntry) {
+    pongFaceSwapState.seekEntry = null;
+    retirePongFaceSwapSeekEntry(priorEntry);
+  }
+  const request = { wrapper, video, target, faceId, generation, shouldPlay, running: false };
+  pongFaceSwapState.pendingSeekTarget = request;
+  wrapper.dataset.pongFaceSwapPendingSeek = String(target);
+  updatePongFaceSwapProgress(wrapper, video);
+  if (wrapper.dataset.pongFaceSwapBusy === 'true') return true;
+  request.running = true;
+  return preparePongFaceSwapSeek(request);
+}
+
+function stagePongFaceSwapOutgoingWrapper(wrapper) {
+  const video = wrapper?.querySelector?.('video');
+  if (!wrapper || !video || wrapper.dataset.pongFaceSwapActive !== 'true') return false;
+  // Do only local, non-destructive work here. In particular, do not DELETE the
+  // session and do not remove/reload src before the next card's /activate has a
+  // chance to use the WebView connection. The target's first presented frame
+  // is the commit point for local detachment.
+  try { video.pause(); } catch (_) {}
+  try { video.muted = true; } catch (_) {}
+  try { video.defaultMuted = true; } catch (_) {}
+  try { video.volume = 0; } catch (_) {}
+  wrapper.classList.remove('video-playing');
+  delete wrapper.dataset.playIntent;
+  if (window.currentlyPlayingVideo === video) window.currentlyPlayingVideo = null;
+  wrapper.dataset.pongFaceSwapRetirePending = 'true';
+  pongFaceSwapState.outgoingWrappers.add(wrapper);
+  return true;
+}
+
+function retirePongFaceSwapOutgoingWrappers({ exceptWrapper = null, serverAlreadyRetired = true } = {}) {
+  const outgoing = Array.from(pongFaceSwapState.outgoingWrappers);
+  outgoing.forEach(wrapper => {
+    if (wrapper === exceptWrapper) {
+      // A user can swipe again between the frame callback and this deferred
+      // cleanup task. If this just-presented wrapper has since become outgoing,
+      // keep it staged for the *next* activation commit.
+      if (wrapper?.dataset?.pongFaceSwapRetirePending !== 'true') {
+        pongFaceSwapState.outgoingWrappers.delete(wrapper);
+      }
+      return;
+    }
+    pongFaceSwapState.outgoingWrappers.delete(wrapper);
+    if (wrapper?.dataset) delete wrapper.dataset.pongFaceSwapRetirePending;
+    if (!wrapper?.querySelector?.('video')) return;
+    void stopPongFaceSwapForWrapper(wrapper, {
+      restore: false,
+      skipServerStop: serverAlreadyRetired
+    });
+  });
+}
+
+async function stopPongFaceSwapForWrapper(
+  wrapper,
+  { restore = true, announce = false, skipServerStop = false } = {}
+) {
+  const video = wrapper?.querySelector?.('video');
+  if (!wrapper || !video) return false;
+  pongFaceSwapState.outgoingWrappers.delete(wrapper);
+  delete wrapper.dataset.pongFaceSwapRetirePending;
+  clearPongFaceSwapTransitionOverlay(wrapper);
+  const sessionId = String(wrapper.dataset.pongFaceSwapSessionId || '');
+  const generation = String(wrapper.dataset.pongFaceSwapGeneration || '');
+  const original = video.__pongSwapOriginal;
+  const currentMuted = Boolean(video.muted);
+  const currentVolume = Math.max(0, Math.min(1, Number(video.volume || 0)));
+  const resumeAt = Math.max(0, Number(original?.startSeconds || 0) + Number(video.currentTime || 0));
+  if (pongFaceSwapState.pendingSeekTarget?.wrapper === wrapper) {
+    pongFaceSwapState.seekGeneration++;
+    pongFaceSwapState.pendingSeekTarget = null;
+  }
+  if (pongFaceSwapState.seekEntry?.wrapper === wrapper) {
+    const seekEntry = pongFaceSwapState.seekEntry;
+    pongFaceSwapState.seekEntry = null;
+    retirePongFaceSwapSeekEntry(seekEntry);
+  }
+  delete wrapper.dataset.pongFaceSwapSessionId;
+  delete wrapper.dataset.pongFaceSwapActive;
+  delete wrapper.dataset.pongFaceSwapBusy;
+  delete wrapper.dataset.pongFaceSwapGeneration;
+  delete wrapper.dataset.pongFaceSwapFaceId;
+  delete wrapper.dataset.pongFaceSwapFullDuration;
+  delete wrapper.dataset.pongFaceSwapPendingSeek;
+  delete wrapper.dataset.pongFaceSwapPrefetched;
+  delete wrapper.dataset.pongFaceSwapPreopened;
+  delete wrapper.dataset.pongFaceSwapPreloadSessionId;
+  delete wrapper.dataset.pongFaceSwapPreloadReady;
+  delete video.__pongSwapPreloadedOriginal;
+  if (restore) delete video.__pongSwapOriginal;
+  hidePongFaceSwapLoading(generation);
+  updatePongFaceSwapButton();
+  if (sessionId && !skipServerStop) {
+    const stopUrl = `/pong-swap/sessions/${encodeURIComponent(sessionId)}${restore ? '' : '?defer=1'}`;
+    fetch(stopUrl, {
+      method: 'DELETE',
+      cache: 'no-store'
+    }).catch(() => {});
+  }
+  if (restore && original?.source) {
+    const shouldPlay = original.wasPlaying || wrapper.dataset.playIntent === 'true';
+    const restorePosition = () => {
+      if (Number.isFinite(video.duration) && resumeAt > 0) {
+        try { video.currentTime = Math.min(resumeAt, Math.max(0, video.duration - 0.05)); } catch (_) {}
+      }
+      video.muted = currentMuted;
+      video.volume = currentMuted ? 0 : currentVolume;
+    };
+    video.addEventListener('loadedmetadata', restorePosition, { once: true });
+    video.addEventListener('canplay', () => {
+      restorePosition();
+      if (shouldPlay && (wrapper.classList.contains('deck-active') || wrapper.classList.contains('most-visible'))) {
+        void playVideoCleanly(video);
+      }
+    }, { once: true });
+    setPongVideoSource(video, original.source);
+    try { video.load(); } catch (_) {}
+  } else if (!restore) {
+    // Destructive local detach runs only after a target-frame commit (or an
+    // explicit cleanup/error path), never in the persistent swipe handler.
+    try {
+      video.pause();
+      advancePongVideoSourceGeneration(video);
+      video.removeAttribute('src');
+      video.preload = 'none';
+      video.load();
+    } catch (_) {}
+  }
+  if (announce) showSortingIndicator('Face swap off');
+  return true;
+}
+
+async function startPongFaceSwap(faceId, options = {}) {
+  const wrapper = pongFaceSwapCurrentWrapper();
+  const video = wrapper?.querySelector?.('video');
+  if (!wrapper || !video) {
+    showSortingIndicator('Load a video first');
+    return false;
+  }
+  if (wrapper.dataset.pongFaceSwapBusy === 'true') return false;
+  const playable = pongFaceSwapPlayableSource(wrapper, video);
+  if (!playable) {
+    showSortingIndicator('This video source cannot be swapped');
+    return false;
+  }
+  const previous = playable.original;
+  const preloadedOriginal = video.__pongSwapPreloadedOriginal;
+  const desiredMuted = preloadedOriginal ? Boolean(preloadedOriginal.muted) : Boolean(video.muted);
+  const desiredVolume = preloadedOriginal
+    ? Math.max(0, Math.min(1, Number(preloadedOriginal.volume || 0)))
+    : Math.max(0, Math.min(1, Number(video.volume || 0)));
+  const nativeDuration = Number(video.duration || 0);
+  const metadataDuration = Number(videoMetadata?.[Number(wrapper.dataset.index || 0)]?.duration || 0);
+  const fullDuration = Number(
+    previous?.fullDuration || options.prefetchedEntry?.fullDuration ||
+    wrapper.dataset.pongFaceSwapFullDuration || nativeDuration || metadataDuration || 0
+  );
+  if (Number.isFinite(Number(options.startSeconds))) {
+    playable.startSeconds = Math.max(0, fullDuration > 0
+      ? Math.min(Number(options.startSeconds), Math.max(0, fullDuration - 0.05))
+      : Number(options.startSeconds));
+  }
+  const wasPlaying = typeof options.forcePlaying === 'boolean'
+    ? options.forcePlaying
+    : preloadedOriginal
+      // A hidden Paperclip reader is prepared while paused, then moved into
+      // the newly active deck and can begin playback before /activate returns.
+      // Preserve that live foreground intent instead of allowing the stale
+      // hidden-reader snapshot (`wasPlaying: false`) to pause a ready swap at
+      // time zero indefinitely.
+      ? Boolean(
+          preloadedOriginal.wasPlaying ||
+          (!video.paused && !video.ended) ||
+          wrapper.dataset.playIntent === 'true' ||
+          wrapper.classList.contains('deck-active') ||
+          wrapper.classList.contains('most-visible')
+        )
+      : previous ? (previous.wasPlaying || !video.paused)
+      : (!video.paused && !video.ended);
+  const preserveCurrentUntilActivation = options.preserveCurrentUntilActivation === true;
+  const priorSwapState = preserveCurrentUntilActivation ? {
+    sessionId: String(wrapper.dataset.pongFaceSwapSessionId || ''),
+    generation: String(wrapper.dataset.pongFaceSwapGeneration || ''),
+    faceId: String(wrapper.dataset.pongFaceSwapFaceId || ''),
+    active: wrapper.dataset.pongFaceSwapActive === 'true'
+  } : null;
+  if (wrapper.dataset.pongFaceSwapSessionId && !preserveCurrentUntilActivation) {
+    await stopPongFaceSwapForWrapper(wrapper, { restore: false });
+  }
+  const generation = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  if (options.keepOriginalVisible === true) {
+    createPongFaceSwapTransitionOverlay(
+      wrapper,
+      video,
+      playable.source,
+      playable.startSeconds,
+      { freezeFrameOnly: preserveCurrentUntilActivation }
+    );
+  }
+  const prefetchKey = playable.startSeconds < 0.10
+    ? pongFaceSwapSourceKey(faceId, playable.source, 0)
+    : '';
+  const prefetched = options.prefetchedEntry || (prefetchKey ? pongFaceSwapState.prefetches.get(prefetchKey) : null);
+  const preopened = Boolean(
+    prefetched?.attached &&
+    prefetched?.browserReady &&
+    prefetched?.sessionId &&
+    prefetched?.video === video &&
+    wrapper.dataset.pongFaceSwapPreloadSessionId === prefetched.sessionId
+  );
+  wrapper.dataset.pongFaceSwapGeneration = generation;
+  wrapper.dataset.pongFaceSwapBusy = 'true';
+  updatePongFaceSwapButton();
+  const faceName = pongFaceSwapState.faces.find(face => face.id === faceId)?.name || 'selected face';
+  updatePongFaceSwapLoading(generation, 8, `Preparing ${faceName}`, 'Starting GPU face swap…');
+  try {
+    let payload;
+    if (prefetched?.sessionId && prefetched?.streamUrl) {
+      // Every speculative producer is paused at its short lead fragment.  A
+      // held reader and a server-only seek replacement both need explicit
+      // promotion; relying on a later GET needlessly delays GPU continuation.
+      const activateResponse = await fetch(`/pong-swap/sessions/${encodeURIComponent(prefetched.sessionId)}/activate`, {
+        method: 'POST', cache: 'no-store'
+      });
+      if (!activateResponse.ok) {
+        const activatePayload = await activateResponse.json().catch(() => ({}));
+        throw new Error(activatePayload?.detail || `HTTP ${activateResponse.status}`);
+      }
+      prefetched.adopted = true;
+      const adoptedPrefetchKey = prefetched.key || prefetchKey;
+      if (adoptedPrefetchKey && pongFaceSwapState.prefetches.get(adoptedPrefetchKey) === prefetched) {
+        pongFaceSwapState.prefetches.delete(adoptedPrefetchKey);
+      }
+      payload = {
+        session: { id: prefetched.sessionId },
+        streamUrl: prefetched.streamUrl,
+        prefetched: true
+      };
+      updatePongFaceSwapLoading(generation, prefetched.ready ? 84 : 42, 'Opening prepared swap', prefetched.ready ? 'First frames are already buffered' : 'Finishing the first buffered frames…');
+    } else {
+      const response = await fetch('/pong-swap/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({
+          channel: pongFaceSwapChannel(),
+          sourceUrl: playable.source,
+          faceId,
+          startSeconds: playable.startSeconds
+        })
+      });
+      payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.session?.id || !payload?.streamUrl) {
+        throw new Error(payload?.detail || payload?.error || `HTTP ${response.status}`);
+      }
+    }
+    updatePongFaceSwapLoading(generation, 18, 'Preparing face model', 'Waiting for the first swapped frame…');
+    wrapper.dataset.pongFaceSwapSessionId = payload.session.id;
+    wrapper.dataset.pongFaceSwapActive = 'true';
+    wrapper.dataset.pongFaceSwapFaceId = faceId;
+    wrapper.dataset.pongFaceSwapPrefetched = payload.prefetched === true ? 'true' : 'false';
+    wrapper.dataset.pongFaceSwapPreopened = preopened ? 'true' : 'false';
+    if (fullDuration > 0) wrapper.dataset.pongFaceSwapFullDuration = String(fullDuration);
+    video.__pongSwapOriginal = preloadedOriginal || {
+      source: playable.source,
+      startSeconds: playable.startSeconds,
+      fullDuration,
+      muted: desiredMuted,
+      volume: desiredVolume,
+      wasPlaying
+    };
+    if (prefetched) cleanupPongFaceSwapAttachmentListeners(prefetched);
+    delete video.__pongSwapPreloadedOriginal;
+    delete wrapper.dataset.pongFaceSwapPreloadSessionId;
+    delete wrapper.dataset.pongFaceSwapPreloadReady;
+    const applyDesiredAudioState = () => {
+      video.muted = desiredMuted;
+      video.volume = desiredMuted ? 0 : desiredVolume;
+    };
+    applyDesiredAudioState();
+    monitorPongFaceSwapEncoding(wrapper, payload.session.id, generation);
+    let prefetchUnlockScheduled = false;
+    let prefetchUnlocked = false;
+    const unlockPrefetchAfterPresentedFrame = () => {
+      if (prefetchUnlocked) return;
+      const unlock = () => {
+        if (prefetchUnlocked) return;
+        const presentedSessionMatches = Boolean(
+          wrapper.dataset.pongFaceSwapGeneration === generation &&
+          wrapper.dataset.pongFaceSwapSessionId === payload.session.id &&
+          String(video.currentSrc || video.src || '').includes(
+            `/pong-swap/sessions/${payload.session.id}/stream`
+          )
+        );
+        if (!presentedSessionMatches || Number(video.readyState || 0) < 2) {
+          // A callback for the superseded/original frame can race a src swap.
+          // Permit loadeddata (or the next generation) to arm a fresh gate.
+          prefetchUnlockScheduled = false;
+          return;
+        }
+        clearPongFaceSwapTransitionOverlay(wrapper);
+        // Let this callback return so the newly presented frame can paint,
+        // then detach every paused predecessor locally. The server already
+        // retired the prior channel session during create/activate.
+        setTimeout(() => retirePongFaceSwapOutgoingWrappers({
+          exceptWrapper: wrapper,
+          serverAlreadyRetired: true
+        }), 0);
+        if (
+          !pongFaceSwapState.enabled ||
+          pongFaceSwapState.selectedFaceId !== faceId ||
+          !presentedSessionMatches
+        ) return;
+        prefetchUnlocked = true;
+        pongFaceSwapState.prefetchReadyFaceId = faceId;
+        schedulePongFaceSwapPrefetch(120);
+      };
+      if (prefetchUnlockScheduled) return;
+      prefetchUnlockScheduled = true;
+      if (typeof video.requestVideoFrameCallback === 'function') {
+        video.requestVideoFrameCallback(() => unlock());
+        // Chromium can dispatch loadeddata after the first paused frame has
+        // already been painted, leaving a newly registered rVFC dormant until
+        // playback resumes. Two animation frames after a decoded readyState
+        // provide a paint-safe fallback for that paused/preopened case.
+        setTimeout(() => {
+          if (prefetchUnlocked) return;
+          requestAnimationFrame(() => requestAnimationFrame(() => unlock()));
+        }, 160);
+      } else {
+        requestAnimationFrame(() => requestAnimationFrame(unlock));
+      }
+    };
+    const firstFrameReady = () => {
+      if (wrapper.dataset.pongFaceSwapGeneration !== generation) return;
+      updatePongFaceSwapLoading(generation, 100, 'First swapped frame ready', 'Swap stays on while you swipe');
+      hidePongFaceSwapLoading(generation, 1200);
+      unlockPrefetchAfterPresentedFrame();
+    };
+    video.addEventListener('loadedmetadata', () => {
+      if (wrapper.dataset.pongFaceSwapGeneration === generation) {
+        updatePongFaceSwapLoading(generation, 90, 'Opening swapped video', 'Decoding the first frame…');
+      }
+    }, { once: true });
+    video.addEventListener('loadeddata', firstFrameReady, { once: true });
+    const ready = () => {
+      if (wrapper.dataset.pongFaceSwapGeneration !== generation) return;
+      delete wrapper.dataset.pongFaceSwapBusy;
+      if (!pongFaceSwapState.pendingSeekTarget || pongFaceSwapState.pendingSeekTarget.wrapper !== wrapper) {
+        delete wrapper.dataset.pongFaceSwapPendingSeek;
+      }
+      updatePongFaceSwapButton();
+      updatePongFaceSwapProgress(wrapper, video);
+      applyDesiredAudioState();
+      if (video.readyState >= 2) firstFrameReady();
+      if (wasPlaying || wrapper.dataset.playIntent === 'true') {
+        void playVideoCleanly(video).finally(applyDesiredAudioState);
+      }
+      flushPendingPongFaceSwapSeek(wrapper, video);
+    };
+    video.addEventListener('canplay', ready, { once: true });
+    if (!preopened) {
+      video.preload = 'auto';
+      // Retire any pending play() owned by the original CDN source before the
+      // reusable node receives the swap stream. Otherwise canplay can observe
+      // the stale pending token, skip the new play request, and leave a fully
+      // decoded swap paused at time zero.
+      advancePongVideoSourceGeneration(video);
+      video.src = new URL(payload.streamUrl, location.origin).href;
+    } else {
+      // The held `attach=1` response is already decoded by this exact element.
+      // Keep it in place: assigning src or calling load() here was the measured
+      // 1.9--7.5 second warm-transition regression.
+      video.preload = 'auto';
+      if (video.readyState >= 2) {
+        queueMicrotask(() => {
+          firstFrameReady();
+          ready();
+        });
+      }
+    }
+    setTimeout(() => {
+      if (
+        wrapper.dataset.pongFaceSwapGeneration === generation &&
+        wrapper.dataset.pongFaceSwapBusy === 'true' &&
+        Number(video.readyState || 0) < 2
+      ) {
+        retirePongFaceSwapOutgoingWrappers({
+          exceptWrapper: wrapper,
+          serverAlreadyRetired: true
+        });
+        void stopPongFaceSwapForWrapper(wrapper, { restore: true });
+        hidePongFaceSwapLoading(generation);
+        showSortingIndicator('Face swap timed out; original restored');
+      }
+    }, 20_000);
+    return true;
+  } catch (error) {
+    clearPongFaceSwapTransitionOverlay(wrapper);
+    delete wrapper.dataset.pongFaceSwapBusy;
+    if (priorSwapState?.active && priorSwapState.sessionId) {
+      wrapper.dataset.pongFaceSwapSessionId = priorSwapState.sessionId;
+      wrapper.dataset.pongFaceSwapGeneration = priorSwapState.generation;
+      wrapper.dataset.pongFaceSwapFaceId = priorSwapState.faceId;
+      wrapper.dataset.pongFaceSwapActive = 'true';
+    } else if (wrapper.dataset.pongFaceSwapGeneration === generation) {
+      delete wrapper.dataset.pongFaceSwapGeneration;
+    }
+    hidePongFaceSwapLoading(generation);
+    updatePongFaceSwapButton();
+    // A failed promotion has no target frame that can commit the handoff.
+    // Release staged predecessors explicitly so they cannot leak readers.
+    retirePongFaceSwapOutgoingWrappers({
+      exceptWrapper: wrapper,
+      serverAlreadyRetired: false
+    });
+    showSortingIndicator(`Face swap unavailable: ${error.message || error}`);
+    return false;
+  }
+}
+
+function renderPongFaceSwapPicker() {
+  const list = document.getElementById('pong-face-swap-list');
+  const status = document.getElementById('pong-face-swap-status');
+  if (!list || !status) return;
+  list.replaceChildren();
+  const off = document.createElement('button');
+  off.type = 'button';
+  off.className = `pong-face-choice${pongFaceSwapState.enabled ? '' : ' selected'}`;
+  off.innerHTML = '<span style="width:42px;text-align:center;font-size:22px">×</span><span><div class="pong-face-choice-name">Original video</div><div class="pong-face-choice-meta">Turn face swap off</div></span>';
+  off.addEventListener('click', () => {
+    const wrapper = pongFaceSwapCurrentWrapper();
+    closePongFaceSwapPicker();
+    setPongFaceSwapPersistentEnabled(false);
+    if (wrapper?.dataset?.pongFaceSwapActive === 'true') void stopPongFaceSwapForWrapper(wrapper, { restore: true, announce: true });
+  });
+  list.appendChild(off);
+  pongFaceSwapState.faces.forEach(face => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `pong-face-choice${pongFaceSwapState.enabled && face.id === pongFaceSwapState.selectedFaceId ? ' selected' : ''}`;
+    const image = document.createElement('img');
+    image.loading = 'lazy';
+    image.decoding = 'async';
+    image.fetchPriority = 'low';
+    image.alt = '';
+    setPongFaceSwapThumbnail(image, face);
+    const text = document.createElement('span');
+    const name = document.createElement('div');
+    name.className = 'pong-face-choice-name';
+    name.textContent = face.name;
+    const meta = document.createElement('div');
+    meta.className = 'pong-face-choice-meta';
+    meta.textContent = `${face.imageCount} approved photo${face.imageCount === 1 ? '' : 's'}`;
+    text.append(name, meta);
+    button.append(image, text);
+    button.addEventListener('click', () => {
+      pongFaceSwapState.selectedFaceId = face.id;
+      setPongFaceSwapPersistentEnabled(true);
+      closePongFaceSwapPicker();
+      void primePongFaceSwap(face.id);
+    });
+    list.appendChild(button);
+  });
+  status.textContent = pongFaceSwapState.faces.length
+    ? 'Choose once to keep that face active while you swipe through videos.'
+    : 'No approved faces yet. Add a named folder to Pong Swap/approved-faces on the PC.';
+}
+
+function closePongFaceSwapPicker() {
+  const picker = document.getElementById('pong-face-swap-picker');
+  const list = document.getElementById('pong-face-swap-list');
+  if (picker) picker.hidden = true;
+  if (!list) return;
+  list.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
+  list.replaceChildren();
+}
+
+async function openPongFaceSwapPicker() {
+  const picker = document.getElementById('pong-face-swap-picker');
+  const status = document.getElementById('pong-face-swap-status');
+  if (!picker || pongFaceSwapState.loading) return;
+  picker.hidden = false;
+  void warmPongFaceSwapEngine();
+  const cachedFaces = loadCachedPongFaceSwapFaces();
+  if (cachedFaces.length) {
+    pongFaceSwapState.faces = cachedFaces;
+    renderPongFaceSwapPicker();
+  } else {
+    status.textContent = 'Loading approved faces…';
+  }
+  pongFaceSwapState.loading = true;
+  try {
+    pongFaceSwapState.faces = await fetchPongFaceSwapFaces();
+    renderPongFaceSwapPicker();
+  } catch (error) {
+    if (!cachedFaces.length) status.textContent = `Face swap service unavailable: ${pongFaceSwapFriendlyError(error)}`;
+  } finally {
+    pongFaceSwapState.loading = false;
+  }
+}
+
+document.getElementById('pong-face-swap-close')?.addEventListener('click', () => {
+  closePongFaceSwapPicker();
+});
+
 function currentRandom40RejectBundleInfo(reason) {
   const meta = typeof random40CurrentVideoMeta === 'function' ? random40CurrentVideoMeta() : {};
   return {
@@ -3715,6 +5730,7 @@ function rejectCurrentRandom40Artist(reason) {
 function createSaveButtons() {
   const existingPanel = document.getElementById('save-actions-panel');
   if (existingPanel) {
+    ensurePongFaceSwapButton(existingPanel);
     if (!document.getElementById('skip-played-filter-button')) {
       const playedSkipBtn = document.createElement('button');
       playedSkipBtn.id = 'skip-played-filter-button';
@@ -3729,6 +5745,7 @@ function createSaveButtons() {
       const rejectControl = existingPanel.querySelector('.random40-reject-wrap, #reject-current-artist-button');
       existingPanel.insertBefore(playedSkipBtn, rejectControl || null);
     }
+    ensurePongFaceSwapButton(existingPanel);
     updatePongSkipPlayedButton();
     updateSaveCounters();
     return;
@@ -3862,6 +5879,7 @@ function createSaveButtons() {
   panel.appendChild(artistBtn);
   panel.appendChild(playedSkipBtn);
   panel.appendChild(rejectWrap);
+  ensurePongFaceSwapButton(panel);
   document.body.appendChild(panel);
 
   videoBtn.title = 'Tap to save this video. Hold to play all saved videos randomly.';
@@ -4729,7 +6747,8 @@ function shuffleLoadedVideosForPlayback(urls, metadata, events) {
     }
     shuffleInPlace(group.indexes);
   });
-  shuffleInPlace(groups);
+  const preserveGroupOrder = groups.some(group => group.event?.preserveGroupOrder === true);
+  if (!preserveGroupOrder) shuffleInPlace(groups);
 
   const order = groups.flatMap(group => group.indexes);
   let nextStartIndex = 0;
@@ -4811,10 +6830,16 @@ function pongSavedLinksEndpoint() {
 
 function pongApplyAuthoritativeSavedLinks(data) {
   if (!data || typeof data !== 'object') return false;
-  pongApplySharedOriginState({
-    [SAVED_VIDEOS_KEY]: JSON.stringify(data.savedVideos || {}),
-    [SAVED_ARTISTS_KEY]: JSON.stringify(data.savedArtists || {})
-  });
+  // Port 8787 is the single authority for both Pong apps. Replacing these two
+  // maps prevents an older app instance from resurrecting aliases that the
+  // server already canonicalized or a user already removed.
+  try {
+    localStorage.setItem(SAVED_VIDEOS_KEY, JSON.stringify(data.savedVideos || {}));
+    localStorage.setItem(SAVED_ARTISTS_KEY, JSON.stringify(data.savedArtists || {}));
+  } catch (_) {
+    return false;
+  }
+  updateSaveCounters();
   return true;
 }
 
@@ -4835,19 +6860,7 @@ function pongSyncSavedLinksWithPc({ push = false } = {}) {
       if (!response.ok) return false;
       const payload = await response.json();
       const applied = pongApplyAuthoritativeSavedLinks(payload?.data);
-      if (!applied || push) return applied;
-      // Startup reconciliation is two-way: first merge the PC collection into
-      // this app, then merge any app-only items back into the same PC store.
-      const reconcileResponse = await fetch(`${endpoint}/saved-links/save`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
-        body: JSON.stringify({ data: {
-          savedVideos: loadSavedMap(SAVED_VIDEOS_KEY),
-          savedArtists: loadSavedMap(SAVED_ARTISTS_KEY)
-        } })
-      });
-      if (!reconcileResponse.ok) return false;
-      const reconciled = await reconcileResponse.json();
-      return pongApplyAuthoritativeSavedLinks(reconciled?.data);
+      return applied;
     } catch (error) {
       console.warn('Shared saved-items sync unavailable:', error);
       return false;
@@ -4878,6 +6891,23 @@ function advancePongVideoSourceGeneration(video) {
 
 function detachPongVideoForTransition(video) {
   if (!video) return false;
+  const wrapper = video.closest?.('.video-wrapper');
+  const preloadSessionId = String(wrapper?.dataset?.pongFaceSwapPreloadSessionId || '');
+  if (preloadSessionId && typeof pongFaceSwapState === 'object') {
+    const entry = [...pongFaceSwapState.prefetches.values()].find(candidate => (
+      candidate?.sessionId === preloadSessionId && !candidate?.adopted
+    ));
+    if (entry) {
+      cleanupPongFaceSwapAttachmentListeners(entry);
+      entry.attached = false;
+      entry.browserReady = false;
+      entry.video = null;
+      if (entry.wrapper === wrapper) entry.wrapper = null;
+    }
+    delete wrapper.dataset.pongFaceSwapPreloadSessionId;
+    delete wrapper.dataset.pongFaceSwapPreloadReady;
+    delete video.__pongSwapPreloadedOriginal;
+  }
   advancePongVideoSourceGeneration(video);
   silencePongVideo(video);
   try { video.autoplay = false; } catch (_) {}
@@ -4959,7 +6989,8 @@ function getVideoBufferedAheadSeconds(video) {
 }
 
 function getVideoBufferedLoadedPercent(video) {
-  const duration = Number(video?.duration || 0);
+  const wrapper = video?.closest?.('.video-wrapper');
+  const duration = pongFaceSwapFullDuration(wrapper, video);
   if (!video || !Number.isFinite(duration) || duration <= 0 || !video.buffered?.length) return 0;
 
   let bufferedEnd = 0;
@@ -4971,7 +7002,10 @@ function getVideoBufferedLoadedPercent(video) {
     return 0;
   }
 
-  return Math.max(0, Math.min(100, (bufferedEnd / duration) * 100));
+  const startSeconds = wrapper?.dataset?.pongFaceSwapActive === 'true'
+    ? Math.max(0, Number(video.__pongSwapOriginal?.startSeconds || 0))
+    : 0;
+  return Math.max(0, Math.min(100, ((startSeconds + bufferedEnd) / duration) * 100));
 }
 
 function updateVideoBufferedProgressBar(video) {
@@ -5054,7 +7088,7 @@ function refreshForegroundVideoPriority(video, force = false) {
 function scheduleForegroundNoLoadRetry(video) {
   if (!video || !document.body.contains(video)) return;
   const wrapper = video.closest('.video-wrapper');
-  if (!wrapper) return;
+  if (!wrapper || isPongFaceSwapManagedMedia(wrapper, video)) return;
   const retriesAtSchedule = Number(video.dataset.foregroundNoLoadRetries || 0);
   const baseRetryDelay = pongLocal2FastPlaybackActive() ? 2200 : VIDEO_FOREGROUND_NO_LOAD_RETRY_MS;
   // Three retries used to be a terminal state. Keep recovering the active
@@ -5071,13 +7105,31 @@ function scheduleForegroundNoLoadRetry(video) {
       video.dataset.foregroundLoadWatch !== token ||
       foregroundPriorityVideo !== video ||
       !wrapper.classList.contains('deck-active') ||
-      !document.body.contains(video)
+      !document.body.contains(video) ||
+      isPongFaceSwapManagedMedia(wrapper, video)
     ) return;
 
     // Do not restart a slow but usable request. This watchdog is only for a
     // completely empty active card: no metadata and no buffered media at all.
     if (video.readyState >= 1 || getVideoBufferedAheadSeconds(video) > 0) return;
     const retries = Number(video.dataset.foregroundNoLoadRetries || 0);
+
+    // A dead first URL must not pin a large, already-playable album behind a
+    // permanent 0% card. After two clean foreground attempts, defer this card
+    // (do not delete it) and promote the best ready unseen video immediately.
+    if (retries >= 2 && !hasVideoDuration(video) && DECK_MODE_ENABLED) {
+      const currentIndex = getDeckIndex(wrapper);
+      const nextIndex = getNextDeckIndex();
+      const nextWrapper = nextIndex == null ? null : getDeckWrapper(nextIndex);
+      if (nextWrapper && isWrapperReady(nextWrapper)) {
+        delete wrapper.dataset.playIntent;
+        delete wrapper.dataset.playIntentAt;
+        delete wrapper.dataset.userAudioIntent;
+        moveDeckIndexToBack(currentIndex);
+        setDeckActiveIndex(nextIndex, 'ready', { pushHistory: false });
+        return;
+      }
+    }
 
     video.dataset.foregroundNoLoadRetries = String(retries + 1);
     video.dataset.lastNetworkAttemptAt = String(Date.now());
@@ -5101,7 +7153,11 @@ function scheduleForegroundNoLoadRetry(video) {
 function scheduleForegroundPlaybackStallRecovery(video) {
   if (!video || !document.body.contains(video)) return;
   const wrapper = video.closest('.video-wrapper');
-  if (!wrapper || !wrapper.classList.contains('deck-active')) return;
+  if (
+    !wrapper ||
+    !wrapper.classList.contains('deck-active') ||
+    isPongFaceSwapManagedMedia(wrapper, video)
+  ) return;
   const token = `${Date.now()}-${Math.random()}`;
   const startedTime = Math.max(0, Number(video.currentTime || 0));
   video.dataset.foregroundStallWatch = token;
@@ -5111,7 +7167,8 @@ function scheduleForegroundPlaybackStallRecovery(video) {
       foregroundPriorityVideo !== video ||
       !wrapper.classList.contains('deck-active') ||
       !document.body.contains(video) ||
-      video.ended
+      video.ended ||
+      isPongFaceSwapManagedMedia(wrapper, video)
     ) return;
     const wantsPlayback = wrapper.dataset.playIntent === 'true' || !video.paused;
     const advanced = Math.max(0, Number(video.currentTime || 0)) > startedTime + 0.15;
@@ -5142,6 +7199,7 @@ function scheduleForegroundPlaybackStallRecovery(video) {
       if (
         foregroundPriorityVideo === video &&
         wrapper.classList.contains('deck-active') &&
+        !isPongFaceSwapManagedMedia(wrapper, video) &&
         (wrapper.dataset.playIntent === 'true' || !video.paused)
       ) random40PromoteWrapperToServerCache(wrapper, { forceActive: true });
     }).catch(() => {});
@@ -5186,7 +7244,11 @@ function transferForegroundVideoPriority(video) {
 
   const now = Date.now();
   const lastLoadKick = Number(nextVideo.dataset.lastLoadKick || 0);
-  if (nextVideo.networkState === 0 && now - lastLoadKick > 500) {
+  if (
+    !isPongFaceSwapManagedMedia(nextWrapper, nextVideo) &&
+    nextVideo.networkState === 0 &&
+    now - lastLoadKick > 500
+  ) {
     nextVideo.dataset.lastLoadKick = String(now);
     try { nextVideo.load(); } catch (_) {}
   }
@@ -5197,6 +7259,10 @@ function transferForegroundVideoPriority(video) {
 
 function suspendDeckVideoNetwork(wrapper, video) {
   if (!DECK_MODE_ENABLED || !wrapper || !video || wrapper.dataset.networkSuspended === 'true') return false;
+  // A face-swap preloader is an intentional warm reader for a future card, and
+  // an active swap owns its long-lived stream. The normal deck network budget
+  // must never detach either reader.
+  if (isPongFaceSwapManagedMedia(wrapper, video)) return false;
 
   const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
   const preferredUrl = String(random40PlaybackUrl(originalUrl) || '');
@@ -5221,6 +7287,7 @@ function suspendDeckVideoNetwork(wrapper, video) {
 
 function restoreDeckVideoNetwork(wrapper, video) {
   if (!wrapper || !video || wrapper.dataset.networkSuspended !== 'true') return false;
+  if (isPongFaceSwapManagedMedia(wrapper, video)) return false;
 
   const originalUrl = String(wrapper.dataset.originalVideoUrl || '');
   const preferredUrl = String(
@@ -5327,6 +7394,15 @@ function tuneVideoPreloadAround(activeWrapper) {
   wrappers.forEach(w => {
     const v = w.querySelector('video');
     if (!v) return;
+
+    // Face-swap media owns a single long-lived streaming request. The deck's
+    // generic preload tuner must never suspend, restore, or call load() on it:
+    // any of those operations discards the held response and reconnects the
+    // browser just before the prefetched card is adopted.
+    if (isPongFaceSwapManagedMedia(w, v)) {
+      if (v.preload !== 'auto') v.preload = 'auto';
+      return;
+    }
 
     const shouldWarm = DECK_MODE_ENABLED
       ? warmIndexes.has(getDeckIndex(w))
@@ -5569,6 +7645,19 @@ function getVideoRetryDelay(attempts) {
   return VIDEO_LOAD_RETRY_DELAYS_MS[Math.min(attempts, VIDEO_LOAD_RETRY_DELAYS_MS.length - 1)];
 }
 
+function isPongFaceSwapManagedMedia(wrapper, video) {
+  const source = String(video?.currentSrc || video?.src || '');
+  return Boolean(
+    wrapper?.dataset?.pongFaceSwapPreloadSessionId ||
+    wrapper?.dataset?.pongFaceSwapSessionId ||
+    wrapper?.dataset?.pongFaceSwapActive === 'true' ||
+    wrapper?.dataset?.pongFaceSwapBusy === 'true' ||
+    video?.__pongSwapPreloadedOriginal ||
+    video?.__pongSwapOriginal ||
+    /\/pong-swap\/sessions\/[^/]+\/stream(?:[?#]|$)/i.test(source)
+  );
+}
+
 function videoNetworkRequestIsMakingProgress(video, wrapper, now = Date.now()) {
   if (!video || video.networkState !== 2) return false;
   const progressAt = Number(video.dataset.lastNetworkProgressAt || 0);
@@ -5599,7 +7688,12 @@ function videoNetworkRequestIsMakingProgress(video, wrapper, now = Date.now()) {
 function rotateVideoRetrySource(wrapper, video) {
   const originalUrl = String(wrapper?.dataset?.originalVideoUrl || '');
   const currentUrl = String(video?.currentSrc || video?.src || '');
-  if (!originalUrl || !video || wrapper?.dataset?.sessionSkipped === 'true') return false;
+  if (
+    !originalUrl ||
+    !video ||
+    wrapper?.dataset?.sessionSkipped === 'true' ||
+    isPongFaceSwapManagedMedia(wrapper, video)
+  ) return false;
 
   if (random40IsPcGrowingCachePlaybackUrl(currentUrl)) {
     const gatewayUrl = random40PcPlaybackGatewayUrl(originalUrl);
@@ -5695,6 +7789,7 @@ function retryVisibleBatchVideoLoads(token) {
 
     if (
       !video ||
+      isPongFaceSwapManagedMedia(wrapper, video) ||
       wrapper.dataset.networkSuspended === 'true' ||
       wrapper.dataset.autoRetryDone === 'true' ||
       wrapper.dataset.sessionSkipped === 'true'
@@ -5779,6 +7874,7 @@ function warmCurrentBatchVideos() {
       if (
         !video ||
         !document.body.contains(video) ||
+        isPongFaceSwapManagedMedia(wrapper, video) ||
         wrapper.dataset.networkSuspended === 'true' ||
         isVideoReadyForInitialPlayback(video)
       ) return;
@@ -5870,6 +7966,13 @@ function getNextDeckIndex() {
     const wrapper = getDeckWrapper(index);
     return wrapper && !isWrapperViewed(wrapper);
   });
+  // Persistent face swap prefetch is scheduled in this same logical order.
+  // Never let a later card that happened to finish decoding first jump over
+  // the immediately following video: on Android that made one upward swipe
+  // move 0 -> 2 and left video 1 stranded behind it. If the first card is
+  // still finishing its one-second lead, activate that exact card and let the
+  // normal prepare/adopt path complete instead of changing playback order.
+  if (pongFaceSwapState.enabled) return unseen[0] ?? null;
   unseen.sort((left, right) => {
     const leftWrapper = getDeckWrapper(left);
     const rightWrapper = getDeckWrapper(right);
@@ -5935,6 +8038,8 @@ function isDeckCurrentBusy() {
   const video = wrapper && wrapper.querySelector('video');
 
   if (!wrapper) return false;
+  if (wrapper.dataset.pongFaceSwapBusy === 'true') return true;
+  if (pongFaceSwapState.priming && wrapper === pongFaceSwapCurrentWrapper()) return true;
   if (isWrapperViewed(wrapper)) return true;
   if (wrapper.dataset.playIntent === 'true') return true;
   if (video && !video.paused) return true;
@@ -5986,6 +8091,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   if (!target || targetIndex < 0) return false;
   if (oldIndex === targetIndex && target.classList.contains('deck-active')) {
     transferForegroundVideoPriority(target.querySelector('video'));
+    maybeApplyPersistentPongFaceSwap(target);
     updateBatchReadyCounter();
     updateViewedRemainingCounter();
     schedulePongAutoScroll();
@@ -5996,6 +8102,10 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
 
   if (oldWrapper && oldWrapper !== target && options.pushHistory !== false) {
     pushDeckHistoryIndex(deckHistory, oldIndex);
+    if (oldWrapper.dataset.pongFaceSwapActive === 'true') {
+      if (pongFaceSwapState.enabled) stagePongFaceSwapOutgoingWrapper(oldWrapper);
+      else void stopPongFaceSwapForWrapper(oldWrapper, { restore: true });
+    }
     const oldVideo = oldWrapper.querySelector('video');
     if (oldVideo && !oldVideo.paused) oldVideo.pause();
     oldWrapper.classList.remove('video-playing');
@@ -6034,6 +8144,8 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
   ensureVideoCounter().textContent = getDeckLogicalCounterText(currentVideoIndex);
   const video = target.querySelector('video');
   transferForegroundVideoPriority(video);
+  updatePongFaceSwapButton();
+  maybeApplyPersistentPongFaceSwap(target);
   window.PongUpdateSkipVideoButton?.();
   if (DECK_MODE_ENABLED && !visibleBatchRetryTimer) startVisibleBatchAutoRetry();
   updateBatchReadyCounter();
@@ -6041,7 +8153,7 @@ function setDeckActiveIndex(index, direction = 'none', options = {}) {
 
   if (oldIndex !== targetIndex) scheduleSessionSave(450);
 
-  if (window.autoplayEnabled && isWrapperReady(target) && video && video.paused) {
+  if (!pongFaceSwapState.enabled && window.autoplayEnabled && isWrapperReady(target) && video && video.paused) {
     playVideoCleanly(video);
   }
 
@@ -6666,8 +8778,16 @@ function createVideoElements() {
       Boolean(videoMetadata[index]?.random40Mode);
     if (isRandom40Card) wrapper.dataset.random40Card = 'true';
     const shouldAttachInitially = !DECK_MODE_ENABLED || index === initialDeckIndex;
+    const canonicalFaceSwapSource = pongCanonicalMediaUrlForGlobalIndex(globalIndex, url);
+    const faceSwapPlaybackSource = random40PlaybackOverrideFor(
+      canonicalFaceSwapSource || url,
+      videoMetadata[index] || {}
+    ) || random40PlaybackUrl(url || canonicalFaceSwapSource);
+    const claimedFaceSwap = shouldAttachInitially
+      ? claimPongFaceSwapAttachedVideo(faceSwapPlaybackSource, wrapper)
+      : null;
     const claimedPreload = shouldAttachInitially ? random40ClaimReadyPreloadVideo(globalIndex, url) : null;
-    const video = claimedPreload?.video || document.createElement('video');
+    const video = claimedFaceSwap?.video || claimedPreload?.video || document.createElement('video');
     video.style.cssText = '';
     video.className = 'video-player';
     video.preload = shouldAttachInitially
@@ -6676,7 +8796,7 @@ function createVideoElements() {
     if (shouldAttachInitially && !video.dataset.lastNetworkAttemptAt) {
       video.dataset.lastNetworkAttemptAt = String(Date.now());
     }
-    if (shouldAttachInitially && (!claimedPreload || video.error || !video.currentSrc)) {
+    if (shouldAttachInitially && !claimedFaceSwap && (!claimedPreload || video.error || !video.currentSrc)) {
       // Route the visible Random40 card through the PC's priority-zero growing
       // stream instead of letting an earlier direct-CDN preload bypass it.
       const playbackUrl = isRandom40Card
@@ -6686,7 +8806,7 @@ function createVideoElements() {
       // A proxy attempt has its own direct fallback. The PC file-cache route is
       // separate: if it fails, the normal proxy should still get one attempt.
       if (random40IsPcProxyPlaybackUrl(playbackUrl)) wrapper.dataset.gatewayFallbackTried = 'true';
-    } else if (shouldAttachInitially && isRandom40Card) {
+    } else if (shouldAttachInitially && !claimedFaceSwap && isRandom40Card) {
       const playbackUrl = random40ForegroundPlaybackUrl(url);
       if (playbackUrl && String(video.currentSrc || video.src || '') !== playbackUrl) setPongVideoSource(video, playbackUrl);
     } else if (!shouldAttachInitially) {
@@ -6696,7 +8816,8 @@ function createVideoElements() {
         : random40PlaybackUrl(url);
     }
     video.playsInline = true; video.controls = false; video.autoplay = false;
-    video.muted = window.pongUserWantsAudio !== true; video.volume = window.pongUserWantsAudio === true ? 1.0 : 0;
+    video.muted = claimedFaceSwap ? true : window.pongUserWantsAudio !== true;
+    video.volume = claimedFaceSwap ? 0 : window.pongUserWantsAudio === true ? 1.0 : 0;
     video.setAttribute('playsinline',''); video.setAttribute('webkit-playsinline',''); video.setAttribute('poster','data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
     video.style.transform = 'translateZ(0)'; video.style.willChange = 'transform'; video.style.background = '#000';
 
@@ -6767,39 +8888,78 @@ function createVideoElements() {
       flashTimer = setTimeout(() => { leftFlash.classList.remove('show'); rightFlash.classList.remove('show'); }, 500);
     }
 
-    function scrubTo(clientX) {
+    let pendingProgressSeek = null;
+    let suppressProgressClick = false;
+    function previewScrubTo(clientX) {
       const rect = progressBar.getBoundingClientRect();
       const pos = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-      if (video.duration) video.currentTime = pos * video.duration;
+      const duration = pongFaceSwapFullDuration(wrapper, video);
+      const target = duration > 0 ? pos * duration : 0;
+      pendingProgressSeek = target;
+      // Preview seeks are safe only on an ordinary finite media resource. A
+      // busy, prepared, or active swap reader owns a short growing fMP4; direct
+      // currentTime writes can clamp to that fragment and rebase its timeline.
+      // The pointer/touch release below commits through seekPongVideoTo().
+      if (!isPongFaceSwapManagedMedia(wrapper, video) && duration > 0) video.currentTime = target;
       progressFill.style.width = `${pos * 100}%`;
+      return target;
     }
 
     progressBar.addEventListener('mousedown', e => {
       e.stopPropagation(); e.preventDefault();
+      suppressProgressClick = true;
       scrubberHandle.style.display = 'block';
       progressFill.classList.add('active-scrubbing');
-      scrubTo(e.clientX);
-      const onMove = ev => { ev.preventDefault(); scrubTo(ev.clientX); };
-      const onUp = () => { document.removeEventListener('mousemove',onMove); progressFill.classList.remove('active-scrubbing'); setTimeout(()=>{ if(!progressBar.matches(':hover')) scrubberHandle.style.display=''; },1500); };
+      previewScrubTo(e.clientX);
+      const onMove = ev => { ev.preventDefault(); previewScrubTo(ev.clientX); };
+      const onUp = () => {
+        document.removeEventListener('mousemove',onMove);
+        progressFill.classList.remove('active-scrubbing');
+        const target = pendingProgressSeek;
+        pendingProgressSeek = null;
+        if (Number.isFinite(target)) void seekPongVideoTo(wrapper, video, target);
+        setTimeout(() => { suppressProgressClick = false; }, 0);
+        setTimeout(()=>{ if(!progressBar.matches(':hover')) scrubberHandle.style.display=''; },1500);
+      };
       document.addEventListener('mousemove',onMove);
       document.addEventListener('mouseup',onUp,{once:true});
     });
 
-    progressBar.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); scrubberHandle.style.display='block'; scrubTo(e.clientX); setTimeout(()=>{ if(!progressBar.matches(':hover')) scrubberHandle.style.display=''; },1500); });
+    progressBar.addEventListener('click', e => {
+      e.stopPropagation(); e.preventDefault();
+      if (suppressProgressClick) return;
+      scrubberHandle.style.display='block';
+      const target = previewScrubTo(e.clientX);
+      pendingProgressSeek = null;
+      void seekPongVideoTo(wrapper, video, target);
+      setTimeout(()=>{ if(!progressBar.matches(':hover')) scrubberHandle.style.display=''; },1500);
+    });
     progressBar.addEventListener('mouseenter', () => { scrubberHandle.style.display='block'; });
     progressBar.addEventListener('mouseleave', () => { if(!progressFill.classList.contains('active-scrubbing')) scrubberHandle.style.display=''; });
 
     progressBar.addEventListener('touchstart', e => {
       e.stopPropagation(); e.preventDefault();
+      suppressProgressClick = true;
       if (document.activeElement) document.activeElement.blur();
       progressFill.classList.add('active-scrubbing');
       scrubberHandle.style.display = 'block';
       document.body.classList.add('scrubbing-active');
-      scrubTo(e.touches[0].clientX);
-      const onMove = ev => { ev.preventDefault(); ev.stopPropagation(); scrubTo(ev.touches[0].clientX); };
-      const onEnd = () => { document.removeEventListener('touchmove',onMove); progressFill.classList.remove('active-scrubbing'); document.body.classList.remove('scrubbing-active'); setTimeout(()=>{ scrubberHandle.style.display=''; },1500); };
+      previewScrubTo(e.touches[0].clientX);
+      const onMove = ev => { ev.preventDefault(); ev.stopPropagation(); previewScrubTo(ev.touches[0].clientX); };
+      const onEnd = event => {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        document.removeEventListener('touchmove',onMove);
+        progressFill.classList.remove('active-scrubbing');
+        document.body.classList.remove('scrubbing-active');
+        const target = pendingProgressSeek;
+        pendingProgressSeek = null;
+        if (Number.isFinite(target)) void seekPongVideoTo(wrapper, video, target);
+        setTimeout(() => { suppressProgressClick = false; }, 700);
+        setTimeout(()=>{ scrubberHandle.style.display=''; },1500);
+      };
       document.addEventListener('touchmove',onMove,{passive:false});
-      document.addEventListener('touchend',onEnd,{once:true});
+      document.addEventListener('touchend',onEnd,{once:true,passive:false});
     },{passive:false});
 
     const tapArea = document.createElement('div');
@@ -6810,7 +8970,7 @@ function createVideoElements() {
 
     tapArea.addEventListener('touchstart', e => {
       if (e.target.closest('.video-progress-container') || e.target.tagName==='BUTTON') return;
-      startX = e.touches[0].clientX; startY = e.touches[0].clientY; startTime = video.currentTime; isDragging = false; isDeckSwipe = false;
+      startX = e.touches[0].clientX; startY = e.touches[0].clientY; startTime = pongFaceSwapAbsoluteTime(wrapper, video); isDragging = false; isDeckSwipe = false;
     },{passive:true});
 
     tapArea.addEventListener('touchmove', e => {
@@ -6830,18 +8990,19 @@ function createVideoElements() {
       if (!isDeckSwipe && absX > 8 && absX > absY * 1.05) {
         isDragging = true;
         progressContainer.style.opacity = '1';
-        const newTime = getAdaptiveScrubTime(startTime, dx, video.duration || 0, wrapper.offsetWidth);
+        const fullDuration = pongFaceSwapFullDuration(wrapper, video);
+        const newTime = getAdaptiveScrubTime(startTime, dx, fullDuration, wrapper.offsetWidth);
         wrapper.dataset.pendingTime = newTime;
-        if (video.duration && !isNaN(newTime)) {
+        if (fullDuration && !isNaN(newTime)) {
           let pf = wrapper.querySelector('.preview-fill');
           if (!pf) { pf=document.createElement('div'); pf.className='preview-fill'; progressBar.appendChild(pf); }
-          pf.style.width = `${(newTime/video.duration)*100}%`;
+          pf.style.width = `${(newTime/fullDuration)*100}%`;
           scrubberHandle.style.display = 'block';
         }
         let ti = wrapper.querySelector('.time-indicator');
         if (!ti) { ti=document.createElement('div'); ti.className='time-indicator'; wrapper.appendChild(ti); }
         ti.style.opacity='1'; ti.style.display='flex';
-        ti.textContent = `${dx>0?'▶️':'◀️'} ${formatTime(newTime)} / ${formatTime(video.duration)}`;
+        ti.textContent = `${dx>0?'▶️':'◀️'} ${formatTime(newTime)} / ${formatTime(fullDuration)}`;
         e.preventDefault();
       }
     },{passive:false});
@@ -6865,7 +9026,12 @@ function createVideoElements() {
       if (isDragging) {
         isDragging = false;
         const pt = parseFloat(wrapper.dataset.pendingTime);
-        if (!isNaN(pt) && pt>=0) { video.currentTime=pt; if(video.duration) progressFill.style.width=`${(pt/video.duration)*100}%`; delete wrapper.dataset.pendingTime; }
+        if (!isNaN(pt) && pt>=0) {
+          const fullDuration = pongFaceSwapFullDuration(wrapper, video);
+          void seekPongVideoTo(wrapper, video, pt);
+          if(fullDuration) progressFill.style.width=`${(pt/fullDuration)*100}%`;
+          delete wrapper.dataset.pendingTime;
+        }
         const pf=wrapper.querySelector('.preview-fill'); if(pf) pf.remove();
         const ti=wrapper.querySelector('.time-indicator'); if(ti){ti.classList.add('fade-out');setTimeout(()=>{ti.style.display='none';},1000);}
         setTimeout(()=>{scrubberHandle.style.display='';},1500);
@@ -6880,10 +9046,11 @@ function createVideoElements() {
 
       if (isDoubleTap) {
         if (tapX < wrapper.offsetWidth * 0.4) {
-          video.currentTime = Math.max(0, video.currentTime - 10);
+          void seekPongVideoTo(wrapper, video, Math.max(0, pongFaceSwapAbsoluteTime(wrapper, video) - 10));
           showFlash(leftFlash);
         } else if (tapX > wrapper.offsetWidth * 0.6) {
-          video.currentTime = Math.min(video.duration || 0, video.currentTime + 10);
+          const fullDuration = pongFaceSwapFullDuration(wrapper, video);
+          void seekPongVideoTo(wrapper, video, Math.min(fullDuration || Infinity, pongFaceSwapAbsoluteTime(wrapper, video) + 10));
           showFlash(rightFlash);
         }
         lastTapTime = 0;
@@ -6938,6 +9105,10 @@ function createVideoElements() {
       }
     });
     video.addEventListener('waiting', () => {
+      // A held fMP4 reader naturally waits at the end of its short lead while
+      // the activated producer appends the next fragment. Treating that seam as
+      // an origin stall would replace the owned stream and reset its timeline.
+      if (isPongFaceSwapManagedMedia(wrapper, video)) return;
       random40ProtectLocal2FastPlayback(true);
       refreshForegroundVideoPriority(video, true);
       if (wrapper.classList.contains('deck-active')) {
@@ -6952,6 +9123,7 @@ function createVideoElements() {
       scheduleForegroundPlaybackStallRecovery(video);
     });
     video.addEventListener('stalled', () => {
+      if (isPongFaceSwapManagedMedia(wrapper, video)) return;
       if (!wrapper.classList.contains('deck-active')) return;
       wrapper.dataset.serverCacheRecoveryRequested = 'true';
       random40ProtectLocal2FastPlayback(true);
@@ -6992,7 +9164,7 @@ function createVideoElements() {
       random40PumpPreloadQueue(500);
     });
     video.addEventListener('loadedmetadata', () => {
-      restoreVideoPlaybackPosition(video, wrapper);
+      if (wrapper.dataset.pongFaceSwapActive !== 'true') restoreVideoPlaybackPosition(video, wrapper);
       updateVideoReadyLoader(video);
     });
     video.addEventListener('seeked', () => {
@@ -7007,10 +9179,11 @@ function createVideoElements() {
     video.addEventListener('timeupdate', () => {
       if (!isPongActiveVideo(video) && !video.paused) { silencePongVideo(video); return; }
       pongPlaybackBenchmarkOnTimeUpdate(video, wrapper);
-      if(video.duration) progressFill.style.width=`${(video.currentTime/video.duration)*100}%`;
+      const swapProgress = pongFaceSwapProgressState(wrapper, video);
+      if(swapProgress.duration) progressFill.style.width=`${(swapProgress.currentTime/swapProgress.duration)*100}%`;
       updateVideoBufferedProgressBar(video);
-      const viewThreshold = video.duration ? 0.01 : 0.75;
-      if (!video.paused && video.currentTime >= viewThreshold) markVideoViewed(wrapper);
+      const viewThreshold = swapProgress.duration ? 0.01 : 0.75;
+      if (!video.paused && swapProgress.currentTime >= viewThreshold) markVideoViewed(wrapper);
       refreshForegroundVideoPriority(video);
       const now = Date.now();
       if (now - Number(video.dataset.lastPlaybackPositionCaptureAt || 0) >= 750) {
@@ -7020,8 +9193,9 @@ function createVideoElements() {
     });
     video.addEventListener('loadedmetadata', () => {
       const metadataIndex = Number(wrapper.dataset.index || index);
-      durationText.textContent=formatTime(video.duration);
-      videoMetadata[metadataIndex]={...videoMetadata[metadataIndex],duration:video.duration||0};
+      const displayDuration = pongFaceSwapFullDuration(wrapper, video);
+      durationText.textContent=formatTime(displayDuration);
+      videoMetadata[metadataIndex]={...videoMetadata[metadataIndex],duration:displayDuration||0};
       updateVideoBufferedProgressBar(video);
       updateVideoReadyLoader(video);
     });
@@ -7036,6 +9210,23 @@ function createVideoElements() {
       }
     });
     video.addEventListener('error', () => {
+      if (isPongFaceSwapManagedMedia(wrapper, video)) {
+        if (wrapper.dataset.pongFaceSwapActive === 'true' || wrapper.dataset.pongFaceSwapBusy === 'true') {
+          // Keep ownership visible to later listeners handling this same error.
+          // In particular, pong-sync's signed-URL repair listener must observe
+          // the swap marker and stand down before we restore the original.
+          queueMicrotask(() => {
+            if (
+              wrapper.dataset.pongFaceSwapActive === 'true' ||
+              wrapper.dataset.pongFaceSwapBusy === 'true'
+            ) {
+              void stopPongFaceSwapForWrapper(wrapper, { restore: true });
+              showSortingIndicator('Face swap stream failed; original restored');
+            }
+          });
+        }
+        return;
+      }
       if (wrapper.dataset.networkSuspended === 'true') return;
       loadingIndicator.style.display='none';
       updateVideoReadyLoader(video);
@@ -7115,7 +9306,11 @@ function createVideoElements() {
           video.dataset.lastNetworkAttemptAt = String(Date.now());
           random40RememberPlaybackOverride(originalUrl, pcRetryUrl);
           setTimeout(() => {
-            if (!document.body.contains(video) || wrapper.dataset.networkSuspended === 'true') return;
+            if (
+              !document.body.contains(video) ||
+              wrapper.dataset.networkSuspended === 'true' ||
+              isPongFaceSwapManagedMedia(wrapper, video)
+            ) return;
             video.src = pcRetryUrl;
             try { video.load(); } catch (_) {}
           }, 450);
@@ -7144,6 +9339,10 @@ function createVideoElements() {
     wrapper.appendChild(rightFlash);
     wrapper.appendChild(tapArea);
     videoContainer.appendChild(wrapper);
+    // Paperclip rebuilds the DOM for the next artist. Rebind its already-built
+    // server swap sessions before deck activation; otherwise the visibility
+    // watcher can start a redundant fresh swap during the 420 ms scheduler gap.
+    if (pongFaceSwapState.enabled) attachExistingPongFaceSwapPrefetch(wrapper);
     updateVideoReadyLoader(video);
 
     if (index < videoUrls.length-1) {
@@ -7157,6 +9356,7 @@ function createVideoElements() {
   setupVisibilityObserver();
   warmCurrentBatchVideos();
   startVisibleBatchAutoRetry();
+  if (pongFaceSwapState.enabled) schedulePongFaceSwapPrefetch(420);
   if (isPongServerCachedPlaybackActive()) {
     [0, 500, 1500].forEach(delay => setTimeout(random40StartServerVideoCacheTimers, delay));
   }
@@ -7212,9 +9412,18 @@ function setupVisibilityObserver() {
     transferForegroundVideoPriority(mostVisibleVideo);
     const nextVideoIndex = parseInt(mostVisible.dataset.index || 0);
     const indexChanged = nextVideoIndex !== currentVideoIndex;
+    if (indexChanged) {
+      const previousWrapper = document.querySelector(`.video-wrapper[data-index="${currentVideoIndex}"]`);
+      if (previousWrapper?.dataset?.pongFaceSwapActive === 'true') {
+        if (pongFaceSwapState.enabled) stagePongFaceSwapOutgoingWrapper(previousWrapper);
+        else void stopPongFaceSwapForWrapper(previousWrapper, { restore: true });
+      }
+    }
     currentVideoIndex = nextVideoIndex;
     counter.textContent = getVideoCounterText(currentVideoIndex);
     window.PongUpdateSkipVideoButton?.();
+    updatePongFaceSwapButton();
+    maybeApplyPersistentPongFaceSwap(mostVisible);
 
     if (indexChanged) scheduleSessionSave(450);
 
@@ -7226,7 +9435,7 @@ function setupVisibilityObserver() {
       });
     }
 
-    if (window.autoplayEnabled && highestVis > 0.85 && mostVisibleVideo && mostVisibleVideo.paused) {
+    if (!pongFaceSwapState.enabled && window.autoplayEnabled && highestVis > 0.85 && mostVisibleVideo && mostVisibleVideo.paused) {
       playVideoCleanly(mostVisibleVideo);
     }
   }
@@ -7334,6 +9543,7 @@ function markVideoPlayIntent(wrapper, video) {
   if (!wrapper) return;
 
   wrapper.dataset.playIntent = 'true';
+  wrapper.dataset.playIntentAt = String(Date.now());
   wrapper.dataset.userAudioIntent = 'true';
   if (video?.muted && isVideoReadyForInitialPlayback(video)) {
     rememberPlayerAudioPreference(true);
@@ -7344,6 +9554,23 @@ function markVideoPlayIntent(wrapper, video) {
       audioBtn.textContent = '🔊';
       audioBtn.setAttribute('data-muted', 'false');
     }
+  }
+}
+
+function restartPongVideoFromBeginning(wrapper, video) {
+  if (!wrapper || !video || !video.ended) return 'not-ended';
+  if (
+    wrapper.dataset.pongFaceSwapActive === 'true' &&
+    isPongFaceSwapManagedMedia(wrapper, video)
+  ) {
+    void seekPongVideoTo(wrapper, video, 0);
+    return 'swap';
+  }
+  try {
+    video.currentTime = 0;
+    return 'native';
+  } catch (_) {
+    return 'failed';
   }
 }
 
@@ -7362,6 +9589,7 @@ function toggleVideoPlaybackFromIntent(wrapper, video) {
       return;
     }
     wrapper.dataset.playIntent = 'false';
+    delete wrapper.dataset.playIntentAt;
     wrapper.dataset.userPaused = 'true';
     delete wrapper.dataset.userAudioIntent;
     video.pause();
@@ -7370,6 +9598,7 @@ function toggleVideoPlaybackFromIntent(wrapper, video) {
 
   if (wrapper.dataset.playIntent === 'true' && !isVideoReadyForInitialPlayback(video)) {
     wrapper.dataset.playIntent = 'false';
+    delete wrapper.dataset.playIntentAt;
     wrapper.dataset.userPaused = 'true';
     delete wrapper.dataset.userAudioIntent;
     wrapper.classList.remove('video-playing');
@@ -7378,11 +9607,13 @@ function toggleVideoPlaybackFromIntent(wrapper, video) {
     return;
   }
 
-  if (video.ended) {
-    try { video.currentTime = 0; } catch (_) {}
-  }
+  const restartMode = restartPongVideoFromBeginning(wrapper, video);
   delete wrapper.dataset.userPaused;
   markVideoPlayIntent(wrapper, video);
+  // seekPongVideoTo prepares a replacement stream and its ready callback
+  // observes playIntent. Calling play() on the ended growing stream here would
+  // let WebView rewind that old fragment before the replacement is adopted.
+  if (restartMode === 'swap') return;
   if (isVideoReadyForInitialPlayback(video)) playVideoCleanly(video);
   else {
     prepareVideoForPlayback(video);
@@ -8715,6 +10946,9 @@ function isPasteEventRetiredForPaperclip(event, index = -1) {
 
 function isPasteEventViewableForPaperclip(event) {
   if (!event || !Array.isArray(allVideoUrls) || !allVideoUrls.length) return false;
+  // TikTok is always a side deck of its paired artist. It must never consume
+  // its own Paperclip position, even when the TikTok result arrives first.
+  if (isSimpCityTikTokEvent(event)) return false;
   if (event.paperclipHidden === true) return false;
   const start = Number(event.startIndex);
   const count = Number(event.count);
@@ -8943,8 +11177,7 @@ function shouldNextBatchAdvanceSavedArtist() {
 function isSimpCityTikTokEvent(event) {
   return Boolean(
     event &&
-    String(event.simpCityMediaKind || '').toLowerCase() === 'tiktok' &&
-    String(event.simpCityPairId || '')
+    String(event.simpCityMediaKind || '').toLowerCase() === 'tiktok'
   );
 }
 
@@ -9085,7 +11318,9 @@ function prewarmRecallPasteEventForTransition(event, resumeOffset = 0) {
     currentUrls: activeUrl ? [activeUrl, ...entryUrls.filter(url => url !== activeUrl)] : entryUrls,
     entryUrls,
     playbackProfile: isSimpCityTikTokEvent(event) ? 'tiktok' : 'bunkr',
-    urgent: false,
+    // The selected artist is foreground intent. Promote its five-card preview
+    // above speculative backlog downloads so swipe playback wins immediately.
+    urgent: true,
     authoritative: false
   });
 }
@@ -9145,22 +11380,34 @@ function navigateToPreviousPasteEvent() {
 
 window.PongNavigateToPreviousPasteEvent = navigateToPreviousPasteEvent;
 
+function resolveNextPaperclipEventIndex(excludedIdentity = getCurrentPaperclipArtistIdentity()) {
+  if (!Array.isArray(pasteEvents) || !pasteEvents.length) return -1;
+  if (paperclipHistoryPosition >= 0 && paperclipHistoryPosition < paperclipHistory.length - 1) {
+    const historyIndex = Number(paperclipHistory[paperclipHistoryPosition + 1]);
+    return Number.isInteger(historyIndex) ? historyIndex : -1;
+  }
+  const eromeBundleMode = isEromePasteEvent(pasteEvents[currentPasteIndex]) || window.PongLoadedSavedMode === 'erome';
+  const pairedIndex = getNextSimpCityPairEventIndex();
+  if (eromeBundleMode) {
+    if (pairedIndex >= 0) return pairedIndex;
+    return document.documentElement.dataset.pongSimpCityActive === 'true'
+      ? getFirstActiveEromePasteEventIndex(excludedIdentity)
+      : getNextActivePasteEventIndex(excludedIdentity);
+  }
+  const nextLoadedIndex = getBestLoadedPasteEventIndex(excludedIdentity);
+  if (nextLoadedIndex >= 0) return nextLoadedIndex;
+  const nextRegularIndex = getNextActivePasteEventIndex(excludedIdentity);
+  return nextRegularIndex >= 0
+    ? nextRegularIndex
+    : getFirstActivePasteEventIndex(excludedIdentity);
+}
+
 function canNavigateToNextPasteEvent() {
   if (!Array.isArray(pasteEvents) || !pasteEvents.length || !Array.isArray(allVideoUrls) || !allVideoUrls.length) {
     return false;
   }
-  if (paperclipHistoryPosition >= 0 && paperclipHistoryPosition < paperclipHistory.length - 1) {
-    return true;
-  }
-
   const excludedIdentity = getCurrentPaperclipArtistIdentity();
-  const eromeBundleMode = isEromePasteEvent(pasteEvents[currentPasteIndex]) || window.PongLoadedSavedMode === 'erome';
-  const pairedIndex = getNextSimpCityPairEventIndex();
-  return eromeBundleMode
-    ? pairedIndex >= 0 || (document.documentElement.dataset.pongSimpCityActive === 'true'
-      ? getFirstActiveEromePasteEventIndex(excludedIdentity) >= 0
-      : getRandomActiveEromePasteEventIndex(excludedIdentity) >= 0)
-    : getFirstActivePasteEventIndex(excludedIdentity) >= 0;
+  return resolveNextPaperclipEventIndex(excludedIdentity) >= 0;
 }
 
 function navigateToNextPasteEvent(){
@@ -9174,33 +11421,10 @@ function navigateToNextPasteEvent(){
     recordPaperclipHistoryIndex(currentPasteIndex);
   }
 
-  // After Previous, Paperclip moves forward through the exact viewed history.
-  // Once caught up, it resumes selecting artists that have never been visited.
-  if (paperclipHistoryPosition >= 0 && paperclipHistoryPosition < paperclipHistory.length - 1) {
-    paperclipHistoryPosition++;
-    displayPasteEventAtIndex(paperclipHistory[paperclipHistoryPosition], { recordHistory: false });
-    return;
-  }
-
   const excludedIdentity = getCurrentPaperclipArtistIdentity();
   const eromeBundleMode = isEromePasteEvent(pasteEvents[currentPasteIndex]) || window.PongLoadedSavedMode === 'erome';
-  const pairedIndex = getNextSimpCityPairEventIndex();
-  const nextActiveIndex = eromeBundleMode
-    ? pairedIndex >= 0
-      ? pairedIndex
-      : document.documentElement.dataset.pongSimpCityActive === 'true'
-        ? getFirstActiveEromePasteEventIndex(excludedIdentity)
-        : getRandomActiveEromePasteEventIndex(excludedIdentity)
-    : (() => {
-        const nextLoadedIndex = getBestLoadedPasteEventIndex(excludedIdentity);
-        const nextRegularIndex = getNextActivePasteEventIndex(excludedIdentity);
-        const nextFallbackIndex = getFirstActivePasteEventIndex(excludedIdentity);
-        return nextLoadedIndex >= 0
-          ? nextLoadedIndex
-          : nextRegularIndex >= 0
-            ? nextRegularIndex
-            : nextFallbackIndex;
-      })();
+  const replayingHistory = paperclipHistoryPosition >= 0 && paperclipHistoryPosition < paperclipHistory.length - 1;
+  const nextActiveIndex = resolveNextPaperclipEventIndex(excludedIdentity);
 
   if (nextActiveIndex < 0) {
     const total = getPaperclipTotalBundleCount();
@@ -9225,7 +11449,7 @@ function navigateToNextPasteEvent(){
 window.PongNavigateToNextPasteEvent = navigateToNextPasteEvent;
 
 function stopRandom40WorkflowForRefresh() {
-  if (random40State && !random40State.done) {
+  if (random40State && !random40State.done && !random40State.stop) {
     random40State.stop = true;
     random40State.done = true;
     random40State.abortController?.abort();
@@ -9557,7 +11781,11 @@ function createGearButton(){
 }
 
 // ─── Load videos ──────────────────────────────────────────────────────────────
-loadVideosButton.addEventListener('click', async ()=>{
+loadVideosButton.addEventListener('click', async event=>{
+  // Explicitly loading a new paste is a new viewing session. Never carry a
+  // selected face into it. Programmatic loads (Paperclip/recall continuation)
+  // keep the user's current session-only selection.
+  if (event?.isTrusted) resetPongFaceSwapForFreshLoad();
   if (pasteParseQueue.length || pasteParsePromises.length) {
     showSortingIndicator('Finishing paste cache...');
     await flushPendingPasteParses();
@@ -10781,14 +13009,25 @@ function albumsFromSavedEromeVideoGroups(groups) {
 }
 
 function rawEromeUrlFromPlayableUrl(rawUrl) {
-  try {
-    const url = new URL(rawUrl, window.location.href);
-    const embedded = url.searchParams.get('u');
+  let current = String(rawUrl || '').trim();
 
-    return embedded || rawUrl;
-  } catch (e) {
-    return rawUrl;
+  // Older saved records may already contain a Worker playback URL. Re-saving
+  // those records through a newer Worker used to create proxy(proxy(video)),
+  // which neither Worker can stream and which also collapsed every media key
+  // to /erome.mp4. Peel every known wrapper before rebuilding playback URLs.
+  for (let depth = 0; current && depth < 6; depth++) {
+    try {
+      const url = new URL(current, window.location.href);
+      const embedded = url.searchParams.get('u') || url.searchParams.get('url');
+
+      if (!embedded || embedded === current) break;
+      current = embedded;
+    } catch (e) {
+      break;
+    }
   }
+
+  return current || rawUrl;
 }
 
 function buildCurrentLoadedEromeRecords() {
@@ -11592,6 +13831,11 @@ function buildEromeImportGroups(data, fallbackUrl) {
       title: group?.title || sourceTitle || `Erome batch ${index + 1}`,
       sourceUrl: fallbackUrl,
       sourceTitle,
+      source: 'erome',
+      // A creator-page import is a queue, not a shuffle. Keep every album in
+      // the order it becomes available so Paperclip 1/2/3 continues through
+      // adjacent albums instead of jumping to an unrelated album.
+      preserveGroupOrder: true,
       videos: Array.isArray(group?.videos) ? group.videos.filter(Boolean) : []
     }))
     .filter(group => group.videos.length);
@@ -11621,20 +13865,23 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
     const groupSourceTitle = group.sourceTitle || artistNameFromUrl(groupSourceUrl) || 'Erome';
     const groupArtistSources = artistSourceNamesFromRecord(group);
     const groupPlaybackBase = String(group.playbackBase || proxyBase).replace(/\/+$/, '');
+    const isHosted = group.source === 'bunkr' || group.source === 'hosted';
+    const isDirect = group.source === 'direct';
 
     group.videos.forEach((rawUrl, videoIndex) => {
       const descriptor = eromeMediaDescriptor(rawUrl);
-      const mediaUrl = descriptor.url;
+      const mediaUrl = isHosted || isDirect
+        ? descriptor.url
+        : rawEromeUrlFromPlayableUrl(descriptor.url);
       if (!mediaUrl) return;
-      const isHosted = group.source === 'bunkr' || group.source === 'hosted';
-      const isSimpCityMedia = isHosted || group.source === 'direct';
+      const isSimpCityMedia = isHosted || isDirect;
       const playbackUrlFor = candidateUrl => isHosted
         ? String(group.mediaKind || '').toLowerCase() === 'tiktok'
           ? `${groupPlaybackBase}/video-cache/stream?url=${encodeURIComponent(candidateUrl)}&profile=tiktok`
           : groupPlaybackBase === EROME_PROXY_BASE.replace(/\/+$/, '')
           ? `${groupPlaybackBase}/bunkr.mp4?u=${encodeURIComponent(candidateUrl)}`
           : `${groupPlaybackBase}/video-cache/stream?url=${encodeURIComponent(candidateUrl)}&profile=bunkr`
-        : group.source === 'direct'
+        : isDirect
           ? candidateUrl
           : groupPlaybackBase + '/erome.mp4?u=' + encodeURIComponent(candidateUrl);
       const proxiedUrl = playbackUrlFor(mediaUrl);
@@ -11662,7 +13909,10 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         videoUrl: proxiedUrl,
         originalVideoUrl: mediaUrl,
         canonicalMediaUrl: mediaUrl,
-        alternateVideoUrls: descriptor.alternateVideoUrls.map(playbackUrlFor),
+        alternateVideoUrls: descriptor.alternateVideoUrls
+          .map(value => isHosted || isDirect ? value : rawEromeUrlFromPlayableUrl(value))
+          .filter(Boolean)
+          .map(playbackUrlFor),
         verified: descriptor.verified,
         fastStart: descriptor.fastStart
       });
@@ -11688,12 +13938,13 @@ function buildEromeCardImportPayload(groups, proxyBase, globalStartIndex = 0) {
         simpCitySourcePairId: String(group.sourcePairId || ''),
         simpCityMediaKind: String(group.mediaKind || ''),
         artistSources: groupArtistSources.slice(),
+        preserveGroupOrder: group.preserveGroupOrder === true,
         simpCityDeferredVideos: Array.isArray(group.deferredVideos) ? group.deferredVideos.slice() : [],
         simpCityPreviewExpanded: group.previewExpanded === true,
         // A TikTok result is hidden only when its paired primary group asks for
         // that explicitly. TikTok-only artists must remain visible Paperclip
         // bundles or a successful lookup would be present but unreachable.
-        paperclipHidden: group.paperclipHidden === true,
+        paperclipHidden: group.paperclipHidden === true || group.mediaKind === 'tiktok',
         loadAll: false,
         ready: true,
         pending: false
@@ -11812,19 +14063,14 @@ let simpCityPreviewDeckRefreshTimer = 0;
 function reconcileArtistLookupTikTokVisibility(pairId) {
   const normalizedPairId = String(pairId || '');
   if (!normalizedPairId.startsWith('artist-lookup:')) return false;
-  const hasPrimary = pasteEvents.some(event => (
-    String(event?.simpCityPairId || '') === normalizedPairId &&
-    String(event?.simpCityMediaKind || '').toLowerCase() !== 'tiktok' &&
-    Number(event?.count || 0) > 0
-  ));
   let changed = false;
   pasteEvents.forEach(event => {
     if (
       String(event?.simpCityPairId || '') !== normalizedPairId ||
       String(event?.simpCityMediaKind || '').toLowerCase() !== 'tiktok'
     ) return;
-    if (event.paperclipHidden !== hasPrimary) {
-      event.paperclipHidden = hasPrimary;
+    if (event.paperclipHidden !== true) {
+      event.paperclipHidden = true;
       changed = true;
     }
   });
@@ -12032,6 +14278,7 @@ const RANDOM40_PAGE_BATCH_SIZE = 2;
 const RANDOM40_LISTING_PAGE_BATCH_SIZE = 1;
 const RANDOM40_MAX_ARTIST_PAGES = 100;
 const RANDOM40_MIN_VIDEOS_PER_ARTIST = 15;
+const RANDOM40_LOCAL22_MIN_VIDEOS_PER_ARTIST = 10;
 const RANDOM40_PRECHECK_MAX_ARTIST_PAGES = 36;
 const RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH = 48;
 const RANDOM40_MIN_POST_IMAGES_FOR_REVIEW = 3;
@@ -12082,6 +14329,7 @@ const PONG_IMPORT_CURRENT_PLAYBACK_WINDOW = 4;
 // SimpCity cards start with a five-video preview; the remaining resolved
 // videos are expanded when the user reaches the second video.
 const SIMPCITY_PREVIEW_VIDEO_COUNT = 5;
+const SIMPCITY_BACKGROUND_WARM_VIDEO_COUNT = 2;
 const RANDOM40_LOCAL2_FAST_PRELOAD_CURRENT_RESERVE = 6;
 const RANDOM40_LOCAL22_PRELOAD_CURRENT_RESERVE = 10;
 const RANDOM40_LOCAL22_BACKGROUND_ARTISTS = 4;
@@ -12444,6 +14692,19 @@ async function random40PingLocalEndpoint(endpoint, timeoutMs = 2200) {
 
 async function getRandom40LocalEndpoint(acceptReachableWarming = false) {
   random40ReachableWarmingEndpoint = null;
+  // A Pong page served by a private/local Pong origin is already proof that
+  // the controller is reachable. Probing every historical endpoint here made
+  // the APK sit on "Connecting local AI" while the workers were asleep—the
+  // mode-specific /start request below is what is supposed to wake them.
+  const sameOriginEndpoint = /^\/(?:pong)?\/?$/i.test(location.pathname) &&
+    location.hostname !== 'odiac22.github.io'
+      ? random40NormalizeLocalEndpoint(location.origin)
+      : '';
+  if (sameOriginEndpoint) {
+    random40GatewayEndpoint = sameOriginEndpoint;
+    try { localStorage.setItem(RANDOM40_LOCAL_ENDPOINT_KEY, sameOriginEndpoint); } catch (_) {}
+    return sameOriginEndpoint;
+  }
   const available = await random40TryKnownLocalEndpoint();
   if (available) return available;
   if (random40ReachableWarmingEndpoint) {
@@ -12615,9 +14876,48 @@ function random40IsLeakedZoneGatewayMediaUrl(rawUrl) {
   }
 }
 
+function pongPendingSourceRequestOwnsVideo(video, requestId) {
+  if (
+    !video ||
+    video.dataset.pongBlobRequestId !== requestId ||
+    !document.body.contains(video)
+  ) return false;
+  const wrapper = video.closest?.('.video-wrapper');
+  return !isPongFaceSwapManagedMedia(wrapper, video);
+}
+
 function setPongVideoSource(video, rawUrl) {
   const sourceUrl = String(rawUrl || '');
   if (!video || !sourceUrl) return false;
+  const wrapper = video.closest?.('.video-wrapper');
+  advancePongVideoSourceGeneration(video);
+  // A future face-swap card can already own an open, paused stream reader.
+  // Card recycling or a normal source replacement must retire that reader
+  // before attaching the new media, otherwise the old GPU session and HTTP
+  // response remain alive invisibly and compete with the visible video.
+  const preloadSessionId = String(wrapper?.dataset?.pongFaceSwapPreloadSessionId || '');
+  if (preloadSessionId && wrapper?.dataset?.pongFaceSwapActive !== 'true') {
+    wrapper.dataset.pongFaceSwapPreloadClearedBy = sourceUrl;
+    const matchingEntry = [...pongFaceSwapState.prefetches.values()].find(entry => (
+      entry?.sessionId === preloadSessionId && !entry?.adopted
+    ));
+    if (matchingEntry) {
+      cleanupPongFaceSwapAttachmentListeners(matchingEntry);
+      matchingEntry.attached = false;
+      matchingEntry.browserReady = false;
+      matchingEntry.video = null;
+      pongFaceSwapState.prefetches.delete(matchingEntry.key);
+    }
+    fetch(`/pong-swap/sessions/${encodeURIComponent(preloadSessionId)}?defer=1`, {
+      method: 'DELETE', cache: 'no-store'
+    }).catch(() => {});
+    delete wrapper.dataset.pongFaceSwapPreloadSessionId;
+    delete wrapper.dataset.pongFaceSwapPreloadReady;
+    delete video.__pongSwapPreloadedOriginal;
+  }
+  if (video.__pongSwapOriginal && wrapper?.dataset?.pongFaceSwapActive !== 'true') {
+    delete video.__pongSwapOriginal;
+  }
   if (video.__pongBlobUrl) {
     try { URL.revokeObjectURL(video.__pongBlobUrl); } catch (_) {}
     video.__pongBlobUrl = '';
@@ -12640,7 +14940,9 @@ function setPongVideoSource(video, rawUrl) {
         return response.blob();
       })
       .then(blob => {
-        if (video.dataset.pongBlobRequestId !== requestId || !document.body.contains(video)) return;
+        // The user may enable face swap while this private TikTok fetch is in
+        // flight. Its late completion must not replace the now-owned swap src.
+        if (!pongPendingSourceRequestOwnsVideo(video, requestId)) return;
         const blobUrl = URL.createObjectURL(blob);
         video.__pongBlobUrl = blobUrl;
         video.src = blobUrl;
@@ -12651,7 +14953,9 @@ function setPongVideoSource(video, rawUrl) {
         }
       })
       .catch(() => {
-        if (video.dataset.pongBlobRequestId === requestId) video.dispatchEvent(new Event('error'));
+        if (pongPendingSourceRequestOwnsVideo(video, requestId)) {
+          video.dispatchEvent(new Event('error'));
+        }
       });
     return true;
   }
@@ -12693,14 +14997,14 @@ function random40PlaybackUrlsMatch(left, right) {
 
 function random40SwapRenderedVideoSource(wrapper, playbackUrl, { forceActive = false } = {}) {
   if (!wrapper || !playbackUrl) return false;
+  const video = wrapper.querySelector('video');
+  if (!video || isPongFaceSwapManagedMedia(wrapper, video)) return false;
   wrapper.dataset.serverCachePlaybackSrc = playbackUrl;
   if (wrapper.dataset.networkSuspended === 'true') {
     wrapper.dataset.suspendedVideoSrc = playbackUrl;
     return true;
   }
 
-  const video = wrapper.querySelector('video');
-  if (!video) return false;
   const currentUrl = String(video.currentSrc || video.src || '');
   if (random40PlaybackUrlsMatch(currentUrl, playbackUrl)) return false;
 
@@ -12782,9 +15086,10 @@ function random40ApplyServerCachePlaybackUrl(originalUrl, playbackUrl, { forceAc
 
 function random40PromoteWrapperToServerCache(wrapper, { forceActive = false } = {}) {
   if (wrapper?.dataset?.serverCacheBypassed === 'true') return false;
+  const video = wrapper?.querySelector?.('video');
+  if (!video || isPongFaceSwapManagedMedia(wrapper, video)) return false;
   const originalUrl = pongCanonicalMediaUrlForWrapper(wrapper);
   const record = originalUrl ? random40ServerVideoCacheRecordFor(originalUrl) : null;
-  const video = wrapper?.querySelector?.('video');
   const noMetadataRecovery = forceActive &&
     Number(video?.readyState || 0) === 0 &&
     Number(record?.bytes || 0) >= 384 * 1024;
@@ -12924,6 +15229,10 @@ function random40StartServerVideoCacheTimers() {
   // session so later artists do not remain stuck on their origin/TikTok URL.
   document.querySelectorAll('.video-wrapper').forEach(wrapper => {
     if (wrapper.dataset.serverCacheBypassed === 'true') return;
+    const video = wrapper.querySelector('video');
+    // The face-swap lifecycle owns prepared and active readers. Rebinding one
+    // here, even at currentTime zero, aborts its held response and warm decoder.
+    if (!video || isPongFaceSwapManagedMedia(wrapper, video)) return;
     const playbackSourceUrl = String(wrapper.dataset.originalVideoUrl || '');
     const streamUrl = random40ForegroundPlaybackUrl(playbackSourceUrl);
     if (!streamUrl) return;
@@ -12931,8 +15240,7 @@ function random40StartServerVideoCacheTimers() {
       wrapper.dataset.suspendedVideoSrc = streamUrl;
       return;
     }
-    const video = wrapper.querySelector('video');
-    if (!video || Number(video.currentTime || 0) > 0.01 || video.dataset.hasPlayedFrame === 'true') return;
+    if (Number(video.currentTime || 0) > 0.01 || video.dataset.hasPlayedFrame === 'true') return;
     if (String(video.currentSrc || video.src || '') === streamUrl) return;
     video.src = streamUrl;
     video.preload = 'auto';
@@ -13166,6 +15474,13 @@ function random40WarmServerVideoCacheForActiveWrapper(
   const eventIndex = getPasteEventIndexForGlobalVideo(activeGlobalIndex);
   const event = eventIndex >= 0 ? pasteEvents[eventIndex] : null;
   const bounds = getPasteEventVideoBounds(event);
+  const playbackProfile = isSimpCityTikTokEvent(event)
+    ? 'tiktok'
+    : isBunkrPasteEvent(event)
+      ? 'bunkr'
+      : pongLocal22PlaybackActive()
+        ? 'local22'
+        : 'current';
   if (bounds) {
     const reserve = !isRandom40PlaybackActive() && isPongServerCachedPlaybackActive()
       ? Math.min(
@@ -13195,6 +15510,7 @@ function random40WarmServerVideoCacheForActiveWrapper(
       activeUrl: (activeIsCompleteCache || activeNeedsHedge) ? originalUrl : '',
       deferredUrl: (activeIsCompleteCache || activeNeedsHedge) ? '' : originalUrl,
       currentUrls,
+      playbackProfile,
       urgent
     });
   }
@@ -17096,7 +19412,7 @@ async function random40PreflightArtist(artist, mode = '') {
 }
 
 async function random40TakeWarmCandidates(localEndpoint, count = RANDOM40_MAX_ARTISTS_PER_PAGE_BATCH) {
-  const empty = { candidates: [], ready: false, remaining: 0, readyMin: 8, decisionRevision: '' };
+  const empty = { candidates: [], enabled: false, eligibilityOnly: false, ready: false, remaining: 0, readyMin: 8, decisionRevision: '' };
   if (!localEndpoint) return empty;
   const controller = new AbortController();
   const releaseController = trackPongWorkloadController(controller);
@@ -17114,6 +19430,7 @@ async function random40TakeWarmCandidates(localEndpoint, count = RANDOM40_MAX_AR
       .map(item => random40NormalizeArtistUrl(item?.artistUrl || ''))
       .filter(Boolean);
     const playbackProtected = payload?.playbackProtected === true;
+    const eligibilityOnly = payload?.eligibilityOnly === true;
     const decisionRevision = String(payload?.decisionRevision || '').trim();
     const rememberWarmDrop = (item, reason) => {
       if (!random40State) return;
@@ -17161,7 +19478,10 @@ async function random40TakeWarmCandidates(localEndpoint, count = RANDOM40_MAX_AR
         verifiedEntries.slice(0, RANDOM40_MIN_VIDEOS_PER_ARTIST).every(entry => entry?.playbackProbeVerified === true) &&
         exactDecisionImages.length >= RANDOM40_LOCAL_REQUIRED_GRADED_IMAGES &&
         random40IsAcceptedDecision(warmDecision);
-      if (!warmDecisionValid) {
+      const eligibilityValid = eligibilityOnly &&
+        verifiedEntries.length >= RANDOM40_MIN_VIDEOS_PER_ARTIST &&
+        verifiedEntries.slice(0, RANDOM40_MIN_VIDEOS_PER_ARTIST).every(entry => entry?.playbackProbeVerified === true);
+      if (!warmDecisionValid && !eligibilityValid) {
         const validVerified = verifiedEntries.filter(entry => entry?.playbackProbeVerified === true).length;
         const reason = !decisionRevision || item?.local1DecisionRevision !== decisionRevision
           ? 'stale preference revision'
@@ -17194,9 +19514,11 @@ async function random40TakeWarmCandidates(localEndpoint, count = RANDOM40_MAX_AR
         nextPage: scannedThroughPage + 1,
         scanComplete: !hasNext
       };
-      artist.precomputedLocal1Decision = warmDecision;
-      artist.precomputedLocal1DecisionRevision = decisionRevision;
-      artist.precomputedLocal1ImageUrls = exactDecisionImages;
+      if (warmDecisionValid) {
+        artist.precomputedLocal1Decision = warmDecision;
+        artist.precomputedLocal1DecisionRevision = decisionRevision;
+        artist.precomputedLocal1ImageUrls = exactDecisionImages;
+      }
       candidates.push(artist);
     }
     const droppedLeases = Math.max(0, leasedArtistUrls.length - candidates.length);
@@ -17215,6 +19537,8 @@ async function random40TakeWarmCandidates(localEndpoint, count = RANDOM40_MAX_AR
     );
     return {
       candidates,
+      enabled: payload?.enabled !== false,
+      eligibilityOnly,
       ready: payload?.ready === true,
       remaining: Number(payload?.remaining || 0),
       readyMin: Number(payload?.readyMin || 8),
@@ -17253,9 +19577,13 @@ async function random40AcknowledgeWarmCandidates(localEndpoint, artistUrls, resu
 function random40Local2CandidateIsHardSafe(candidate) {
   const decision = candidate?.decision || {};
   const hard = decision?.hardFilters || {};
-  return candidate?.schema === 'pong.local2.accepted.v1' &&
+  const common = candidate?.schema === 'pong.local2.accepted.v1' &&
     candidate?.storage === 'memory-only' &&
-    String(decision?.verdict || '').toLowerCase() === 'accept' &&
+    String(decision?.verdict || '').toLowerCase() === 'accept';
+  // Blank-slate Local2.2 has one learned historical verdict and no separate
+  // hard-filter projection. The server's ten-video proof remains independent.
+  if (common && decision?.historyOnly === true) return true;
+  return common &&
     hard.photograph === true &&
     hard.femalePresentingAdult === true &&
     hard.malePresent === false &&
@@ -17310,7 +19638,10 @@ async function random40TakeLocal2Candidates(localEndpoint, count, runState, endp
   else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
   const timer = setTimeout(() => controller.abort(), 12000);
   try {
-    const requested = Math.max(1, Math.min(12, Number(count || 12)));
+    // Collect a five-artist backlog in one foreground response. Every artist
+    // still carries all fifteen verified entries; only the current five-card
+    // rendering window attaches media elements and starts network playback.
+    const requested = Math.max(1, Math.min(5, Number(count || 5)));
     const response = await fetch(`${localEndpoint}${endpointPath}/candidates?count=${requested}`, {
       cache: 'no-store',
       signal: controller.signal
@@ -17367,7 +19698,16 @@ async function random40TakeLocal2Candidates(localEndpoint, count, runState, endp
           reviewImageUrls,
           local2Revision: String(item?.revision || '')
         })));
-      if (verifiedEntries.length < RANDOM40_MIN_VIDEOS_PER_ARTIST) continue;
+      const testAiAvailableVideoCount = Math.max(0, Number(item?.decision?.availableVideoCount || 0));
+      const requiredServerVideos = endpointPath === '/local22-turbo'
+        ? RANDOM40_LOCAL22_MIN_VIDEOS_PER_ARTIST
+        : RANDOM40_MIN_VIDEOS_PER_ARTIST;
+      if (testAiCandidate) {
+        const requiredInitialVideos = testAiAvailableVideoCount >= RANDOM40_MIN_VIDEOS_PER_ARTIST
+          ? 5
+          : RANDOM40_MIN_VIDEOS_PER_ARTIST;
+        if (verifiedEntries.length < requiredInitialVideos) continue;
+      } else if (verifiedEntries.length < requiredServerVideos) continue;
       entries.push(...verifiedEntries.slice(0, 20));
       artists.push({
         artistId: String(item?.artist?.id || artistIdentity),
@@ -17443,7 +19783,22 @@ async function random40RunCleanLocal2(runState, localEndpoint, {
       continue;
     }
 
-    const published = random40PublishEntries(batch.entries, runState);
+    // Local2 retains fifteen-video admission; blank-slate Local2.2 requires
+    // ten. Playback receives five immediately and defers the rest until that
+    // artist is actually being viewed.
+    const initialEntries = [];
+    const deferredByArtist = new Map();
+    const entriesByArtist = new Map();
+    batch.entries.forEach(entry => {
+      const identity = random40ArtistIdentity(entry.artistUrl || '');
+      if (!entriesByArtist.has(identity)) entriesByArtist.set(identity, []);
+      entriesByArtist.get(identity).push(entry);
+    });
+    entriesByArtist.forEach((entries, identity) => {
+      initialEntries.push(...entries.slice(0, 5));
+      deferredByArtist.set(identity, entries.slice(5));
+    });
+    const published = random40PublishEntries(initialEntries, runState);
     const publishedIdentities = new Set((published?.events || [])
       .map(event => random40ArtistIdentity(event?.artistUrl || ''))
       .filter(Boolean));
@@ -17457,6 +19812,25 @@ async function random40RunCleanLocal2(runState, localEndpoint, {
     batch.artists.forEach(artist => {
       if (!publishedIdentities.has(artist.artistIdentity)) return;
       runState.seenArtists.add(artist.artistIdentity);
+      random40AppendDeferredEntriesWhileViewed(
+        deferredByArtist.get(artist.artistIdentity) || [],
+        runState
+      );
+      if (!RANDOM40_BENCHMARK_LIVE_SCAN) {
+        const firstEntries = entriesByArtist.get(artist.artistIdentity) || [];
+        const firstPostUrls = [...new Set(firstEntries.map(entry => entry?.postUrl).filter(Boolean))];
+        random40ContinueArtistScrapeInBackground({
+          artistUrl: artist.artistUrl,
+          artistName: artist.artistName,
+          artistKey: artist.artistId
+        }, {
+          links: firstPostUrls,
+          verifiedEntries: firstEntries,
+          checkedPostLinks: firstPostUrls,
+          scannedThroughPage: 1,
+          scanComplete: false
+        }, firstEntries, runState, { requireActiveArtist: true });
+      }
       runState.verdictAudit.push({
         artistUrl: artist.artistUrl,
         artistName: artist.artistName,
@@ -17510,6 +19884,10 @@ async function random40CollectVideoPostLinks(artist, {
   const checkedPostLinks = new Set(seed?.checkedPostLinks || []);
   const verificationTarget = Math.max(0, Number(verifyVideosAt) || 0);
   const local2Mode = random40NormalizeMode(mode) === 'local2';
+  // Local1 needs only enough profile pages to prove 15 media, not the manual
+  // scraper's complete archive. Two-page waves prevent seven unnecessary page
+  // requests from sitting ahead of the decisive media proof.
+  const artistPageBatchSize = RANDOM40_PAGE_BATCH_SIZE;
   const firstDoc = seed?.firstDoc || await random40FetchDoc(base, { timeoutMs: 22000, signal, priority: sourcePriority });
   let scannedThroughPage = Math.max(1, Number(seed?.scannedThroughPage || 1));
   let scanComplete = Boolean(seed?.scanComplete);
@@ -17620,7 +19998,7 @@ async function random40CollectVideoPostLinks(artist, {
   while (!scanComplete && page <= maxPages && needsMore()) {
     if (signal?.aborted) throw new DOMException('Artist precheck aborted', 'AbortError');
     if (random40State?.stop && !ignoreStop) break;
-    const pages = Array.from({ length: Math.min(RANDOM40_PAGE_BATCH_SIZE, maxPages - page + 1) }, (_, i) => page + i);
+    const pages = Array.from({ length: Math.min(artistPageBatchSize, maxPages - page + 1) }, (_, i) => page + i);
     const docs = await Promise.all(pages.map(n =>
       random40FetchDoc(`${base}?page=${n}`, { timeoutMs: 16000, signal, priority: sourcePriority }).catch(error => {
         if (signal?.aborted) throw error;
@@ -17644,7 +20022,7 @@ async function random40CollectVideoPostLinks(artist, {
       break;
     }
     await verifyPendingPostLinks();
-    page += RANDOM40_PAGE_BATCH_SIZE;
+    page += artistPageBatchSize;
   }
 
   // A one-page profile can exhaust its legacy links before the loop starts.
@@ -18176,6 +20554,73 @@ function random40AppendEntriesToExistingArtist(entries, runState = random40State
   return urls.length;
 }
 
+function random40AppendDeferredEntriesWhileViewed(entries, runState = random40State) {
+  const pending = [...(entries || [])];
+  if (!pending.length || !runState || random40State !== runState || runState.stop) return;
+  const identity = random40ArtistIdentity(pending[0]?.artistUrl || '');
+  const activePasteEvent = () => {
+    const visibleIndex = typeof syncCurrentPasteIndexFromVisibleVideo === 'function'
+      ? syncCurrentPasteIndexFromVisibleVideo()
+      : -1;
+    return pasteEvents[visibleIndex >= 0 ? visibleIndex : currentPasteIndex] || null;
+  };
+  let wasCurrent = false;
+  const tick = () => {
+    if (!pending.length || !runState || random40State !== runState || runState.stop) return;
+    const activeEvent = activePasteEvent();
+    const activeIdentity = random40ArtistIdentity(activeEvent?.artistUrl || '');
+    if (activeIdentity === identity) {
+      wasCurrent = true;
+      random40AppendEntriesToExistingArtist(pending.splice(0, 5), runState);
+      if (pending.length) setTimeout(tick, 1800);
+      return;
+    }
+    // Future artists wait. Once a viewed artist is left or skipped, its
+    // remaining playback work is discarded and cannot requeue itself.
+    if (wasCurrent) return;
+    setTimeout(tick, 500);
+  };
+  setTimeout(tick, 900);
+}
+
+async function random40RankFreshLocalCandidates(candidates, localEndpoint, signal = null) {
+  const values = Array.isArray(candidates) ? [...candidates] : [];
+  if (!localEndpoint || values.length < 2) return values;
+  // Ranking is ordering-only. Every candidate still passes the identical
+  // 15-video, four-image, three-clear-body and hard-filter contract.
+  const head = values.slice(0, 16);
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(() => controller.abort(), 9000);
+  try {
+    const response = await fetch(`${localEndpoint}/local1/rank-thumbnails`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      signal: controller.signal,
+      body: JSON.stringify({ thumbnailUrls: head.map(item => item?.imageUrl || '') })
+    });
+    if (!response.ok) return values;
+    const payload = await response.json();
+    if (payload?.ranking_only !== true || !Array.isArray(payload?.items)) return values;
+    payload.items.forEach(item => {
+      if (!Number.isInteger(item?.index) || item.index < 0 || item.index >= head.length) return;
+      if (typeof item.rank !== 'number' || !Number.isFinite(item.rank)) return;
+      head[item.index].preferenceRank = Math.max(0, Math.min(1, item.rank));
+    });
+    return values.sort((left, right) =>
+      Number(right?.preferenceRank ?? -1) - Number(left?.preferenceRank ?? -1)
+    );
+  } catch (_) {
+    return values;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
 async function random40AppendEntriesToExistingArtistWhenReady(entries, attempts = 12, runState = random40State) {
   const cleanEntries = (entries || []).filter(entry => entry?.videoUrl);
   if (!cleanEntries.length) return 0;
@@ -18192,7 +20637,7 @@ async function random40AppendEntriesToExistingArtistWhenReady(entries, attempts 
   return random40AppendEntriesToExistingArtist(cleanEntries, runState);
 }
 
-function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries, runState = random40State) {
+function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries, runState = random40State, options = {}) {
   if (!artist?.artistUrl || !runState || random40State !== runState || runState.stop) return;
   const firstPostUrls = [...new Set((firstEntries || []).map(entry => entry?.postUrl).filter(Boolean))];
   // The first fifteen verified URLs already cover the acceptance/playback SLA.
@@ -18203,6 +20648,40 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
   const backgroundDelay = 100;
 
   setTimeout(async () => {
+    const artistIdentity = random40ArtistIdentity(artist.artistUrl || '');
+    const activePasteEvent = () => {
+      const visibleIndex = typeof syncCurrentPasteIndexFromVisibleVideo === 'function'
+        ? syncCurrentPasteIndexFromVisibleVideo()
+        : -1;
+      return pasteEvents[visibleIndex >= 0 ? visibleIndex : currentPasteIndex] || null;
+    };
+    const artistController = new AbortController();
+    const parentSignal = runState.abortController?.signal || null;
+    const abortFromRun = () => artistController.abort();
+    if (parentSignal?.aborted) artistController.abort();
+    else parentSignal?.addEventListener('abort', abortFromRun, { once: true });
+    let activeMonitor = null;
+    if (options.requireActiveArtist === true) {
+      while (random40State === runState && !runState.stop && !artistController.signal.aborted) {
+        const activeEvent = activePasteEvent();
+        if (random40ArtistIdentity(activeEvent?.artistUrl || '') === artistIdentity) break;
+        await sleep(500);
+      }
+      if (random40State !== runState || runState.stop || artistController.signal.aborted) {
+        parentSignal?.removeEventListener('abort', abortFromRun);
+        return;
+      }
+      await sleep(3000);
+      const activeEvent = activePasteEvent();
+      if (random40ArtistIdentity(activeEvent?.artistUrl || '') !== artistIdentity) {
+        parentSignal?.removeEventListener('abort', abortFromRun);
+        return;
+      }
+      activeMonitor = setInterval(() => {
+        const currentEvent = activePasteEvent();
+        if (random40ArtistIdentity(currentEvent?.artistUrl || '') !== artistIdentity) artistController.abort();
+      }, 300);
+    }
     // The complete 100-page fill starts as soon as the first protected cohort
     // has ten ready videos each. A bounded safety deadline prevents a permanent
     // stall, and the per-artist stagger avoids a thundering herd at release.
@@ -18226,7 +20705,7 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
     const flushPending = () => {
       clearTimeout(flushTimer);
       flushTimer = null;
-      if (!pendingEntries.length || random40State !== runState || runState.stop) {
+      if (!pendingEntries.length || random40State !== runState || runState.stop || artistController.signal.aborted) {
         pendingEntries = [];
         return appendChain;
       }
@@ -18242,7 +20721,7 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
     };
 
     const queueDiscoveredEntries = entries => {
-      if (!entries?.length || random40State !== runState || runState.stop) return;
+      if (!entries?.length || random40State !== runState || runState.stop || artistController.signal.aborted) return;
       pendingEntries.push(...entries);
       if (pendingEntries.length >= RANDOM40_BACKGROUND_APPEND_BATCH) {
         void flushPending();
@@ -18261,7 +20740,7 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
         maxPages: RANDOM40_MAX_ARTIST_PAGES,
         ignoreStop: true,
         seed: precheck,
-        signal: runState.abortController?.signal || null,
+        signal: artistController.signal,
         sourcePriority: 2
       }).catch(() => null);
 
@@ -18272,7 +20751,7 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
         true,
         queueDiscoveredEntries,
         2,
-        runState.abortController?.signal || null
+        artistController.signal
       );
 
       const expanded = await fullScanPromise;
@@ -18286,7 +20765,7 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
           true,
           queueDiscoveredEntries,
           2,
-          runState.abortController?.signal || null
+          artistController.signal
         );
       }
 
@@ -18304,6 +20783,9 @@ function random40ContinueArtistScrapeInBackground(artist, precheck, firstEntries
       }
     } catch (_) {
       await flushPending();
+    } finally {
+      if (activeMonitor) clearInterval(activeMonitor);
+      parentSignal?.removeEventListener('abort', abortFromRun);
     }
   }, backgroundDelay);
 }
@@ -18322,10 +20804,15 @@ async function random40Pool(items, limit, worker) {
 }
 
 function random40AdaptiveLocalConcurrency() {
-  return RANDOM40_LOCAL_CONCURRENCY;
+  // Fresh Local1 used to interleave ten deep profile scans through one shared
+  // rate-safe source clock. That maximized work in flight but starved every
+  // near-complete artist, so nothing reached Pong. Finish the two best-ranked
+  // candidates first; the next pair begins as soon as either settles.
+  return random40State?.mode === 'local' ? 2 : RANDOM40_LOCAL_CONCURRENCY;
 }
 
-async function random40Local2OverlappedDecision(artist, localEndpoint, signal) {
+async function random40LocalOverlappedDecision(artist, localEndpoint, mode, signal) {
+  const normalizedMode = random40NormalizeMode(mode);
   const seed = artist?.precheckSeed;
   const firstDoc = seed?.firstDoc;
   if (!firstDoc || !localEndpoint) return null;
@@ -18343,21 +20830,21 @@ async function random40Local2OverlappedDecision(artist, localEndpoint, signal) {
     profileImage,
     postImageEntries,
     fallbackImageUrls,
-    maxImages: random40ReviewImageLimit('local2'),
+    maxImages: random40ReviewImageLimit(normalizedMode),
     resolvePostImages: false,
     deterministic: true
   });
   // Early decisions are terminal only when they use the same complete four-
   // image evidence window as normal Local2. Smaller sets continue to the live
   // video/profile path and can collect more post images.
-  if (candidateImageUrls.length < random40ReviewImageLimit('local2')) return null;
+  if (candidateImageUrls.length < random40ReviewImageLimit(normalizedMode)) return null;
   return random40AnalyzeArtist({ ...artist, imageUrl: profileImage }, '', {
     firstDoc,
     collected: { ...seed, profileImageUrl: profileImage, postImageEntries },
     candidateImageUrls,
-    mode: 'local2',
+    mode: normalizedMode,
     localEndpoint,
-    deferLocalHardVerification: false,
+    deferLocalHardVerification: normalizedMode === 'local',
     signal
   });
 }
@@ -18407,7 +20894,10 @@ async function random40AnalyzeArtist(artist, apiKey, options = {}) {
         // Profile cards already link to the original storage image. Opening the
         // same post page again added source latency without improving evidence.
         resolvePostImages: false,
-        deterministic: mode === 'local2'
+        // Stable evidence selection is part of the decision contract. Random
+        // image sampling made the same historical artist alternate between two
+        // and three clear-body views on repeated Local1 runs.
+        deterministic: localMode
       })
     : [primaryImage].filter(Boolean);
   const reviewedImages = candidateImagePool.slice(
@@ -18654,6 +21144,14 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
       return;
     }
     random40State.localEndpoint = localEndpoint;
+    if (runMode === 'local') {
+      // Do not wait: model startup overlaps authoritative memory loading and
+      // fresh source discovery. This prepares no artist and stores no media.
+      void fetch(`${localEndpoint}/local1/wake`, {
+        method: 'POST',
+        cache: 'no-store'
+      }).catch(() => null);
+    }
     if (runMode === 'local2' && random40State.playbackProfile !== 'local22') {
       // Local2 now scans the selected random pages immediately. Retire the old
       // background producer so it cannot compete with foreground source/model work.
@@ -18819,6 +21317,25 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
         artists = warmBatch.candidates;
         random40RecordStageTiming('ram-reservoir', performance.now() - reservoirStarted);
         if (!artists.length) {
+          // The accepted-candidate reservoir is intentionally disabled in the
+          // fresh Local1 configuration. In that state, continue directly into
+          // the live listing scan instead of polling an unavailable cache
+          // forever. An enabled reservoir that is still filling keeps its
+          // original bounded wait behavior.
+          const eligibilityWaitExpired = warmBatch.eligibilityOnly === true &&
+            Date.now() - Number(runState.startedAt || Date.now()) >= 12000;
+          if (warmBatch.enabled === false || eligibilityWaitExpired) {
+            updateRandom40Progress({
+              detail: eligibilityWaitExpired
+                ? 'Eligibility queue is still filling; continuing with a live Local1 scan...'
+                : 'Fresh Local1 scan: finding new artists...',
+              accepted: random40State.accepted,
+              videos: random40State.videos,
+              pages: random40State.pages,
+              api: random40State.api,
+              force: true
+            });
+          } else {
           updateRandom40Progress({
             detail: warmBatch.ready
               ? 'Preparing more personalized Local1 matches...'
@@ -18831,6 +21348,7 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
           });
           await sleep(1000);
           continue;
+          }
         }
       }
       let attempts = 0;
@@ -18886,7 +21404,16 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
             });
           });
 
-          const candidates = [...byArtist.values()];
+          let candidates = [...byArtist.values()];
+          if (runMode === 'local' && !RANDOM40_BENCHMARK_LIVE_SCAN) {
+            const rankingStarted = performance.now();
+            candidates = await random40RankFreshLocalCandidates(
+              candidates,
+              localEndpoint,
+              runState.abortController.signal
+            );
+            random40RecordStageTiming('listing-thumbnail-order', performance.now() - rankingStarted);
+          }
           if (RANDOM40_BENCHMARK_LIVE_SCAN) {
             artists = candidates
               .sort((left, right) => random40ArtistIdentity(left.artistUrl).localeCompare(random40ArtistIdentity(right.artistUrl)))
@@ -18935,13 +21462,17 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
         }
         random40State.seenArtists.add(artistIdentity);
         const classifierLabel = random40ModeLabel(runMode);
-        let overlappedLocal2Decision = null;
-        const overlappedLocal2Started = runMode === 'local2' ? performance.now() : 0;
-        const overlappedLocal2Promise = runMode === 'local2'
+        let overlappedLocalDecision = null;
+        let overlappedHardVerificationPromise = null;
+        let overlappedHardVerificationStarted = 0;
+        const canOverlapLocalDecision = random40IsLocalMode(runMode) && Boolean(artist.precheckSeed);
+        const overlappedLocalStarted = canOverlapLocalDecision ? performance.now() : 0;
+        const overlappedLocalPromise = canOverlapLocalDecision
           ? random40WithAbortableTimeout(
-              signal => random40Local2OverlappedDecision(
+              signal => random40LocalOverlappedDecision(
                 artist,
                 localEndpoint,
+                runMode,
                 signal
               ),
               RANDOM40_LOCAL2_OVERLAP_TIMEOUT_MS,
@@ -18983,13 +21514,45 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
         // workflow. Verified RAM-reservoir artists complete immediately; all
         // other artists must prove 15 actual media URLs before using GPU time.
         const precheckPromise = startPrecheck();
-        if (overlappedLocal2Promise) {
-          overlappedLocal2Decision = await overlappedLocal2Promise;
-          random40RecordStageTiming('local2-overlapped-ai', performance.now() - overlappedLocal2Started);
-          const earlySource = String(overlappedLocal2Decision?.source || '').toLowerCase();
+        if (overlappedLocalPromise) {
+          overlappedLocalDecision = await overlappedLocalPromise;
+          random40RecordStageTiming(`${runMode}-overlapped-ai`, performance.now() - overlappedLocalStarted);
+          if (
+            runMode === 'local' &&
+            random40IsAcceptedDecision(overlappedLocalDecision) &&
+            overlappedLocalDecision?.requires_local_hard_verification === true
+          ) {
+            overlappedHardVerificationStarted = performance.now();
+            overlappedHardVerificationPromise = random40WithAbortableTimeout(
+              signal => random40ClassifyArtistLocal(
+                artist,
+                localEndpoint,
+                overlappedLocalDecision.local_hard_verification_images || [],
+                {
+                  visionModel: RANDOM40_LOCAL2_VISION_MODEL,
+                  mode: 'local2',
+                  hardCheckOnly: true,
+                  bodyPreferenceCheck: false,
+                  qwenReviewReasons: overlappedLocalDecision?.qwen_review_reasons,
+                  signal,
+                  maxImages: RANDOM40_LOCAL_MAX_REVIEW_IMAGES
+                }
+              ),
+              18000,
+              'Local1 hard-filter verification timed out',
+              runState.abortController.signal
+            ).catch(error => ({
+              decision: 'reject',
+              confidence: 0,
+              reason: error.message,
+              checks: {}
+            }));
+          }
+          const earlySource = String(overlappedLocalDecision?.source || '').toLowerCase();
           const earlyTerminalReject =
-            overlappedLocal2Decision?.decision === 'reject' &&
-            Number(overlappedLocal2Decision?.confidence || 0) > 0 &&
+            runMode === 'local2' &&
+            overlappedLocalDecision?.decision === 'reject' &&
+            Number(overlappedLocalDecision?.confidence || 0) > 0 &&
             earlySource !== 'screening_gate';
           if (earlyTerminalReject) {
             precheckController.abort();
@@ -19012,7 +21575,7 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
         }
         const precheckVerifiedCount = (precheck.verifiedEntries || []).length;
         const local2SupplementalCandidate =
-          random40IsAcceptedDecision(overlappedLocal2Decision) &&
+          random40IsAcceptedDecision(overlappedLocalDecision) &&
           (precheck.supplementalPostLinks || []).length > 0;
         if (
           runMode === 'local2' &&
@@ -19107,16 +21670,16 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
           (artist.precomputedLocal1ImageUrls || []).length >= RANDOM40_LOCAL_REQUIRED_GRADED_IMAGES &&
           random40IsAcceptedDecision(precomputedLocal1Decision)
         );
-        const usePrecomputedLocal2Decision = Boolean(
-          runMode === 'local2' &&
-          overlappedLocal2Decision &&
-          random40IsAcceptedDecision(overlappedLocal2Decision)
+        const useOverlappedLocalDecision = Boolean(
+          random40IsLocalMode(runMode) &&
+          overlappedLocalDecision &&
+          random40IsAcceptedDecision(overlappedLocalDecision)
         );
         stageStarted = performance.now();
         let decision = usePrecomputedLocal1Decision
           ? precomputedLocal1Decision
-          : usePrecomputedLocal2Decision
-          ? overlappedLocal2Decision
+          : useOverlappedLocalDecision
+          ? overlappedLocalDecision
           : await random40WithAbortableTimeout(
               signal => random40AnalyzeArtist(artistWithPrecheckText, apiKey, {
                 firstDoc: precheck.firstDoc,
@@ -19326,8 +21889,10 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
 
         if (runMode === 'local' && decision.requires_local_hard_verification) {
           updateRandom40Progress({ detail: `${classifierLabel} accepted ${artist.artistName}. Verifying hard filters...`, accepted: random40State.accepted, videos: random40State.videos, pages: random40State.pages, api: random40State.api, force: true });
-          stageStarted = performance.now();
-          const hardVerification = await random40WithAbortableTimeout(
+          stageStarted = overlappedHardVerificationStarted || performance.now();
+          const hardVerification = overlappedHardVerificationPromise
+            ? await overlappedHardVerificationPromise
+            : await random40WithAbortableTimeout(
             signal => random40ClassifyArtistLocal(artistWithPrecheckText, localEndpoint, decision.local_hard_verification_images || [], {
               visionModel: RANDOM40_LOCAL2_VISION_MODEL,
               mode: 'local2',
@@ -19340,12 +21905,12 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
             18000,
             'Local1 hard-filter verification timed out',
             runState.abortController.signal
-          ).catch(error => ({
-            decision: 'reject',
-            confidence: 0,
-            reason: error.message,
-            checks: {}
-          }));
+            ).catch(error => ({
+              decision: 'reject',
+              confidence: 0,
+              reason: error.message,
+              checks: {}
+            }));
           random40State.api++;
           random40RecordStageTiming('local-hard-verify', performance.now() - stageStarted);
 
@@ -19465,11 +22030,11 @@ async function startRandom40(mode = 'nano', buttonStartedAt = Date.now(), option
 const EROME_ALBUM_SCRAPE_CONCURRENCY = 8;
 const EROME_INITIAL_ALBUM_BATCH_SIZE = 4;
 const EROME_READY_ALBUM_BUFFER_TARGET = 10;
-const EROME_BACKGROUND_ALBUM_CONCURRENCY = 2;
+const EROME_BACKGROUND_ALBUM_CONCURRENCY = 4;
 const EROME_BACKGROUND_LOW_BUFFER_DELAY_MS = 650;
 const EROME_BACKGROUND_PLAYING_LOW_BUFFER_DELAY_MS = 1100;
 const EROME_BACKGROUND_READY_BUFFER_DELAY_MS = 3600;
-const EROME_PROFILE_PAGE_CONCURRENCY = 4;
+const EROME_PROFILE_PAGE_CONCURRENCY = 6;
 const EROME_BACKGROUND_PROFILE_CONCURRENCY = 1;
 const EROME_SEARCH_MAX_PAGES = 250;
 const EROME_FETCH_TIMEOUT_MS = 8000;
@@ -19763,7 +22328,12 @@ function setSimpCityDisconnectVisible(visible) {
 }
 
 async function disconnectSimpCity() {
-  const endpoint = await getRandom40LocalEndpoint(true);
+  // Prefer the already trusted Pong LAN origin when this page came from it.
+  const endpoint = location.protocol === 'http:' && (
+    ['localhost', '127.0.0.1'].includes(location.hostname) ||
+    /^10\./.test(location.hostname) || /^192\.168\./.test(location.hostname) ||
+    /^172\.(?:1[6-9]|2\d|3[01])\./.test(location.hostname)
+  ) ? location.origin : await getRandom40LocalEndpoint(true);
   bunkrLoadGeneration++;
   if (!endpoint) {
     setSimpCityDisconnectVisible(false);
@@ -19920,7 +22490,14 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
   simpCitySkippedCreatorKeys.clear();
   simpCityActiveCreatorChoices = [];
   setSimpCitySkipVisible(true);
-  const endpoint = await getRandom40LocalEndpoint(true);
+  // Recall is already running from the trusted Pong LAN page in the APK. Use
+  // that same origin immediately; re-probing every historical endpoint added
+  // roughly twenty seconds before an already-present Recall bundle rendered.
+  const endpoint = location.protocol === 'http:' && (
+    ['localhost', '127.0.0.1'].includes(location.hostname) ||
+    /^10\./.test(location.hostname) || /^192\.168\./.test(location.hostname) ||
+    /^172\.(?:1[6-9]|2\d|3[01])\./.test(location.hostname)
+  ) ? location.origin : await getRandom40LocalEndpoint(true);
   if (!endpoint) {
     alert('SimpCity imports need the Pong PC server to be running and reachable.');
     return;
@@ -20247,16 +22824,11 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     if (recallChannel === 3) {
       const pairIds = new Set(groups.map(group => String(group?.pairId || '')).filter(Boolean));
       pairIds.forEach(pairId => {
-        const hasPrimary = pasteEvents.some(event => (
-          String(event?.simpCityPairId || '') === pairId &&
-          String(event?.simpCityMediaKind || '').toLowerCase() !== 'tiktok' &&
-          Number(event?.count || 0) > 0
-        ));
         pasteEvents.forEach(event => {
           if (
             String(event?.simpCityPairId || '') === pairId &&
             String(event?.simpCityMediaKind || '').toLowerCase() === 'tiktok'
-          ) event.paperclipHidden = hasPrimary;
+          ) event.paperclipHidden = true;
         });
       });
       updatePasteNavigationButton();
@@ -20265,7 +22837,9 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
     videoCount += imported.urls.length;
     scheduleEromeCheckpointAutosave();
     const warmItems = groups
-      .flatMap(group => group.videos.slice(0, SIMPCITY_PREVIEW_VIDEO_COUNT).map(video => ({
+      // Backlog artists warm only their first two cards. Warming five for each
+      // queued artist created large competing downloads that delayed playback.
+      .flatMap(group => group.videos.slice(0, SIMPCITY_BACKGROUND_WARM_VIDEO_COUNT).map(video => ({
         url: pongCanonicalRawMediaUrl(eromeMediaDescriptor(video).url),
         artistKey: group.creatorKey || group.sourceUrl || group.url || ''
       })))
@@ -20274,9 +22848,8 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       const previewEntryUrls = [...new Set(warmItems.map(item => item.url))];
       postJson('/video-cache/warm', {
         playbackProfile: 'bunkr',
-        // Every Recall artist gets its five-card preview at entry priority.
-        // Once selected, the normal active/current request still promotes the
-        // visible card above these future entries.
+        // Selection promotes the complete five-card preview through the
+        // foreground warm path.
         items: warmItems,
         entryUrls: previewEntryUrls,
         urgent: false,
@@ -21811,6 +24384,25 @@ async function loadEromeAsCards() {
         updateDiscoveryProgress(i, target, 1, pageCount);
       }
 
+      // Establish a creator profile's first Paperclips from page 1 before the
+      // remaining discovery pages race in. Erome lists newest first; the player
+      // consumes the initial four-card window oldest-to-newest, matching the
+      // visible THDyt8nF -> H6fWVg6G -> TafhqT0L sequence for Casualandhot.
+      // Later pages keep loading in the background after these stable anchors.
+      if (!eromeCardsStarted && !isEromeSearchLaunchUrl(target)) {
+        const firstPagePriorityAlbums = albumQueue
+          .slice(albumsBeforeTarget, albumsBeforeTarget + EROME_INITIAL_ALBUM_BATCH_SIZE)
+          .reverse();
+
+        for (const album of firstPagePriorityAlbums) {
+          if (completedAlbumUrls.has(album.url)) continue;
+          const ok = await scrapeEromeAlbumOnce(album, 'page 1 priority');
+          if (!ok) failedAlbums.push(album);
+        }
+
+        publishScrapedGroups('page 1 ready', true);
+      }
+
       if (isEromeSearchLaunchUrl(target)) {
         // Erome search uses progressive pagination: page N often reveals only
         // page N+1. Follow that moving edge until the last advertised page.
@@ -22306,6 +24898,14 @@ async function startTestAi(buttonStartedAt = Date.now()) {
     pongAssignLanLocation(target);
     return;
   }
+
+  // After Previous, Paperclip moves forward through the exact viewed history.
+  // The shared resolver lets prefetch predict this exact destination too.
+  if (replayingHistory) {
+    paperclipHistoryPosition++;
+    displayPasteEventAtIndex(nextActiveIndex, { recordHistory: false });
+    return;
+  }
   await startRandom40('local2', buttonStartedAt, { playbackProfile: 'testai', testAi: true });
 }
 
@@ -22336,7 +24936,8 @@ document.addEventListener('keydown', event => {
 });
 installTrainAiSwipe();
 
-document.getElementById('open-erome').addEventListener('click',()=>{
+document.getElementById('open-erome').addEventListener('click', event=>{
+  if (event?.isTrusted) resetPongFaceSwapForFreshLoad();
   void loadEromeAsCards().catch(error => {
     console.error('[Albums] Open Albums failed', error);
     updateEromeProgress({
@@ -22353,8 +24954,11 @@ document.getElementById('open-erome').addEventListener('click',()=>{
 const savedEromeButton = document.getElementById('saved-erome');
 let savedEromeHoldTimer = null;
 let savedEromeLongPress = false;
+let savedEromePointerId = null;
 
 function startSavedEromeHold(e) {
+  if (e?.button != null && e.button !== 0) return;
+  savedEromePointerId = e?.pointerId ?? null;
   savedEromeLongPress = false;
   clearTimeout(savedEromeHoldTimer);
 
@@ -22365,6 +24969,12 @@ function startSavedEromeHold(e) {
 }
 
 function endSavedEromeHold(e) {
+  if (
+    savedEromePointerId != null &&
+    e?.pointerId != null &&
+    e.pointerId !== savedEromePointerId
+  ) return;
+  savedEromePointerId = null;
   clearTimeout(savedEromeHoldTimer);
 
   if (e) {
@@ -22377,12 +24987,15 @@ function endSavedEromeHold(e) {
   }
 }
 
-savedEromeButton?.addEventListener('touchstart', startSavedEromeHold, { passive: true });
-savedEromeButton?.addEventListener('touchend', endSavedEromeHold);
-savedEromeButton?.addEventListener('touchcancel', () => clearTimeout(savedEromeHoldTimer));
-savedEromeButton?.addEventListener('mousedown', startSavedEromeHold);
-savedEromeButton?.addEventListener('mouseup', endSavedEromeHold);
-savedEromeButton?.addEventListener('mouseleave', () => clearTimeout(savedEromeHoldTimer));
+// Pointer events cover both touch and mouse exactly once. Registering separate
+// touch and mouse handlers made Android WebView toggle the menu open and then
+// immediately closed again when it emitted compatibility mouse events.
+savedEromeButton?.addEventListener('pointerdown', startSavedEromeHold, { passive: true });
+savedEromeButton?.addEventListener('pointerup', endSavedEromeHold);
+savedEromeButton?.addEventListener('pointercancel', () => {
+  savedEromePointerId = null;
+  clearTimeout(savedEromeHoldTimer);
+});
 
 eromeUrlInput?.addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -22901,7 +25514,7 @@ window.PongObserverStateBridge = () => ({
   loadedSavedMode: window.PongLoadedSavedMode || ''
 });
 </script>
-<script src="pong-observer.js?v=4"></script>
-<script src="pong-sync.js?v=112"></script>
+<script src="pong-observer.js?v=9"></script>
+<script src="pong-sync.js?v=115"></script>
 </body>
 </html>

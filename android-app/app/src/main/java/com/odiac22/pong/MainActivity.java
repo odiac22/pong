@@ -1,45 +1,97 @@
 package com.odiac22.pong;
 
 import android.app.Activity;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
 import android.os.Bundle;
 import android.os.Build;
-import android.os.Handler;
-import android.os.Looper;
 import android.net.Uri;
-import android.util.Base64;
 import android.view.View;
-import android.view.PixelCopy;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.RenderProcessGoneDetail;
 import android.content.SharedPreferences;
+import android.content.Intent;
 import org.json.JSONObject;
-import java.io.ByteArrayOutputStream;
 import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
+  // Both locally validated and release APKs use the live LAN Pong endpoint.
+  // A deliberate deep link can still override it for isolated emulator tests.
   private static final String DEFAULT_PONG_URL = "http://192.168.1.124:8787/pong";
   private WebView web;
   private String observerPair;
   private String deviceId;
   private SharedPreferences appState;
-  private boolean activityVisible = false;
-  private final Handler observerHandler = new Handler(Looper.getMainLooper());
-  private final Runnable captureRunnable = new Runnable() {
-    @Override public void run() {
-      captureObserverFrame();
-      // Keep the remote frame close to the playback telemetry. Ten-second
-      // captures routinely missed videos that began playing just before the
-      // app was backgrounded.
-      observerHandler.postDelayed(this, 1_500);
+
+  private void configureAndLoadWebView(String initialUrl) {
+    web = new WebView(this);
+    setContentView(web);
+    if (Build.VERSION.SDK_INT >= 26) {
+      web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
     }
-  };
+    WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
+    WebSettings s = web.getSettings();
+    s.setJavaScriptEnabled(true);
+    s.setDomStorageEnabled(true);
+    s.setDatabaseEnabled(true);
+    s.setMediaPlaybackRequiresUserGesture(true);
+    s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+    s.setLoadWithOverviewMode(true);
+    s.setUseWideViewPort(true);
+    s.setCacheMode(WebSettings.LOAD_DEFAULT);
+    s.setSupportZoom(false);
+    s.setBuiltInZoomControls(false);
+    s.setDisplayZoomControls(false);
+    s.setJavaScriptCanOpenWindowsAutomatically(false);
+    s.setSupportMultipleWindows(false);
+    CookieManager.getInstance().setAcceptCookie(true);
+    CookieManager.getInstance().setAcceptThirdPartyCookies(web, true);
+    web.setWebViewClient(new WebViewClient() {
+      @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+        if (!request.isForMainFrame()) return false;
+        String original = request.getUrl().toString();
+        String decorated = decoratePongUrl(original);
+        if (decorated.equals(original)) return false;
+        view.post(() -> view.loadUrl(decorated));
+        return true;
+      }
+      @Override public void onPageFinished(WebView view, String url) {
+        String decorated = decoratePongUrl(url);
+        if (!decorated.equals(url)) {
+          view.loadUrl(decorated);
+          return;
+        }
+        rememberPongUrl(url);
+        connectObserver();
+      }
+      @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+        final String recoveryUrl = resumablePongUrl(view.getUrl());
+        rememberPongUrl(recoveryUrl);
+        view.post(() -> {
+          if (web != view || isFinishing() || isDestroyed()) return;
+          try {
+            setContentView(new View(MainActivity.this));
+            view.destroy();
+          } catch (Exception ignored) {}
+          configureAndLoadWebView(recoveryUrl);
+        });
+        // The page session is authoritative in localStorage. Recover the
+        // renderer instead of allowing Android to terminate the whole APK.
+        return true;
+      }
+    });
+    web.setWebChromeClient(new WebChromeClient());
+    web.loadUrl(resumablePongUrl(initialUrl));
+  }
+
+  private boolean hasObserverPairing() {
+    String value = observerPair == null ? "" : observerPair.trim();
+    return !value.isEmpty() && !"OBSERVER_PAIR_PLACEHOLDER".equals(value);
+  }
 
   static boolean isPongUrl(Uri url) {
     String host = url.getHost();
@@ -113,19 +165,18 @@ public class MainActivity extends Activity {
     } catch (Exception ignored) {}
   }
 
-  private void persistWebSession() {
-    if (web == null) return;
+  private String requestedPongUrl(Intent intent) {
     try {
-      rememberPongUrl(web.getUrl());
-      web.evaluateJavascript(
-        "try{typeof snapshotRenderedPlaybackPositions==='function'&&snapshotRenderedPlaybackPositions({immediate:true});typeof saveSession==='function'&&saveSession()}catch(e){}",
-        null
-      );
+      String requested = intent == null ? null : intent.getDataString();
+      if (requested != null && isPongUrl(Uri.parse(requested))) return requested;
     } catch (Exception ignored) {}
+    return null;
   }
 
   private void connectObserver() {
-    if (web == null || web.getUrl() == null || !isPongUrl(Uri.parse(web.getUrl()))) return;
+    if (!hasObserverPairing() || web == null || web.getUrl() == null || !isPongUrl(Uri.parse(web.getUrl()))) {
+      return;
+    }
     try {
       JSONObject client = new JSONObject();
       client.put("instance", BuildConfig.INSTANCE);
@@ -134,44 +185,7 @@ public class MainActivity extends Activity {
       // No JavaScript interface is exposed to third-party pages. Repair pairing after
       // history restoration and origin handoffs even when a fragment was consumed.
       web.evaluateJavascript("window.PongLiveObserver && window.PongLiveObserver.configure(" + JSONObject.quote(observerPair) + "," + client + ")", null);
-      observerHandler.removeCallbacks(captureRunnable);
-      observerHandler.postDelayed(captureRunnable, 500);
     } catch (Exception ignored) {}
-  }
-
-  private void deliverObserverFrame(Bitmap full) {
-    Bitmap scaled = null;
-    try {
-      if (!activityVisible || web == null) return;
-      int width = Math.min(360, full.getWidth());
-      int height = Math.max(1, Math.round(full.getHeight() * (width / (float) full.getWidth())));
-      scaled = Bitmap.createScaledBitmap(full, width, height, true);
-      ByteArrayOutputStream output = new ByteArrayOutputStream();
-      scaled.compress(Bitmap.CompressFormat.JPEG, 42, output);
-      String encoded = Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP);
-      web.evaluateJavascript("window.PongLiveObserver && (window.PongLiveObserver.frame(" + JSONObject.quote(encoded) + "," + width + "," + height + "),window.PongLiveObserver.send())", null);
-    } catch (Exception ignored) {
-    } finally {
-      if (scaled != null && scaled != full) scaled.recycle();
-      full.recycle();
-    }
-  }
-
-  private void captureObserverFrame() {
-    if (web == null || web.getWidth() < 1 || web.getHeight() < 1 || web.getUrl() == null || !isPongUrl(Uri.parse(web.getUrl()))) return;
-    Bitmap full = Bitmap.createBitmap(web.getWidth(), web.getHeight(), Bitmap.Config.RGB_565);
-    if (Build.VERSION.SDK_INT >= 26) {
-      try {
-        PixelCopy.request(getWindow(), full, result -> {
-          if (result == PixelCopy.SUCCESS && activityVisible) deliverObserverFrame(full); else full.recycle();
-        }, observerHandler);
-      } catch (Exception ignored) {
-        full.recycle();
-      }
-      return;
-    }
-    web.draw(new Canvas(full));
-    deliverObserverFrame(full);
   }
 
   @Override public void onCreate(Bundle state) {
@@ -184,49 +198,47 @@ public class MainActivity extends Activity {
       deviceId = UUID.randomUUID().toString();
       appState.edit().putString("observer-device", deviceId).apply();
     }
-    web = new WebView(this); setContentView(web);
-    if (Build.VERSION.SDK_INT >= 26) {
-      web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
-    }
-    WebSettings s = web.getSettings();
-    s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); s.setDatabaseEnabled(true);
-    s.setMediaPlaybackRequiresUserGesture(true); s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-    s.setLoadWithOverviewMode(true); s.setUseWideViewPort(true);
-    CookieManager.getInstance().setAcceptCookie(true); CookieManager.getInstance().setAcceptThirdPartyCookies(web, true);
-    web.setWebViewClient(new WebViewClient() {
-      @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-        if (!request.isForMainFrame()) return false;
-        String original = request.getUrl().toString();
-        String decorated = decoratePongUrl(original);
-        if (decorated.equals(original)) return false;
-        view.post(() -> view.loadUrl(decorated));
-        return true;
-      }
-      @Override public void onPageFinished(WebView view, String url) {
-        rememberPongUrl(url);
-        connectObserver();
-      }
-    });
-    web.setWebChromeClient(new WebChromeClient());
-    if (state == null || web.restoreState(state) == null) {
-      String lastUrl = appState.getString("last-pong-url", DEFAULT_PONG_URL);
-      web.loadUrl(resumablePongUrl(lastUrl));
-    }
+    String requestedUrl = requestedPongUrl(getIntent());
+    String lastUrl = requestedUrl != null
+      ? requestedUrl
+      : appState.getString("last-pong-url", DEFAULT_PONG_URL);
+    // Do not marshal the complete WebView history into Android's Activity
+    // state Bundle. Large Pong decks made that Bundle expensive and could
+    // crash during background/restore. The web app's compact localStorage
+    // session is the single restoration authority.
+    configureAndLoadWebView(lastUrl);
   }
-  @Override protected void onResume() { super.onResume(); activityVisible = true; if (web != null) { web.onResume(); web.resumeTimers(); connectObserver(); } }
+  @Override protected void onNewIntent(Intent intent) {
+    super.onNewIntent(intent);
+    setIntent(intent);
+    String requestedUrl = requestedPongUrl(intent);
+    if (requestedUrl != null && web != null) web.loadUrl(resumablePongUrl(requestedUrl));
+  }
+  @Override protected void onResume() { super.onResume(); if (web != null) { web.onResume(); web.resumeTimers(); connectObserver(); } }
   @Override protected void onPause() {
-    activityVisible = false;
-    observerHandler.removeCallbacks(captureRunnable);
     if (web != null) {
-      persistWebSession();
-      web.evaluateJavascript("document.querySelectorAll('video,audio').forEach(v=>v.pause());window.PongLiveObserver && window.PongLiveObserver.send()", null);
+      rememberPongUrl(web.getUrl());
+      web.evaluateJavascript("try{document.querySelectorAll('video,audio').forEach(v=>v.pause());window.PongLiveObserver&&window.PongLiveObserver.send()}catch(e){}", null);
       // Keep JavaScript, queue polling, and media preloading alive while another
       // Android app is in front. Media itself is paused above, so no audio leaks.
     }
     super.onPause();
   }
-  @Override protected void onStop() { persistWebSession(); super.onStop(); }
-  @Override protected void onDestroy() { observerHandler.removeCallbacks(captureRunnable); super.onDestroy(); }
-  @Override protected void onSaveInstanceState(Bundle out) { web.saveState(out); super.onSaveInstanceState(out); }
-  @Override public void onBackPressed() { if (web.canGoBack()) web.goBack(); else super.onBackPressed(); }
+  @Override protected void onStop() { if (web != null) rememberPongUrl(web.getUrl()); super.onStop(); }
+  @Override protected void onDestroy() {
+    WebView oldWeb = web;
+    web = null;
+    if (oldWeb != null) {
+      try {
+        oldWeb.stopLoading();
+        oldWeb.setWebChromeClient(null);
+        oldWeb.setWebViewClient(null);
+        oldWeb.removeAllViews();
+        oldWeb.destroy();
+      } catch (Exception ignored) {}
+    }
+    super.onDestroy();
+  }
+  @Override protected void onSaveInstanceState(Bundle out) { super.onSaveInstanceState(out); }
+  @Override public void onBackPressed() { if (web != null && web.canGoBack()) web.goBack(); else super.onBackPressed(); }
 }
