@@ -1,9 +1,18 @@
 plugins { id 'com.android.application' }
 
+def pongObserverPair = System.getenv('PONG_OBSERVER_PAIR') ?: 'OBSERVER_PAIR_PLACEHOLDER'
+def escapedObserverPair = pongObserverPair.replace('\\', '\\\\').replace('"', '\\"')
+
 android {
     namespace 'com.odiac22.pong'
     compileSdk 35
-    defaultConfig { minSdk 24; targetSdk 35; versionCode 2769; versionName '27.69' }
+    defaultConfig {
+        minSdk 24
+        targetSdk 35
+        versionCode 2770
+        versionName '27.70'
+        buildConfigField 'String', 'OBSERVER_PAIR', "\"${escapedObserverPair}\""
+    }
     flavorDimensions 'instance'
     productFlavors {
         pong1 {
@@ -28,5 +37,15 @@ android {
     }
     buildTypes {
         release { minifyEnabled false; signingConfig signingConfigs.release }
+    }
+}
+
+gradle.taskGraph.whenReady { graph ->
+    def createsReleaseApk = graph.allTasks.any { task ->
+        task.project == project && task.name.toLowerCase().contains('release') &&
+            (task.name.toLowerCase().contains('assemble') || task.name.toLowerCase().contains('bundle'))
+    }
+    if (createsReleaseApk && pongObserverPair == 'OBSERVER_PAIR_PLACEHOLDER') {
+        throw new GradleException('Release APK requires PONG_OBSERVER_PAIR; refusing to build disconnected Pong diagnostics.')
     }
 }

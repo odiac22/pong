@@ -226,7 +226,10 @@ public class MainActivity extends Activity {
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
     getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
-    observerPair = getString(R.string.observer_pair);
+    // The release build injects the private observer pairing through BuildConfig.
+    // Keeping it out of source/resources prevents accidental plaintext commits,
+    // while the release guard refuses APKs that would silently ship disconnected.
+    observerPair = BuildConfig.OBSERVER_PAIR;
     activityInstanceId = UUID.randomUUID().toString();
     appState = getSharedPreferences("pong-app-state", MODE_PRIVATE);
     deviceId = appState.getString("observer-device", "");
