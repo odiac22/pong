@@ -25,15 +25,24 @@ public class MainActivity extends Activity {
   private WebView web;
   private String observerPair;
   private String deviceId;
+  private String activityInstanceId;
   private SharedPreferences appState;
+  private int webGeneration = 0;
+  private int lifecycleSequence = 0;
+  private boolean recoveringRenderer = false;
+  private boolean nativeForeground = false;
 
   private void configureAndLoadWebView(String initialUrl) {
+    webGeneration += 1;
     web = new WebView(this);
     setContentView(web);
     if (Build.VERSION.SDK_INT >= 26) {
       web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
     }
-    WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
+    // Wireless/USB debugging is the operator's private diagnostic channel for
+    // the release APKs as well. It exposes no in-page bridge and is reachable
+    // only through an already-authorized Android debugging connection.
+    WebView.setWebContentsDebuggingEnabled(true);
     WebSettings s = web.getSettings();
     s.setJavaScriptEnabled(true);
     s.setDomStorageEnabled(true);
@@ -67,10 +76,14 @@ public class MainActivity extends Activity {
         }
         rememberPongUrl(url);
         connectObserver();
+        emitNativeLifecycle(recoveringRenderer ? "renderer-recovered" : "webview-ready");
+        recoveringRenderer = false;
       }
       @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
         final String recoveryUrl = resumablePongUrl(view.getUrl());
         rememberPongUrl(recoveryUrl);
+        recoveringRenderer = true;
+        lifecycleSequence += 1;
         view.post(() -> {
           if (web != view || isFinishing() || isDestroyed()) return;
           try {
@@ -181,10 +194,32 @@ public class MainActivity extends Activity {
       JSONObject client = new JSONObject();
       client.put("instance", BuildConfig.INSTANCE);
       client.put("deviceId", deviceId);
+      client.put("activityInstanceId", activityInstanceId);
       client.put("version", BuildConfig.VERSION_NAME);
+      client.put("webGeneration", webGeneration);
+      client.put("lifecycleSequence", lifecycleSequence);
+      client.put("foreground", nativeForeground);
       // No JavaScript interface is exposed to third-party pages. Repair pairing after
       // history restoration and origin handoffs even when a fragment was consumed.
       web.evaluateJavascript("window.PongLiveObserver && window.PongLiveObserver.configure(" + JSONObject.quote(observerPair) + "," + client + ")", null);
+    } catch (Exception ignored) {}
+  }
+
+  private void emitNativeLifecycle(String phase) {
+    if (web == null || web.getUrl() == null) return;
+    try {
+      if (!isPongUrl(Uri.parse(web.getUrl()))) return;
+      lifecycleSequence += 1;
+      JSONObject detail = new JSONObject();
+      detail.put("phase", phase);
+      detail.put("activityInstanceId", activityInstanceId);
+      detail.put("foreground", nativeForeground);
+      detail.put("webGeneration", webGeneration);
+      detail.put("sequence", lifecycleSequence);
+      web.evaluateJavascript(
+        "window.PongLiveObserver&&window.PongLiveObserver.event('native-lifecycle'," + detail + ")",
+        null
+      );
     } catch (Exception ignored) {}
   }
 
@@ -192,6 +227,7 @@ public class MainActivity extends Activity {
     super.onCreate(state);
     getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
     observerPair = getString(R.string.observer_pair);
+    activityInstanceId = UUID.randomUUID().toString();
     appState = getSharedPreferences("pong-app-state", MODE_PRIVATE);
     deviceId = appState.getString("observer-device", "");
     if (deviceId.isEmpty()) {
@@ -214,17 +250,29 @@ public class MainActivity extends Activity {
     String requestedUrl = requestedPongUrl(intent);
     if (requestedUrl != null && web != null) web.loadUrl(resumablePongUrl(requestedUrl));
   }
-  @Override protected void onResume() { super.onResume(); if (web != null) { web.onResume(); web.resumeTimers(); connectObserver(); } }
+  @Override protected void onResume() {
+    super.onResume();
+    nativeForeground = true;
+    if (web != null) {
+      web.onResume();
+      web.resumeTimers();
+      web.evaluateJavascript("try{window.PongResumeFromAppBackground&&window.PongResumeFromAppBackground()}catch(e){}", null);
+      connectObserver();
+      emitNativeLifecycle("resume");
+    }
+  }
   @Override protected void onPause() {
+    nativeForeground = false;
     if (web != null) {
       rememberPongUrl(web.getUrl());
-      web.evaluateJavascript("try{document.querySelectorAll('video,audio').forEach(v=>v.pause());window.PongLiveObserver&&window.PongLiveObserver.send()}catch(e){}", null);
+      lifecycleSequence += 1;
+      web.evaluateJavascript("try{if(window.PongPrepareForAppBackground){window.PongPrepareForAppBackground()}else{document.querySelectorAll('video,audio').forEach(v=>v.pause())}window.PongLiveObserver&&window.PongLiveObserver.event('native-lifecycle',{phase:'pause',activityInstanceId:" + JSONObject.quote(activityInstanceId) + ",foreground:false,webGeneration:" + webGeneration + ",sequence:" + lifecycleSequence + "});window.PongLiveObserver&&window.PongLiveObserver.send()}catch(e){}", null);
       // Keep JavaScript, queue polling, and media preloading alive while another
       // Android app is in front. Media itself is paused above, so no audio leaks.
     }
     super.onPause();
   }
-  @Override protected void onStop() { if (web != null) rememberPongUrl(web.getUrl()); super.onStop(); }
+  @Override protected void onStop() { nativeForeground = false; if (web != null) rememberPongUrl(web.getUrl()); super.onStop(); }
   @Override protected void onDestroy() {
     WebView oldWeb = web;
     web = null;

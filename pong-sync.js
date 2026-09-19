@@ -28,7 +28,8 @@
   const SAVED_ARTISTS_PLAYBACK_CACHE_KEY = 'pong_saved_artists_playback_cache_v3';
   const DEFAULT_COOMERFANS_PROXY_URL = 'https://pong-coomerfans-proxy.odiac22-pong-repair.workers.dev';
   const REPAIR_CONCURRENCY_KEY = 'pong_repair_item_concurrency_v1';
-  const SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT = 80;
+  const SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT = 15;
+  const SAVED_ARTIST_INITIAL_BACKLOG = 5;
   const PONG_ARTIST_PREFIX = '#PONG_ARTIST ';
   const PONG_VIDEO_PREFIX = '#PONG_VIDEO ';
   const REPAIR_LOG_UPLOAD_PATH = 'pong-data/repair-log-latest.txt';
@@ -138,6 +139,40 @@
         opacity: 0.95 !important;
         border-color: rgba(251,113,133,0.9) !important;
         box-shadow: 0 0 0 2px rgba(244,63,94,0.2), 0 8px 24px rgba(0,0,0,0.28) !important;
+      }
+
+      .played-skip-control-button {
+        left: 282px !important;
+        width: 24px !important;
+        height: 24px !important;
+        min-height: 24px !important;
+        padding: 0 !important;
+        font-size: 7px !important;
+        font-weight: 900 !important;
+        letter-spacing: 0 !important;
+        border-color: rgba(96,165,250,0.48) !important;
+        background: rgba(30,64,175,0.34) !important;
+        color: #bfdbfe !important;
+      }
+
+      .played-skip-control-button.active {
+        opacity: 0.92 !important;
+        background: rgba(37,99,235,0.82) !important;
+        border-color: rgba(147,197,253,0.92) !important;
+        color: #fff !important;
+      }
+
+      .side-save-button.auto-skip-video-button {
+        border-color: rgba(251,191,36,0.38) !important;
+        background: rgba(120,53,15,0.30) !important;
+        color: #fde68a !important;
+      }
+
+      .side-save-button.auto-skip-video-button.active {
+        opacity: 0.95 !important;
+        border-color: rgba(250,204,21,0.92) !important;
+        background: rgba(180,83,9,0.72) !important;
+        color: #fff !important;
       }
 
       .side-save-icon {
@@ -629,7 +664,6 @@
   function updateSaveCounterElements(counts) {
     const videoCount = document.getElementById('saved-video-count');
     const artistCount = document.getElementById('saved-artist-count');
-    const accuracy = document.getElementById('random40-accuracy-mini');
 
     if (videoCount) {
       videoCount.textContent = String(Math.max(0, Number(counts?.videos || 0)));
@@ -638,19 +672,7 @@
     if (artistCount) {
       artistCount.textContent = String(Math.max(0, Number(counts?.artists || 0)));
     }
-
-    if (accuracy && typeof window.PongRandom40AccuracyText === 'function') {
-      accuracy.textContent = window.PongRandom40AccuracyText();
-    }
   }
-
-  function renderRandom40AccuracyMini() {
-    const accuracy = document.getElementById('random40-accuracy-mini');
-    if (!accuracy || typeof window.PongRandom40AccuracyText !== 'function') return;
-    accuracy.textContent = window.PongRandom40AccuracyText();
-  }
-
-  window.PongRenderRandom40Accuracy = renderRandom40AccuracyMini;
 
   function getCountsFromSharedData(data) {
     return {
@@ -778,9 +800,12 @@
     normalized.savedVideos = normalized.savedVideos || {};
     normalized.savedArtists = normalized.savedArtists || {};
 
-    if (options.refreshMedia) {
-      refreshSharedDataMediaUrls(normalized);
-    }
+    // Saved state must contain source/CDN URLs, never an instance-specific
+    // /video-cache, /proxy, or host wrapper. Normalizing on every ingress also
+    // migrates older LAN-cache records before they reach a playback cache.
+    refreshSharedDataMediaUrls(normalized, {
+      preferFresh: options.refreshMedia === true
+    });
 
     return normalized;
   }
@@ -822,7 +847,15 @@
   }
 
   function pcSavedLinksEndpoint() {
-    return location.port === '8787' ? location.origin : '';
+    try {
+      const page = new URL(location.href);
+      const privateHost = ['localhost', '127.0.0.1'].includes(page.hostname) ||
+        /^10\./.test(page.hostname) || /^192\.168\./.test(page.hostname) ||
+        /^172\.(?:1[6-9]|2\d|3[01])\./.test(page.hostname);
+      return page.protocol === 'http:' && privateHost ? page.origin : '';
+    } catch (_) {
+      return '';
+    }
   }
 
   async function fetchPcSavedLinks() {
@@ -840,7 +873,7 @@
 
   async function publishSavedDeltaToPc(delta) {
     const endpoint = pcSavedLinksEndpoint();
-    if (!endpoint) return false;
+    if (!endpoint) return null;
     try {
       const response = await fetch(`${endpoint}/saved-links/save`, {
         method: 'POST',
@@ -848,9 +881,11 @@
         cache: 'no-store',
         body: JSON.stringify({ data: normalizeSharedData(delta) })
       });
-      return response.ok;
+      if (!response.ok) return null;
+      const payload = await response.json();
+      return normalizeSharedData(payload?.data);
     } catch (_) {
-      return false;
+      return null;
     }
   }
 
@@ -1247,7 +1282,7 @@
     const items = Object.values(data?.savedVideos || {})
       .filter(item => item?.url)
       .map(item => ({
-        url: preferFreshMediaUrl(item.url),
+        url: savedMediaPlaybackUrl(item.url, item),
         meta: compactCachedMeta(item)
       }))
       .filter(item => item.url);
@@ -1259,20 +1294,26 @@
     };
   }
 
-  function buildSavedArtistsPlaybackSource(data) {
-    const artists = Object.values(data?.savedArtists || {})
-      .filter(artist => artist && Array.isArray(artist.videos) && artist.videos.length)
+  function buildSavedArtistsPlaybackSource(data, options = {}) {
+    const artistLimit = Math.max(1, Number(options.artistLimit || Number.MAX_SAFE_INTEGER));
+    const videoLimit = Math.max(1, Number(options.videoLimit || SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT));
+    const records = Object.values(data?.savedArtists || {})
+      .filter(artist => artist && Array.isArray(artist.videos) && artist.videos.length);
+    const artists = (options.preserveOrder === true ? records : shuffleArray(records))
+      .slice(0, artistLimit)
       .map((artist, artistIndex) => {
         const artistMeta = compactSavedArtistPlaybackMeta(artist);
-        const cleanVideos = shuffleArray(dedupeAndRefreshMediaUrls(artist.videos.filter(Boolean)))
-          .slice(0, SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT);
-        const videos = cleanVideos.map(url => {
-          const mediaKey = getSavedVideoKey(url);
+        const canonicalVideos = dedupeAndRefreshMediaUrls(
+          artist.videos.filter(Boolean).map(url => canonicalSavedMediaUrl(url, artist))
+        );
+        const cleanVideos = shuffleArray(canonicalVideos).slice(0, videoLimit);
+        const videos = cleanVideos.map(canonicalUrl => {
+          const mediaKey = getSavedVideoKey(canonicalUrl);
           const videoMeta = mediaKey && artist.videoMeta ? artist.videoMeta[mediaKey] : null;
 
           return {
-            url,
-            meta: compactVideoMetadata(videoMeta) || {}
+            url: savedMediaPlaybackUrl(canonicalUrl, { ...artist, ...(videoMeta || {}) }),
+            meta: compactCachedMeta(videoMeta, artistMeta)
           };
         }).filter(item => item.url);
 
@@ -1291,6 +1332,222 @@
       videoCount: artists.reduce((total, artist) => total + artist.videos.length, 0),
       artists
     };
+  }
+
+  function savedRepairPostUrls(record, limit = 12) {
+    const metadata = record?.videoMeta && typeof record.videoMeta === 'object'
+      ? Object.values(record.videoMeta)
+      : [];
+    const urls = [
+      record?.postUrl,
+      ...metadata.map(item => item?.postUrl)
+    ].map(value => String(value || '').trim()).filter(Boolean);
+    return shuffleArray([...new Set(urls)]).slice(0, Math.max(1, limit));
+  }
+
+  function isCoomerRepairPostUrl(rawUrl) {
+    try {
+      const hostname = new URL(rawUrl, window.location.href).hostname.toLowerCase();
+      return hostname === 'coomerfans.com' || hostname.endsWith('.coomerfans.com') ||
+        hostname === 'onlyfaphouse.com' || hostname.endsWith('.onlyfaphouse.com');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function verifySavedPlaybackPosts(postUrls, artistInfo = {}, stopAt = 5) {
+    const endpoint = pcSavedLinksEndpoint();
+    const cleanPosts = [...new Set((postUrls || []).map(value => String(value || '').trim()).filter(Boolean))];
+    if (!endpoint || !cleanPosts.length) return [];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await fetch(`${endpoint}/verify-videos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        signal: controller.signal,
+        body: JSON.stringify({
+          postUrls: cleanPosts,
+          stopAt: Math.max(1, Math.min(8, Number(stopAt) || 5)),
+          perArtistConcurrency: 8,
+          priorityControl: { forceFresh: true },
+          artistInfo: compactCachedMeta(artistInfo, artistInfo)
+        })
+      });
+      if (!response.ok) return [];
+      const payload = await response.json();
+      const entries = (Array.isArray(payload?.entries) ? payload.entries : [])
+        .filter(entry => entry?.videoUrl);
+      rememberFreshMediaUrls(entries.map(entry => entry.videoUrl));
+      return entries;
+    } catch (_) {
+      return [];
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function buildFreshSavedArtistsPlaybackSource(data) {
+    const source = buildSavedArtistsPlaybackSource(data);
+    if (!source?.artists?.length) return source;
+    const records = shuffleArray(Object.values(data?.savedArtists || {}))
+      .filter(record => record && Array.isArray(record.videos) && record.videos.length);
+    for (const record of records.slice(0, 4)) {
+      const posts = savedRepairPostUrls(record, 6);
+      if (!posts.length) continue;
+      const fresh = await verifySavedPlaybackPosts(posts, record, 3);
+      if (!fresh.length) continue;
+      const key = String(record.artistKey || '');
+      const targetIndex = source.artists.findIndex(artist => String(artist.artistKey || '') === key);
+      if (targetIndex < 0) continue;
+      const target = source.artists[targetIndex];
+      target.videos = fresh.map(entry => ({
+        url: savedMediaPlaybackUrl(entry.videoUrl, { ...record, ...entry }),
+        meta: compactCachedMeta(entry, record)
+      })).filter(item => item.url);
+      source.artists = [target];
+      source.preserveOrder = true;
+      source.selectedArtistKey = key;
+      source.videoCount = source.artists.reduce((total, artist) => total + artist.videos.length, 0);
+      return source;
+    }
+    return source;
+  }
+
+  async function buildFreshSavedVideosPlaybackSource(data) {
+    const source = buildSavedVideosPlaybackSource(data);
+    if (!source?.items?.length) return source;
+    const records = shuffleArray(Object.values(data?.savedVideos || {})).filter(Boolean);
+    const postUrls = records
+      .flatMap(record => savedRepairPostUrls(record, 2))
+      .filter(isCoomerRepairPostUrl)
+      .slice(0, 4);
+    const fresh = await verifySavedPlaybackPosts(postUrls, records[0] || {}, 2);
+    if (!fresh.length) return source;
+    const freshItems = fresh.map(entry => ({
+      url: savedMediaPlaybackUrl(entry.videoUrl, entry),
+      meta: compactCachedMeta(entry)
+    })).filter(item => item.url);
+    return {
+      ...source,
+      preserveOrder: true,
+      items: freshItems,
+      count: freshItems.length,
+      verifiedPostUrls: postUrls
+    };
+  }
+
+  let savedPlaybackVerificationGeneration = 0;
+  let savedPlaybackLoadIntentGeneration = 0;
+
+  function cancelSavedPlaybackLoadIntent() {
+    savedPlaybackVerificationGeneration++;
+    return ++savedPlaybackLoadIntentGeneration;
+  }
+
+  function beginSavedPlaybackLoadIntent() {
+    // A new explicit load owns the deck immediately, before its first await.
+    // It also retires background verification from the previous dataset.
+    return cancelSavedPlaybackLoadIntent();
+  }
+
+  function isSavedPlaybackLoadIntentCurrent(generation) {
+    return Number(generation) === savedPlaybackLoadIntentGeneration;
+  }
+
+  // Deck replacements are owned by index.html, while saved/collection loads
+  // live in this bundle. Expose one narrow generation fence so a normal paste,
+  // Recall, or Local run can prevent an older saved fetch from taking the deck
+  // back after its await completes.
+  window.PongBeginSavedPlaybackLoadIntent = beginSavedPlaybackLoadIntent;
+  window.PongCancelSavedPlaybackLoadIntent = cancelSavedPlaybackLoadIntent;
+  window.PongIsSavedPlaybackLoadIntentCurrent = isSavedPlaybackLoadIntentCurrent;
+
+  function freshSavedArtistSource(record, fresh) {
+    const source = buildSavedArtistsPlaybackSource({ savedArtists: { current: record } });
+    const artist = source?.artists?.[0];
+    if (!artist || !fresh?.length) return null;
+    artist.videos = fresh.map(entry => ({
+      url: savedMediaPlaybackUrl(entry.videoUrl, { ...record, ...entry }),
+      meta: compactCachedMeta(entry, record)
+    })).filter(item => item.url);
+    if (!artist.videos.length) return null;
+    return { ...source, preserveOrder: true, artists: [artist], count: 1, videoCount: artist.videos.length };
+  }
+
+  function appendVerifiedSavedArtistSource(source) {
+    const payload = buildSavedArtistsPlaybackDataFromSource(source);
+    if (!payload?.urls?.length || !payload?.pasteEvents?.length) return false;
+    const offset = allVideoUrls.length;
+    allVideoUrls.push(...payload.urls);
+    allVideoMetadata.push(...payload.metadata);
+    pasteEvents.push(...payload.pasteEvents.map(event => ({
+      ...event,
+      startIndex: offset + Number(event.startIndex || 0)
+    })));
+    updatePasteNavigationButton?.();
+    return true;
+  }
+
+  function startSavedArtistsBackgroundVerification(data, selectedArtistKey = '') {
+    const generation = ++savedPlaybackVerificationGeneration;
+    const queue = shuffleArray(Object.values(data?.savedArtists || {})).filter(record => (
+      record && Array.isArray(record.videos) && record.videos.length &&
+      String(record.artistKey || '') !== String(selectedArtistKey || '')
+    ));
+    void (async () => {
+      while (queue.length && generation === savedPlaybackVerificationGeneration) {
+        if (String(window.PongLoadedSavedMode || '') !== 'savedArtists') return;
+        const activeEvent = Math.max(0, Number(currentPasteIndex || 0));
+        if (pasteEvents.length - activeEvent >= 5) {
+          await new Promise(resolve => setTimeout(resolve, 900));
+          continue;
+        }
+        const record = queue.shift();
+        // Existing canonical saved URLs are immediately useful. Do not make
+        // playback wait for a network re-scrape; a failed current item already
+        // enters the silent repair lane.
+        const source = buildSavedArtistsPlaybackSource(
+          { savedArtists: { current: record } },
+          { artistLimit: 1, videoLimit: SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT, preserveOrder: true }
+        );
+        if (source) appendVerifiedSavedArtistSource(source);
+        await new Promise(resolve => setTimeout(resolve, 40));
+      }
+
+    })();
+  }
+
+  function startSavedVideosBackgroundVerification(data, initialPostUrls = []) {
+    const generation = ++savedPlaybackVerificationGeneration;
+    const usedPosts = new Set((initialPostUrls || []).map(value => String(value || '')));
+    const queue = shuffleArray(Object.values(data?.savedVideos || {}))
+      .flatMap(record => savedRepairPostUrls(record, 2).map(postUrl => ({ postUrl, record })))
+      .filter(item => item.postUrl && isCoomerRepairPostUrl(item.postUrl) && !usedPosts.has(item.postUrl));
+    const seenMedia = new Set(allVideoUrls.map(url => getSavedVideoKey(canonicalSavedMediaUrl(url))).filter(Boolean));
+    void (async () => {
+      while (queue.length && generation === savedPlaybackVerificationGeneration) {
+        if (String(window.PongLoadedSavedMode || '') !== 'savedVideos') return;
+        const loadedRemaining = Math.max(0, allVideoUrls.length - (Number(currentBatch || 0) * BATCH_SIZE + Number(currentVideoIndex || 0)));
+        if (loadedRemaining >= 20) {
+          await new Promise(resolve => setTimeout(resolve, 900));
+          continue;
+        }
+        const batch = queue.splice(0, 12);
+        const fresh = await verifySavedPlaybackPosts(batch.map(item => item.postUrl), batch[0]?.record || {}, 8);
+        if (generation !== savedPlaybackVerificationGeneration) return;
+        const additions = fresh.filter(entry => {
+          const key = getSavedVideoKey(entry.videoUrl);
+          if (!key || seenMedia.has(key)) return false;
+          seenMedia.add(key);
+          return true;
+        });
+        if (!additions.length) continue;
+        allVideoUrls.push(...additions.map(entry => savedMediaPlaybackUrl(entry.videoUrl, entry)));
+        allVideoMetadata.push(...additions.map(entry => compactCachedMeta(entry)));
+      }
+    })();
   }
 
   function writeSavedPlaybackCaches(data) {
@@ -1422,24 +1679,28 @@
   }
 
   async function updateSaveCountersOverride() {
-    let combined = localSharedDataSnapshot();
-    updateSaveCountersFromData(combined);
+    const cachedCounts = loadSaveCounts();
+    if (cachedCounts) updateSaveCounterElements(cachedCounts);
 
     try {
       const pcData = await fetchPcSavedLinks();
-      if (pcData) combined = mergeSharedData(combined, pcData);
-      mirrorSharedDataToLocal(combined);
+      if (pcData) {
+        // The PC store is authoritative. Replacing, rather than unioning, is
+        // what keeps Pong 1 and Pong 2 on one stable count.
+        mirrorSharedDataToLocal(pcData);
+        return;
+      }
     } catch (error) {
       console.warn('[Pong saved] Could not refresh save counters from PC memory', error);
     }
 
     try {
       const loaded = await fetchSharedDataFromGitHub();
-      combined = mergeSharedData(loaded.data, combined);
-      mirrorSharedDataToLocal(combined);
-      scheduleSavedPlaybackCacheWrite(combined);
+      mirrorSharedDataToLocal(loaded.data);
+      scheduleSavedPlaybackCacheWrite(loaded.data);
     } catch (error) {
       console.warn('[Pong saved] Could not refresh save counters from shared data', error);
+      updateSaveCountersFromData(localSharedDataSnapshot());
     }
   }
 
@@ -1512,6 +1773,86 @@
 
   function getSavedVideoKey(rawUrl) {
     return getMediaUrlKey(rawUrl) || String(rawUrl || '').trim();
+  }
+
+  function canonicalSavedMediaUrl(rawUrl, metadata = {}) {
+    const candidates = [
+      metadata?.canonicalMediaUrl,
+      metadata?.originalVideoUrl,
+      metadata?.videoUrl,
+      rawUrl
+    ].map(value => String(value || '').trim()).filter(Boolean);
+
+    for (const candidate of candidates) {
+      try {
+        if (typeof window.pongCanonicalRawMediaUrl === 'function') {
+          const canonical = String(window.pongCanonicalRawMediaUrl(candidate, metadata) || '').trim();
+          if (canonical && !/\/(?:video-cache\/stream|proxy|(?:bunkr|erome)\.mp4)(?:\?|$)/i.test(canonical)) {
+            return canonical;
+          }
+        }
+      } catch (_) {}
+
+      let current = candidate;
+      for (let depth = 0; depth < 5; depth++) {
+        let parsed;
+        try {
+          parsed = new URL(current, window.location.href);
+        } catch (_) {
+          break;
+        }
+        const wrapper = /\/(?:video-cache\/stream|proxy|(?:bunkr|erome)\.mp4)$/i.test(parsed.pathname || '');
+        const nested = wrapper
+          ? String(parsed.searchParams.get('url') || parsed.searchParams.get('u') || '').trim()
+          : '';
+        if (!nested || nested === current) break;
+        current = nested;
+      }
+      if (current && !/\/(?:video-cache\/stream|proxy|(?:bunkr|erome)\.mp4)(?:\?|$)/i.test(current)) {
+        return current;
+      }
+    }
+
+    return candidates[0] || '';
+  }
+
+  function savedMediaPlaybackUrl(rawUrl, metadata = {}) {
+    const canonical = canonicalSavedMediaUrl(rawUrl, metadata);
+    const refreshed = preferFreshMediaUrl(canonical);
+    if (!refreshed) return '';
+    let hostname = '';
+    try { hostname = new URL(refreshed).hostname.toLowerCase(); } catch (_) {}
+    const localGatewayHost = [
+      'coomerfans.com', 'onlyfaphouse.com', 'cdn.cr', 'pixeldrain.com',
+      'gofile.io', 'cyberdrop.cr', 'cyberdrop.me', 'cyberdrop.to',
+      'cyberfile.me', 'saint.to', 'saint2.su', 'saint2.cr', 'turbo.cr',
+      'turbocdn.st', 'tiktok.com', 'fileditchfiles.st', 'fileditch.com'
+    ].some(host => hostname === host || hostname.endsWith(`.${host}`));
+    if (localGatewayHost) {
+      let routed = '';
+      // The APK itself is served by the Pong PC. Saved playback can be pressed
+      // before asynchronous endpoint discovery finishes, so its own trusted LAN
+      // origin is already the best gateway and needs no additional probe.
+      try {
+        const page = new URL(window.location.href);
+        const privateHost = ['localhost', '127.0.0.1'].includes(page.hostname) ||
+          /^10\./.test(page.hostname) || /^192\.168\./.test(page.hostname) ||
+          /^172\.(?:1[6-9]|2\d|3[01])\./.test(page.hostname);
+        if (page.protocol === 'http:' && privateHost) {
+          routed = `${page.origin}/video-cache/stream?url=${encodeURIComponent(refreshed)}&profile=bunkr`;
+        }
+      } catch (_) {}
+      if (!routed && typeof window.random40PcPlaybackGatewayUrl === 'function') {
+        routed = String(window.random40PcPlaybackGatewayUrl(refreshed) || '').trim();
+      }
+      if (routed) return routed;
+    }
+    const isErome = String(metadata?.source || '').toLowerCase() === 'erome' ||
+      hostname === 'erome.com' || hostname.endsWith('.erome.com');
+    if (isErome && typeof EROME_PROXY_BASE === 'string' && EROME_PROXY_BASE) {
+      return `${EROME_PROXY_BASE.replace(/\/+$/, '')}/erome.mp4?u=${encodeURIComponent(refreshed)}`;
+    }
+    return refreshed;
   }
 
   function getSignedMediaInfo(rawUrl) {
@@ -1662,12 +2003,13 @@
   }
 
   function dedupeAndRefreshMediaUrls(urls) {
-    rememberFreshMediaUrls(urls);
+    const canonicalUrls = (urls || []).map(url => canonicalSavedMediaUrl(url)).filter(Boolean);
+    rememberFreshMediaUrls(canonicalUrls);
 
     const byMediaKey = new Map();
     const orderedKeys = [];
 
-    (urls || []).forEach(rawUrl => {
+    canonicalUrls.forEach(rawUrl => {
       const refreshed = preferFreshMediaUrl(rawUrl);
       const mediaKey = getSavedVideoKey(refreshed);
 
@@ -1684,7 +2026,7 @@
     return orderedKeys.map(key => byMediaKey.get(key)).filter(Boolean);
   }
 
-  function refreshSharedDataMediaUrls(data) {
+  function refreshSharedDataMediaUrls(data, options = {}) {
     if (!data || typeof data !== 'object') {
       return {
         data,
@@ -1698,12 +2040,12 @@
     const allKnownUrls = [];
 
     Object.entries(data.savedVideos).forEach(([key, item]) => {
-      allKnownUrls.push(item?.url || key);
+      allKnownUrls.push(canonicalSavedMediaUrl(item?.url || key, item));
     });
 
     Object.values(data.savedArtists).forEach(artist => {
       if (artist && Array.isArray(artist.videos)) {
-        artist.videos.forEach(url => allKnownUrls.push(url));
+        artist.videos.forEach(url => allKnownUrls.push(canonicalSavedMediaUrl(url, artist)));
       }
     });
 
@@ -1713,8 +2055,9 @@
     let changed = false;
 
     Object.entries(data.savedVideos).forEach(([key, item]) => {
-      const originalUrl = String(item?.url || key || '').trim();
-      const refreshedUrl = preferFreshMediaUrl(originalUrl);
+      const storedUrl = String(item?.url || key || '').trim();
+      const originalUrl = canonicalSavedMediaUrl(storedUrl, item);
+      const refreshedUrl = options.preferFresh === true ? preferFreshMediaUrl(originalUrl) : originalUrl;
       const stableKey = getSavedVideoKey(originalUrl);
 
       if (!stableKey) return;
@@ -1727,7 +2070,7 @@
         mediaKey: stableKey
       };
 
-      if (merged.url !== originalUrl || stableKey !== key) {
+      if (merged.url !== storedUrl || stableKey !== key) {
         merged.updatedAt = new Date().toISOString();
         changed = true;
       }
@@ -1740,9 +2083,25 @@
     Object.values(data.savedArtists).forEach(artist => {
       if (!artist || !Array.isArray(artist.videos)) return;
 
-      const refreshedVideos = dedupeAndRefreshMediaUrls(artist.videos);
+      const priorVideos = artist.videos.slice();
+      const refreshedVideos = dedupeAndRefreshMediaUrls(
+        artist.videos.map(url => canonicalSavedMediaUrl(url, artist))
+      );
 
-      if (JSON.stringify(refreshedVideos) !== JSON.stringify(artist.videos)) {
+      if (artist.videoMeta && typeof artist.videoMeta === 'object') {
+        const rebuiltVideoMeta = {};
+        Object.entries(artist.videoMeta).forEach(([key, meta]) => {
+          const sourceUrl = canonicalSavedMediaUrl(meta?.videoUrl || meta?.originalVideoUrl || key, meta);
+          const stableKey = getSavedVideoKey(sourceUrl) || key;
+          rebuiltVideoMeta[stableKey] = {
+            ...(rebuiltVideoMeta[stableKey] || {}),
+            ...(meta || {})
+          };
+        });
+        artist.videoMeta = rebuiltVideoMeta;
+      }
+
+      if (JSON.stringify(refreshedVideos) !== JSON.stringify(priorVideos)) {
         artist.videos = refreshedVideos;
         artist.updatedAt = new Date().toISOString();
         changed = true;
@@ -2162,10 +2521,20 @@
     window.PongLoadedSavedMode = 'normal';
   }
 
-  function loadSavedListIntoPlayer(urls, message, newPasteEvents, mode, metadata) {
+  function loadSavedListIntoPlayer(urls, message, newPasteEvents, mode, metadata, intentGeneration = 0) {
+    const suppliedIntent = Number(intentGeneration || 0);
+    if (suppliedIntent > 0) {
+      if (!isSavedPlaybackLoadIntentCurrent(suppliedIntent)) return false;
+    } else {
+      beginSavedPlaybackLoadIntent();
+    }
     if (!urls || !urls.length) {
       showMsg('No saved videos found');
-      return;
+      return false;
+    }
+
+    if (typeof window.PongInvalidateDatasetOwnership === 'function') {
+      window.PongInvalidateDatasetOwnership(`saved-${mode || 'normal'}`);
     }
 
     if (window.currentlyPlayingVideo && !window.currentlyPlayingVideo.paused) {
@@ -2200,7 +2569,7 @@
         window.PongResetPaperclipQueue();
       }
 
-      if (window.PongLoadedSavedMode === 'savedArtists' && pasteEvents.length && typeof setActivePlaybackRangeForPasteEvent === 'function') {
+      if (['savedArtists', 'savedCollection'].includes(window.PongLoadedSavedMode) && pasteEvents.length && typeof setActivePlaybackRangeForPasteEvent === 'function') {
         setActivePlaybackRangeForPasteEvent(0);
       }
 
@@ -2215,7 +2584,11 @@
       setTimeout(() => saveSession(), 900);
     }
 
-    videoContainer.innerHTML = '<div class="loading-message">Loading saved videos...</div>';
+    if (typeof replacePongVideoContainerHtml === 'function') {
+      replacePongVideoContainerHtml('<div class="loading-message">Loading saved videos...</div>');
+    } else {
+      videoContainer.innerHTML = '<div class="loading-message">Loading saved videos...</div>';
+    }
     window.PongFastNextBatchOnce = true;
     loadNextBatch();
 
@@ -2228,6 +2601,7 @@
     }
 
     showMsg(message);
+    return true;
   }
 
   async function playSavedVideosRandomized() {
@@ -2399,7 +2773,7 @@
 
     if (!items.length) return null;
 
-    const randomizedItems = shuffleArray(items);
+    const randomizedItems = source?.preserveOrder === true ? items : shuffleArray(items);
 
     return {
       urls: randomizedItems.map(item => item.url),
@@ -2482,7 +2856,9 @@
     const groupedMetadata = [];
     const rebuiltPasteEvents = [];
 
-    shuffleArray(artistEntries).forEach((artist, artistIndex) => {
+    const orderedArtists = source?.preserveOrder === true ? artistEntries : shuffleArray(artistEntries);
+    orderedArtists.forEach((artist, artistIndex) => {
+      const artistMeta = artist.artistMeta || {};
       const cleanVideos = shuffleArray(artist.videos.filter(item => item?.url))
         .slice(0, SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT);
 
@@ -2493,7 +2869,6 @@
       cleanVideos.forEach(item => {
         groupedVideos.push(item.url);
         const itemMeta = item.meta || {};
-        const artistMeta = artist.artistMeta || {};
         groupedMetadata.push({
           ...artistMeta,
           ...itemMeta,
@@ -2594,7 +2969,7 @@
     };
   }
 
-  function loadSavedPlaybackDataFast(playbackData) {
+  function loadSavedPlaybackDataFast(playbackData, intentGeneration = 0) {
     if (!playbackData?.urls?.length) {
       throw new Error('Saved playback data has no URLs');
     }
@@ -2603,12 +2978,13 @@
       throw new Error('Saved artist playback has no artist bundles');
     }
 
-    loadSavedListIntoPlayer(
+    return loadSavedListIntoPlayer(
       playbackData.urls,
       playbackData.message,
       playbackData.pasteEvents,
       playbackData.mode,
-      playbackData.metadata
+      playbackData.metadata,
+      intentGeneration
     );
   }
 
@@ -2622,12 +2998,11 @@
     }
   }
 
-  function tryLoadSavedArtistsPlaybackSource(source, label) {
+  function tryLoadSavedArtistsPlaybackSource(source, label, intentGeneration = 0) {
     try {
       const playbackData = buildSavedArtistsPlaybackDataFromSource(source);
       if (!playbackData) return false;
-      loadSavedPlaybackDataFast(playbackData);
-      return true;
+      return loadSavedPlaybackDataFast(playbackData, intentGeneration) === true;
     } catch (error) {
       clearSavedArtistsPlaybackCache();
       console.warn(`[Pong saved] Could not load saved artists from ${label}`, error);
@@ -2655,10 +3030,17 @@
     if (memory.videos?.items?.length && memory.artists?.artists?.length) return savedPlaybackWarmPromise;
     if (savedPlaybackWarmPromise) return savedPlaybackWarmPromise;
 
-    savedPlaybackWarmPromise = fetchSharedDataFromGitHub()
-      .then(loaded => {
-        writeSavedPlaybackCaches(loaded.data);
-        updateSaveCountersFromData(loaded.data);
+    savedPlaybackWarmPromise = (async () => {
+      const pcData = await fetchPcSavedLinks();
+      if (pcData) {
+        mirrorSharedDataToLocal(pcData);
+        return pcData;
+      }
+      return (await fetchSharedDataFromGitHub()).data;
+    })()
+      .then(savedData => {
+        writeSavedPlaybackCaches(savedData);
+        updateSaveCountersFromData(savedData);
         console.log('[Pong saved] Warmed saved playback cache');
         return true;
       })
@@ -2674,27 +3056,43 @@
   }
 
   playSavedVideosRandomized = async function playSavedVideosRandomizedFast() {
+    const loadIntent = beginSavedPlaybackLoadIntent();
     try {
       showMsg('Loading saved videos...');
 
-      const cachedPlayback = buildSavedVideosPlaybackDataFromSource(loadSavedPlaybackSource('videos'));
+      const cachedPlayback = !pcSavedLinksEndpoint()
+        ? buildSavedVideosPlaybackDataFromSource(loadSavedPlaybackSource('videos'))
+        : null;
       if (cachedPlayback) {
-        loadSavedPlaybackDataFast(cachedPlayback);
+        if (!loadSavedPlaybackDataFast(cachedPlayback, loadIntent)) return;
         warmSavedPlaybackCacheInBackground();
         return;
       }
 
-      if (savedPlaybackWarmPromise) {
+      if (savedPlaybackWarmPromise && !pcSavedLinksEndpoint()) {
         await savedPlaybackWarmPromise;
+        if (!isSavedPlaybackLoadIntentCurrent(loadIntent)) return;
         const warmedPlayback = buildSavedVideosPlaybackDataFromSource(loadSavedPlaybackSource('videos'));
 
         if (warmedPlayback) {
-          loadSavedPlaybackDataFast(warmedPlayback);
+          loadSavedPlaybackDataFast(warmedPlayback, loadIntent);
           return;
         }
       }
 
+      const pcData = await fetchPcSavedLinks();
+      if (!isSavedPlaybackLoadIntentCurrent(loadIntent)) return;
+      const pcSource = pcData ? buildSavedVideosPlaybackSource(pcData) : null;
+      const pcPlayback = buildSavedVideosPlaybackDataFromSource(pcSource);
+      if (pcPlayback) {
+        mirrorSharedDataToLocal(pcData);
+        writeSavedPlaybackCaches(pcData);
+        loadSavedPlaybackDataFast(pcPlayback, loadIntent);
+        return;
+      }
+
       const loaded = await fetchSharedDataFromGitHub();
+      if (!isSavedPlaybackLoadIntentCurrent(loadIntent)) return;
       const savedData = loaded.data;
       mirrorSharedDataToLocal(savedData);
 
@@ -2705,39 +3103,76 @@
         return;
       }
 
-      loadSavedPlaybackDataFast(playbackData);
+      loadSavedPlaybackDataFast(playbackData, loadIntent);
     } catch (e) {
+      if (!isSavedPlaybackLoadIntentCurrent(loadIntent)) return;
       showMsg('Could not load saved videos');
       console.error(e);
     }
   };
 
   playSavedArtistsRandomized = async function playSavedArtistsRandomizedFast() {
+    const loadIntent = beginSavedPlaybackLoadIntent();
     try {
       showMsg('Loading saved artists...');
+
+      if (!pcSavedLinksEndpoint() && tryLoadSavedArtistsPlaybackSource(loadSavedPlaybackSource('artists'), 'instant cache', loadIntent)) {
+        refreshSavedPlaybackCacheInBackground('saved artists');
+        return;
+      }
+
+      if (savedPlaybackWarmPromise && !pcSavedLinksEndpoint()) {
+        await savedPlaybackWarmPromise;
+        if (!isSavedPlaybackLoadIntentCurrent(loadIntent)) return;
+        if (tryLoadSavedArtistsPlaybackSource(loadSavedPlaybackSource('artists'), 'warmed cache', loadIntent)) return;
+      }
+
+      const pcData = await fetchPcSavedLinks();
+      if (!isSavedPlaybackLoadIntentCurrent(loadIntent)) return;
+      if (pcData) {
+        mirrorSharedDataToLocal(pcData);
+        writeSavedPlaybackCaches(pcData);
+        const pcSource = buildSavedArtistsPlaybackSource(pcData, {
+          artistLimit: SAVED_ARTIST_INITIAL_BACKLOG,
+          videoLimit: SAVED_ARTIST_PLAYBACK_VIDEO_LIMIT
+        });
+        if (tryLoadSavedArtistsPlaybackSource(pcSource, 'PC cache', loadIntent)) {
+          const initialKeys = new Set((pcSource.artists || []).map(artist => String(artist.artistKey || '')));
+          const remainingData = {
+            savedArtists: Object.fromEntries(Object.entries(pcData.savedArtists || {}).filter(([, artist]) => (
+              !initialKeys.has(String(artist?.artistKey || ''))
+            )))
+          };
+          startSavedArtistsBackgroundVerification(remainingData, '');
+          return;
+        }
+      }
 
       let savedData = null;
 
       try {
         const loaded = await fetchSharedDataFromGitHub();
+        if (!isSavedPlaybackLoadIntentCurrent(loadIntent)) return;
         savedData = loaded.data;
         mirrorSharedDataToLocal(savedData);
       } catch (error) {
+        if (!isSavedPlaybackLoadIntentCurrent(loadIntent)) return;
         console.warn('[Pong saved] GitHub saved artists load failed; trying local cache', error);
         savedData = loadCachedSharedData();
       }
 
-      const playbackData = buildSavedArtistsPlaybackDataSafe(savedData)
-        || buildSavedArtistsPlaybackDataFromSource(buildSavedArtistsPlaybackSource(savedData))
+      const playbackData = buildSavedArtistsPlaybackDataFromSource(buildSavedArtistsPlaybackSource(savedData))
+        || buildSavedArtistsPlaybackDataSafe(savedData)
         || buildSavedArtistsPlaybackDataFast(savedData);
       if (!playbackData) {
         showMsg('No saved artists yet');
         return;
       }
 
-      loadSavedPlaybackDataFast(playbackData);
+      if (!loadSavedPlaybackDataFast(playbackData, loadIntent)) return;
       warmSavedPlaybackCacheInBackground();
     } catch (e) {
+      if (!isSavedPlaybackLoadIntentCurrent(loadIntent)) return;
       showMsg(`Could not load saved artists: ${getSaveErrorMessage(e)}`);
       console.error(e);
     }
@@ -2882,13 +3317,14 @@
       if (!url) return;
 
       const rawUrl = String(url).trim();
-      const key = getSavedVideoKey(rawUrl);
-      const playableUrl = preferFreshMediaUrl(rawUrl);
+      const pastedMeta = compactVideoMetadata(getPastedMetadataForUrl(rawUrl, pastedLookup));
+      const canonicalUrl = canonicalSavedMediaUrl(rawUrl, pastedMeta || {});
+      const key = getSavedVideoKey(canonicalUrl);
+      const playableUrl = preferFreshMediaUrl(canonicalUrl);
 
       if (!key) return;
 
       if (!data.savedVideos[key]) {
-        const pastedMeta = compactVideoMetadata(getPastedMetadataForUrl(rawUrl, pastedLookup));
         data.savedVideos[key] = {
           url: playableUrl,
           mediaKey: key,
@@ -2915,8 +3351,6 @@
           existing.artistKey = artistKey;
         }
 
-        const pastedMeta = compactVideoMetadata(getPastedMetadataForUrl(rawUrl, pastedLookup));
-
         if (pastedMeta) {
           Object.assign(existing, pastedMeta);
         }
@@ -2938,7 +3372,7 @@
     rememberFreshMediaUrls([...existingVideos, ...artistVideos]);
 
     existingVideos.forEach(url => {
-      const refreshed = preferFreshMediaUrl(url);
+      const refreshed = preferFreshMediaUrl(canonicalSavedMediaUrl(url, existing || {}));
       const mediaKey = getSavedVideoKey(refreshed);
 
       if (!mediaKey) return;
@@ -2949,7 +3383,7 @@
     let addedBundleVideoCount = 0;
 
     artistVideos.forEach(url => {
-      const refreshed = preferFreshMediaUrl(url);
+      const refreshed = preferFreshMediaUrl(canonicalSavedMediaUrl(url, bundleInfo || {}));
       const mediaKey = getSavedVideoKey(refreshed);
 
       if (!mediaKey) return;
@@ -3165,6 +3599,8 @@
         void publishSavedDeltaToPc({
           savedVideos: { [mediaKey]: savedRecord },
           savedArtists: {}
+        }).then(authoritative => {
+          if (authoritative) mirrorSharedDataToLocal(authoritative);
         });
       }
       syncSaveToGitHubSilently(mutation);
@@ -3205,6 +3641,8 @@
         void publishSavedDeltaToPc({
           savedVideos: {},
           savedArtists: { [artistKey]: savedArtist }
+        }).then(authoritative => {
+          if (authoritative) mirrorSharedDataToLocal(authoritative);
         });
       }
       syncSaveToGitHubSilently(mutation);
@@ -5165,6 +5603,7 @@
 
     if (existing) {
       if (existing.dataset.pongSyncPanel === 'true') {
+        window.ensurePongFaceSwapButton?.(existing);
         updateSaveCountersOverride();
         ensureCurrentArtistSaveLabelUpdater();
         return;
@@ -5208,6 +5647,33 @@
       event.stopPropagation();
       window.PongSkipCurrentVideo?.();
     });
+
+    const autoSkipVideoBtn = document.createElement('button');
+    autoSkipVideoBtn.id = 'auto-skip-video-button';
+    autoSkipVideoBtn.className = 'side-save-button auto-skip-video-button';
+    autoSkipVideoBtn.type = 'button';
+    autoSkipVideoBtn.title = 'Automatically skip a video when no visible frame loads within 3 seconds';
+    autoSkipVideoBtn.innerHTML = `
+      <span class="side-save-icon">⏱</span>
+      <span class="side-save-label">Auto</span>
+      <span class="side-save-count">3s</span>
+    `;
+    autoSkipVideoBtn.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      window.PongToggleAutoSkipVideo?.();
+    });
+
+    window.PongUpdateAutoSkipVideoButton = () => {
+      const button = document.getElementById('auto-skip-video-button');
+      if (!button) return;
+      const enabled = window.PongAutoSkipVideoEnabled?.() === true;
+      button.classList.toggle('active', enabled);
+      button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      button.title = enabled
+        ? 'Auto Skip is on: permanently skip videos with no visible frame after 3 seconds'
+        : 'Auto Skip is off';
+    };
 
     window.PongUpdateSkipVideoButton = () => {
       const button = document.getElementById('skip-current-video-button');
@@ -5334,11 +5800,6 @@
       <span id="saved-video-count" class="side-save-count">0</span>
     `;
 
-    const accuracyText = document.createElement('span');
-    accuracyText.id = 'random40-accuracy-mini';
-    accuracyText.className = 'side-save-accuracy';
-    accuracyText.textContent = 'Nano --\nLocal --\nLocal2 --\nNano --\nLocal --\nLocal2 --';
-
     let videoHoldTimer = null;
     let videoLongPress = false;
     let videoSaveTarget = null;
@@ -5405,7 +5866,7 @@
 
     const playedSkipBtn = document.createElement('button');
     playedSkipBtn.id = 'skip-played-filter-button';
-    playedSkipBtn.className = 'side-save-button played-skip-toggle';
+    playedSkipBtn.className = 'control-button played-skip-control-button';
     playedSkipBtn.type = 'button';
     playedSkipBtn.textContent = 'SKIP';
     playedSkipBtn.title = 'Skip items already played from this source';
@@ -5417,15 +5878,17 @@
 
     panel.appendChild(tokenBtn);
     panel.appendChild(skipVideoBtn);
+    panel.appendChild(autoSkipVideoBtn);
     panel.appendChild(repairBtn);
     panel.appendChild(artistBtn);
     panel.appendChild(videoBtn);
-    panel.appendChild(playedSkipBtn);
-    panel.appendChild(accuracyText);
+    document.body.appendChild(playedSkipBtn);
     document.body.appendChild(panel);
+    window.ensurePongFaceSwapButton?.(panel);
 
     window.PongUpdateSkipPlayedButton?.();
     window.PongUpdateSkipVideoButton?.();
+    window.PongUpdateAutoSkipVideoButton?.();
     updateSaveCountersOverride();
     ensureCurrentArtistSaveLabelUpdater();
   }
@@ -5440,6 +5903,57 @@
     setTimeout(() => {
       flash.classList.remove('show');
     }, 500);
+  }
+
+  function pongSyncIsManagedSwapMedia(wrapper, video) {
+    return Boolean(
+      typeof window.isPongFaceSwapManagedMedia === 'function' &&
+      window.isPongFaceSwapManagedMedia(wrapper, video)
+    );
+  }
+
+  function pongSyncPlaybackDuration(wrapper, video) {
+    if (
+      pongSyncIsManagedSwapMedia(wrapper, video) &&
+      typeof window.pongFaceSwapFullDuration === 'function'
+    ) {
+      const fullDuration = Number(window.pongFaceSwapFullDuration(wrapper, video));
+      if (Number.isFinite(fullDuration) && fullDuration > 0) return fullDuration;
+    }
+
+    const nativeDuration = Number(video?.duration || 0);
+    return Number.isFinite(nativeDuration) && nativeDuration > 0 ? nativeDuration : 0;
+  }
+
+  function pongSyncPlaybackCurrentTime(wrapper, video) {
+    if (
+      pongSyncIsManagedSwapMedia(wrapper, video) &&
+      typeof window.pongFaceSwapAbsoluteTime === 'function'
+    ) {
+      const absoluteTime = Number(window.pongFaceSwapAbsoluteTime(wrapper, video));
+      if (Number.isFinite(absoluteTime) && absoluteTime >= 0) return absoluteTime;
+    }
+
+    const nativeTime = Number(video?.currentTime || 0);
+    return Number.isFinite(nativeTime) && nativeTime >= 0 ? nativeTime : 0;
+  }
+
+  function pongSyncSeekPlayback(wrapper, video, targetSeconds) {
+    const target = Math.max(0, Number(targetSeconds || 0));
+    if (
+      pongSyncIsManagedSwapMedia(wrapper, video) &&
+      typeof window.seekPongVideoTo === 'function'
+    ) {
+      void window.seekPongVideoTo(wrapper, video, target);
+      return true;
+    }
+
+    try {
+      video.currentTime = target;
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   function attachSmoothScrubToTapArea(tapArea) {
@@ -5499,7 +6013,7 @@
 
       state.startX = e.touches[0].clientX;
       state.startY = e.touches[0].clientY;
-      state.startTime = video.currentTime || 0;
+      state.startTime = pongSyncPlaybackCurrentTime(wrapper, video);
       state.isHorizontalScrub = false;
       state.isVerticalSwipe = false;
     }, { capture: true, passive: true });
@@ -5535,7 +6049,7 @@
 
       e.preventDefault();
 
-      const duration = video.duration || 0;
+      const duration = pongSyncPlaybackDuration(wrapper, video);
       const metadataIndex = Number(wrapper.dataset.index || 0);
       const scrubMetadata = typeof videoMetadata !== 'undefined'
         ? videoMetadata[metadataIndex]
@@ -5598,10 +6112,11 @@
         const pendingTime = parseFloat(wrapper.dataset.pendingTime);
 
         if (!isNaN(pendingTime) && pendingTime >= 0) {
-          video.currentTime = pendingTime;
+          pongSyncSeekPlayback(wrapper, video, pendingTime);
 
-          if (video.duration) {
-            progressFill.style.width = `${(pendingTime / video.duration) * 100}%`;
+          const duration = pongSyncPlaybackDuration(wrapper, video);
+          if (duration) {
+            progressFill.style.width = `${(pendingTime / duration) * 100}%`;
           }
 
           delete wrapper.dataset.pendingTime;
@@ -5622,11 +6137,13 @@
       const isDoubleTap = (now - state.lastTapTime) < 300 && Math.abs(tapX - state.lastTapX) < 80;
 
       if (isDoubleTap) {
+        const currentTime = pongSyncPlaybackCurrentTime(wrapper, video);
+        const duration = pongSyncPlaybackDuration(wrapper, video);
         if (tapX < wrapper.offsetWidth * 0.4) {
-          video.currentTime = Math.max(0, video.currentTime - 10);
+          pongSyncSeekPlayback(wrapper, video, Math.max(0, currentTime - 10));
           showSeekFlash(wrapper, 'left');
         } else if (tapX > wrapper.offsetWidth * 0.6) {
-          video.currentTime = Math.min(video.duration || 0, video.currentTime + 10);
+          pongSyncSeekPlayback(wrapper, video, Math.min(duration, currentTime + 10));
           showSeekFlash(wrapper, 'right');
         }
 
@@ -5687,26 +6204,157 @@
     }
   }
 
+  const savedAutomaticRepairInFlight = new Set();
+
+  function deferFailedSavedMedia(video, failedUrl) {
+    const mode = String(window.PongLoadedSavedMode || 'normal');
+    if (!['savedVideos', 'savedArtists'].includes(mode)) return false;
+    const wrapper = video?.closest('.video-wrapper');
+    const globalIndex = getCurrentGlobalVideoIndex(wrapper);
+    if (globalIndex < 0 || !Array.isArray(allVideoUrls) || globalIndex >= allVideoUrls.length) return false;
+
+    let insertIndex = allVideoUrls.length - 1;
+    if (mode === 'savedArtists') {
+      const bundle = getCurrentPasteBundleInfo(wrapper);
+      if (bundle) insertIndex = Math.max(globalIndex, Math.min(allVideoUrls.length - 1, bundle.startIndex + bundle.count - 1));
+    }
+    if (globalIndex < insertIndex) {
+      const [url] = allVideoUrls.splice(globalIndex, 1);
+      const [metadata] = allVideoMetadata.splice(globalIndex, 1);
+      allVideoUrls.splice(insertIndex, 0, url);
+      allVideoMetadata.splice(insertIndex, 0, metadata || {});
+      scheduleSessionSave?.(250);
+    }
+
+    // Advance within the already-rendered deck without blacklisting the URL;
+    // the repaired entry remains at the tail and can be retried later.
+    if (typeof setDeckActiveIndex === 'function' && currentVideoIndex + 1 < videoUrls.length) {
+      setDeckActiveIndex(currentVideoIndex + 1, 'up', { pushHistory: true });
+    } else {
+      const next = wrapper?.nextElementSibling;
+      next?.scrollIntoView?.({ behavior: 'auto', block: 'start' });
+    }
+    return true;
+  }
+
+  function scheduleAutomaticSavedRepair(video, failedUrl) {
+    const mode = String(window.PongLoadedSavedMode || 'normal');
+    if (!['savedVideos', 'savedArtists'].includes(mode)) return false;
+    const wrapper = video?.closest('.video-wrapper');
+    const bundle = getCurrentPasteBundleInfo(wrapper);
+    const data = localSharedDataSnapshot();
+    let item = null;
+    let repairKey = '';
+
+    if (mode === 'savedArtists') {
+      const artistKey = String(bundle?.artistKey || bundle?.bundleKey || '');
+      const artist = data.savedArtists?.[artistKey];
+      const sourceUrl = String(artist?.artistUrl || bundle?.artistUrl || '');
+      if (artistKey && artist && sourceUrl) {
+        repairKey = `artist:${artistKey}`;
+        item = {
+          id: `auto-${Date.now().toString(36)}`,
+          kind: 'artist',
+          phase: 'artist',
+          url: sourceUrl,
+          label: artist.artistDisplayName || artist.artistName || artistKey,
+          savedKey: artistKey,
+          savedKeys: [artistKey],
+          sourceMeta: artist
+        };
+      }
+    } else {
+      const canonicalUrl = canonicalSavedMediaUrl(failedUrl);
+      const target = getSavedVideoRepairTarget(data, canonicalUrl);
+      const sourceUrl = String(target?.item?.postUrl || target?.item?.artistUrl || '');
+      if (target?.key && sourceUrl) {
+        repairKey = `video:${target.key}`;
+        item = {
+          id: `auto-${Date.now().toString(36)}`,
+          kind: target.item.postUrl ? 'post' : 'artist',
+          phase: 'video',
+          url: sourceUrl,
+          label: target.item.artistDisplayName || target.item.artistName || target.key,
+          savedKey: target.key,
+          savedKeys: [target.key],
+          sourceMeta: target.item
+        };
+      }
+    }
+
+    if (!item || !repairKey || savedAutomaticRepairInFlight.has(repairKey)) return false;
+    savedAutomaticRepairInFlight.add(repairKey);
+    void directRepairScrapeItem(item)
+      .then(result => {
+        if (!result?.text) return null;
+        const mutate = targetData => item.phase === 'artist'
+          ? applyArtistScrapeResultsToSavedArtists(targetData, [{ item, text: result.text }])
+          : repairDataWithEntries(
+              targetData,
+              (parsePastedMetadata(result.text).orderedVideos || []).filter(entry => entry?.videoUrl),
+              { savedVideoKey: item.savedKey, skipSavedArtists: true }
+            );
+        return updateLocalSharedData(mutate).then(updated => {
+          const delta = item.phase === 'artist'
+            ? { savedVideos: {}, savedArtists: { [item.savedKey]: updated.data.savedArtists[item.savedKey] } }
+            : { savedVideos: { [item.savedKey]: updated.data.savedVideos[item.savedKey] }, savedArtists: {} };
+          scheduleSavedPlaybackCacheWrite(updated.data);
+          void publishSavedDeltaToPc(delta);
+          syncSaveToGitHubSilently(mutate);
+          return updated;
+        });
+      })
+      .catch(error => console.warn('[Pong saved] Automatic source repair deferred', error))
+      .finally(() => savedAutomaticRepairInFlight.delete(repairKey));
+    return true;
+  }
+
   function attachExpiredMediaHintsToVideo(video) {
     if (!video || video.dataset.pongExpiredMediaHint === 'true') return;
 
     video.dataset.pongExpiredMediaHint = 'true';
     video.addEventListener('error', () => {
-      const failedUrl = video.currentSrc || video.src || '';
+      const wrapper = video.closest('.video-wrapper');
+      // Swap streams and their held preloads have their own lifecycle. A media
+      // error there must not let the generic signed-URL repair listener replace
+      // src, call load(), or defer the original card behind the swap's back.
+      if (
+        typeof window.isPongFaceSwapManagedMedia === 'function' &&
+        window.isPongFaceSwapManagedMedia(wrapper, video)
+      ) return;
+      const failedPlaybackUrl = video.currentSrc || video.src || '';
+      const metadataIndex = Number(wrapper?.dataset?.index || 0);
+      const failedMetadata = (Array.isArray(videoMetadata) ? videoMetadata[metadataIndex] : null) || {};
+      const failedUrl = canonicalSavedMediaUrl(
+        wrapper?.dataset?.canonicalMediaUrl || wrapper?.dataset?.originalVideoUrl || failedPlaybackUrl,
+        failedMetadata
+      );
+      const savedMode = ['savedVideos', 'savedArtists'].includes(String(window.PongLoadedSavedMode || ''));
 
-      if (!getMediaUrlKey(failedUrl)) return;
+      if (!savedMode && !getMediaUrlKey(failedUrl)) return;
 
       const cachedFreshUrl = getCachedFreshMediaUrl(failedUrl);
 
       if (cachedFreshUrl && cachedFreshUrl !== failedUrl) {
-        video.src = cachedFreshUrl;
+        video.src = savedMode
+          ? savedMediaPlaybackUrl(cachedFreshUrl, failedMetadata)
+          : cachedFreshUrl;
         video.load();
         showMsg('Retried with refreshed signed URL');
         return;
       }
 
       if (!getSignedMediaInfo(failedUrl) || !signedUrlStillFresh(failedUrl, 0)) {
-        showVideoExpiredHint(video, 'CDN link expired. Repair or paste fresh link.');
+        const deferred = deferFailedSavedMedia(video, failedUrl);
+        const repairing = scheduleAutomaticSavedRepair(video, failedUrl);
+        showVideoExpiredHint(
+          video,
+          repairing
+            ? 'CDN link moved to queue end while Pong refreshes its source.'
+            : deferred
+              ? 'CDN link moved to queue end for a later retry.'
+              : 'CDN link expired. Repair or paste fresh link.'
+        );
       }
     });
   }
@@ -5794,7 +6442,21 @@
     saveCurrentVideoLink: saveCurrentVideoLinkOverride,
     saveCurrentArtistVideos: saveCurrentArtistVideosOverride,
     removeCurrentSavedItem: removeCurrentSavedItemOverride,
-    repairSavedLinks: repairSavedLinksOverride
+    repairSavedLinks: repairSavedLinksOverride,
+    loadNamedCollection(urls, pasteEventsForCollection, metadata, name = 'collection', intentGeneration = 0) {
+      const rawUrls = Array.isArray(urls) ? urls.filter(Boolean) : [];
+      const compactMetadata = Array.isArray(metadata) ? metadata : rawUrls.map(() => ({}));
+      const playbackUrls = rawUrls.map((url, index) => savedMediaPlaybackUrl(url, compactMetadata[index] || {}));
+      loadSavedListIntoPlayer(
+        playbackUrls,
+        `Playing ${name}`,
+        Array.isArray(pasteEventsForCollection) ? pasteEventsForCollection : [],
+        'savedCollection',
+        compactMetadata,
+        intentGeneration
+      );
+      return playbackUrls.length;
+    }
   };
 
   window.PongMetadataSync = {
@@ -5805,3 +6467,682 @@
     getCurrentMetadata: () => window.PongCurrentPastedMetadata || emptyPastedMetadata()
   };
 })();
+
+// BEGIN bundled named-link collections v1. The gateway already serves this
+// file dynamically, so phone refreshes receive the feature without interrupting
+// an active playback stream. Keep the standalone source in pong-collections.js
+// for focused tests and future extraction.
+(() => {
+  'use strict';
+
+  const STORAGE_KEY = 'pong_saved_collections_v1';
+  const button = document.getElementById('pong-collection-save-button');
+  const panel = document.getElementById('pong-collection-panel');
+  const closeButton = document.getElementById('pong-collection-close');
+  const editButton = document.getElementById('pong-collection-edit');
+  const editor = document.getElementById('pong-collection-editor');
+  const nameInput = document.getElementById('pong-collection-name');
+  const addButton = document.getElementById('pong-collection-add');
+  const list = document.getElementById('pong-collection-list');
+  const saveButton = document.getElementById('pong-collection-save-links');
+  const loadButton = document.getElementById('pong-collection-load');
+  const removeButton = document.getElementById('pong-collection-remove');
+  const status = document.getElementById('pong-collection-status');
+  const scopeButtons = [...document.querySelectorAll('[data-collection-scope]')];
+
+  if (!button || !panel || !list) return;
+
+  let selectedId = '';
+  let selectedScope = 'current';
+  let syncing = false;
+
+  function setStatus(message, error = false) {
+    if (!status) return;
+    status.textContent = String(message || '');
+    status.style.color = error ? '#fca5a5' : '';
+  }
+
+  function hashText(value) {
+    let hash = 2166136261;
+    const text = String(value || '');
+    for (let index = 0; index < text.length; index++) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function collectionIdForName(name) {
+    const normalized = String(name || '').normalize('NFKC').trim().toLowerCase();
+    const slug = normalized.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'list';
+    return `collection-${slug}-${hashText(normalized)}`;
+  }
+
+  function canonicalUrl(rawUrl, metadata = {}) {
+    const raw = String(rawUrl || '').trim();
+    if (!raw) return '';
+    try {
+      if (typeof pongCanonicalRawMediaUrl === 'function') {
+        return String(pongCanonicalRawMediaUrl(raw, metadata) || raw).trim();
+      }
+    } catch (_) {}
+    return raw;
+  }
+
+  function mediaKeyFor(rawUrl, metadata = {}) {
+    const explicit = String(metadata?.mediaKey || '').trim();
+    if (explicit && !/^https?:\/\//i.test(explicit)) return explicit;
+    const canonical = canonicalUrl(rawUrl, metadata);
+    try {
+      const parsed = new URL(canonical, location.href);
+      const storageMatch = decodeURIComponent(parsed.pathname || '').match(/\/(?:storage|storager)\/(.+\.(?:mp4|m4v|mov|webm))$/i);
+      if (storageMatch) return `media:${storageMatch[1].toLowerCase()}`;
+      parsed.hash = '';
+      return parsed.toString();
+    } catch (_) {
+      return canonical;
+    }
+  }
+
+  function compactMetadata(metadata = {}, url = '') {
+    const allowed = [
+      'source', 'sourceUrl', 'artistName', 'artistDisplayName', 'artistKey',
+      'artistUrl', 'bundleKey', 'bundleLabel', 'postUrl', 'postIndex',
+      'mediaKey', 'canonicalMediaUrl', 'originalVideoUrl', 'duration',
+      'simpCityCreatorKey', 'simpCityThreadUrl', 'tiktokUsername'
+    ];
+    const compact = {};
+    for (const key of allowed) {
+      const value = metadata?.[key];
+      if (value !== undefined && value !== null && value !== '') compact[key] = value;
+    }
+    const canonical = canonicalUrl(url, metadata);
+    compact.canonicalMediaUrl = canonical;
+    compact.originalVideoUrl = canonical;
+    compact.mediaKey = mediaKeyFor(canonical, compact);
+    return compact;
+  }
+
+  function normalizeVideo(rawVideo) {
+    const record = typeof rawVideo === 'string' ? { url: rawVideo } : { ...(rawVideo || {}) };
+    const metadata = compactMetadata({
+      ...record,
+      ...(record.meta && typeof record.meta === 'object' ? record.meta : {}),
+      mediaKey: record.mediaKey || record.meta?.mediaKey || ''
+    }, record.url);
+    const url = canonicalUrl(record.url, metadata);
+    const mediaKey = mediaKeyFor(url, metadata);
+    return url && mediaKey ? { url, mediaKey, meta: metadata } : null;
+  }
+
+  function normalizeBundle(rawBundle) {
+    if (!rawBundle || typeof rawBundle !== 'object') return null;
+    const id = String(rawBundle.id || '').trim().slice(0, 180);
+    if (!id) return null;
+    const videos = [];
+    const seen = new Set();
+    for (const rawVideo of Array.isArray(rawBundle.videos) ? rawBundle.videos : []) {
+      const video = normalizeVideo(rawVideo);
+      if (!video || seen.has(video.mediaKey)) continue;
+      seen.add(video.mediaKey);
+      videos.push(video);
+    }
+    if (!videos.length) return null;
+    return {
+      id,
+      label: String(rawBundle.label || rawBundle.artistName || 'Bundle').trim().slice(0, 160),
+      source: String(rawBundle.source || '').trim().slice(0, 80),
+      artistKey: String(rawBundle.artistKey || '').trim().slice(0, 240),
+      artistName: String(rawBundle.artistName || '').trim().slice(0, 160),
+      artistUrl: String(rawBundle.artistUrl || '').trim().slice(0, 1000),
+      bundleKey: String(rawBundle.bundleKey || '').trim().slice(0, 240),
+      videos
+    };
+  }
+
+  function normalizeCollections(rawValue) {
+    const source = rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) ? rawValue : {};
+    const result = {};
+    for (const [rawId, rawCollection] of Object.entries(source)) {
+      if (!rawCollection || typeof rawCollection !== 'object') continue;
+      const id = String(rawCollection.id || rawId || '').trim().toLowerCase().slice(0, 120);
+      const name = String(rawCollection.name || '').normalize('NFKC').trim().slice(0, 80);
+      if (!id || !name) continue;
+      const deletedAt = String(rawCollection.deletedAt || '');
+      const bundles = deletedAt ? [] : (Array.isArray(rawCollection.bundles) ? rawCollection.bundles : [])
+        .map(normalizeBundle)
+        .filter(Boolean);
+      result[id] = {
+        id,
+        name,
+        bundles,
+        createdAt: String(rawCollection.createdAt || ''),
+        updatedAt: String(rawCollection.updatedAt || ''),
+        deletedAt
+      };
+    }
+    return result;
+  }
+
+  function readCollections() {
+    try {
+      return normalizeCollections(JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'));
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function writeCollections(collections) {
+    const normalized = normalizeCollections(collections);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized)); } catch (_) {}
+    return normalized;
+  }
+
+  function mergeBundles(previousBundles, incomingBundles) {
+    const order = [];
+    const map = new Map();
+    for (const rawBundle of [...(previousBundles || []), ...(incomingBundles || [])]) {
+      const bundle = normalizeBundle(rawBundle);
+      if (!bundle) continue;
+      if (!map.has(bundle.id)) order.push(bundle.id);
+      const previous = map.get(bundle.id);
+      if (!previous) {
+        map.set(bundle.id, bundle);
+        continue;
+      }
+      const videoOrder = [];
+      const videos = new Map();
+      for (const video of [...previous.videos, ...bundle.videos]) {
+        if (!videos.has(video.mediaKey)) videoOrder.push(video.mediaKey);
+        videos.set(video.mediaKey, { ...(videos.get(video.mediaKey) || {}), ...video });
+      }
+      map.set(bundle.id, {
+        ...previous,
+        ...bundle,
+        videos: videoOrder.map(mediaKey => videos.get(mediaKey))
+      });
+    }
+    return order.map(id => map.get(id));
+  }
+
+  function mergeCollections(baseValue, incomingValue) {
+    const base = normalizeCollections(baseValue);
+    const incoming = normalizeCollections(incomingValue);
+    for (const [id, record] of Object.entries(incoming)) {
+      const previous = base[id] || {};
+      if (previous.deletedAt || record.deletedAt) {
+        const previousTime = Date.parse(previous.updatedAt || previous.deletedAt || 0) || 0;
+        const recordTime = Date.parse(record.updatedAt || record.deletedAt || 0) || 0;
+        const recordWins = recordTime > previousTime || (
+          recordTime === previousTime && Boolean(record.deletedAt) && !previous.deletedAt
+        );
+        if (!Object.keys(previous).length || recordWins) {
+          base[id] = {
+            ...record,
+            id,
+            bundles: record.deletedAt ? [] : (record.bundles || []),
+            deletedAt: String(record.deletedAt || '')
+          };
+        }
+        continue;
+      }
+      base[id] = {
+        ...previous,
+        ...record,
+        id,
+        bundles: mergeBundles(previous.bundles, record.bundles),
+        createdAt: previous.createdAt || record.createdAt || new Date().toISOString(),
+        updatedAt: record.updatedAt || previous.updatedAt || new Date().toISOString(),
+        deletedAt: ''
+      };
+    }
+    return base;
+  }
+
+  function pcEndpoint() {
+    try {
+      const page = new URL(location.href);
+      return ['http:', 'https:'].includes(page.protocol) ? page.origin : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  async function publishCollection(record) {
+    const endpoint = pcEndpoint();
+    if (!endpoint || !record) return null;
+    try {
+      const response = await fetch(`${endpoint}/saved-links/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({
+          data: {
+            savedVideos: {},
+            savedArtists: {},
+            savedCollections: { [record.id]: record }
+          }
+        })
+      });
+      if (!response.ok) return null;
+      const payload = await response.json();
+      if (!payload?.data || !Object.prototype.hasOwnProperty.call(payload.data, 'savedCollections')) return null;
+      const serverCollections = normalizeCollections(payload?.data?.savedCollections);
+      return writeCollections(mergeCollections(readCollections(), serverCollections));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function refreshCollections() {
+    if (syncing) return readCollections();
+    syncing = true;
+    try {
+      const localAtRequestStart = readCollections();
+      const endpoint = pcEndpoint();
+      if (!endpoint) return localAtRequestStart;
+      const response = await fetch(`${endpoint}/saved-links/state?t=${Date.now()}`, { cache: 'no-store' });
+      if (!response.ok) return readCollections();
+      const payload = await response.json();
+      const server = normalizeCollections(payload?.data?.savedCollections);
+      // Include edits committed while the request was in flight. Publish every
+      // changed existing record and tombstone, not only IDs absent on server.
+      const currentLocal = readCollections();
+      const merged = writeCollections(mergeCollections(server, currentLocal));
+      for (const [id, localRecord] of Object.entries(currentLocal)) {
+        const mergedRecord = merged[id] || localRecord;
+        if (JSON.stringify(server[id] || null) !== JSON.stringify(mergedRecord || null)) {
+          await publishCollection(mergedRecord);
+        }
+      }
+      return merged;
+    } catch (_) {
+      return readCollections();
+    } finally {
+      syncing = false;
+    }
+  }
+
+  function currentUrls() {
+    if (typeof allVideoUrls !== 'undefined' && Array.isArray(allVideoUrls) && allVideoUrls.length) return allVideoUrls;
+    if (typeof videoUrls !== 'undefined' && Array.isArray(videoUrls)) return videoUrls;
+    return [];
+  }
+
+  function currentMetadata() {
+    if (typeof allVideoMetadata !== 'undefined' && Array.isArray(allVideoMetadata)) return allVideoMetadata;
+    if (typeof videoMetadata !== 'undefined' && Array.isArray(videoMetadata)) return videoMetadata;
+    return [];
+  }
+
+  function buildBundle(event, indexes, eventIndex = -1) {
+    const urls = currentUrls();
+    const metadata = currentMetadata();
+    const videos = [];
+    for (const index of indexes) {
+      const rawUrl = urls[index];
+      if (!rawUrl) continue;
+      const meta = compactMetadata(metadata[index] || {}, rawUrl);
+      const url = canonicalUrl(rawUrl, meta);
+      const mediaKey = mediaKeyFor(url, meta);
+      if (!url || !mediaKey || videos.some(video => video.mediaKey === mediaKey)) continue;
+      videos.push({ url, mediaKey, meta });
+    }
+    if (!videos.length) return null;
+    const firstMeta = videos[0].meta || {};
+    const source = String(event?.source || firstMeta.source || 'links');
+    const artistKey = String(event?.artistKey || event?.simpCityCreatorKey || firstMeta.artistKey || firstMeta.simpCityCreatorKey || '');
+    const artistName = String(event?.artistDisplayName || event?.artistName || firstMeta.artistDisplayName || firstMeta.artistName || '');
+    const artistUrl = String(event?.artistUrl || firstMeta.artistUrl || '');
+    const bundleKey = String(event?.bundleKey || firstMeta.bundleKey || '');
+    const stableBundleIdentity = bundleKey || artistUrl || artistKey || videos[0].mediaKey;
+    const identity = [source, stableBundleIdentity].join('|');
+    return {
+      id: `bundle-${hashText(identity)}`,
+      label: String(event?.bundleLabel || artistName || bundleKey || `Bundle ${eventIndex + 1}`).slice(0, 160),
+      source,
+      artistKey,
+      artistName,
+      artistUrl,
+      bundleKey,
+      videos
+    };
+  }
+
+  function eventBounds(event, total) {
+    const start = Number(event?.startIndex);
+    const count = Number(event?.count);
+    if (!Number.isInteger(start) || start < 0 || !Number.isInteger(count) || count <= 0) return null;
+    return { start, end: Math.min(total, start + count) };
+  }
+
+  function captureAllBundles() {
+    const urls = currentUrls();
+    if (!urls.length) return [];
+    const events = typeof pasteEvents !== 'undefined' && Array.isArray(pasteEvents) ? pasteEvents : [];
+    const covered = new Set();
+    const bundles = [];
+    events.forEach((event, eventIndex) => {
+      const bounds = eventBounds(event, urls.length);
+      if (!bounds) return;
+      const indexes = [];
+      for (let index = bounds.start; index < bounds.end; index++) {
+        indexes.push(index);
+        covered.add(index);
+      }
+      const bundle = buildBundle(event, indexes, eventIndex);
+      if (bundle) bundles.push(bundle);
+    });
+    const uncovered = urls.map((_, index) => index).filter(index => !covered.has(index));
+    if (uncovered.length) {
+      const bundle = buildBundle({ source: 'links', bundleLabel: 'Pasted links' }, uncovered, events.length);
+      if (bundle) bundles.push(bundle);
+    }
+    return bundles;
+  }
+
+  function currentEventIndex() {
+    try {
+      if (typeof syncCurrentPasteIndexFromVisibleVideo === 'function') {
+        const value = Number(syncCurrentPasteIndexFromVisibleVideo());
+        if (Number.isInteger(value) && value >= 0) return value;
+      }
+    } catch (_) {}
+    if (typeof currentPasteIndex !== 'undefined' && Number.isInteger(currentPasteIndex) && currentPasteIndex >= 0) return currentPasteIndex;
+    return -1;
+  }
+
+  function captureCurrentBundle() {
+    const urls = currentUrls();
+    if (!urls.length) return [];
+    const events = typeof pasteEvents !== 'undefined' && Array.isArray(pasteEvents) ? pasteEvents : [];
+    const eventIndex = currentEventIndex();
+    const event = eventIndex >= 0 ? events[eventIndex] : null;
+    const bounds = eventBounds(event, urls.length);
+    if (bounds) {
+      const indexes = [];
+      for (let index = bounds.start; index < bounds.end; index++) indexes.push(index);
+      const bundle = buildBundle(event, indexes, eventIndex);
+      return bundle ? [bundle] : [];
+    }
+    const bundle = buildBundle({ source: 'links', bundleLabel: 'Pasted links' }, urls.map((_, index) => index), 0);
+    return bundle ? [bundle] : [];
+  }
+
+  function collectionCounts(record) {
+    const bundles = Array.isArray(record?.bundles) ? record.bundles : [];
+    return {
+      bundles: bundles.length,
+      videos: bundles.reduce((sum, bundle) => sum + (Array.isArray(bundle?.videos) ? bundle.videos.length : 0), 0)
+    };
+  }
+
+  function render() {
+    const collections = readCollections();
+    const records = Object.values(collections)
+      .filter(record => !record.deletedAt)
+      .sort((left, right) => left.name.localeCompare(right.name));
+    if (selectedId && (!collections[selectedId] || collections[selectedId].deletedAt)) selectedId = '';
+    if (!selectedId && records.length === 1) selectedId = records[0].id;
+    list.replaceChildren();
+    if (!records.length) {
+      const empty = document.createElement('div');
+      empty.className = 'pong-collection-empty';
+      empty.textContent = 'No collections yet. Tap the pencil to name one.';
+      list.appendChild(empty);
+    }
+    for (const record of records) {
+      const counts = collectionCounts(record);
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = `pong-collection-row${record.id === selectedId ? ' selected' : ''}`;
+      row.dataset.collectionId = record.id;
+      row.setAttribute('role', 'radio');
+      row.setAttribute('aria-checked', record.id === selectedId ? 'true' : 'false');
+      const check = document.createElement('span');
+      check.className = 'pong-collection-check';
+      check.textContent = record.id === selectedId ? '✓' : '';
+      const label = document.createElement('span');
+      label.className = 'pong-collection-name-label';
+      label.textContent = record.name;
+      const count = document.createElement('span');
+      count.className = 'pong-collection-count';
+      count.textContent = `${counts.bundles} clips · ${counts.videos}`;
+      row.append(check, label, count);
+      row.addEventListener('click', () => {
+        selectedId = record.id;
+        render();
+        setStatus(`${record.name} selected`);
+      });
+      list.appendChild(row);
+    }
+    scopeButtons.forEach(scopeButton => {
+      scopeButton.classList.toggle('selected', scopeButton.dataset.collectionScope === selectedScope);
+    });
+  }
+
+  function setOpen(open) {
+    panel.hidden = !open;
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (!open) {
+      editor.hidden = true;
+      setStatus('');
+    }
+  }
+
+  async function addCollection() {
+    const name = String(nameInput?.value || '').normalize('NFKC').trim().slice(0, 80);
+    if (!name) {
+      setStatus('Enter a collection name.', true);
+      nameInput?.focus();
+      return;
+    }
+    const collections = readCollections();
+    const existing = Object.values(collections).find(record => !record.deletedAt && record.name.toLowerCase() === name.toLowerCase());
+    let id = existing?.id || collectionIdForName(name);
+    if (!existing && collections[id]?.deletedAt) id = collectionIdForName(`${name}-${Date.now()}`);
+    const now = new Date().toISOString();
+    const record = existing || { id, name, bundles: [], createdAt: now, updatedAt: now, deletedAt: '' };
+    collections[id] = record;
+    writeCollections(collections);
+    selectedId = id;
+    editor.hidden = true;
+    if (nameInput) nameInput.value = '';
+    render();
+    setStatus(existing ? `${name} selected` : `${name} added`);
+    await publishCollection(record);
+    render();
+  }
+
+  async function saveSelection() {
+    const collections = readCollections();
+    const selected = collections[selectedId];
+    if (!selected || selected.deletedAt) {
+      setStatus('Choose or add a collection first.', true);
+      return;
+    }
+    const bundles = selectedScope === 'all' ? captureAllBundles() : captureCurrentBundle();
+    if (!bundles.length) {
+      setStatus(selectedScope === 'all' ? 'No loaded links to save.' : 'No current paperclip to save.', true);
+      return;
+    }
+    const before = collectionCounts(selected);
+    const updated = {
+      ...selected,
+      bundles: mergeBundles(selected.bundles, bundles),
+      updatedAt: new Date().toISOString()
+    };
+    collections[selectedId] = updated;
+    writeCollections(collections);
+    render();
+    const after = collectionCounts(updated);
+    setStatus(`Saved ${after.videos - before.videos} new link${after.videos - before.videos === 1 ? '' : 's'} to ${updated.name}`);
+    await publishCollection(updated);
+    render();
+  }
+
+  function shuffledBundles(bundles) {
+    const result = [...bundles];
+    if (result.length > 1 && typeof globalThis.crypto?.getRandomValues === 'function') {
+      const random = new Uint32Array(result.length);
+      globalThis.crypto.getRandomValues(random);
+      for (let index = result.length - 1; index > 0; index--) {
+        const target = random[index] % (index + 1);
+        [result[index], result[target]] = [result[target], result[index]];
+      }
+      return result;
+    }
+    for (let index = result.length - 1; index > 0; index--) {
+      const target = Math.floor(Math.random() * (index + 1));
+      [result[index], result[target]] = [result[target], result[index]];
+    }
+    return result;
+  }
+
+  async function loadSelection() {
+    const intentGeneration = Number(window.PongBeginSavedPlaybackLoadIntent?.() || 0);
+    setStatus('Refreshing shared collections…');
+    await refreshCollections();
+    if (
+      intentGeneration > 0 &&
+      window.PongIsSavedPlaybackLoadIntentCurrent?.(intentGeneration) !== true
+    ) return;
+    const selected = readCollections()[selectedId];
+    if (!selected || selected.deletedAt) {
+      render();
+      setStatus('Choose a collection first.', true);
+      return;
+    }
+    const bundles = shuffledBundles((selected.bundles || []).filter(bundle => bundle?.videos?.length));
+    const urls = [];
+    const metadata = [];
+    const events = [];
+    bundles.forEach((bundle, bundleIndex) => {
+      const startIndex = urls.length;
+      bundle.videos.forEach((video, videoIndex) => {
+        urls.push(video.url);
+        metadata.push({
+          ...(video.meta || {}),
+          source: video.meta?.source || bundle.source || 'savedCollection',
+          artistKey: video.meta?.artistKey || bundle.artistKey || '',
+          artistName: video.meta?.artistName || bundle.artistName || bundle.label,
+          artistDisplayName: video.meta?.artistDisplayName || bundle.artistName || bundle.label,
+          artistUrl: video.meta?.artistUrl || bundle.artistUrl || '',
+          bundleKey: bundle.bundleKey || bundle.id,
+          postIndex: Number.isFinite(Number(video.meta?.postIndex)) ? Number(video.meta.postIndex) : videoIndex,
+          mediaKey: video.mediaKey,
+          canonicalMediaUrl: video.url,
+          originalVideoUrl: video.url,
+          savedCollectionId: selected.id,
+          savedCollectionName: selected.name
+        });
+      });
+      events.push({
+        startIndex,
+        count: urls.length - startIndex,
+        source: bundle.source || 'savedCollection',
+        artistKey: bundle.artistKey || bundle.id,
+        artistUrl: bundle.artistUrl || '',
+        bundleKey: bundle.bundleKey || bundle.id,
+        artistDisplayName: bundle.artistName || bundle.label || `Bundle ${bundleIndex + 1}`,
+        bundleLabel: bundle.label || bundle.artistName || `Bundle ${bundleIndex + 1}`,
+        savedCollectionId: selected.id,
+        savedCollectionName: selected.name,
+        loadAll: false,
+        ready: true,
+        pending: false
+      });
+    });
+    if (!urls.length) {
+      setStatus(`${selected.name} has no links yet.`, true);
+      return;
+    }
+    const loaded = window.PongGitHubSync?.loadNamedCollection?.(
+      urls,
+      events,
+      metadata,
+      selected.name,
+      intentGeneration
+    );
+    if (!loaded) {
+      setStatus('Player is still starting. Try Load again.', true);
+      return;
+    }
+    setOpen(false);
+  }
+
+  async function removeSelection({ confirmRemoval = true } = {}) {
+    const collections = readCollections();
+    const selected = collections[selectedId];
+    if (!selected || selected.deletedAt) {
+      setStatus('Choose a collection to remove first.', true);
+      return false;
+    }
+    if (confirmRemoval && typeof window.confirm === 'function' && !window.confirm(`Remove "${selected.name}"?`)) {
+      return false;
+    }
+    const now = new Date().toISOString();
+    const tombstone = {
+      ...selected,
+      bundles: [],
+      updatedAt: now,
+      deletedAt: now
+    };
+    collections[selected.id] = tombstone;
+    writeCollections(collections);
+    selectedId = '';
+    render();
+    setStatus(`${selected.name} removed`);
+    await publishCollection(tombstone);
+    render();
+    return true;
+  }
+
+  button.addEventListener('click', async () => {
+    const open = panel.hidden;
+    setOpen(open);
+    if (!open) return;
+    render();
+    setStatus('Loading shared collections…');
+    await refreshCollections();
+    render();
+    setStatus('Choose one collection to save or load.');
+  });
+  closeButton?.addEventListener('click', () => setOpen(false));
+  editButton?.addEventListener('click', () => {
+    editor.hidden = !editor.hidden;
+    if (!editor.hidden) {
+      setStatus('Name a new collection, then tap Add.');
+      requestAnimationFrame(() => nameInput?.focus());
+    }
+  });
+  addButton?.addEventListener('click', addCollection);
+  nameInput?.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void addCollection();
+    }
+  });
+  scopeButtons.forEach(scopeButton => scopeButton.addEventListener('click', () => {
+    selectedScope = scopeButton.dataset.collectionScope === 'all' ? 'all' : 'current';
+    render();
+    setStatus(selectedScope === 'all' ? 'Save every loaded bundle.' : 'Save the entire current paperclip.');
+  }));
+  saveButton?.addEventListener('click', () => void saveSelection());
+  loadButton?.addEventListener('click', () => void loadSelection());
+  removeButton?.addEventListener('click', () => void removeSelection());
+  window.addEventListener('storage', event => {
+    if (event.key === STORAGE_KEY && !panel.hidden) render();
+  });
+
+  window.PongNamedCollections = {
+    open: () => button.click(),
+    refresh: refreshCollections,
+    snapshot: readCollections,
+    captureAllBundles,
+    captureCurrentBundle,
+    mergeCollections,
+    removeSelection
+  };
+})();
+// END bundled named-link collections v1.

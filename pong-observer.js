@@ -18,8 +18,8 @@
   let eventSequence = 0;
   let sending = false;
   let sendTimer = null;
-  let pendingFrame = null;
-  let latestFrameMeta = null;
+  let lastCommandId = '';
+  const REMOTE_CLICK_TARGETS = new Set(['random-40-local', 'random-40-local2', 'test-ai']);
 
   function decodePairing(raw) {
     try {
@@ -148,6 +148,17 @@
       : null;
     const eventStart = number(playbackEvent?.startIndex, -1);
     const eventCount = Math.max(0, number(playbackEvent?.count));
+    const swapActive = wrapper?.dataset?.pongFaceSwapActive === 'true';
+    const swapOriginal = video?.__pongSwapOriginal;
+    const swapAudio = wrapper?.querySelector?.('audio.pong-face-swap-audio');
+    const swapStartSeconds = swapActive ? Math.max(0, number(swapOriginal?.startSeconds)) : 0;
+    const displayDuration = swapActive
+      ? Math.max(0, number(swapOriginal?.fullDuration || wrapper?.dataset?.pongFaceSwapFullDuration))
+      : number(video?.duration);
+    const displayCurrentTime = swapActive
+      ? Math.min(displayDuration || Infinity, swapStartSeconds + number(video?.currentTime))
+      : number(video?.currentTime);
+    const lastPresentedFrameAt = number(video?.dataset?.pongLastPresentedFrameAt);
     return {
       globalIndex,
       localIndex,
@@ -166,10 +177,50 @@
       paused: video ? video.paused : null,
       playing: Boolean(video && !video.paused && !video.ended && video.readyState >= 3),
       muted: video ? video.muted : true,
+      volume: video ? number(video.volume) : 0,
+      audioPreference: source.pongUserWantsAudio === true,
+      visibleFrame: Boolean(
+        video && wrapper?.dataset?.pongVisibleFrame === 'true' &&
+        video.dataset.pongPresentedSourceGeneration === video.dataset.pongSourceGeneration
+      ),
+      presentedFrameCount: number(video?.dataset?.pongPresentedFrameCount),
+      lastPresentedFrameAt,
+      lastPresentedFrameAgeMs: lastPresentedFrameAt > 0
+        ? Math.max(0, Date.now() - lastPresentedFrameAt)
+        : null,
+      lastPresentedMediaTime: number(video?.dataset?.pongLastPresentedMediaTime),
+      autoSkipVideo: {
+        enabled: source.PongAutoSkipVideoEnabled?.() === true,
+        watching: wrapper?.dataset?.autoSkipVideoWatching === 'true'
+      },
+      swapAudio: swapAudio ? {
+        present: true,
+        paused: swapAudio.paused,
+        muted: swapAudio.muted,
+        volume: number(swapAudio.volume),
+        readyState: number(swapAudio.readyState),
+        currentTime: number(swapAudio.currentTime),
+        duration: number(swapAudio.duration),
+        error: swapAudio.error ? {
+          code: number(swapAudio.error.code),
+          message: bounded(swapAudio.error.message)
+        } : null
+      } : { present: false },
       ended: video ? video.ended : false,
       seeking: video ? video.seeking : false,
       currentTime: number(video?.currentTime),
       duration: number(video?.duration),
+      displayCurrentTime,
+      displayDuration,
+      videoWidth: number(video?.videoWidth),
+      videoHeight: number(video?.videoHeight),
+      faceSwap: {
+        active: swapActive,
+        busy: wrapper?.dataset?.pongFaceSwapBusy === 'true',
+        faceId: bounded(wrapper?.dataset?.pongFaceSwapFaceId || ''),
+        sessionId: bounded(wrapper?.dataset?.pongFaceSwapSessionId || ''),
+        startSeconds: swapStartSeconds
+      },
       readyState: number(video?.readyState),
       networkState: number(video?.networkState),
       buffered: video ? bufferedRanges(video) : [],
@@ -231,8 +282,12 @@
     const controls = document.querySelector('.controls-overlay');
     const server = document.getElementById('pong-server-toggle');
     const tiktok = document.getElementById('simpcity-tiktok-button');
+    const faceSwap = document.getElementById('pong-face-swap-button');
+    const faceSwapLoading = document.getElementById('pong-face-swap-loading');
     const tiktokStyle = tiktok ? getComputedStyle(tiktok) : null;
+    const faceSwapStyle = faceSwap ? getComputedStyle(faceSwap) : null;
     const tiktokVisible = Boolean(tiktok && tiktokStyle?.display !== 'none' && tiktokStyle?.visibility !== 'hidden');
+    const faceSwapVisible = Boolean(faceSwap && faceSwapStyle?.display !== 'none' && faceSwapStyle?.visibility !== 'hidden' && faceSwapStyle?.opacity !== '0');
     return {
       visible: document.visibilityState,
       focused: document.hasFocus(),
@@ -242,6 +297,10 @@
       serverText: bounded(server?.textContent || ''),
       counter: bounded(activeWrapper()?.querySelector('.video-counter')?.textContent || document.getElementById('video-counter')?.textContent || ''),
       paperclip: bounded(document.getElementById('paste-nav-button')?.dataset?.count || ''),
+      savedCounts: {
+        videos: number(document.getElementById('saved-video-count')?.textContent),
+        artists: number(document.getElementById('saved-artist-count')?.textContent)
+      },
       tiktokButton: {
         present: Boolean(tiktok),
         visible: tiktokVisible,
@@ -249,11 +308,44 @@
         disabled: Boolean(tiktok?.disabled),
         label: bounded(tiktok?.getAttribute('aria-label') || tiktok?.textContent || '')
       },
+      faceSwapButton: {
+        present: Boolean(faceSwap),
+        visible: faceSwapVisible,
+        active: Boolean(faceSwap?.classList.contains('active')),
+        busy: Boolean(faceSwap?.classList.contains('busy')),
+        label: bounded(faceSwap?.textContent || ''),
+        persistent: Boolean(typeof pongFaceSwapState !== 'undefined' && pongFaceSwapState?.enabled),
+        selectedFaceId: bounded(typeof pongFaceSwapState !== 'undefined' ? pongFaceSwapState?.selectedFaceId || '' : ''),
+        prefetched: typeof pongFaceSwapState !== 'undefined' && pongFaceSwapState?.prefetches instanceof Map
+          ? pongFaceSwapState.prefetches.size
+          : 0,
+        prefetchReady: typeof pongFaceSwapState !== 'undefined' && pongFaceSwapState?.prefetches instanceof Map
+          ? [...pongFaceSwapState.prefetches.values()].filter(item => item?.ready).length
+          : 0
+      },
+      faceSwapLoading: {
+        visible: Boolean(faceSwapLoading && !faceSwapLoading.hidden),
+        title: bounded(faceSwapLoading?.querySelector('.pong-face-swap-loading-title')?.textContent || ''),
+        detail: bounded(faceSwapLoading?.querySelector('.pong-face-swap-loading-detail')?.textContent || ''),
+        percent: number(String(faceSwapLoading?.querySelector('.pong-face-swap-loading-fill')?.style?.width || '').replace('%', ''))
+      },
       version: bounded(document.querySelector('.version-number')?.textContent || '')
     };
   }
 
   function recordEvent(type, detail = {}) {
+    if (type === 'native-lifecycle' && nativeClient) {
+      if (typeof detail?.foreground === 'boolean') nativeClient.foreground = detail.foreground;
+      if (detail?.activityInstanceId) {
+        nativeClient.activityInstanceId = bounded(detail.activityInstanceId, 100);
+      }
+      if (Number.isFinite(Number(detail?.webGeneration))) {
+        nativeClient.webGeneration = number(detail.webGeneration);
+      }
+      if (Number.isFinite(Number(detail?.sequence))) {
+        nativeClient.lifecycleSequence = number(detail.sequence);
+      }
+    }
     const event = {
       sequence: ++eventSequence,
       at: new Date().toISOString(),
@@ -279,13 +371,21 @@
       state.workflow.progressDetail,
       state.queues.artists,
       state.queues.videos,
+      state.ui.savedCounts.videos,
+      state.ui.savedCounts.artists,
       state.ui.tiktokButton.visible,
-      state.ui.serverState
+      state.ui.serverState,
+      state.diagnostics?.latestSequence || 0
     ]);
   }
 
   function collectState() {
     const source = bridgeState();
+    let diagnostics = { latestSequence: 0, events: [] };
+    try {
+      const snapshot = globalThis.PongRuntimeDiagnostics?.snapshot?.();
+      if (snapshot && typeof snapshot === 'object') diagnostics = snapshot;
+    } catch (_) {}
     return {
       instanceId,
       appName,
@@ -293,11 +393,12 @@
       sentAt: new Date().toISOString(),
       client: nativeClient || { native: false },
       page: { url: safeUrl(location.href), online: navigator.onLine, topFrame: true, bridge: false },
-      screenshot: latestFrameMeta,
+      screenshot: null,
       ui: collectUi(),
       playback: collectPlayback(source),
       workflow: collectWorkflow(source),
-      queues: collectQueues(source)
+      queues: collectQueues(source),
+      diagnostics
     };
   }
 
@@ -309,7 +410,6 @@
     try {
       const state = collectState();
       const freshEvents = events.filter(event => event.sequence > lastSentEventSequence);
-      const frame = pendingFrame;
       const response = await fetch(String(config.endpoint), {
         method: 'POST',
         mode: 'cors',
@@ -321,11 +421,31 @@
           'Content-Type': 'application/json',
           Authorization: `Bearer ${config.token}`
         },
-        body: JSON.stringify({ state, events: freshEvents, frame })
+        body: JSON.stringify({ state, events: freshEvents })
       });
       if (!response.ok) throw new Error(`observer HTTP ${response.status}`);
+      const reply = await response.json().catch(() => ({}));
+      const command = reply?.command;
+      if (
+        command?.action === 'click' &&
+        command?.id &&
+        command.id !== lastCommandId &&
+        REMOTE_CLICK_TARGETS.has(String(command.targetId || ''))
+      ) {
+        lastCommandId = command.id;
+        queueMicrotask(() => {
+          // A remote QA action may start discovery but must never start audio.
+          document.querySelectorAll('video,audio').forEach(media => {
+            try { media.muted = true; media.pause(); } catch (_) {}
+          });
+          const target = document.getElementById(command.targetId);
+          if (target) {
+            recordEvent('remote-command', { action: 'click', targetId: command.targetId });
+            target.click();
+          }
+        });
+      }
       if (freshEvents.length) lastSentEventSequence = freshEvents[freshEvents.length - 1].sequence;
-      if (pendingFrame === frame) pendingFrame = null;
       document.documentElement.dataset.pongObserver = 'connected';
       delete document.documentElement.dataset.pongObserverError;
     } catch (error) {
@@ -347,6 +467,16 @@
   }
 
   function installEventCapture() {
+    addEventListener('pong-runtime-diagnostic', event => {
+      const diagnostic = event?.detail || {};
+      recordEvent('runtime-diagnostic', {
+        sequence: number(diagnostic.sequence),
+        type: bounded(diagnostic.type, 64),
+        detail: diagnostic.detail && typeof diagnostic.detail === 'object'
+          ? diagnostic.detail
+          : {}
+      });
+    });
     addEventListener('error', event => recordEvent('window-error', {
       message: bounded(event.message),
       source: safeUrl(event.filename),
@@ -400,20 +530,25 @@
       const next = decodePairing(pairing);
       if (!next?.endpoint || !next?.token || String(client?.instance) !== requestedInstance) return false;
       config = next;
-      nativeClient = { native: true, instance: String(client.instance), deviceId: bounded(client.deviceId, 100), version: bounded(client.version, 40) };
+      nativeClient = {
+        native: true,
+        instance: String(client.instance),
+        deviceId: bounded(client.deviceId, 100),
+        activityInstanceId: bounded(client.activityInstanceId, 100),
+        version: bounded(client.version, 40),
+        webGeneration: number(client.webGeneration),
+        lifecycleSequence: number(client.lifecycleSequence),
+        foreground: client.foreground === true
+      };
       try { localStorage.setItem(CONFIG_KEY, JSON.stringify(next)); } catch (_) {}
       recordEvent('native-connected', { version: nativeClient.version });
       void sendNow();
       return true;
     },
-    frame(jpegBase64, width, height) {
-      const data = String(jpegBase64 || '');
-      if (!nativeClient?.native || data.length < 100 || data.length > 190_000 || !/^[A-Za-z0-9+/=]+$/.test(data)) return false;
-      latestFrameMeta = { capturedAt: new Date().toISOString(), width: number(width), height: number(height) };
-      pendingFrame = { ...latestFrameMeta, jpegBase64: data };
-      scheduleSend(25);
-      return true;
-    },
+    // Screen inspection is handled over the user's wireless ADB connection.
+    // Keep this compatibility method so older shells do not throw, but never
+    // accept, retain, or transmit screenshot pixels through the VPS observer.
+    frame() { return false; },
     snapshot: collectState,
     event: recordEvent,
     send: sendNow,
