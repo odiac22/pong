@@ -1237,7 +1237,7 @@
 
   <div id="pong-instance-label" class="pong-instance-label">Pong 1</div>
   <script>document.getElementById('pong-instance-label').textContent = `Pong ${window.PongInstanceNumber || '1'}`;</script>
-    <div class="version-number">27.71</div>
+    <div class="version-number">27.72</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
   <button id="pong-collection-save-button" type="button" aria-expanded="false">Save</button>
@@ -8665,6 +8665,10 @@ function markPongVideoVisualFrameUnavailable(wrapper, video) {
 
 function markPongVideoVisualFramePresented(wrapper, video, generation, metadata = null) {
   if (!wrapper || !video || pongVideoSourceGeneration(video) !== generation) return false;
+  const firstVisibleFrameForSource = !(
+    wrapper.dataset.pongVisibleFrame === 'true' &&
+    video.dataset.pongPresentedSourceGeneration === String(generation)
+  );
   const priorCount = Math.max(0, Number(video.dataset.pongPresentedFrameCount || 0));
   const mediaTime = Number(metadata?.mediaTime);
   video.dataset.pongPresentedSourceGeneration = String(generation);
@@ -8676,7 +8680,11 @@ function markPongVideoVisualFramePresented(wrapper, video, generation, metadata 
   wrapper.dataset.pongVisibleFrame = 'true';
   wrapper.dataset.pongVisibleFrameAt = String(Date.now());
   clearPongAutoSkipVideoTimer(wrapper);
-  if (isPongActiveVideo(video) && window.pongUserWantsAudio === true) {
+  // Audio ownership only needs to be acquired when this source presents its
+  // first real frame. Reapplying it for every requestVideoFrameCallback forced
+  // the swap companion to seek/play dozens of times per second, causing
+  // Android AudioTrack and audio focus to continuously stop and restart.
+  if (firstVisibleFrameForSource && isPongActiveVideo(video) && window.pongUserWantsAudio === true) {
     applyPlayerAudioPreference(video, wrapper, true);
   }
   return true;
@@ -8842,6 +8850,10 @@ function syncPongFaceSwapAudioCompanion(wrapper, video, { play = false, force = 
   audio.muted = false;
   audio.defaultMuted = false;
   audio.volume = 1;
+  // timeupdate and drift checks run throughout playback. Calling play() on an
+  // already-running WebView audio element repeatedly churns Android audio
+  // focus and can produce silence even while decoded bytes increase.
+  if (!audio.paused) return true;
   const requestToken = Number(audio.__pongAudioRequestToken || 0) + 1;
   audio.__pongAudioRequestToken = requestToken;
   const promise = audio.play();
