@@ -91,8 +91,8 @@ try {
   }
 
   New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
-  Copy-Item -LiteralPath (Join-Path $repoRoot 'android-app\app\build\outputs\apk\pong1\release\app-pong1-release.apk') -Destination (Join-Path $OutputDirectory 'Pong-1-27.70.apk') -Force
-  Copy-Item -LiteralPath (Join-Path $repoRoot 'android-app\app\build\outputs\apk\pong2\release\app-pong2-release.apk') -Destination (Join-Path $OutputDirectory 'Pong-2-27.70.apk') -Force
+  Copy-Item -LiteralPath (Join-Path $repoRoot 'android-app\app\build\outputs\apk\pong1\release\app-pong1-release.apk') -Destination (Join-Path $OutputDirectory 'Pong-1-27.71.apk') -Force
+  Copy-Item -LiteralPath (Join-Path $repoRoot 'android-app\app\build\outputs\apk\pong2\release\app-pong2-release.apk') -Destination (Join-Path $OutputDirectory 'Pong-2-27.71.apk') -Force
 } finally {
   foreach ($name in $oldEnvironment.Keys) {
     [Environment]::SetEnvironmentVariable($name, $oldEnvironment[$name], 'Process')
@@ -102,4 +102,4 @@ try {
   $pairEncoded = $null
 }
 
-Write-Output 'Built paired Pong 1 and Pong 2 version 27.70 APKs.'
+Write-Output 'Built paired Pong 1 and Pong 2 version 27.71 APKs.'

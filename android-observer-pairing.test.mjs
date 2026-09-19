@@ -17,6 +17,11 @@ test('Android shell reconnects the observer from its build-time pairing', () => 
   assert.match(activity, /PongLiveObserver\.configure/);
 });
 
+test('Android permits Pong-owned ordinary and delayed swap audio playback', () => {
+  assert.match(activity, /setMediaPlaybackRequiresUserGesture\(false\)/);
+  assert.doesNotMatch(activity, /setMediaPlaybackRequiresUserGesture\(true\)/);
+});
+
 test('private pairing is resolved only by the release builder', () => {
   assert.match(builder, /\/etc\/pong-observer\.env/);
   assert.match(builder, /PONG_OBSERVER_INGEST_TOKEN/);

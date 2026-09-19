@@ -47,7 +47,13 @@ public class MainActivity extends Activity {
     s.setJavaScriptEnabled(true);
     s.setDomStorageEnabled(true);
     s.setDatabaseEnabled(true);
-    s.setMediaPlaybackRequiresUserGesture(true);
+    // Pong owns audible playback through its persisted speaker control and
+    // active/visible-frame gate. Swap audio is a synchronized companion stream
+    // started after asynchronous GPU preparation, so WebView's per-start
+    // gesture requirement would permanently reject it even after the user had
+    // explicitly enabled audio. Let the page enforce the stricter ownership
+    // policy instead of Android blocking valid ordinary/resumed/swap playback.
+    s.setMediaPlaybackRequiresUserGesture(false);
     s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
     s.setLoadWithOverviewMode(true);
     s.setUseWideViewPort(true);
