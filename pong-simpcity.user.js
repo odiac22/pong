@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.13.2
+// @version      1.13.7
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -35,8 +35,8 @@
   if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.13.2';
-  const FORUM_CREATOR_CONCURRENCY = 2;
+  const SCRIPT_VERSION = '1.13.7';
+  const FORUM_CREATOR_CONCURRENCY = 3;
   // Use a conservative source pace. The PC worker still delegates
   // to the server's shared adaptive limiter, so both Recall channels remain
   // globally coordinated and back off on 403/429 responses.
@@ -47,7 +47,6 @@
   const MAX_LINKED_THREADS = 24;
   const MAX_LINKED_THREAD_DEPTH = 2;
   const MAX_LINKED_THREAD_PAGES = 40;
-  const ARTIST_LOOKUP_THREAD_PAGES = 6;
   const endpoints = Array.isArray(globalThis.PONG_LOCAL_ENDPOINTS)
     ? globalThis.PONG_LOCAL_ENDPOINTS
     : ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
@@ -410,7 +409,10 @@
       seen.add(threadUrl);
       threads.push(threadUrl);
     }
-    return lookupKey ? threads.slice(0, 2) : threads;
+    // A creator can have a discussion thread plus multiple historical profile
+    // threads. Truncating exact title matches here silently discarded valid
+    // profiles before Recall could inspect even page 1.
+    return threads;
   };
 
   const listingPageCount = html => {
@@ -495,10 +497,33 @@
       const body = article.querySelector('.message-body .bbWrapper, .message-body, .bbWrapper');
       if (!body) return null;
       const clone = body.cloneNode(true);
+      // Quoted text must not influence creator identity, but old posts often
+      // quote the only surviving media embed. Capture only link/media element
+      // attributes from quotes before removing their names and prose.
+      const quotedMediaEntries = [...clone.querySelectorAll([
+        'blockquote a[href]', 'blockquote iframe[src]', 'blockquote video[src]', 'blockquote source[src]',
+        '.bbCodeBlock--quote a[href]', '.bbCodeBlock--quote iframe[src]',
+        '.bbCodeBlock--quote video[src]', '.bbCodeBlock--quote source[src]'
+      ].join(','))].map(element => ({
+        text: String(element.textContent || element.title || '').trim().slice(0, 240),
+        candidates: [
+          element.getAttribute('href'), element.getAttribute('src'),
+          element.dataset?.url, element.dataset?.href, element.dataset?.src,
+          element.getAttribute('data-target'), element.outerHTML
+        ]
+      }));
       clone.querySelectorAll('blockquote,.bbCodeBlock--quote,.message-signature,.message-footer,.reactionsBar,button,script,style').forEach(node => node.remove());
-      const links = [...clone.querySelectorAll('a[href]')].flatMap(anchor => {
-        const text = String(anchor.textContent || anchor.title || '').trim().slice(0, 240);
-        const pending = [anchor.getAttribute('href'), anchor.dataset?.url, anchor.dataset?.href, anchor.getAttribute('data-target'), anchor.outerHTML];
+      const visibleMediaEntries = [...clone.querySelectorAll('a[href],iframe[src],video[src],source[src]')].map(element => ({
+        text: String(element.textContent || element.title || '').trim().slice(0, 240),
+        candidates: [
+          element.getAttribute('href'), element.getAttribute('src'),
+          element.dataset?.url, element.dataset?.href, element.dataset?.src,
+          element.getAttribute('data-target'), element.outerHTML
+        ]
+      }));
+      const links = [...visibleMediaEntries, ...quotedMediaEntries].flatMap(entry => {
+        const text = entry.text;
+        const pending = entry.candidates.slice();
         const found = [];
         const seen = new Set();
         while (pending.length && found.length < 12) {
@@ -589,9 +614,14 @@
   resumeLabel.style.cssText = 'display:flex;align-items:center;gap:5px;font:inherit;white-space:nowrap';
   resumeLabel.innerHTML = '<input data-resume type="checkbox" style="width:18px;height:18px"> Resume';
   panel.insertBefore(resumeLabel, panel.querySelector('[data-scrape]'));
+  const multiLabel = document.createElement('label');
+  multiLabel.style.cssText = 'display:flex;align-items:center;gap:5px;font:inherit;white-space:nowrap';
+  multiLabel.innerHTML = '<input data-multi type="checkbox" style="width:18px;height:18px"> Multi';
+  panel.insertBefore(multiLabel, panel.querySelector('[data-scrape]'));
   panel.querySelector('[data-close]').onclick = () => panel.remove();
   const status = panel.querySelector('[data-status]');
   const resumeCheckbox = panel.querySelector('[data-resume]');
+  const multiCheckbox = panel.querySelector('[data-multi]');
   const logLines = [];
   diagnosticSink = (message, details = '') => {
     const stamp = new Date().toISOString();
@@ -682,6 +712,9 @@
       const resumeSkipProfiles = globalThis.PONG_PC_BACKGROUND_CONTEXT
         ? Math.max(0, Math.floor(Number(globalThis.PONG_SIMPCITY_RESUME_SKIP_PROFILES || 0)))
         : 0;
+      const multiEnabled = globalThis.PONG_PC_BACKGROUND_CONTEXT
+        ? globalThis.PONG_SIMPCITY_MULTI === true
+        : multiCheckbox.checked === true;
       const rootThreadUrl = canonicalSimpCityThreadUrl(requestedSourceUrl);
       const listingRootUrl = canonicalSimpCityListingUrl(requestedSourceUrl);
       diagnostic('Source URL classified', `thread=${rootThreadUrl || 'none'}; listing=${listingRootUrl || 'none'}`);
@@ -705,7 +738,8 @@
             background = await sendToPong('/simpcity/background/start', {
               url: location.href,
               channel,
-              resumeFromSaved: resumeCheckbox.checked === true
+              resumeFromSaved: resumeCheckbox.checked === true,
+              multi: multiEnabled
             }, 30000);
           } catch (firstError) {
             diagnostic('Stored-session PC start failed', firstError?.message || String(firstError));
@@ -723,7 +757,8 @@
             background = await sendToPong('/simpcity/background/start', {
               url: location.href,
               channel,
-              resumeFromSaved: resumeCheckbox.checked === true
+              resumeFromSaved: resumeCheckbox.checked === true,
+              multi: multiEnabled
             }, 30000);
           }
           if (!background?.sourceCaptureRequired) {
@@ -784,9 +819,14 @@
       await sendToPong('/simpcity/recall/begin', { id: scrapeId, threadUrl: recallSourceUrl, channel }, 12000);
       const names = new Map();
       const albums = new Map();
+      let serverAlbumCount = 0;
       const aiSlots = Array.from({ length: AI_CONCURRENCY }, () => Promise.resolve());
       const aiTasks = [];
+      const creatorEntryTasks = new Map();
       const linkedThreadQueue = [];
+      const seenLinkedThreads = new Set();
+      const linkedThreadTasks = [];
+      let linkedThreadChain = Promise.resolve();
       const seenThreads = new Set(listingRootUrl ? [] : [first.href]);
       let slotIndex = 0, pagesFetched = 0, totalPages = 0, postsSent = 0, listingPagesFetched = 0;
       const saveResumeCursor = async cursorUrl => {
@@ -801,7 +841,7 @@
         }
       };
       const update = () => {
-        if (isCurrentRun()) status.textContent = `Pong ${channel}: ${pagesFetched}/${Math.max(totalPages, pagesFetched)} pages · ${postsSent} posts · ${names.size} creators · ${albums.size} albums · ${seenThreads.size} threads`;
+        if (isCurrentRun()) status.textContent = `Pong ${channel}: ${pagesFetched}/${Math.max(totalPages, pagesFetched)} pages · ${postsSent} posts · ${names.size} creators · ${Math.max(albums.size, serverAlbumCount)} albums · ${seenThreads.size} threads`;
       };
       const normalizeLinkedThread = rawUrl => {
         try {
@@ -813,23 +853,53 @@
           return url.toString();
         } catch (_) { return ''; }
       };
-      const queuePosts = (posts, depth = 0, batchSize = AI_BATCH_SIZE, orderedPair = false, allowExisting = false) => {
-        if (depth < MAX_LINKED_THREAD_DEPTH && seenThreads.size <= MAX_LINKED_THREADS) {
+      const queuePosts = (
+        posts,
+        depth = 0,
+        batchSize = AI_BATCH_SIZE,
+        orderedPair = false,
+        allowExisting = false,
+        lane = 'shared',
+        prerequisite = null
+      ) => {
+        const queuedTasks = [];
+        if (depth < MAX_LINKED_THREAD_DEPTH && seenLinkedThreads.size < MAX_LINKED_THREADS) {
           for (const post of posts) {
             for (const link of post?.links || []) {
               if (!link?.simpcityThread) continue;
               const threadUrl = normalizeLinkedThread(link.url);
-              if (!threadUrl || seenThreads.has(threadUrl) || seenThreads.size >= MAX_LINKED_THREADS + 1) continue;
+              if (!threadUrl || seenThreads.has(threadUrl) || seenLinkedThreads.size >= MAX_LINKED_THREADS) continue;
               seenThreads.add(threadUrl);
-              linkedThreadQueue.push({ url: threadUrl, depth: depth + 1 });
+              seenLinkedThreads.add(threadUrl);
+              const linked = { url: threadUrl, depth: depth + 1 };
+              linkedThreadQueue.push(linked);
+              const task = linkedThreadChain = linkedThreadChain.then(async () => {
+                try {
+                  await scanThread({ ...linked, atomic: true });
+                } catch (error) {
+                  diagnostic('Linked creator thread skipped', `url=${linked.url}; ${error?.message || error}`);
+                } finally {
+                  const index = linkedThreadQueue.indexOf(linked);
+                  if (index >= 0) linkedThreadQueue.splice(index, 1);
+                }
+              });
+              linkedThreadTasks.push(task);
             }
           }
         }
         const safeBatchSize = Math.max(1, Number(batchSize || AI_BATCH_SIZE));
         for (let offset = 0; offset < posts.length; offset += safeBatchSize) {
           const batch = posts.slice(offset, offset + safeBatchSize);
-          const slot = orderedPair ? 0 : slotIndex++ % AI_CONCURRENCY;
+          // Reserve one extraction lane for creator entry pages. A creator with
+          // dozens of deep pages can fill the background lane without delaying
+          // page 1 of every creator discovered behind it. Total extraction
+          // concurrency remains AI_CONCURRENCY.
+          let slot;
+          if (AI_CONCURRENCY <= 1 || lane === 'creator-entry') slot = 0;
+          else if (lane === 'creator-background') slot = 1 + (slotIndex++ % (AI_CONCURRENCY - 1));
+          else slot = slotIndex++ % AI_CONCURRENCY;
           const task = aiSlots[slot] = aiSlots[slot].then(async () => {
+            if (prerequisite) await prerequisite;
             const result = await sendToPong('/simpcity/extract-creators', {
               id: scrapeId, channel, posts: batch, orderedPair, allowExisting
             });
@@ -842,10 +912,13 @@
               }
             }
             for (const album of result.albums || []) if (album?.url) albums.set(album.url, album);
+            serverAlbumCount = Math.max(serverAlbumCount, Number(result?.totals?.albums || 0));
             update();
           });
           aiTasks.push(task);
+          queuedTasks.push(task);
         }
+        return Promise.all(queuedTasks);
       };
       const pageCountFromHtml = html => {
         const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -853,7 +926,7 @@
           .map(anchor => Number(anchor.getAttribute('href')?.match(/page-(\d+)/i)?.[1] || 1));
         return Math.max(1, ...pages);
       };
-      const scanThread = async ({ url: threadUrl, depth, maxPages = 0, atomic = false, deferSubmit = false, streamFirstPage = false, followLinkedThreads = true }, currentHtml = '') => {
+      const scanThread = async ({ url: threadUrl, depth, maxPages = 0, atomic = false, deferSubmit = false, streamFirstPage = false, followLinkedThreads = true, onEntryComplete = null }, currentHtml = '') => {
         if (!isCurrentRun()) throw Object.assign(new Error('This scrape was superseded'), { status: 409 });
         const firstHtml = currentHtml || await fetchSimpCityPage(threadUrl, 1);
         const discoveredPages = pageCountFromHtml(firstHtml);
@@ -873,13 +946,18 @@
             links: [{ text: '', url: threadUrl, simpcityThread: true }],
             attachments: []
           }, ...firstPosts];
-          queuePosts(
+          const entryTask = queuePosts(
             probePosts,
             followLinkedThreads ? depth : MAX_LINKED_THREAD_DEPTH,
             probePosts.length,
             true,
-            true
+            true,
+            'creator-entry'
           );
+          creatorEntryTasks.set(threadUrl, entryTask);
+          if (typeof onEntryComplete === 'function') onEntryComplete(entryTask);
+        } else if (typeof onEntryComplete === 'function') {
+          onEntryComplete(Promise.resolve());
         }
         pagesFetched++;
         update();
@@ -905,7 +983,9 @@
                 followLinkedThreads ? depth : MAX_LINKED_THREAD_DEPTH,
                 enrichPosts.length,
                 true,
-                true
+                true,
+                'creator-background',
+                creatorEntryTasks.get(threadUrl) || null
               );
             }
             pagesFetched++;
@@ -923,7 +1003,15 @@
           // One request marks the complete creator thread. The PC can resolve
           // every host concurrently without releasing a partial pair.
           if (deferSubmit) return collectedPosts;
-          queuePosts(collectedPosts, depth, collectedPosts.length, true, streamFirstPage);
+          queuePosts(
+            collectedPosts,
+            depth,
+            collectedPosts.length,
+            true,
+            streamFirstPage,
+            'creator-background',
+            creatorEntryTasks.get(threadUrl) || null
+          );
         }
         return collectedPosts;
       };
@@ -935,14 +1023,15 @@
         const listingIsForum = /^\/forums\//i.test(new URL(listingRootUrl).pathname);
         const listingIsSearch = /^\/search\//i.test(new URL(listingRootUrl).pathname);
         const listingContentThreads = [];
-        const completedThreads = [];
+        const completedCreatorIndexes = new Set();
         const creatorWaiters = [];
         let creatorCursor = 0;
-        let nextCreatorToSubmit = 0;
+        let nextCreatorCheckpoint = 0;
         let resumeCheckpointChain = Promise.resolve();
         const listingNeedsCreatorScan = listingIsForum || listingIsSearch;
         const listingIsArtistLookup = listingIsSearch && Boolean(artistLookupQuery);
         let listingDiscoveryComplete = !listingNeedsCreatorScan;
+        let creatorEntryTurn = Promise.resolve();
         const wakeCreatorWorkers = () => {
           while (creatorWaiters.length) creatorWaiters.shift()();
         };
@@ -952,29 +1041,38 @@
             while (
               listingNeedsCreatorScan &&
               isCurrentRun() &&
-              nextCreatorToSubmit < requiredCreatorCount
+              nextCreatorCheckpoint < requiredCreatorCount
             ) await delay(250);
             if (isCurrentRun()) await saveResumeCursor(cursorUrl);
           });
           return resumeCheckpointChain;
         };
         let resumedProfilesSkipped = 0;
-        const flushCompletedCreators = () => {
-          while (completedThreads[nextCreatorToSubmit]) {
-            const posts = completedThreads[nextCreatorToSubmit];
-            completedThreads[nextCreatorToSubmit] = null;
-            if (nextCreatorToSubmit < resumeSkipProfiles) {
-              resumedProfilesSkipped++;
-              if (resumedProfilesSkipped === resumeSkipProfiles) {
-                diagnostic('Resume cursor reached', `continued after ${resumeSkipProfiles} Pong profiles`);
-              }
-            } else {
-              // A complete profile becomes one ordered server job. The server
-              // resolves SimpCity hosts, TikTok and Balbums concurrently and
-              // publishes Videos then TikTok as adjacent Pong bundles.
-              queuePosts(posts, MAX_LINKED_THREAD_DEPTH, posts.length, true);
+        const completeCreatorScan = (index, posts = [], threadUrl = '') => {
+          if (completedCreatorIndexes.has(index)) return;
+          completedCreatorIndexes.add(index);
+          if (index < resumeSkipProfiles) {
+            resumedProfilesSkipped++;
+            if (resumedProfilesSkipped === resumeSkipProfiles) {
+              diagnostic('Resume cursor reached', `continued after ${resumeSkipProfiles} Pong profiles`);
             }
-            nextCreatorToSubmit++;
+          } else if (posts.length) {
+            // Publish a completed profile immediately. Resume persistence still
+            // advances only across the contiguous completed prefix below, so a
+            // slow earlier thread cannot block delivery without making the
+            // saved listing cursor skip unfinished work.
+            queuePosts(
+              posts,
+              MAX_LINKED_THREAD_DEPTH,
+              posts.length,
+              true,
+              false,
+              'creator-background',
+              creatorEntryTasks.get(threadUrl) || null
+            );
+          }
+          while (completedCreatorIndexes.has(nextCreatorCheckpoint)) {
+            nextCreatorCheckpoint++;
           }
         };
         const queueListingThreads = threadUrls => {
@@ -1010,28 +1108,42 @@
               // user already passed in Pong do not need their threads fetched,
               // parsed, classified, or resolved again.
               if (index < resumeSkipProfiles) {
-                completedThreads[index] = [];
-                flushCompletedCreators();
+                completeCreatorScan(index);
                 continue;
               }
               if (isCurrentRun()) {
                 status.textContent = `Pong ${channel}: creator ${index + 1}/${Math.max(index + 1, listingContentThreads.length)} · discovering more listings`;
               }
-               try {
-                 completedThreads[index] = await scanThread({
-                   url: threadUrl,
-                   depth: 0,
-                   maxPages: listingIsArtistLookup ? ARTIST_LOOKUP_THREAD_PAGES : 0,
-                   atomic: true,
-                   deferSubmit: true,
-                   streamFirstPage: true,
-                   followLinkedThreads: !listingIsArtistLookup
-                 });
+              const priorEntryTurn = creatorEntryTurn;
+              let releaseEntryTurn;
+              let entryTurnReleased = false;
+              creatorEntryTurn = new Promise(resolve => { releaseEntryTurn = resolve; });
+              await priorEntryTurn;
+              const releaseAfterEntry = entryTask => {
+                entryTurnReleased = true;
+                Promise.resolve(entryTask).finally(releaseEntryTurn);
+              };
+              try {
+                const completedPosts = await scanThread({
+                  url: threadUrl,
+                  depth: 0,
+                  // Exact artist matches retain complete pagination. Page 1 is
+                  // still streamed immediately, so coverage does not delay the
+                  // first playable bundle.
+                  maxPages: 0,
+                  atomic: true,
+                  deferSubmit: true,
+                  streamFirstPage: true,
+                  followLinkedThreads: !listingIsArtistLookup,
+                  onEntryComplete: releaseAfterEntry
+                });
+                completeCreatorScan(index, completedPosts, threadUrl);
               } catch (error) {
                 diagnostic('Creator thread failed', `index=${index + 1}; url=${threadUrl}; ${error?.message || error}`);
-                completedThreads[index] = [];
+                completeCreatorScan(index);
+              } finally {
+                if (!entryTurnReleased) releaseEntryTurn();
               }
-              flushCompletedCreators();
             }
           })
           : [];
@@ -1040,8 +1152,8 @@
           // artist result page. Searching its historical pagination repeats
           // stale result sets and can turn one handle into dozens of listing
           // requests before the next pasted artist starts. Artist Lookup uses
-          // only this current result page and the two matched threads queued
-          // above; each matched thread retains its six-page media ceiling.
+          // only this current result page. Every exact title match is queued,
+          // and every matched thread retains its complete pagination.
         } else if (listingIsSearch) {
           const seenListingPages = new Set([listingPageIdentity(location.href)]);
           const pendingListingPages = listingContinuationUrls(listingHtml, location.href, listingRootUrl)
@@ -1098,7 +1210,6 @@
           listingDiscoveryComplete = true;
           wakeCreatorWorkers();
           await Promise.all(creatorWorkers);
-          flushCompletedCreators();
           await resumeCheckpointChain;
         }
       } else if (rootIsSinglePageThread) {
@@ -1107,20 +1218,19 @@
         pagesFetched = 1;
         update();
       } else {
-        await scanThread({ url: first.href, depth: 0 }, currentPage === 1 ? document.documentElement.outerHTML : '');
+        // A direct profile-thread Recall is one creator by default. Bind every
+        // page to the thread title deterministically so media discovery never
+        // depends on the optional AI extractor. Multi explicitly opts into
+        // linked creator-thread traversal.
+        await scanThread({
+          url: first.href,
+          depth: 0,
+          atomic: true,
+          streamFirstPage: true,
+          followLinkedThreads: multiEnabled
+        }, currentPage === 1 ? document.documentElement.outerHTML : '');
       }
-      while (linkedThreadQueue.length && isCurrentRun()) {
-        const linked = linkedThreadQueue.shift();
-        try {
-          // A linked creator profile is one artist unit. Collect its pages as
-          // one ordered batch so its own media stays attached to its title.
-          await scanThread({ ...linked, atomic: true });
-        } catch (error) {
-          // Deleted/moved utility or creator threads are normal in old
-          // megathreads. One 404 must not abort every remaining artist.
-          diagnostic('Linked creator thread skipped', `url=${linked?.url || 'unknown'}; ${error?.message || error}`);
-        }
-      }
+      await Promise.allSettled(linkedThreadTasks);
       await Promise.all(aiTasks);
       await sendToPong('/simpcity/recall', {
         id: scrapeId, channel, schema: 'pong-simpcity-ai-v1', threadUrl: first.href,
