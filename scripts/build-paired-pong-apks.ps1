@@ -44,29 +44,38 @@ if (-not $hostName -or -not $userName) { throw 'VPS connection information is in
 $remote = @'
 set -eu
 . /etc/pong-observer.env
+. /etc/pong-gateway.env
 domain=$(nginx -T 2>/dev/null | awk '/server_name aiostreams\./ { gsub(";", "", $2); print $2; exit }')
 test -n "$domain"
-printf '%s\n%s' "$domain" "$PONG_OBSERVER_INGEST_TOKEN"
+test -n "$PONG_GATEWAY_DOMAIN"
+test -n "$PONG_GATEWAY_TOKEN"
+printf '%s\n%s\n%s\n%s' "$domain" "$PONG_OBSERVER_INGEST_TOKEN" "$PONG_GATEWAY_DOMAIN" "$PONG_GATEWAY_TOKEN"
 '@
 $remoteBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remote))
 $remoteResult = & ssh -i $sshKeyPath -p $sshPort "$userName@$hostName" "echo $remoteBase64 | base64 -d | sudo bash"
-if ($LASTEXITCODE -ne 0 -or @($remoteResult).Count -lt 2) { throw 'Could not obtain the observer build pairing.' }
+if ($LASTEXITCODE -ne 0 -or @($remoteResult).Count -lt 4) { throw 'Could not obtain the observer and gateway build pairing.' }
 
 $observerDomain = [string](@($remoteResult)[0])
 $observerToken = [string](@($remoteResult)[1])
+$gatewayDomain = [string](@($remoteResult)[2])
+$gatewayToken = [string](@($remoteResult)[3])
 $observerDomain = $observerDomain.Trim()
 $observerToken = $observerToken.Trim()
-if (-not $observerDomain -or -not $observerToken) { throw 'Observer build pairing is incomplete.' }
+$gatewayDomain = $gatewayDomain.Trim()
+$gatewayToken = $gatewayToken.Trim()
+if (-not $observerDomain -or -not $observerToken -or -not $gatewayDomain -or -not $gatewayToken) { throw 'Observer or gateway build pairing is incomplete.' }
 $pairJson = @{ endpoint = "https://$observerDomain/pong-observe/ingest"; token = $observerToken } | ConvertTo-Json -Compress
 $pairEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pairJson)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 
 $oldEnvironment = @{}
-foreach ($name in @('PONG_OBSERVER_PAIR', 'PONG_KEYSTORE_PATH', 'PONG_KEYSTORE_PASSWORD', 'PONG_KEY_ALIAS', 'PONG_KEY_PASSWORD', 'JAVA_HOME')) {
+foreach ($name in @('PONG_OBSERVER_PAIR', 'PONG_GATEWAY_URL', 'PONG_GATEWAY_TOKEN', 'PONG_KEYSTORE_PATH', 'PONG_KEYSTORE_PASSWORD', 'PONG_KEY_ALIAS', 'PONG_KEY_PASSWORD', 'JAVA_HOME')) {
   $oldEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 
 try {
   $env:PONG_OBSERVER_PAIR = $pairEncoded
+  $env:PONG_GATEWAY_URL = "https://$gatewayDomain/pong"
+  $env:PONG_GATEWAY_TOKEN = $gatewayToken
   $env:PONG_KEYSTORE_PATH = $keystorePath
   $env:PONG_KEYSTORE_PASSWORD = $signingValues.KEYSTORE_PASSWORD
   $env:PONG_KEY_ALIAS = 'pong'
@@ -102,6 +111,7 @@ try {
     [Environment]::SetEnvironmentVariable($name, $oldEnvironment[$name], 'Process')
   }
   $observerToken = $null
+  $gatewayToken = $null
   $pairJson = $null
   $pairEncoded = $null
 }

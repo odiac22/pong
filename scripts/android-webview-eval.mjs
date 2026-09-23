@@ -14,11 +14,6 @@ await new Promise((resolve, reject) => {
 });
 
 const id = 1;
-socket.send(JSON.stringify({
-  id,
-  method: 'Runtime.evaluate',
-  params: { expression, returnByValue: true, awaitPromise: true }
-}));
 const reply = await new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('Android WebView evaluation timed out.')), 10_000);
   socket.onmessage = event => {
@@ -27,6 +22,11 @@ const reply = await new Promise((resolve, reject) => {
     clearTimeout(timer);
     resolve(message);
   };
+  socket.send(JSON.stringify({
+    id,
+    method: 'Runtime.evaluate',
+    params: { expression, returnByValue: true, awaitPromise: true }
+  }));
 });
 socket.close();
 if (reply.error || reply.result?.exceptionDetails) {

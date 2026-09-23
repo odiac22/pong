@@ -7,6 +7,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.net.Uri;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
@@ -16,11 +18,14 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceResponse;
+import android.webkit.HttpAuthHandler;
 import android.webkit.RenderProcessGoneDetail;
 import android.content.SharedPreferences;
 import android.content.Intent;
 import android.widget.FrameLayout;
+import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.ArrayList;
@@ -38,12 +43,15 @@ import java.io.IOException;
 import java.io.InputStream;
 
 public class MainActivity extends Activity {
-  // Both locally validated and release APKs use the live LAN Pong endpoint.
-  // A deliberate deep link can still override it for isolated emulator tests.
-  private static final String DEFAULT_PONG_URL = "http://192.168.1.124:8787/pong";
+  private static final String HOME_PONG_URL = "http://192.168.1.124:8787/pong";
+  private static final String GATEWAY_PONG_URL = BuildConfig.PONG_GATEWAY_URL;
+  private static final String DEFAULT_PONG_URL = GATEWAY_PONG_URL;
   private static final String TIKTOK_HOME_URL = "https://www.tiktok.com/foryou";
   private FrameLayout root;
   private WebView web;
+  private TextView connectionIndicator;
+  private String activePongRoute = "Connecting";
+  private boolean gatewayFallbackStarted = false;
   private WebView tiktokWeb;
   private String currentTikTokUrl = "";
   private final List<String> nearbyTikTokUrls = new ArrayList<>();
@@ -80,6 +88,78 @@ public class MainActivity extends Activity {
   private boolean recoveringRenderer = false;
   private boolean nativeForeground = false;
 
+  private int dp(int value) {
+    return Math.round(value * getResources().getDisplayMetrics().density);
+  }
+
+  private void ensureConnectionIndicator() {
+    ensureRoot();
+    if (connectionIndicator != null) return;
+    connectionIndicator = new TextView(this);
+    connectionIndicator.setTextColor(Color.WHITE);
+    connectionIndicator.setTextSize(10f);
+    connectionIndicator.setGravity(Gravity.CENTER);
+    connectionIndicator.setPadding(dp(7), dp(3), dp(7), dp(3));
+    connectionIndicator.setClickable(false);
+    connectionIndicator.setFocusable(false);
+    FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+      ViewGroup.LayoutParams.WRAP_CONTENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT,
+      Gravity.END | Gravity.BOTTOM
+    );
+    params.rightMargin = dp(8);
+    params.bottomMargin = dp(102);
+    root.addView(connectionIndicator, params);
+    setConnectionIndicator("Connecting");
+  }
+
+  private void setConnectionIndicator(String route) {
+    activePongRoute = route;
+    if (connectionIndicator == null) return;
+    connectionIndicator.setText(route);
+    GradientDrawable background = new GradientDrawable();
+    background.setCornerRadius(dp(9));
+    if ("Home".equals(route)) background.setColor(Color.rgb(21, 128, 61));
+    else if ("VPS".equals(route)) background.setColor(Color.rgb(109, 40, 217));
+    else background.setColor(Color.rgb(71, 85, 105));
+    background.setStroke(dp(1), Color.argb(170, 148, 163, 184));
+    connectionIndicator.setBackground(background);
+    connectionIndicator.bringToFront();
+  }
+
+  private boolean isHomePongReachable() {
+    HttpURLConnection connection = null;
+    try {
+      connection = (HttpURLConnection) new URL(HOME_PONG_URL).openConnection();
+      connection.setRequestMethod("GET");
+      connection.setConnectTimeout(900);
+      connection.setReadTimeout(900);
+      connection.setUseCaches(false);
+      connection.setInstanceFollowRedirects(false);
+      connection.setRequestProperty("Range", "bytes=0-0");
+      int status = connection.getResponseCode();
+      return status >= 200 && status < 400;
+    } catch (Exception ignored) {
+      return false;
+    } finally {
+      if (connection != null) connection.disconnect();
+    }
+  }
+
+  private void choosePongRouteAndLoad() {
+    ensureConnectionIndicator();
+    setConnectionIndicator("Connecting");
+    new Thread(() -> {
+      boolean useHome = isHomePongReachable();
+      runOnUiThread(() -> {
+        if (isFinishing() || isDestroyed() || web != null) return;
+        gatewayFallbackStarted = !useHome;
+        setConnectionIndicator(useHome ? "Home" : "VPS");
+        configureAndLoadWebView(useHome ? HOME_PONG_URL : GATEWAY_PONG_URL);
+      });
+    }, "pong-route-probe").start();
+  }
+
   private void ensureRoot() {
     if (root != null) return;
     root = new FrameLayout(this);
@@ -97,6 +177,8 @@ public class MainActivity extends Activity {
       ViewGroup.LayoutParams.MATCH_PARENT,
       ViewGroup.LayoutParams.MATCH_PARENT
     ));
+    ensureConnectionIndicator();
+    connectionIndicator.bringToFront();
     if (Build.VERSION.SDK_INT >= 26) {
       web.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
     }
@@ -149,6 +231,26 @@ public class MainActivity extends Activity {
         connectObserver();
         emitNativeLifecycle(recoveringRenderer ? "renderer-recovered" : "webview-ready");
         recoveringRenderer = false;
+        if (connectionIndicator != null) connectionIndicator.bringToFront();
+      }
+      @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+        if (request.isForMainFrame() && "Home".equals(activePongRoute) && !gatewayFallbackStarted) {
+          gatewayFallbackStarted = true;
+          setConnectionIndicator("VPS");
+          view.post(() -> view.loadUrl(resumablePongUrl(GATEWAY_PONG_URL)));
+          return;
+        }
+        super.onReceivedError(view, request, error);
+      }
+      @Override public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler handler, String host, String realm) {
+        try {
+          String gatewayHost = Uri.parse(DEFAULT_PONG_URL).getHost();
+          if (gatewayHost != null && gatewayHost.equalsIgnoreCase(host) && !BuildConfig.PONG_GATEWAY_TOKEN.isEmpty()) {
+            handler.proceed("pong", BuildConfig.PONG_GATEWAY_TOKEN);
+            return;
+          }
+        } catch (Exception ignored) {}
+        super.onReceivedHttpAuthRequest(view, handler, host, realm);
       }
       @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
         final String recoveryUrl = resumablePongUrl(view.getUrl());
@@ -216,6 +318,7 @@ public class MainActivity extends Activity {
           tiktokWeb.setAlpha(1f);
           tiktokWeb.setVisibility(View.VISIBLE);
           if (!tiktokPongUiForeground) tiktokWeb.bringToFront();
+          if (connectionIndicator != null) connectionIndicator.bringToFront();
         } catch (Exception ignored) {}
         if (tiktokVisible) tiktokLayoutHandler.postDelayed(tiktokLayoutPoller, 750);
       }
@@ -571,6 +674,12 @@ public class MainActivity extends Activity {
     if (host == null || scheme == null || !("/pong".equals(path) || "/pong/".equals(path) || "/pong/index.html".equals(path))) return false;
     host = host.toLowerCase(Locale.ROOT);
     if (host.equals("odiac22.github.io")) return scheme.equals("https") && (url.getPort() == -1 || url.getPort() == 443);
+    try {
+      Uri gateway = Uri.parse(DEFAULT_PONG_URL);
+      if (gateway.getHost() != null && host.equalsIgnoreCase(gateway.getHost())) {
+        return scheme.equals("https") && (url.getPort() == -1 || url.getPort() == 443);
+      }
+    } catch (Exception ignored) {}
     if (!scheme.equals("http") && !scheme.equals("https")) return false;
     if (host.equals("localhost") || host.equals("127.0.0.1")) return true;
     String[] parts = host.split("\\.");
@@ -696,15 +805,22 @@ public class MainActivity extends Activity {
       appState.edit().putString("observer-device", deviceId).apply();
     }
     String requestedUrl = requestedPongUrl(getIntent());
-    String lastUrl = requestedUrl != null
-      ? requestedUrl
-      : appState.getString("last-pong-url", DEFAULT_PONG_URL);
     // Do not marshal the complete WebView history into Android's Activity
     // state Bundle. Large Pong decks made that Bundle expensive and could
     // crash during background/restore. The web app's compact localStorage
     // session is the single restoration authority.
     ensureRoot();
-    configureAndLoadWebView(lastUrl);
+    ensureConnectionIndicator();
+    if (requestedUrl != null) {
+      try {
+        String requestedHost = Uri.parse(requestedUrl).getHost();
+        String homeHost = Uri.parse(HOME_PONG_URL).getHost();
+        setConnectionIndicator(homeHost != null && homeHost.equalsIgnoreCase(requestedHost) ? "Home" : "VPS");
+      } catch (Exception ignored) { setConnectionIndicator("VPS"); }
+      configureAndLoadWebView(requestedUrl);
+    } else {
+      choosePongRouteAndLoad();
+    }
   }
   @Override protected void onNewIntent(Intent intent) {
     super.onNewIntent(intent);

@@ -2,6 +2,10 @@ plugins { id 'com.android.application' }
 
 def pongObserverPair = System.getenv('PONG_OBSERVER_PAIR') ?: 'OBSERVER_PAIR_PLACEHOLDER'
 def escapedObserverPair = pongObserverPair.replace('\\', '\\\\').replace('"', '\\"')
+def pongGatewayUrl = System.getenv('PONG_GATEWAY_URL') ?: 'http://192.168.1.124:8787/pong'
+def pongGatewayToken = System.getenv('PONG_GATEWAY_TOKEN') ?: ''
+def escapedGatewayUrl = pongGatewayUrl.replace('\\', '\\\\').replace('"', '\\"')
+def escapedGatewayToken = pongGatewayToken.replace('\\', '\\\\').replace('"', '\\"')
 
 android {
     namespace 'com.odiac22.pong'
@@ -9,9 +13,11 @@ android {
     defaultConfig {
         minSdk 24
         targetSdk 35
-        versionCode 2797
-        versionName '27.97'
+        versionCode 2799
+        versionName '27.99'
         buildConfigField 'String', 'OBSERVER_PAIR', "\"${escapedObserverPair}\""
+        buildConfigField 'String', 'PONG_GATEWAY_URL', "\"${escapedGatewayUrl}\""
+        buildConfigField 'String', 'PONG_GATEWAY_TOKEN', "\"${escapedGatewayToken}\""
     }
     flavorDimensions 'instance'
     productFlavors {
@@ -47,5 +53,8 @@ gradle.taskGraph.whenReady { graph ->
     }
     if (createsReleaseApk && pongObserverPair == 'OBSERVER_PAIR_PLACEHOLDER') {
         throw new GradleException('Release APK requires PONG_OBSERVER_PAIR; refusing to build disconnected Pong diagnostics.')
+    }
+    if (createsReleaseApk && (!pongGatewayUrl.startsWith('https://') || !pongGatewayToken)) {
+        throw new GradleException('Release APK requires the authenticated HTTPS Pong gateway.')
     }
 }
