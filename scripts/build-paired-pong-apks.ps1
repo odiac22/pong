@@ -7,6 +7,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoRoot 'downloads' }
+$buildConfigText = Get-Content -LiteralPath (Join-Path $repoRoot 'android-app\app\build.gradle') -Raw
+$versionMatch = [regex]::Match($buildConfigText, 'versionName\s+[''"]([^''"]+)[''"]')
+if (-not $versionMatch.Success) { throw 'Android versionName could not be read.' }
+$appVersion = $versionMatch.Groups[1].Value
 
 $credentialPath = Join-Path $PrivateDirectory 'SLS-ALL-CREDENTIALS-PRIVATE.txt'
 $signingPath = Join-Path $PrivateDirectory 'pong-android-signing-private.txt'
@@ -91,8 +95,8 @@ try {
   }
 
   New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
-  Copy-Item -LiteralPath (Join-Path $repoRoot 'android-app\app\build\outputs\apk\pong1\release\app-pong1-release.apk') -Destination (Join-Path $OutputDirectory 'Pong-1-27.72.apk') -Force
-  Copy-Item -LiteralPath (Join-Path $repoRoot 'android-app\app\build\outputs\apk\pong2\release\app-pong2-release.apk') -Destination (Join-Path $OutputDirectory 'Pong-2-27.72.apk') -Force
+  Copy-Item -LiteralPath (Join-Path $repoRoot 'android-app\app\build\outputs\apk\pong1\release\app-pong1-release.apk') -Destination (Join-Path $OutputDirectory "Pong-1-$appVersion.apk") -Force
+  Copy-Item -LiteralPath (Join-Path $repoRoot 'android-app\app\build\outputs\apk\pong2\release\app-pong2-release.apk') -Destination (Join-Path $OutputDirectory "Pong-2-$appVersion.apk") -Force
 } finally {
   foreach ($name in $oldEnvironment.Keys) {
     [Environment]::SetEnvironmentVariable($name, $oldEnvironment[$name], 'Process')
@@ -102,4 +106,4 @@ try {
   $pairEncoded = $null
 }
 
-Write-Output 'Built paired Pong 1 and Pong 2 version 27.72 APKs.'
+Write-Output "Built paired Pong 1 and Pong 2 version $appVersion APKs."

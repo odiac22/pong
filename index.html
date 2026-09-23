@@ -1249,7 +1249,7 @@
 
   <div id="pong-instance-label" class="pong-instance-label">Pong 1</div>
   <script>document.getElementById('pong-instance-label').textContent = `Pong ${window.PongInstanceNumber || '1'}`;</script>
-    <div class="version-number">27.87</div>
+    <div class="version-number">27.88</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
   <button id="pong-collection-save-button" type="button" aria-expanded="false">Save</button>
@@ -1291,6 +1291,7 @@
         <button id="simpcity-recall-2">Recall 2</button>
         <button id="saved-erome">Saved Erome</button>
         <button id="train-ai">Train AI</button>
+        <button id="tiktok-live" type="button">TikTok Live</button>
       </div>
     </div>
   </div>
@@ -1787,7 +1788,136 @@ let pasteParsePromises = [];
 const videoContainer = document.getElementById('video-container');
 const videoUrlsInput  = document.getElementById('video-urls');
 const loadVideosButton = document.getElementById('load-videos');
+const tiktokLiveButton = document.getElementById('tiktok-live');
 lastVideoUrlsInputValue = videoUrlsInput ? videoUrlsInput.value || '' : '';
+
+const pongTikTokLiveState = {
+  current: '',
+  urls: [],
+  receivedAt: 0
+};
+
+function pongCanonicalTikTokVideoPage(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    if (!/(^|\.)tiktok\.com$/i.test(parsed.hostname)) return '';
+    if (!/^\/@[^/]+\/video\/\d+\/?$/i.test(parsed.pathname)) return '';
+    return `${parsed.origin}${parsed.pathname.replace(/\/$/, '')}`;
+  } catch (_) {
+    return '';
+  }
+}
+
+function pongTikTokLiveCacheEndpoint() {
+  if (typeof random40ServerVideoCacheEndpoint === 'function') {
+    const configured = random40ServerVideoCacheEndpoint();
+    if (configured) return configured.replace(/\/$/, '');
+  }
+  return location.protocol === 'http:' && location.port === '8787' ? location.origin : '';
+}
+
+function pongTikTokLivePlaybackUrl(rawUrl) {
+  const canonical = pongCanonicalTikTokVideoPage(rawUrl);
+  const endpoint = pongTikTokLiveCacheEndpoint();
+  if (!canonical || !endpoint) return '';
+  return `${endpoint}/video-cache/stream?url=${encodeURIComponent(canonical)}&profile=tiktok`;
+}
+
+window.PongTikTokLiveFeed = payload => {
+  const supplied = payload && typeof payload === 'object' ? payload : {};
+  const current = pongCanonicalTikTokVideoPage(supplied.current);
+  const urls = [];
+  const append = value => {
+    const canonical = pongCanonicalTikTokVideoPage(value);
+    if (canonical && !urls.includes(canonical)) urls.push(canonical);
+  };
+  append(current);
+  (Array.isArray(supplied.urls) ? supplied.urls : []).forEach(append);
+  if (!urls.length) return false;
+  pongTikTokLiveState.current = current || urls[0];
+  pongTikTokLiveState.urls = urls.slice(0, 8);
+  pongTikTokLiveState.receivedAt = Date.now();
+  // This is a complete-file warm request, not a preview range. The current
+  // TikTok gets foreground priority and every nearby post continues into the
+  // same hidden ephemeral cache so all of its frames are available to Pong.
+  if (typeof random40WarmServerVideoCache === 'function') {
+    void random40WarmServerVideoCache(pongTikTokLiveState.urls, {
+      activeUrl: pongTikTokLiveState.current,
+      entryUrls: [pongTikTokLiveState.current],
+      currentUrls: pongTikTokLiveState.urls,
+      playbackProfile: 'tiktok',
+      urgent: true,
+      authoritative: false
+    });
+  }
+  return true;
+};
+
+window.PongTikTokLiveSwapCurrent = rawUrl => {
+  const current = pongCanonicalTikTokVideoPage(rawUrl) || pongTikTokLiveState.current;
+  if (!current) {
+    showSortingIndicator('Open a TikTok video first');
+    return false;
+  }
+  const ordered = [];
+  const append = value => {
+    const canonical = pongCanonicalTikTokVideoPage(value);
+    if (canonical && !ordered.includes(canonical)) ordered.push(canonical);
+  };
+  append(current);
+  pongTikTokLiveState.urls.forEach(append);
+  const playbackUrls = ordered.map(pongTikTokLivePlaybackUrl).filter(Boolean);
+  if (!playbackUrls.length) {
+    showSortingIndicator('Pong cache is unavailable');
+    return false;
+  }
+  parsedVideoUrlsCache = playbackUrls;
+  parsedVideoMetadataCache = playbackUrls.map((videoUrl, index) => ({
+    source: 'tiktok-live',
+    artistName: 'TikTok Live',
+    artistDisplayName: 'TikTok Live',
+    artistKey: 'tiktok-live',
+    artistUrl: ordered[index],
+    postUrl: ordered[index],
+    videoUrl,
+    originalVideoUrl: ordered[index],
+    canonicalMediaUrl: ordered[index],
+    simpCityMediaKind: 'tiktok'
+  }));
+  pendingPastes = [{
+    startIndex: 0,
+    count: playbackUrls.length,
+    source: 'tiktok-live',
+    artistKey: 'tiktok-live',
+    bundleKey: `tiktok-live:${Date.now()}`,
+    artistDisplayName: 'TikTok Live',
+    bundleLabel: 'TikTok Live',
+    preserveGroupOrder: true,
+    ready: true,
+    pending: false,
+    loadAll: true
+  }];
+  _prevUrlCount = playbackUrls.length;
+  parseCacheDirty = false;
+  syncPendingPasteCacheState();
+  if (videoUrlsInput) videoUrlsInput.value = `TikTok Live: ${playbackUrls.length} prepared videos`;
+  window.PongLoadAllVideosOnce = true;
+  window.PongPreserveActiveImporterForNextLoad = true;
+  loadVideosButton.click();
+  showSortingIndicator(`TikTok ready: ${playbackUrls.length} full videos`);
+  return true;
+};
+
+function openPongTikTokLiveMode() {
+  const isNativePong = new URLSearchParams(location.search).get('pongNative') === '1';
+  if (isNativePong) {
+    location.href = 'pong-native://tiktok/open';
+    return;
+  }
+  window.open('https://www.tiktok.com/foryou', '_blank', 'noopener,noreferrer');
+}
+
+if (tiktokLiveButton) tiktokLiveButton.addEventListener('click', openPongTikTokLiveMode);
 
 function parseVideoUrls(text) {
   return parsePastedVideoLines(text).urls;
@@ -9936,6 +10066,7 @@ function shuffleLoadedVideosForPlayback(urls, metadata, events) {
   });
 
   groups.forEach(group => {
+    if (group.event?.preserveGroupOrder === true) return;
     if (group.event?.source === 'random40') {
       const local22Ranked = group.indexes.some(
         index => sourceMetadata[index]?.local2PlaybackProfile === 'local22'
