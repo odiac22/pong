@@ -1249,7 +1249,7 @@
 
   <div id="pong-instance-label" class="pong-instance-label">Pong 1</div>
   <script>document.getElementById('pong-instance-label').textContent = `Pong ${window.PongInstanceNumber || '1'}`;</script>
-    <div class="version-number">27.86</div>
+    <div class="version-number">27.87</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
   <button id="pong-collection-save-button" type="button" aria-expanded="false">Save</button>
@@ -6397,7 +6397,7 @@ function pongFaceSwapRuntimeControlSpec(name, value) {
 
 function pongFaceSwapSettingGroup(name) {
   if (/Diff|Occlud|Parser|Border|Blend|Scale|KPS|Orient/i.test(name)) return 'Mask, edges & occlusion';
-  if (/Detect|Threshold|Similar|Likeness|Merge|Swapper|Strength|Emb/i.test(name)) return 'Identity & detection';
+  if (/Detect|Threshold|Similar|Likeness|FaceLock|FaceMatch|Merge|Swapper|Strength|Emb/i.test(name)) return 'Identity & detection';
   if (/Color|Restorer|Detail|Fidelity|Enhancer/i.test(name)) return 'Color & detail';
   return 'Other processing';
 }
@@ -7384,7 +7384,8 @@ const PONG_FACE_SWAP_SELECTIVE_DEFAULT_PARAMETERS = new Set([
   'LikenessSlider',
   'EmbExtrapSlider',
   'ThresholdSlider',
-  'DetectScoreSlider'
+  'DetectScoreSlider',
+  'FaceLockSlider'
 ]);
 
 function selectivePongFaceSwapDefaultConfig(baseline, defaults, schema = []) {
