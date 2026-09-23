@@ -56,6 +56,7 @@ public class MainActivity extends Activity {
   private FrameLayout tiktokPongControlsLayer;
   private final Map<String, TextView> tiktokPongControlViews = new HashMap<>();
   private String currentTikTokUrl = "";
+  private String lastTrustedTikTokPageUrl = TIKTOK_HOME_URL;
   private final List<String> nearbyTikTokUrls = new ArrayList<>();
   private final Map<String, String> integratedSwapStreams = new ConcurrentHashMap<>();
   private boolean tiktokVisible = false;
@@ -289,6 +290,62 @@ public class MainActivity extends Activity {
     }
   }
 
+  private static boolean hostMatches(String host, String domain) {
+    if (host == null || domain == null) return false;
+    String normalizedHost = host.toLowerCase(Locale.ROOT);
+    String normalizedDomain = domain.toLowerCase(Locale.ROOT);
+    return normalizedHost.equals(normalizedDomain) || normalizedHost.endsWith("." + normalizedDomain);
+  }
+
+  private static boolean isTikTokMainFrame(Uri uri) {
+    if (uri == null) return false;
+    String scheme = uri.getScheme();
+    if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) return false;
+    return hostMatches(uri.getHost(), "tiktok.com");
+  }
+
+  private static boolean isTikTokLoginProvider(Uri uri) {
+    if (uri == null || !"https".equalsIgnoreCase(uri.getScheme())) return false;
+    String host = uri.getHost();
+    return hostMatches(host, "accounts.google.com") ||
+      hostMatches(host, "appleid.apple.com") ||
+      hostMatches(host, "facebook.com");
+  }
+
+  private static boolean isTikTokStoreOrAppEscape(Uri uri) {
+    if (uri == null) return true;
+    String scheme = String.valueOf(uri.getScheme()).toLowerCase(Locale.ROOT);
+    String host = String.valueOf(uri.getHost()).toLowerCase(Locale.ROOT);
+    String raw = uri.toString().toLowerCase(Locale.ROOT);
+    if (!("http".equals(scheme) || "https".equals(scheme))) return true;
+    return hostMatches(host, "play.google.com") ||
+      hostMatches(host, "apps.apple.com") ||
+      hostMatches(host, "app.adjust.com") ||
+      hostMatches(host, "onelink.me") ||
+      raw.contains("/store/apps/") ||
+      raw.contains("tiktok.com/download");
+  }
+
+  private void recoverTikTokMainFrame(WebView view) {
+    if (view == null) return;
+    String recovery = isTikTokMainFrame(Uri.parse(lastTrustedTikTokPageUrl))
+      ? lastTrustedTikTokPageUrl
+      : TIKTOK_HOME_URL;
+    view.post(() -> {
+      if (view != tiktokWeb) return;
+      view.stopLoading();
+      view.loadUrl(recovery);
+    });
+  }
+
+  private static String browserLikeTikTokUserAgent(WebSettings settings) {
+    String userAgent = settings == null ? "" : String.valueOf(settings.getUserAgentString());
+    if (userAgent.isEmpty()) return userAgent;
+    return userAgent
+      .replace("; wv)", ")")
+      .replace(" Version/4.0", "");
+  }
+
   private void updateTikTokStatus(String message) {
     // TikTok has no separate native control/status panel. Its own website UI
     // and Pong's existing controls are the only visible interfaces.
@@ -428,6 +485,10 @@ public class MainActivity extends Activity {
 
   private String tiktokObserverScript() {
     return "javascript:(()=>{try{" +
+      "const blocked=u=>{try{const x=new URL(u,location.href),h=x.hostname.toLowerCase(),s=x.protocol.toLowerCase();return !/^https?:$/.test(s)||h==='play.google.com'||h.endsWith('.play.google.com')||h==='apps.apple.com'||h.endsWith('.apps.apple.com')||h.endsWith('.onelink.me')||h.endsWith('.adjust.com')||x.pathname.includes('/store/apps/')||x.href.toLowerCase().includes('tiktok.com/download')}catch(e){return true}};" +
+      "const scrubAppPrompts=()=>{try{document.querySelectorAll('a[href],button,[role=button]').forEach(e=>{const href=e.getAttribute('href')||'',text=(e.innerText||e.textContent||'').trim();if(blocked(href)||/^(open app|open tiktok lite|install tiktok|get tiktok|download tiktok)$/i.test(text)){e.style.setProperty('display','none','important');e.setAttribute('aria-hidden','true')}});let dismissed=false;document.querySelectorAll('button,[role=button]').forEach(e=>{if(dismissed)return;const label=(e.innerText||e.getAttribute('aria-label')||e.title||'').trim();if(!/^(not now|cancel|close|continue (in|on) (browser|web))$/i.test(label))return;let p=e;for(let i=0;p&&i<8;i++,p=p.parentElement){if(/(tiktok lite|download the app|open (the )?app)/i.test(p.innerText||'')){dismissed=true;e.click();break}}});document.querySelectorAll('[role=dialog],[class*=ModalContainer],#login-modal').forEach(d=>{const text=(d.innerText||'').trim(),r=d.getBoundingClientRect();if(r.width<1||r.height<1||!/(tiktok lite|download the app|open (the )?app)/i.test(text))return;const dismiss=Array.from(d.querySelectorAll('button,[role=button]')).find(e=>/^(not now|cancel|close|continue (in|on) (browser|web))$/i.test((e.innerText||e.getAttribute('aria-label')||e.title||'').trim()));if(dismiss){dismiss.click()}else{d.style.setProperty('display','none','important');document.documentElement.style.overflow='';document.body.style.overflow=''}})}catch(e){}};" +
+      "if(!window.__pongTikTokNavigationGuard){window.__pongTikTokNavigationGuard=true;addEventListener('click',e=>{const a=e.target?.closest?.('a[href],button,[role=button]');if(!a)return;const href=a.getAttribute('href')||'',text=(a.innerText||a.textContent||'').trim();if(blocked(href)||/^(open app|open tiktok lite|install tiktok|get tiktok|download tiktok)$/i.test(text)){e.preventDefault();e.stopImmediatePropagation();scrubAppPrompts()}},true);new MutationObserver(scrubAppPrompts).observe(document.documentElement,{subtree:true,childList:true})}" +
+      "scrubAppPrompts();" +
       "if(window.__pongTikTokObserverInstalled){window.__pongTikTokScan&&window.__pongTikTokScan();return;}" +
       "window.__pongTikTokObserverInstalled=true;let last='';" +
       "const canonical=u=>{try{const x=new URL(u,location.href);return /(^|\\.)tiktok\\.com$/i.test(x.hostname)&&/^\\/@[^/]+\\/video\\/\\d+\\/?$/i.test(x.pathname)?x.origin+x.pathname:''}catch(e){return''}};" +
@@ -468,6 +529,8 @@ public class MainActivity extends Activity {
     settings.setUseWideViewPort(true);
     settings.setCacheMode(WebSettings.LOAD_DEFAULT);
     settings.setSupportMultipleWindows(false);
+    String browserUserAgent = browserLikeTikTokUserAgent(settings);
+    if (!browserUserAgent.isEmpty()) settings.setUserAgentString(browserUserAgent);
     CookieManager.getInstance().setAcceptCookie(true);
     CookieManager.getInstance().setAcceptThirdPartyCookies(tiktokWeb, true);
     tiktokWeb.addJavascriptInterface(new TikTokFeedBridge(), "PongTikTokFeed");
@@ -513,15 +576,35 @@ public class MainActivity extends Activity {
         return super.shouldInterceptRequest(view, request);
       }
       @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-        String scheme = request.getUrl().getScheme();
-        // TikTok periodically tries to wake its native app. Keep this workflow
-        // inside the logged-in website instead of replacing it with an Android
-        // unknown-scheme error page.
-        return !("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
+        Uri destination = request.getUrl();
+        if (!request.isForMainFrame()) {
+          String scheme = destination == null ? "" : String.valueOf(destination.getScheme());
+          return !("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
+        }
+        // The integrated player must never be replaced by Play Store, a native
+        // app deep link, an ad redirect, or an unrelated external page. Login
+        // providers remain available and TikTok's own page retains its cookies.
+        if (isTikTokStoreOrAppEscape(destination)) return true;
+        return !(isTikTokMainFrame(destination) || isTikTokLoginProvider(destination));
+      }
+      @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+        Uri destination;
+        try { destination = Uri.parse(url == null ? "" : url); }
+        catch (Exception ignored) { destination = null; }
+        if (isTikTokMainFrame(destination)) {
+          lastTrustedTikTokPageUrl = url;
+          return;
+        }
+        if (isTikTokStoreOrAppEscape(destination)) recoverTikTokMainFrame(view);
       }
       @Override public void onPageFinished(WebView view, String url) {
-        if (url != null && url.toLowerCase(Locale.ROOT).contains("tiktok.com")) {
+        Uri destination;
+        try { destination = Uri.parse(url == null ? "" : url); }
+        catch (Exception ignored) { destination = null; }
+        if (isTikTokMainFrame(destination)) {
+          lastTrustedTikTokPageUrl = url;
           view.evaluateJavascript(tiktokObserverScript(), null);
+          CookieManager.getInstance().flush();
           updateTikTokStatus(currentTikTokUrl.isEmpty()
             ? "TikTok ready"
             : "Ready · " + Math.max(1, nearbyTikTokUrls.size()) + " queued");
@@ -963,6 +1046,7 @@ public class MainActivity extends Activity {
         "try{document.querySelectorAll('video,audio').forEach(v=>{v.pause();v.muted=true;v.volume=0})}catch(e){}",
         null
       );
+      CookieManager.getInstance().flush();
     }
     super.onPause();
   }

@@ -13,8 +13,8 @@ android {
     defaultConfig {
         minSdk 24
         targetSdk 35
-        versionCode 2800
-        versionName '28.00'
+        versionCode 2801
+        versionName '28.01'
         buildConfigField 'String', 'OBSERVER_PAIR', "\"${escapedObserverPair}\""
         buildConfigField 'String', 'PONG_GATEWAY_URL', "\"${escapedGatewayUrl}\""
         buildConfigField 'String', 'PONG_GATEWAY_TOKEN', "\"${escapedGatewayToken}\""
