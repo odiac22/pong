@@ -303,6 +303,14 @@
       background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.13);
     }
     #pong-face-swap-status { padding: 0 13px 9px; color: rgba(255,255,255,0.58); font-size: 10px; }
+    .pong-face-swap-picker-actions { display: flex; align-items: center; gap: 7px; padding: 0 10px 9px; }
+    .pong-face-swap-picker-actions button {
+      min-height: 30px; flex: 1; padding: 5px 9px; border-radius: 9px; color: #f5f3ff;
+      border: 1px solid rgba(216,180,254,.34); background: rgba(126,34,206,.34);
+      font-size: 10px; font-weight: 850;
+    }
+    #pong-face-swap-apply { background: rgba(21,128,61,.58); border-color: rgba(74,222,128,.58); }
+    #pong-face-swap-apply:disabled { opacity: .4; }
     #pong-face-swap-list { overflow-y: auto; padding: 0 10px 12px; display: grid; gap: 7px; }
     .pong-face-choice {
       position: relative; overflow: hidden;
@@ -1196,6 +1204,10 @@
         <button id="pong-face-swap-close" type="button" aria-label="Close">×</button>
       </header>
       <div id="pong-face-swap-status">Loading approved faces…</div>
+      <div class="pong-face-swap-picker-actions">
+        <button id="pong-face-swap-clear-selection" type="button">Clear</button>
+        <button id="pong-face-swap-apply" type="button">Use selected</button>
+      </div>
       <div id="pong-face-swap-list"></div>
     </section>
   </div>
@@ -1237,7 +1249,7 @@
 
   <div id="pong-instance-label" class="pong-instance-label">Pong 1</div>
   <script>document.getElementById('pong-instance-label').textContent = `Pong ${window.PongInstanceNumber || '1'}`;</script>
-    <div class="version-number">27.72</div>
+    <div class="version-number">27.86</div>
   <div id="video-container"></div>
   <button id="pong-server-toggle" type="button" data-state="unknown" title="Checking Pong server">...</button>
   <button id="pong-collection-save-button" type="button" aria-expanded="false">Save</button>
@@ -4128,6 +4140,8 @@ const pongFaceSwapState = {
   activationSequence: 0,
   faces: [],
   selectedFaceId: '',
+  selectedFaceIds: [],
+  pickerFaceIds: [],
   enabled: false,
   loading: false,
   priming: false,
@@ -4171,6 +4185,42 @@ const pongFaceSwapState = {
   // out of the navigation-critical path; /activate retires the prior producer.
   outgoingWrappers: new Set()
 };
+
+function normalizePongFaceSwapFaceIds(values, maximum = 5) {
+  const result = [];
+  const seen = new Set();
+  (Array.isArray(values) ? values : [values]).forEach(value => {
+    String(value || '').split(',').forEach(part => {
+      const faceId = part.trim();
+      if (!faceId || seen.has(faceId) || result.length >= maximum) return;
+      seen.add(faceId);
+      result.push(faceId);
+    });
+  });
+  return result;
+}
+
+function pongFaceSwapFaceIds(selection = pongFaceSwapState.selectedFaceIds) {
+  const normalized = normalizePongFaceSwapFaceIds(
+    selection?.length ? selection : pongFaceSwapState.selectedFaceId
+  );
+  return normalized;
+}
+
+function pongFaceSwapSelectionKey(faceIds = pongFaceSwapFaceIds()) {
+  return normalizePongFaceSwapFaceIds(faceIds).join(',');
+}
+
+function pongFaceSwapPrimaryFaceId(selection = pongFaceSwapState.selectedFaceId) {
+  return normalizePongFaceSwapFaceIds(selection)[0] || '';
+}
+
+function setPongFaceSwapSelection(faceIds) {
+  const normalized = normalizePongFaceSwapFaceIds(faceIds);
+  pongFaceSwapState.selectedFaceIds = normalized;
+  pongFaceSwapState.selectedFaceId = pongFaceSwapSelectionKey(normalized);
+  return pongFaceSwapState.selectedFaceId;
+}
 
 // Privacy-safe, bounded lifecycle telemetry for remote QA.  This ring never
 // stores media URLs, artist names, selected-face identifiers, image hashes, or
@@ -4292,19 +4342,15 @@ async function pongFaceSwapBackgroundFetch(pathname, options = {}) {
   return fetch(base ? `${base}${path}` : path, options);
 }
 
-// Keep a reliable two-card rolling lead. Session registration is cheap, but
-// each waiting producer retains lifecycle state and can amplify allocator
-// pressure around GPEN512. The selected card always has priority; very rapid
-// swiping may expand the lead by one, never into a six-to-eight-session burst.
-const PONG_FACE_SWAP_PREFETCH_COUNT = 2;
-const PONG_FACE_SWAP_PREFETCH_MAX_COUNT = 3;
-// Android WebView can prepare several server-side sessions cheaply, but every
-// attached <video> consumes a media reader/decoder and (on the LAN HTTP/1.1
-// path) one of a very small number of per-origin sockets.  Keep only the next
-// card and exact next Paperclip destination attached; the remaining sessions
-// stay prepared on the PC without competing with visible playback.
-const PONG_FACE_SWAP_ATTACHMENT_COUNT = 2;
-const PONG_FACE_SWAP_PAPERCLIP_PREFETCH_COUNT = 1;
+// Keep exactly one server-side look-ahead. Multiple speculative producers and
+// held Android readers measured slower than a single prepared next card: they
+// competed for the model lock, media decoders, and WebView's per-origin HTTP
+// sockets. The next card stays on the PC until promotion, so no hidden video
+// element can retain a stale stream subscription.
+const PONG_FACE_SWAP_PREFETCH_COUNT = 1;
+const PONG_FACE_SWAP_PREFETCH_MAX_COUNT = 1;
+const PONG_FACE_SWAP_ATTACHMENT_COUNT = 0;
+const PONG_FACE_SWAP_PAPERCLIP_PREFETCH_COUNT = 0;
 // Prepare one closed one-second GOP for each future card.  Chromium/WebView
 // leaves shorter held fMP4 streams at HAVE_NOTHING even when their moof/mdat is
 // complete; the measured reliable decode boundary is 24 frames / one second.
@@ -4424,7 +4470,7 @@ function pongFaceSwapSchedulerProfile() {
   if (samples >= 2 && dwellMs < 1800) {
     profile = { name: 'fast', count: PONG_FACE_SWAP_PREFETCH_MAX_COUNT, nearSeconds: 1.50, farSeconds: 1.25 };
   } else if (samples >= 2 && dwellMs > 6000) {
-    profile = { name: 'dwell', count: 2, nearSeconds: 2.50, farSeconds: 1.50 };
+    profile = { name: 'dwell', count: PONG_FACE_SWAP_PREFETCH_COUNT, nearSeconds: 2.50, farSeconds: 1.50 };
   } else {
     profile = { name: 'normal', count: PONG_FACE_SWAP_PREFETCH_COUNT, nearSeconds: 2.00, farSeconds: 1.25 };
   }
@@ -4480,6 +4526,7 @@ function releasePongFaceSwapBusyGeneration(wrapper, generation) {
   if (!wrapper?.dataset || wrapper.dataset.pongFaceSwapGeneration !== String(generation || '')) return false;
   delete wrapper.dataset.pongFaceSwapBusy;
   delete wrapper.dataset.pongFaceSwapAutoPending;
+  delete wrapper.dataset.pongFaceSwapRequestedFaceId;
   if (wrapper.dataset.pongFaceSwapActive !== 'true') {
     setPongFaceSwapPhase(wrapper, PONG_FACE_SWAP_PHASES.ORIGINAL, { force: true });
   }
@@ -4493,10 +4540,32 @@ function rememberPendingPongFaceSwapActivation(
   faceId = pongFaceSwapState.selectedFaceId
 ) {
   if (!wrapper || !faceId) return false;
+  const normalizedFaceId = String(faceId);
+  const sourceKey = String(
+    (typeof pongCanonicalMediaUrlForWrapper === 'function'
+      ? pongCanonicalMediaUrlForWrapper(wrapper)
+      : wrapper.dataset.originalVideoUrl) || ''
+  );
+  const existing = pongFaceSwapState.pendingActivationIntent;
+  // Intersection/deck/readiness observers can all report the same visible card
+  // while its one foreground activation is still opening. Re-queuing that exact
+  // intent used to create an endless create/cancel loop which aborted both the
+  // original Recall reader and the swap reader before either could decode.
+  if (
+    pongFaceSwapCurrentWrapper() === wrapper &&
+    (wrapper.dataset.pongFaceSwapBusy === 'true' || wrapper.dataset.pongFaceSwapAutoPending === 'true') &&
+    String(wrapper.dataset.pongFaceSwapRequestedFaceId || normalizedFaceId) === normalizedFaceId
+  ) return false;
+  if (
+    existing?.wrapper === wrapper &&
+    existing.faceId === normalizedFaceId &&
+    existing.sourceKey === sourceKey
+  ) return false;
   pongFaceSwapState.recoverySequence = Number(pongFaceSwapState.recoverySequence || 0) + 1;
   pongFaceSwapState.pendingActivationIntent = {
     wrapper,
-    faceId: String(faceId),
+    faceId: normalizedFaceId,
+    sourceKey,
     requestedAt: Date.now()
   };
   return true;
@@ -4509,7 +4578,15 @@ function replayPendingPongFaceSwapActivation() {
     !pongFaceSwapState.enabled ||
     pongFaceSwapState.selectedFaceId !== intent.faceId ||
     !intent.wrapper?.isConnected ||
-    pongFaceSwapCurrentWrapper() !== intent.wrapper
+    pongFaceSwapCurrentWrapper() !== intent.wrapper ||
+    (
+      intent.sourceKey &&
+      intent.sourceKey !== String(
+        (typeof pongCanonicalMediaUrlForWrapper === 'function'
+          ? pongCanonicalMediaUrlForWrapper(intent.wrapper)
+          : intent.wrapper.dataset.originalVideoUrl) || ''
+      )
+    )
   ) {
     pongFaceSwapState.pendingActivationIntent = null;
     return false;
@@ -4519,6 +4596,13 @@ function replayPendingPongFaceSwapActivation() {
     intent.wrapper.dataset.pongFaceSwapBusy === 'true' ||
     intent.wrapper.dataset.pongFaceSwapAutoPending === 'true'
   ) return false;
+  if (
+    intent.wrapper.dataset.pongFaceSwapActive === 'true' &&
+    intent.wrapper.dataset.pongFaceSwapFaceId === intent.faceId
+  ) {
+    pongFaceSwapState.pendingActivationIntent = null;
+    return false;
+  }
   pongFaceSwapState.pendingActivationIntent = null;
   queueMicrotask(() => {
     if (
@@ -4567,12 +4651,15 @@ async function waitForPongFaceSwapServerLead(
       if (!pongFaceSwapOwnsActivation(wrapper, generation, faceId, activationSequence)) return false;
       if (performance.now() >= deadline) throw new Error('Face swap safety buffer timed out');
       if (error?.name !== 'AbortError') throw error;
-      await new Promise(resolve => setTimeout(resolve, 40));
+      await new Promise(resolve => setTimeout(resolve, 150));
       continue;
     } finally {
       clearTimeout(requestTimer);
     }
     if (!pongFaceSwapOwnsActivation(wrapper, generation, faceId, activationSequence)) return false;
+    if (response.status === 404 || response.status === 410) {
+      throw new Error('Face swap session expired');
+    }
     if (!response.ok || payload?.session?.error) {
       throw new Error(payload?.session?.error || payload?.detail || `HTTP ${response.status}`);
     }
@@ -4588,7 +4675,7 @@ async function waitForPongFaceSwapServerLead(
       'Buffering swapped video',
       'Original keeps playing'
     );
-    await new Promise(resolve => setTimeout(resolve, 40));
+    await new Promise(resolve => setTimeout(resolve, 150));
   }
   throw new Error('Face swap safety buffer timed out');
 }
@@ -4974,7 +5061,8 @@ async function createPongFaceSwapPrefetchForSource(
       body: JSON.stringify({
         channel: pongFaceSwapChannel(),
         sourceUrl: source,
-        faceId,
+        faceId: pongFaceSwapPrimaryFaceId(faceId),
+        faceIds: normalizePongFaceSwapFaceIds(faceId),
         startSeconds: normalizedStartSeconds,
         prefetch: true,
         prebufferSeconds: normalizedPrebufferSeconds,
@@ -5155,6 +5243,7 @@ function attachExistingPongFaceSwapPrefetch(wrapper) {
 }
 
 function getPongFaceSwapNextPaperclipSources(limit = PONG_FACE_SWAP_PAPERCLIP_PREFETCH_COUNT) {
+  if (Number(limit || 0) <= 0) return [];
   if (!Array.isArray(pasteEvents) || pasteEvents.length < 2 || !Array.isArray(allVideoUrls)) return [];
   const excludedIdentity = getCurrentPaperclipArtistIdentity();
   const eventIndex = resolveNextPaperclipEventIndex(excludedIdentity);
@@ -5233,28 +5322,14 @@ function schedulePongFaceSwapPrefetch(delay = 280) {
         if (pongFaceSwapState.prefetches.has(activeKey)) desiredKeys.add(activeKey);
       }
     }
-    const paperclipSources = getPongFaceSwapNextPaperclipSources();
-    // Submit the bounded look-ahead promptly. The service owns strict
-    // foreground/speculative admission, so one slow source must not serialize
-    // every later session POST behind its complete lead.
-    const orderedJobs = [
-      ...candidates.slice(0, 2).map((wrapper, rank) => ({
-        wrapper,
-        prebufferSeconds: rank < 2 ? schedulerProfile.nearSeconds : schedulerProfile.farSeconds
-      })),
-      ...paperclipSources.map(paperclip => ({
-        paperclip,
-        prebufferSeconds: schedulerProfile.nearSeconds
-      })),
-      ...candidates.slice(2).map(wrapper => ({
-        wrapper,
-        prebufferSeconds: schedulerProfile.farSeconds
-      }))
-    ];
+    // Prepare only the next card. A hidden Paperclip reader used to reserve a
+    // second Android decoder/socket and frequently delayed the visible card by
+    // 10+ seconds even though the GPU had already produced playable media.
+    const orderedJobs = candidates.slice(0, 1).map(wrapper => ({
+      wrapper,
+      prebufferSeconds: schedulerProfile.nearSeconds
+    }));
     const desiredAttachmentKeys = new Set();
-    const immediateWrapper = candidates[0] || null;
-    const fallbackSecondWrapper = paperclipSources.length ? null : (candidates[1] || null);
-    const immediatePaperclip = paperclipSources[0] || null;
     for (const job of orderedJobs) {
       if (generation !== pongFaceSwapState.prefetchGeneration || !pongFaceSwapState.enabled) return;
       let entry = null;
@@ -5264,32 +5339,13 @@ function schedulePongFaceSwapPrefetch(delay = 280) {
         if (!playable?.source) continue;
         const key = pongFaceSwapSourceKey(pongFaceSwapState.selectedFaceId, playable.source, 0);
         desiredKeys.add(key);
-        const attachRequested = job.wrapper === immediateWrapper || job.wrapper === fallbackSecondWrapper;
-        if (attachRequested) desiredAttachmentKeys.add(key);
+        const attachRequested = false;
         entry = await createPongFaceSwapPrefetch(
           job.wrapper,
           pongFaceSwapState.selectedFaceId,
           generation,
           {
             attachRequested,
-            prebufferSeconds: job.prebufferSeconds,
-            navigationClass: 'prefetch'
-          }
-        );
-      } else if (job.paperclip?.source) {
-        const key = pongFaceSwapSourceKey(pongFaceSwapState.selectedFaceId, job.paperclip.source, 0);
-        desiredKeys.add(key);
-        const attachRequested = job.paperclip === immediatePaperclip;
-        if (attachRequested) desiredAttachmentKeys.add(key);
-        entry = await createPongFaceSwapPrefetchForSource(
-          job.paperclip.source,
-          pongFaceSwapState.selectedFaceId,
-          generation,
-          -1,
-          null,
-          {
-            attachRequested,
-            allowHidden: attachRequested,
             prebufferSeconds: job.prebufferSeconds,
             navigationClass: 'prefetch'
           }
@@ -5425,6 +5481,11 @@ function createPongFaceSwapTransitionOverlay(wrapper, video, source, startSecond
     if (wrapper.__pongFaceSwapTransitionOverlay !== overlay) return;
     clone.style.opacity = '1';
     snapshot.style.visibility = 'hidden';
+    overlay.dataset.pongVisibleFrame = 'true';
+    // The user now has a real moving source frame to watch while the swap is
+    // prepared. Auto Skip must not discard this card merely because the hidden
+    // replacement stream has not presented its first transformed frame yet.
+    clearPongAutoSkipVideoTimer(wrapper);
     // Mirror the user's visible playback intent. A paused card must not appear
     // to autoplay merely because its swap transition reader became ready.
     if (options.shouldPlay === true) void clone.play().catch(() => {});
@@ -5450,7 +5511,7 @@ function createPongFaceSwapTransitionOverlay(wrapper, video, source, startSecond
 
 function resetPongFaceSwapForFreshLoad({ preserveSelection = false } = {}) {
   if (!preserveSelection) {
-    pongFaceSwapState.selectedFaceId = '';
+    setPongFaceSwapSelection([]);
     setPongFaceSwapPersistentEnabled(false);
   } else {
     // Saved-list navigation is still part of the current viewing session. Fence
@@ -5924,7 +5985,9 @@ function maybeApplyPersistentPongFaceSwap(wrapper = pongFaceSwapCurrentWrapper()
     wrapper.dataset.pongFaceSwapBusy === 'true' ||
     wrapper.dataset.pongFaceSwapAutoPending === 'true'
   ) {
-    rememberPendingPongFaceSwapActivation(wrapper);
+    // This is the same visible-card notification, not a new user intent. The
+    // in-flight foreground job already owns it, so do not schedule a replay.
+    // Explicit face changes still enter through prime/start and are queued there.
     return false;
   }
   if (
@@ -6105,12 +6168,12 @@ function attachPongFacePermanentDeleteHold(button, face, onDeleted) {
 
 async function deletePongFaceSwapFace(face) {
   if (!face?.id) return false;
-  const wasSelected = pongFaceSwapState.selectedFaceId === face.id;
+  const wasSelected = pongFaceSwapFaceIds().includes(face.id);
   if (wasSelected) {
-    pongFaceSwapState.selectedFaceId = '';
+    setPongFaceSwapSelection([]);
     setPongFaceSwapPersistentEnabled(false);
     await Promise.all([...document.querySelectorAll('.video-wrapper')].map(wrapper => (
-      wrapper.dataset.pongFaceSwapFaceId === face.id
+      normalizePongFaceSwapFaceIds(wrapper.dataset.pongFaceSwapFaceId).includes(face.id)
         ? stopPongFaceSwapForWrapper(wrapper, { restore: true })
         : Promise.resolve(false)
     )));
@@ -6125,6 +6188,9 @@ async function deletePongFaceSwapFace(face) {
     throw new Error(payload?.detail || `HTTP ${response.status}`);
   }
   pongFaceSwapState.faces = pongFaceSwapState.faces.filter(candidate => candidate.id !== face.id);
+  pongFaceSwapState.pickerFaceIds = normalizePongFaceSwapFaceIds(
+    pongFaceSwapState.pickerFaceIds
+  ).filter(faceId => faceId !== face.id);
   cachePongFaceSwapFaces(pongFaceSwapState.faces);
   showSortingIndicator(`${face.name} permanently deleted`);
   return true;
@@ -6159,10 +6225,21 @@ function renderPongFaceSwapMenu(menu) {
     void openPongFaceSwapSettingsPanel();
   });
   menu.appendChild(controls);
+  const multiple = document.createElement('button');
+  multiple.type = 'button';
+  multiple.className = `pong-face-swap-menu-choice${pongFaceSwapFaceIds().length > 1 ? ' selected' : ''}`;
+  multiple.innerHTML = '<span style="font-size:17px">◎</span><span>Multiple faces…</span>';
+  multiple.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    closePongFaceSwapMenu(menu);
+    void openPongFaceSwapPicker();
+  });
+  menu.appendChild(multiple);
   pongFaceSwapState.faces.forEach(face => {
     const choice = document.createElement('button');
     choice.type = 'button';
-    choice.className = `pong-face-swap-menu-choice${pongFaceSwapState.enabled && face.id === pongFaceSwapState.selectedFaceId ? ' selected' : ''}`;
+    choice.className = `pong-face-swap-menu-choice${pongFaceSwapState.enabled && pongFaceSwapFaceIds().includes(face.id) ? ' selected' : ''}`;
     const image = document.createElement('img');
     image.loading = 'lazy';
     image.decoding = 'async';
@@ -6180,7 +6257,7 @@ function renderPongFaceSwapMenu(menu) {
       if (consumePongFaceDeleteSuppression(choice, event)) return;
       event.preventDefault();
       event.stopPropagation();
-      pongFaceSwapState.selectedFaceId = face.id;
+      setPongFaceSwapSelection([face.id]);
       setPongFaceSwapPersistentEnabled(true);
       void primePongFaceSwap(face.id);
       // The critical session request has its own control-plane port. Dispatch
@@ -6431,7 +6508,7 @@ function renderPongFaceSwapSettingsFaces() {
   const host = document.getElementById('pong-face-swap-settings-faces');
   if (!host) return;
   host.replaceChildren();
-  const selectedId = String(
+  const selectedId = pongFaceSwapPrimaryFaceId(
     pongFaceSwapState.settingsEditor?.frame?.faceId ||
     pongFaceSwapState.selectedFaceId || ''
   );
@@ -6454,7 +6531,8 @@ function renderPongFaceSwapSettingsFaces() {
         return;
       }
       editor.frame.faceId = face.id;
-      pongFaceSwapState.selectedFaceId = face.id;
+      editor.frame.selectionKey = face.id;
+      setPongFaceSwapSelection([face.id]);
       pongFaceSwapState.enabled = true;
       pongFaceSwapState.settingsDirty = true;
       updatePongFaceSwapButton();
@@ -6467,7 +6545,7 @@ function renderPongFaceSwapSettingsFaces() {
 }
 
 function pongFaceSwapSettingsSelectedFace() {
-  const faceId = String(
+  const faceId = pongFaceSwapPrimaryFaceId(
     pongFaceSwapState.settingsEditor?.frame?.faceId ||
     pongFaceSwapState.selectedFaceId || ''
   );
@@ -6816,7 +6894,7 @@ async function beginPongFaceSwapFrameEditor() {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
     body: JSON.stringify({
       sourceUrl: playable?.source || '',
-      faceId: frame.faceId,
+      faceId: pongFaceSwapPrimaryFaceId(frame.faceId),
       startSeconds: frame.startSeconds,
       frameDataUrl
     })
@@ -6843,7 +6921,7 @@ async function renderPongFaceSwapSettingsSnapshot(config, generation) {
   const editor = pongFaceSwapState.settingsEditor;
   const previewId = String(pongFaceSwapState.settingsPreviewId || '');
   if (!editor || !previewId) return false;
-  const requestedFaceId = String(editor.frame.faceId || '');
+  const requestedFaceId = pongFaceSwapPrimaryFaceId(editor.frame.faceId || '');
   const requestedFace = pongFaceSwapState.faces.find(face => face.id === requestedFaceId);
   // The fixed-frame endpoint cannot safely change a shared model graph while a
   // playback session still owns it. Apply the process-local (non-persisted)
@@ -6970,7 +7048,12 @@ function capturePongFaceSwapSettingsFrame() {
   const frame = {
     wrapper,
     video,
-    faceId: String(wrapper.dataset.pongFaceSwapFaceId || pongFaceSwapState.selectedFaceId || ''),
+    selectionKey: pongFaceSwapSelectionKey(
+      wrapper.dataset.pongFaceSwapFaceId || pongFaceSwapState.selectedFaceId || ''
+    ),
+    faceId: pongFaceSwapPrimaryFaceId(
+      wrapper.dataset.pongFaceSwapFaceId || pongFaceSwapState.selectedFaceId || ''
+    ),
     startSeconds,
     wasPlaying,
     wasActive: true
@@ -7069,8 +7152,10 @@ async function applyPongFaceSwapSettingsPreview(config, generation) {
   // open a throwaway stream; retain the same frozen frame for the latest job.
   if (generation !== pongFaceSwapState.settingsApplyGeneration) return false;
   if (frame?.faceId && pongFaceSwapState.enabled) {
-    pongFaceSwapState.selectedFaceId = frame.faceId;
-    const restarted = await startPongFaceSwap(frame.faceId, {
+    const sessionFaceId = setPongFaceSwapSelection(
+      frame.selectionKey || pongFaceSwapPrimaryFaceId(frame.faceId)
+    );
+    const restarted = await startPongFaceSwap(sessionFaceId, {
       startSeconds: frame.startSeconds,
       forcePlaying: frame.wasPlaying,
       preserveCurrentUntilActivation: !result.lifecycleRestart,
@@ -7172,7 +7257,10 @@ async function openPongFaceSwapSettingsPanel() {
   const panel = document.getElementById('pong-face-swap-settings-panel');
   if (!panel) return;
   panel.hidden = false;
-  if (!pongFaceSwapState.settings) await loadPongFaceSwapSettings();
+  // Settings are authoritative server state.  Always refresh here because a
+  // long-lived Android WebView may still hold a schema/config snapshot from a
+  // previous service revision, including legacy null values.
+  await loadPongFaceSwapSettings();
   if (!pongFaceSwapState.faces.length) {
     pongFaceSwapState.faces = loadCachedPongFaceSwapFaces();
     if (!pongFaceSwapState.faces.length) {
@@ -7755,6 +7843,7 @@ async function stopPongFaceSwapForWrapper(
   delete wrapper.dataset.pongFaceSwapClientEpoch;
   delete wrapper.dataset.pongFaceSwapActivationSequence;
   delete wrapper.dataset.pongFaceSwapFaceId;
+  delete wrapper.dataset.pongFaceSwapRequestedFaceId;
   delete wrapper.dataset.pongFaceSwapFullDuration;
   delete wrapper.dataset.pongFaceSwapPendingSeek;
   delete wrapper.dataset.pongFaceSwapPrefetched;
@@ -7832,6 +7921,7 @@ async function startPongFaceSwap(faceId, options = {}) {
   // Claim intent before the first await. A later face tap or swipe receives a
   // higher sequence, so this operation can never wake up and replace it.
   const activationIntentStartedAt = performance.now();
+  wrapper.dataset.pongFaceSwapRequestedFaceId = String(faceId);
   const activationSequence = ++pongFaceSwapState.activationSequence;
   pongFaceSwapState.recoverySequence = Number(pongFaceSwapState.recoverySequence || 0) + 1;
   recordPongRuntimeDiagnostic('swap.activation-intent', {
@@ -7923,11 +8013,7 @@ async function startPongFaceSwap(faceId, options = {}) {
     !prefetchCandidate.deleted &&
     prefetchCandidate.sessionId &&
     prefetchCandidate.streamUrl &&
-    (
-      prefetchCandidate.ready === true ||
-      prefetchCandidate.browserReady === true ||
-      Number(prefetchCandidate.frames || 0) > 0
-    )
+    prefetchCandidate.ready === true
   ) ? prefetchCandidate : null;
   if (prefetchCandidate && !prefetched) {
     const rejectedKey = prefetchCandidate.key || prefetchKey;
@@ -7949,7 +8035,10 @@ async function startPongFaceSwap(faceId, options = {}) {
   trackPongFaceSwapPresentedFrame(wrapper, video, generation);
   setPongFaceSwapPhase(wrapper, PONG_FACE_SWAP_PHASES.PREPARING, { generation, force: true });
   updatePongFaceSwapButton();
-  const faceName = pongFaceSwapState.faces.find(face => face.id === faceId)?.name || 'selected face';
+  const requestedFaceIds = normalizePongFaceSwapFaceIds(faceId);
+  const faceName = requestedFaceIds.length > 1
+    ? `${requestedFaceIds.length} compatible faces`
+    : (pongFaceSwapState.faces.find(face => face.id === requestedFaceIds[0])?.name || 'selected face');
   updatePongFaceSwapLoading(generation, 8, `Preparing ${faceName}`, 'Starting GPU face swap…');
   const startupAbort = new AbortController();
   const startupDeadline = setTimeout(() => startupAbort.abort(), 20_000);
@@ -7985,22 +8074,6 @@ async function startPongFaceSwap(faceId, options = {}) {
         const activatePayload = await activateResponse.json().catch(() => ({}));
         throw new Error(activatePayload?.detail || `HTTP ${activateResponse.status}`);
       }
-      if (prefetched.ready !== true) {
-        const leadReady = await waitForPongFaceSwapServerLead(
-          wrapper,
-          generation,
-          faceId,
-          activationSequence,
-          prefetched.sessionId
-        );
-        if (!leadReady) {
-          invalidatePongFaceSwapPrefetchEntry(prefetched);
-          releasePongFaceSwapBusyGeneration(wrapper, generation);
-          clearTimeout(startupDeadline);
-          return false;
-        }
-        prefetched.ready = true;
-      }
       prefetched.adopted = true;
       const adoptedPrefetchKey = prefetched.key || prefetchKey;
       if (adoptedPrefetchKey && pongFaceSwapState.prefetches.get(adoptedPrefetchKey) === prefetched) {
@@ -8021,7 +8094,8 @@ async function startPongFaceSwap(faceId, options = {}) {
         body: JSON.stringify({
           channel: pongFaceSwapChannel(),
           sourceUrl: playable.source,
-          faceId,
+          faceId: pongFaceSwapPrimaryFaceId(faceId),
+          faceIds: normalizePongFaceSwapFaceIds(faceId),
           startSeconds: playable.startSeconds,
           prebufferSeconds: PONG_FACE_SWAP_FOREGROUND_PREBUFFER_SECONDS,
           navigationClass: 'foreground',
@@ -8045,21 +8119,9 @@ async function startPongFaceSwap(faceId, options = {}) {
       if (!response.ok || !payload?.session?.id || !payload?.streamUrl) {
         throw new Error(payload?.detail || payload?.error || `HTTP ${response.status}`);
       }
-      if (payload?.session?.prepared !== true) {
-        const leadReady = await waitForPongFaceSwapServerLead(
-          wrapper,
-          generation,
-          faceId,
-          activationSequence,
-          payload.session.id
-        );
-        if (!leadReady) {
-          retireStalePongFaceSwapSession(payload.session.id);
-          releasePongFaceSwapBusyGeneration(wrapper, generation);
-          clearTimeout(startupDeadline);
-          return false;
-        }
-      }
+      // Attach immediately. The original/transition frame remains visible
+      // while WebView demuxes the growing fMP4, overlapping server preparation
+      // with Android decode instead of serially waiting for a full lead first.
     }
     if (!pongFaceSwapOwnsActivation(wrapper, generation, faceId, activationSequence)) {
       if (prefetched?.sessionId === payload?.session?.id) {
@@ -8166,6 +8228,7 @@ async function startPongFaceSwap(faceId, options = {}) {
           delete wrapper.dataset.pongFaceSwapGpuRetryCount;
           delete wrapper.dataset.pongFaceSwapSessionRetryCount;
           delete wrapper.dataset.pongFaceSwapBusy;
+          wrapper.dataset.pongFaceSwapRequestedFaceId = String(faceId);
           updatePongFaceSwapButton();
           replayPendingPongFaceSwapActivation();
           updatePongFaceSwapProgress(wrapper, video);
@@ -8363,7 +8426,11 @@ async function startPongFaceSwap(faceId, options = {}) {
 function renderPongFaceSwapPicker() {
   const list = document.getElementById('pong-face-swap-list');
   const status = document.getElementById('pong-face-swap-status');
-  if (!list || !status) return;
+  const apply = document.getElementById('pong-face-swap-apply');
+  const clear = document.getElementById('pong-face-swap-clear-selection');
+  if (!list || !status || !apply || !clear) return;
+  const pickerFaceIds = normalizePongFaceSwapFaceIds(pongFaceSwapState.pickerFaceIds);
+  pongFaceSwapState.pickerFaceIds = pickerFaceIds;
   list.replaceChildren();
   const off = document.createElement('button');
   off.type = 'button';
@@ -8371,6 +8438,8 @@ function renderPongFaceSwapPicker() {
   off.innerHTML = '<span style="width:42px;text-align:center;font-size:22px">×</span><span><div class="pong-face-choice-name">Original video</div><div class="pong-face-choice-meta">Turn face swap off</div></span>';
   off.addEventListener('click', () => {
     const wrapper = pongFaceSwapCurrentWrapper();
+    setPongFaceSwapSelection([]);
+    pongFaceSwapState.pickerFaceIds = [];
     closePongFaceSwapPicker();
     setPongFaceSwapPersistentEnabled(false);
     if (wrapper?.dataset?.pongFaceSwapActive === 'true') void stopPongFaceSwapForWrapper(wrapper, { restore: true, announce: true });
@@ -8379,7 +8448,7 @@ function renderPongFaceSwapPicker() {
   pongFaceSwapState.faces.forEach(face => {
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = `pong-face-choice${pongFaceSwapState.enabled && face.id === pongFaceSwapState.selectedFaceId ? ' selected' : ''}`;
+    button.className = `pong-face-choice${pickerFaceIds.includes(face.id) ? ' selected' : ''}`;
     const image = document.createElement('img');
     image.loading = 'lazy';
     image.decoding = 'async';
@@ -8398,15 +8467,31 @@ function renderPongFaceSwapPicker() {
     attachPongFacePermanentDeleteHold(button, face, () => renderPongFaceSwapPicker());
     button.addEventListener('click', () => {
       if (consumePongFaceDeleteSuppression(button)) return;
-      pongFaceSwapState.selectedFaceId = face.id;
-      setPongFaceSwapPersistentEnabled(true);
-      void primePongFaceSwap(face.id);
-      setTimeout(() => closePongFaceSwapPicker(), 0);
+      const next = new Set(normalizePongFaceSwapFaceIds(pongFaceSwapState.pickerFaceIds));
+      if (next.has(face.id)) next.delete(face.id);
+      else if (next.size < 5) next.add(face.id);
+      pongFaceSwapState.pickerFaceIds = [...next];
+      renderPongFaceSwapPicker();
     });
     list.appendChild(button);
   });
+  apply.disabled = pickerFaceIds.length === 0;
+  apply.textContent = pickerFaceIds.length > 1
+    ? `Use ${pickerFaceIds.length} faces`
+    : 'Use selected';
+  apply.onclick = () => {
+    const selectionKey = setPongFaceSwapSelection(pongFaceSwapState.pickerFaceIds);
+    if (!selectionKey) return;
+    setPongFaceSwapPersistentEnabled(true);
+    closePongFaceSwapPicker();
+    void primePongFaceSwap(selectionKey);
+  };
+  clear.onclick = () => {
+    pongFaceSwapState.pickerFaceIds = [];
+    renderPongFaceSwapPicker();
+  };
   status.textContent = pongFaceSwapState.faces.length
-    ? 'Choose once to keep that face active. Hold a face for 3 seconds to permanently delete it.'
+    ? `${pickerFaceIds.length}/5 selected. Pong locks the closest compatible face for each video. Hold 3 seconds to delete.`
     : 'No approved faces yet. Add a named folder to Pong Swap/approved-faces on the PC.';
 }
 
@@ -8423,6 +8508,7 @@ async function openPongFaceSwapPicker() {
   const picker = document.getElementById('pong-face-swap-picker');
   const status = document.getElementById('pong-face-swap-status');
   if (!picker || pongFaceSwapState.loading) return;
+  pongFaceSwapState.pickerFaceIds = pongFaceSwapFaceIds();
   picker.hidden = false;
   void warmPongFaceSwapEngine();
   const cachedFaces = loadCachedPongFaceSwapFaces();
@@ -8644,6 +8730,19 @@ function pongVideoHasVisibleFrame(wrapper, video) {
   if (Number(video.videoWidth || 0) <= 0 || Number(video.videoHeight || 0) <= 0) return false;
   return video.dataset.pongPresentedSourceGeneration === String(pongVideoSourceGeneration(video)) &&
     wrapper.dataset.pongVisibleFrame === 'true';
+}
+
+function pongWrapperHasVisibleFrame(wrapper, video) {
+  if (pongVideoHasVisibleFrame(wrapper, video)) return true;
+  const overlay = wrapper?.__pongFaceSwapTransitionOverlay;
+  if (!overlay?.isConnected || overlay.dataset.pongVisibleFrame !== 'true') return false;
+  const transitionVideo = overlay.querySelector?.('video.pong-face-swap-transition-video');
+  return Boolean(
+    transitionVideo &&
+    Number(transitionVideo.readyState || 0) >= 2 &&
+    Number(transitionVideo.videoWidth || 0) > 0 &&
+    Number(transitionVideo.videoHeight || 0) > 0
+  );
 }
 
 function markPongVideoVisualFrameUnavailable(wrapper, video) {
@@ -9173,7 +9272,7 @@ function schedulePongAutoSkipVideo(wrapper, video = wrapper?.querySelector?.('vi
     !wrapper || !video ||
     wrapper.dataset.sessionSkipped === 'true' ||
     !wrapper.classList.contains(DECK_MODE_ENABLED ? 'deck-active' : 'most-visible') ||
-    pongVideoHasVisibleFrame(wrapper, video)
+    pongWrapperHasVisibleFrame(wrapper, video)
   ) return false;
   const token = ++pongAutoSkipVideoToken;
   pongAutoSkipVideoWrapper = wrapper;
@@ -9187,7 +9286,7 @@ function schedulePongAutoSkipVideo(wrapper, video = wrapper?.querySelector?.('vi
       pongVideoSourceGeneration(video) !== sourceGeneration ||
       wrapper.dataset.sessionSkipped === 'true' ||
       !isPongActiveVideo(video) ||
-      pongVideoHasVisibleFrame(wrapper, video)
+      pongWrapperHasVisibleFrame(wrapper, video)
     );
     pongAutoSkipVideoTimer = null;
     pongAutoSkipVideoWrapper = null;
@@ -13120,12 +13219,20 @@ function prioritizeCachedVideosForPasteEvent(event) {
   return false;
 }
 
-function setActivePlaybackRangeForPasteEvent(index, { recordHistory = true } = {}) {
+function setActivePlaybackRangeForPasteEvent(index, {
+  recordHistory = true,
+  allowTikTokSideDeck = false
+} = {}) {
   if (!pasteEvents.length || !allVideoUrls.length) return null;
 
   const safeIndex = ((Number(index) || 0) + pasteEvents.length) % pasteEvents.length;
   const target = pasteEvents[safeIndex];
-  if (!isPasteEventViewableForPaperclip(target)) return null;
+  const authorizedTikTokSideDeck = Boolean(
+    allowTikTokSideDeck &&
+    isSimpCityTikTokEvent(target) &&
+    hasPlayablePasteEventMedia(target)
+  );
+  if (!authorizedTikTokSideDeck && !isPasteEventViewableForPaperclip(target)) return null;
   prioritizeCachedVideosForPasteEvent(target);
   const targetGlobalIndex = Math.max(0, Math.min(allVideoUrls.length, Number(target.startIndex || 0)));
   const targetCount = Math.max(0, Number(target.count || 0));
@@ -13141,8 +13248,13 @@ function setActivePlaybackRangeForPasteEvent(index, { recordHistory = true } = {
   };
   currentBatch = 0;
   currentVideoIndex = 0;
-  markPasteEventVisitedForPaperclip(target, safeIndex);
-  if (recordHistory) recordPaperclipHistoryIndex(safeIndex);
+  // The side deck belongs to its primary artist. It must not consume another
+  // Paperclip visit/counter/history entry merely because the purple button was
+  // opened.
+  if (!authorizedTikTokSideDeck) {
+    markPasteEventVisitedForPaperclip(target, safeIndex);
+    if (recordHistory) recordPaperclipHistoryIndex(safeIndex);
+  }
   notePongActiveCollectionArtist(target, safeIndex);
 
   return target;
@@ -13412,11 +13524,14 @@ function random40PlaybackUrl(rawUrl) {
   const fallbackUrl = String(rawUrl || '');
   const key = pongCanonicalRawMediaUrl(fallbackUrl) || fallbackUrl;
   const serverRecord = random40ServerVideoCacheRecordFor(key);
+  const gatewayFirst = isPongServerCachedPlaybackActive()
+    ? random40PcPlaybackGatewayUrl(key)
+    : '';
   return random40PlaybackOverrideFor(key) ||
     (serverRecord?.ready === true ? serverRecord.playbackUrl : '') ||
     (isRandom40PlaybackActive()
       ? random40PcFileCacheStreamUrl(key)
-      : '') || fallbackUrl;
+      : '') || gatewayFirst || fallbackUrl;
 }
 
 function random40InstallPlaybackFallback(record) {
@@ -14222,6 +14337,11 @@ function isPasteEventViewableForPaperclip(event) {
   // its own Paperclip position, even when the TikTok result arrives first.
   if (isSimpCityTikTokEvent(event)) return false;
   if (event.paperclipHidden === true) return false;
+  return hasPlayablePasteEventMedia(event);
+}
+
+function hasPlayablePasteEventMedia(event) {
+  if (!event || !Array.isArray(allVideoUrls) || !allVideoUrls.length) return false;
   const start = Number(event.startIndex);
   const count = Number(event.count);
   if (!Number.isFinite(start) || !Number.isFinite(count) || count <= 0) return false;
@@ -14519,9 +14639,13 @@ function updateSimpCityTikTokButton() {
 function enterSimpCityTikTokSideDeck() {
   const context = getSimpCityTikTokContext();
   if (context.sideActive || context.tiktokIndex < 0 || context.primaryIndex < 0) return false;
-  simpCityTikTokReturnState = { eventIndex: context.primaryIndex };
-  displayPasteEventAtIndex(context.tiktokIndex, { recordHistory: false });
-  return true;
+  simpCityTikTokReturnState = { eventIndex: context.primaryIndex, pairId: context.pairId };
+  const opened = displayPasteEventAtIndex(context.tiktokIndex, {
+    recordHistory: false,
+    allowTikTokSideDeck: true
+  });
+  if (!opened) simpCityTikTokReturnState = null;
+  return opened;
 }
 
 function leaveSimpCityTikTokSideDeck() {
@@ -14581,14 +14705,23 @@ function prewarmRecallPasteEventForTransition(event, resumeOffset = 0) {
   });
 }
 
-function displayPasteEventAtIndex(index, { recordHistory = true } = {}) {
+function displayPasteEventAtIndex(index, { recordHistory = true, allowTikTokSideDeck = false } = {}) {
   const targetEvent = pasteEvents[index];
-  if (!isPasteEventViewableForPaperclip(targetEvent)) return false;
+  const authorizedTikTokSideDeck = Boolean(
+    allowTikTokSideDeck &&
+    isSimpCityTikTokEvent(targetEvent) &&
+    String(targetEvent?.simpCityPairId || '') === String(simpCityTikTokReturnState?.pairId || '') &&
+    hasPlayablePasteEventMedia(targetEvent)
+  );
+  if (!authorizedTikTokSideDeck && !isPasteEventViewableForPaperclip(targetEvent)) return false;
   const navigationGeneration = ++paperclipNavigationGeneration;
   const paperclipKey = getPasteEventPaperclipKey(targetEvent, index);
   if (!isSimpCityTikTokEvent(targetEvent)) simpCityTikTokReturnState = null;
   rememberCurrentPasteEventVideoPosition();
-  if (!setActivePlaybackRangeForPasteEvent(index, { recordHistory })) return false;
+  if (!setActivePlaybackRangeForPasteEvent(index, {
+    recordHistory,
+    allowTikTokSideDeck: authorizedTikTokSideDeck
+  })) return false;
   updateSimpCityTikTokButton();
   const targetCount = Math.max(1, Number(targetEvent?.count || BATCH_SIZE));
   const hasSavedResumeOffset = Object.prototype.hasOwnProperty.call(
@@ -14768,7 +14901,7 @@ function stopBrowserWorkloadForRefresh() {
   try { window.currentlyPlayingVideo?.pause?.(); } catch (_) {}
 }
 
-function invalidatePongDatasetOwnership(reason = 'dataset-replaced') {
+function invalidatePongDatasetOwnership(reason = 'dataset-replaced', options = {}) {
   // Every asynchronous importer, deferred renderer and media retry belongs to
   // the dataset generation it started in.  Replacing the deck must fence all
   // of them before the shared arrays are mutated; otherwise a late Local/Recall
@@ -14776,7 +14909,10 @@ function invalidatePongDatasetOwnership(reason = 'dataset-replaced') {
   pongDatasetGeneration++;
   paperclipNavigationGeneration++;
   visibleBatchRetryToken++;
-  bunkrLoadGeneration++;
+  // Rendering an incremental importer's first playable batch replaces the
+  // visible deck, but must not revoke the generation that owns the remaining
+  // background work. Real user loads still fence every older importer.
+  if (options?.preserveActiveImporter !== true) bunkrLoadGeneration++;
   // Saved-list and named-collection fetches can still be awaiting network I/O
   // in pong-sync.js. A normal dataset replacement must revoke their right to
   // commit. Saved loaders preserve their own token while performing the shared
@@ -15092,6 +15228,10 @@ function createGearButton(){
 
 // ─── Load videos ──────────────────────────────────────────────────────────────
 loadVideosButton.addEventListener('click', async event=>{
+  // Consume the one-shot marker before the first await so no later click can
+  // accidentally inherit the importer exemption.
+  const preserveActiveImporter = window.PongPreserveActiveImporterForNextLoad === true;
+  window.PongPreserveActiveImporterForNextLoad = false;
   // Explicitly loading a new paste is a new viewing session. Never carry a
   // selected face into it. Programmatic loads (Paperclip/recall continuation)
   // keep the user's current session-only selection.
@@ -15123,7 +15263,7 @@ loadVideosButton.addEventListener('click', async event=>{
     return;
   }
 
-  invalidatePongDatasetOwnership('manual-video-load');
+  invalidatePongDatasetOwnership('manual-video-load', { preserveActiveImporter });
   document.querySelectorAll('video').forEach(v=>v.pause());
 
   allVideoUrls = shuffledLoad.urls;
@@ -25586,6 +25726,12 @@ async function waitForEromeBackgroundScrapeSlot() {
 }
 
 let bunkrLoadGeneration = 0;
+function renderFirstIncrementalImporterBatch() {
+  // click() enters the handler synchronously; it consumes this marker before
+  // any asynchronous paste-cache flush can yield.
+  window.PongPreserveActiveImporterForNextLoad = true;
+  loadVideosButton.click();
+}
 const simpCityActiveJobIds = new Set();
 const simpCitySkippedCreatorKeys = new Set();
 let simpCityActiveCreatorChoices = [];
@@ -26221,7 +26367,7 @@ async function loadSimpCityAsCards(targets, suppliedCreatorNames = [], suppliedA
       setEromeTwentyCardMode(true, { respectRange: true });
       window.PongEromeAutoAdvanceOnce = true;
       window.PongLoadAllVideosOnce = false;
-      loadVideosButton.click();
+      renderFirstIncrementalImporterBatch();
       activateFirstEromeBatch();
       cardsStarted = true;
     } else if (recallChannel === 3) {
@@ -27144,7 +27290,7 @@ async function loadLeakedZoneAsCards(targets) {
       setEromeTwentyCardMode(true, { respectRange: true });
       window.PongEromeAutoAdvanceOnce = true;
       window.PongLoadAllVideosOnce = false;
-      loadVideosButton.click();
+      renderFirstIncrementalImporterBatch();
       activateFirstEromeBatch();
       cardsStarted = true;
     } else {
@@ -27383,7 +27529,7 @@ async function loadBunkrAsCards(targets) {
       setEromeTwentyCardMode(true, { respectRange: true });
       window.PongEromeAutoAdvanceOnce = true;
       window.PongLoadAllVideosOnce = false;
-      loadVideosButton.click();
+      renderFirstIncrementalImporterBatch();
       activateFirstEromeBatch();
       cardsStarted = true;
     } else {
