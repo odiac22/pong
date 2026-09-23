@@ -58,9 +58,15 @@ public class MainActivity extends Activity {
   private boolean tiktokSwapEnabled = false;
   private int tiktokSwapGeneration = 0;
   private final Handler tiktokSwapHandler = new Handler(Looper.getMainLooper());
+  private final Handler tiktokLayoutHandler = new Handler(Looper.getMainLooper());
   private final Runnable tiktokSwapPoller = new Runnable() {
     @Override public void run() {
       pollTikTokIntegratedSwap();
+    }
+  };
+  private final Runnable tiktokLayoutPoller = new Runnable() {
+    @Override public void run() {
+      syncTikTokPlayerBounds();
     }
   };
   private String observerPair;
@@ -199,6 +205,54 @@ public class MainActivity extends Activity {
     return button;
   }
 
+  /**
+   * TikTok is a second WebView because its authenticated website cannot be
+   * placed inside Pong's DOM WebView. Keep it visually embedded by matching
+   * the native view to Pong's existing video viewport instead of covering the
+   * whole application. Coordinates are returned as viewport fractions so the
+   * conversion remains correct across WebView density and page zoom levels.
+   */
+  private void syncTikTokPlayerBounds() {
+    if (!tiktokVisible || web == null || tiktokWeb == null || root == null) return;
+    web.evaluateJavascript(
+      "(()=>{try{const e=document.getElementById('video-container');if(!e)return '';const r=e.getBoundingClientRect(),w=Math.max(1,innerWidth),h=Math.max(1,innerHeight);return JSON.stringify({x:r.left/w,y:r.top/h,w:r.width/w,h:r.height/h})}catch(e){return ''}})()",
+      raw -> {
+        if (!tiktokVisible || tiktokWeb == null || tiktokControls == null || root == null) return;
+        try {
+          String decoded = unwrapJavascriptResult(raw);
+          JSONObject bounds = decoded.isEmpty() ? new JSONObject() : new JSONObject(decoded);
+          int rootWidth = Math.max(1, root.getWidth());
+          int rootHeight = Math.max(1, root.getHeight());
+          int left = Math.min(rootWidth - 1,
+            Math.max(0, (int) Math.round(bounds.optDouble("x", 0) * rootWidth)));
+          int top = Math.min(rootHeight - 1,
+            Math.max(0, (int) Math.round(bounds.optDouble("y", 0) * rootHeight)));
+          int width = Math.max(1, Math.min(rootWidth - left,
+            Math.max(dp(160), (int) Math.round(bounds.optDouble("w", 1) * rootWidth))));
+          int height = Math.max(1, Math.min(rootHeight - top,
+            Math.max(dp(220), (int) Math.round(bounds.optDouble("h", 1) * rootHeight))));
+          int controlsHeight = Math.min(dp(44), Math.max(dp(36), height / 7));
+
+          FrameLayout.LayoutParams playerParams = new FrameLayout.LayoutParams(width, height, Gravity.TOP | Gravity.LEFT);
+          playerParams.leftMargin = left;
+          playerParams.topMargin = top;
+          tiktokWeb.setLayoutParams(playerParams);
+
+          FrameLayout.LayoutParams controlsParams = new FrameLayout.LayoutParams(width, controlsHeight, Gravity.TOP | Gravity.LEFT);
+          controlsParams.leftMargin = left;
+          controlsParams.topMargin = top + height - controlsHeight;
+          tiktokControls.setLayoutParams(controlsParams);
+
+          tiktokWeb.setVisibility(View.VISIBLE);
+          tiktokControls.setVisibility(View.VISIBLE);
+          tiktokWeb.bringToFront();
+          tiktokControls.bringToFront();
+        } catch (Exception ignored) {}
+        if (tiktokVisible) tiktokLayoutHandler.postDelayed(tiktokLayoutPoller, 750);
+      }
+    );
+  }
+
   private String tiktokObserverScript() {
     return "javascript:(()=>{try{" +
       "if(window.__pongTikTokObserverInstalled){window.__pongTikTokScan&&window.__pongTikTokScan();return;}" +
@@ -301,10 +355,7 @@ public class MainActivity extends Activity {
       }
     });
     tiktokWeb.setVisibility(View.GONE);
-    root.addView(tiktokWeb, new FrameLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT,
-      ViewGroup.LayoutParams.MATCH_PARENT
-    ));
+    root.addView(tiktokWeb, new FrameLayout.LayoutParams(1, 1, Gravity.TOP | Gravity.LEFT));
 
     tiktokControls = new LinearLayout(this);
     tiktokControls.setOrientation(LinearLayout.HORIZONTAL);
@@ -331,11 +382,7 @@ public class MainActivity extends Activity {
     tiktokControls.addView(tiktokStatus);
     tiktokControls.addView(swapButton);
     tiktokControls.setVisibility(View.GONE);
-    FrameLayout.LayoutParams controlParams = new FrameLayout.LayoutParams(
-      ViewGroup.LayoutParams.MATCH_PARENT,
-      dp(48),
-      Gravity.TOP
-    );
+    FrameLayout.LayoutParams controlParams = new FrameLayout.LayoutParams(1, 1, Gravity.TOP | Gravity.LEFT);
     root.addView(tiktokControls, controlParams);
     tiktokWeb.loadUrl(TIKTOK_HOME_URL);
   }
@@ -350,16 +397,14 @@ public class MainActivity extends Activity {
         );
       }
       tiktokVisible = true;
-      tiktokWeb.setVisibility(View.VISIBLE);
-      tiktokControls.setVisibility(View.VISIBLE);
       tiktokWeb.onResume();
       tiktokWeb.resumeTimers();
       String currentUrl = tiktokWeb.getUrl();
       if (currentUrl == null || (!currentUrl.startsWith("https://") && !currentUrl.startsWith("http://"))) {
         tiktokWeb.loadUrl(TIKTOK_HOME_URL);
       }
-      tiktokWeb.bringToFront();
-      tiktokControls.bringToFront();
+      tiktokLayoutHandler.removeCallbacks(tiktokLayoutPoller);
+      syncTikTokPlayerBounds();
       tiktokWeb.evaluateJavascript(tiktokObserverScript(), null);
       updateTikTokStatus(currentTikTokUrl.isEmpty() ? "Sign in or choose a video" : "Video ready");
       if (tiktokSwapEnabled && isTikTokPageUrl(currentTikTokUrl)) requestTikTokIntegratedSwap();
@@ -369,6 +414,7 @@ public class MainActivity extends Activity {
   private void hideTikTokMode() {
     if (tiktokWeb == null) return;
     tiktokVisible = false;
+    tiktokLayoutHandler.removeCallbacks(tiktokLayoutPoller);
     clearTikTokIntegratedSwap();
     tiktokWeb.evaluateJavascript(
       "try{document.querySelectorAll('video,audio').forEach(v=>{v.pause();v.muted=true;v.volume=0})}catch(e){}",
@@ -684,6 +730,8 @@ public class MainActivity extends Activity {
   }
   @Override protected void onStop() { nativeForeground = false; if (web != null) rememberPongUrl(web.getUrl()); super.onStop(); }
   @Override protected void onDestroy() {
+    tiktokSwapHandler.removeCallbacks(tiktokSwapPoller);
+    tiktokLayoutHandler.removeCallbacks(tiktokLayoutPoller);
     WebView oldWeb = web;
     WebView oldTikTokWeb = tiktokWeb;
     web = null;
