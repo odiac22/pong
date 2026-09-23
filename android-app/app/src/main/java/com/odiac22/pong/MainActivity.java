@@ -53,6 +53,8 @@ public class MainActivity extends Activity {
   private String activePongRoute = "Connecting";
   private boolean gatewayFallbackStarted = false;
   private WebView tiktokWeb;
+  private FrameLayout tiktokPongControlsLayer;
+  private final Map<String, TextView> tiktokPongControlViews = new HashMap<>();
   private String currentTikTokUrl = "";
   private final List<String> nearbyTikTokUrls = new ArrayList<>();
   private final Map<String, String> integratedSwapStreams = new ConcurrentHashMap<>();
@@ -295,7 +297,7 @@ public class MainActivity extends Activity {
   private void syncTikTokPlayerBounds() {
     if (!tiktokVisible || web == null || tiktokWeb == null || root == null) return;
     web.evaluateJavascript(
-      "(()=>{try{const e=document.getElementById('video-container');if(!e)return '';const r=e.getBoundingClientRect(),vw=Math.max(1,innerWidth),vh=Math.max(1,innerHeight);let left=r.left,bottom=r.bottom;document.querySelectorAll('.side-save-button,#remove-saved-button').forEach(n=>{const q=n.getBoundingClientRect(),s=getComputedStyle(n);if(q.width>0&&q.height>0&&s.display!=='none'&&s.visibility!=='hidden')left=Math.max(left,q.right+4)});document.querySelectorAll('.control-button,#pong-collection-save-button,#pong-server-toggle').forEach(n=>{const q=n.getBoundingClientRect(),s=getComputedStyle(n);if(q.width>0&&q.height>0&&q.top>vh*.7&&s.display!=='none'&&s.visibility!=='hidden')bottom=Math.min(bottom,q.top-4)});return JSON.stringify({x:left/vw,y:r.top/vh,w:Math.max(1,r.right-left)/vw,h:Math.max(1,bottom-r.top)/vh})}catch(e){return ''}})()",
+      "(()=>{try{const e=document.getElementById('video-container');if(!e)return '';const r=e.getBoundingClientRect(),vw=Math.max(1,innerWidth),vh=Math.max(1,innerHeight);let bottom=r.bottom;document.querySelectorAll('.control-button').forEach(n=>{const q=n.getBoundingClientRect(),s=getComputedStyle(n);if(q.width>0&&q.height>0&&q.top>vh*.7&&s.display!=='none'&&s.visibility!=='hidden')bottom=Math.min(bottom,q.top-1)});return JSON.stringify({x:r.left/vw,y:r.top/vh,w:Math.max(1,r.width)/vw,h:Math.max(1,bottom-r.top)/vh})}catch(e){return ''}})()",
       raw -> {
         if (!tiktokVisible || tiktokWeb == null || root == null) return;
         try {
@@ -318,11 +320,110 @@ public class MainActivity extends Activity {
           tiktokWeb.setAlpha(1f);
           tiktokWeb.setVisibility(View.VISIBLE);
           if (!tiktokPongUiForeground) tiktokWeb.bringToFront();
+          if (tiktokPongControlsLayer != null && !tiktokPongUiForeground) {
+            tiktokPongControlsLayer.setVisibility(View.VISIBLE);
+            tiktokPongControlsLayer.bringToFront();
+          }
           if (connectionIndicator != null) connectionIndicator.bringToFront();
         } catch (Exception ignored) {}
         if (tiktokVisible) tiktokLayoutHandler.postDelayed(tiktokLayoutPoller, 750);
       }
     );
+  }
+
+  private void ensureTikTokPongControlsLayer() {
+    ensureRoot();
+    if (tiktokPongControlsLayer != null) return;
+    tiktokPongControlsLayer = new FrameLayout(this);
+    tiktokPongControlsLayer.setClipChildren(false);
+    tiktokPongControlsLayer.setClipToPadding(false);
+    tiktokPongControlsLayer.setClickable(false);
+    tiktokPongControlsLayer.setFocusable(false);
+    tiktokPongControlsLayer.setVisibility(View.GONE);
+    root.addView(tiktokPongControlsLayer, new FrameLayout.LayoutParams(
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.MATCH_PARENT
+    ));
+  }
+
+  private GradientDrawable tiktokControlBackground(String key, int width, int height) {
+    GradientDrawable background = new GradientDrawable();
+    int fill = Color.argb(175, 10, 15, 22);
+    if ("remove-saved-button".equals(key)) fill = Color.argb(180, 88, 19, 28);
+    else if ("paste-nav-button".equals(key)) fill = Color.argb(175, 18, 54, 78);
+    else if ("auto-skip-video-button".equals(key)) fill = Color.argb(180, 93, 62, 13);
+    else if ("repair-saved-links-button".equals(key)) fill = Color.argb(180, 12, 70, 78);
+    else if ("save-current-artist-button".equals(key)) fill = Color.argb(180, 49, 26, 99);
+    else if ("save-current-video-button".equals(key)) fill = Color.argb(180, 12, 61, 79);
+    else if ("pong-collection-save-button".equals(key)) fill = Color.argb(190, 22, 101, 52);
+    else if ("pong-server-toggle".equals(key)) fill = Color.argb(180, 127, 29, 29);
+    background.setColor(fill);
+    background.setStroke(Math.max(1, dp(1)), Color.argb(150, 148, 163, 184));
+    background.setCornerRadius(Math.max(dp(3), Math.min(width, height) * 0.28f));
+    return background;
+  }
+
+  private void clickPongControl(String key) {
+    if (web == null || key == null || key.isEmpty()) return;
+    web.post(() -> web.evaluateJavascript(
+      "(()=>{try{const e=document.getElementById(" + JSONObject.quote(key) + ");if(!e)return false;e.click();return true}catch(_){return false}})()",
+      null
+    ));
+  }
+
+  private void updateTikTokPongControls(JSONArray controls) {
+    ensureTikTokPongControlsLayer();
+    if (!tiktokVisible || tiktokPongUiForeground || controls == null) {
+      tiktokPongControlsLayer.setVisibility(View.GONE);
+      return;
+    }
+    int rootWidth = Math.max(1, root.getWidth());
+    int rootHeight = Math.max(1, root.getHeight());
+    LinkedHashSet<String> visibleKeys = new LinkedHashSet<>();
+    for (int index = 0; index < controls.length(); index++) {
+      JSONObject item = controls.optJSONObject(index);
+      if (item == null) continue;
+      String key = item.optString("key", "").replaceAll("[^A-Za-z0-9_-]", "");
+      if (key.isEmpty()) continue;
+      visibleKeys.add(key);
+      int left = Math.max(0, (int) Math.round(item.optDouble("x", 0) * rootWidth));
+      int top = Math.max(0, (int) Math.round(item.optDouble("y", 0) * rootHeight));
+      int width = Math.max(dp(16), (int) Math.round(item.optDouble("w", 0.07) * rootWidth));
+      int height = Math.max(dp(16), (int) Math.round(item.optDouble("h", 0.04) * rootHeight));
+      TextView control = tiktokPongControlViews.get(key);
+      if (control == null) {
+        control = new TextView(this);
+        control.setTextColor(Color.argb(235, 241, 245, 249));
+        control.setGravity(Gravity.CENTER);
+        control.setPadding(0, 0, 0, 0);
+        control.setIncludeFontPadding(false);
+        control.setSingleLine(false);
+        final String clickKey = key;
+        boolean actionable = !"pong-instance-label".equals(key) && !"version-number".equals(key);
+        control.setClickable(actionable);
+        control.setFocusable(actionable);
+        if (actionable) control.setOnClickListener(ignored -> clickPongControl(clickKey));
+        tiktokPongControlViews.put(key, control);
+        tiktokPongControlsLayer.addView(control);
+      }
+      String text = item.optString("text", "").trim();
+      control.setText(text);
+      boolean multiline = text.contains("\n");
+      control.setTextSize(multiline ? 6.5f : (height > dp(38) ? 12f : 8f));
+      control.setAlpha((float) Math.max(0.42, Math.min(1.0, item.optDouble("opacity", 0.68))));
+      control.setBackground(tiktokControlBackground(key, width, height));
+      FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(width, height);
+      params.leftMargin = Math.min(Math.max(0, rootWidth - width), left);
+      params.topMargin = Math.min(Math.max(0, rootHeight - height), top);
+      control.setLayoutParams(params);
+      control.setVisibility(View.VISIBLE);
+    }
+    for (Map.Entry<String, TextView> entry : tiktokPongControlViews.entrySet()) {
+      if (!visibleKeys.contains(entry.getKey())) entry.getValue().setVisibility(View.GONE);
+    }
+    tiktokPongControlsLayer.setVisibility(View.VISIBLE);
+    tiktokPongControlsLayer.bringToFront();
+    if (connectionIndicator != null) connectionIndicator.bringToFront();
   }
 
   private String tiktokObserverScript() {
@@ -447,6 +548,7 @@ public class MainActivity extends Activity {
       }
       tiktokVisible = true;
       tiktokPongUiForeground = false;
+      ensureTikTokPongControlsLayer();
       tiktokWeb.onResume();
       tiktokWeb.resumeTimers();
       String currentUrl = tiktokWeb.getUrl();
@@ -465,6 +567,7 @@ public class MainActivity extends Activity {
     if (tiktokWeb == null) return;
     tiktokVisible = false;
     tiktokPongUiForeground = false;
+    if (tiktokPongControlsLayer != null) tiktokPongControlsLayer.setVisibility(View.GONE);
     tiktokLayoutHandler.removeCallbacks(tiktokLayoutPoller);
     tiktokFaceHandler.removeCallbacks(tiktokFacePoller);
     tiktokObservedFaceKey = "";
@@ -488,6 +591,7 @@ public class MainActivity extends Activity {
     if (!tiktokVisible || web == null || tiktokWeb == null || tiktokPongUiForeground == foreground) return;
     tiktokPongUiForeground = foreground;
     if (foreground) {
+      if (tiktokPongControlsLayer != null) tiktokPongControlsLayer.setVisibility(View.GONE);
       tiktokWeb.evaluateJavascript(
         "try{window.__pongTikTokResume=Array.from(document.querySelectorAll('video')).some(v=>!v.paused);document.querySelectorAll('video,audio').forEach(v=>v.pause())}catch(e){}",
         null
@@ -502,6 +606,10 @@ public class MainActivity extends Activity {
     } else {
       tiktokWeb.setVisibility(View.VISIBLE);
       syncTikTokPlayerBounds();
+      if (tiktokPongControlsLayer != null) {
+        tiktokPongControlsLayer.setVisibility(View.VISIBLE);
+        tiktokPongControlsLayer.bringToFront();
+      }
       tiktokWeb.evaluateJavascript(
         "try{if(window.__pongTikTokResume){const v=Array.from(document.querySelectorAll('video')).find(v=>v.offsetWidth&&v.offsetHeight);v&&v.play().catch(()=>{})}window.__pongTikTokResume=false}catch(e){}",
         null
@@ -513,7 +621,7 @@ public class MainActivity extends Activity {
   private void pollPongFaceSelectionForTikTok() {
     if (!tiktokVisible || web == null) return;
     web.evaluateJavascript(
-      "(()=>{try{const s=pongFaceSwapState||{},a=Array.isArray(s.selectedFaceIds)&&s.selectedFaceIds.length?s.selectedFaceIds:[s.selectedFaceId],shown=e=>{if(!e||e.hidden)return false;const r=e.getBoundingClientRect(),c=getComputedStyle(e);return r.width>0&&r.height>0&&c.display!=='none'&&c.visibility!=='hidden'},uiOpen=shown(document.querySelector('#pong-face-swap-menu.open'))||shown(document.querySelector('#pong-face-swap-picker:not([hidden])'))||shown(document.querySelector('#pong-face-swap-settings-panel:not([hidden])'))||shown(document.querySelector('#pong-collection-panel:not([hidden])'))||shown(document.querySelector('.auth-helper-panel:not([hidden])'))||shown(document.querySelector('#random40-reject-menu.open'));return JSON.stringify({enabled:!!s.enabled,key:a.filter(Boolean).map(String).join('|'),uiOpen})}catch(e){return ''}})()",
+      "(()=>{try{const s=pongFaceSwapState||{},a=Array.isArray(s.selectedFaceIds)&&s.selectedFaceIds.length?s.selectedFaceIds:[s.selectedFaceId],shown=e=>{if(!e||e.hidden)return false;const r=e.getBoundingClientRect(),c=getComputedStyle(e);return r.width>0&&r.height>0&&c.display!=='none'&&c.visibility!=='hidden'&&c.opacity!=='0'},uiOpen=shown(document.querySelector('#pong-face-swap-menu.open'))||shown(document.querySelector('#pong-face-swap-picker:not([hidden])'))||shown(document.querySelector('#pong-face-swap-settings-panel:not([hidden])'))||shown(document.querySelector('#pong-collection-panel:not([hidden])'))||shown(document.querySelector('.auth-helper-panel:not([hidden])'))||shown(document.querySelector('#random40-reject-menu.open')),vw=Math.max(1,innerWidth),vh=Math.max(1,innerHeight),ids=['pong-instance-label','pong-face-swap-button','remove-saved-button','paste-prev-button','paste-nav-button','github-token-button','skip-current-video-button','auto-skip-video-button','repair-saved-links-button','save-current-artist-button','save-current-video-button','pong-collection-save-button','pong-server-toggle'],controls=ids.map(key=>{const e=document.getElementById(key);if(!shown(e))return null;const r=e.getBoundingClientRect(),c=getComputedStyle(e);return{key,text:(e.innerText||e.textContent||'').trim(),x:r.left/vw,y:r.top/vh,w:r.width/vw,h:r.height/vh,opacity:Number(c.opacity)||.68}}).filter(Boolean);const version=document.querySelector('.version-number');if(shown(version)){const r=version.getBoundingClientRect(),c=getComputedStyle(version);controls.push({key:'version-number',text:(version.innerText||version.textContent||'').trim(),x:r.left/vw,y:r.top/vh,w:r.width/vw,h:r.height/vh,opacity:Number(c.opacity)||.68})}return JSON.stringify({enabled:!!s.enabled,key:a.filter(Boolean).map(String).join('|'),uiOpen,controls})}catch(e){return ''}})()",
       raw -> {
         if (!tiktokVisible) return;
         try {
@@ -521,7 +629,9 @@ public class MainActivity extends Activity {
           JSONObject state = decoded.isEmpty() ? new JSONObject() : new JSONObject(decoded);
           boolean enabled = state.optBoolean("enabled", false);
           String faceKey = state.optString("key", "");
-          setTikTokPongUiForeground(state.optBoolean("uiOpen", false));
+          boolean uiOpen = state.optBoolean("uiOpen", false);
+          setTikTokPongUiForeground(uiOpen);
+          if (!uiOpen) updateTikTokPongControls(state.optJSONArray("controls"));
           if (enabled && !faceKey.isEmpty()) {
             if (!tiktokSwapEnabled || !faceKey.equals(tiktokObservedFaceKey)) {
               clearTikTokIntegratedSwap();
