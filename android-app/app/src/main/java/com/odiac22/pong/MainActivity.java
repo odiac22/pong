@@ -3,6 +3,8 @@ package com.odiac22.pong;
 import android.app.Activity;
 import android.os.Bundle;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.net.Uri;
 import android.graphics.Color;
 import android.view.Gravity;
@@ -15,6 +17,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.RenderProcessGoneDetail;
 import android.content.SharedPreferences;
 import android.content.Intent;
@@ -29,6 +32,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.io.FilterInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 
 public class MainActivity extends Activity {
   // Both locally validated and release APKs use the live LAN Pong endpoint.
@@ -42,7 +53,16 @@ public class MainActivity extends Activity {
   private TextView tiktokStatus;
   private String currentTikTokUrl = "";
   private final List<String> nearbyTikTokUrls = new ArrayList<>();
+  private final Map<String, String> integratedSwapStreams = new ConcurrentHashMap<>();
   private boolean tiktokVisible = false;
+  private boolean tiktokSwapEnabled = false;
+  private int tiktokSwapGeneration = 0;
+  private final Handler tiktokSwapHandler = new Handler(Looper.getMainLooper());
+  private final Runnable tiktokSwapPoller = new Runnable() {
+    @Override public void run() {
+      pollTikTokIntegratedSwap();
+    }
+  };
   private String observerPair;
   private String deviceId;
   private String activityInstanceId;
@@ -186,7 +206,10 @@ public class MainActivity extends Activity {
       "const canonical=u=>{try{const x=new URL(u,location.href);return /(^|\\.)tiktok\\.com$/i.test(x.hostname)&&/^\\/@[^/]+\\/video\\/\\d+\\/?$/i.test(x.pathname)?x.origin+x.pathname:''}catch(e){return''}};" +
       "const score=a=>{const r=a.getBoundingClientRect(),h=Math.max(0,Math.min(innerHeight,r.bottom)-Math.max(0,r.top)),w=Math.max(0,Math.min(innerWidth,r.right)-Math.max(0,r.left));return h*w};" +
       "const reactId=el=>{try{const roots=Object.getOwnPropertyNames(el).filter(k=>k.startsWith('__react')).map(k=>el[k]),seen=new WeakSet(),q=roots.map(x=>[x,0]);while(q.length){const [x,d]=q.shift();if(!x||typeof x!=='object'||seen.has(x)||d>7)continue;seen.add(x);for(const k of Object.keys(x).slice(0,100)){let v;try{v=x[k]}catch(e){continue}if((k==='id'||k==='itemId'||k==='group_id')&&/^\\d{15,22}$/.test(String(v)))return String(v);if(v&&typeof v==='object')q.push([v,d+1])}}}catch(e){}return''};" +
-      "window.__pongTikTokScan=()=>{document.querySelectorAll('video').forEach(v=>{v.muted=true;v.defaultMuted=true;v.volume=0});" +
+      "const visibleVideo=()=>Array.from(document.querySelectorAll('video')).filter(v=>v.id!=='pong-integrated-swap').sort((a,b)=>score(b)-score(a))[0]||null;" +
+      "window.__pongClearIntegratedSwap=()=>{const o=document.getElementById('pong-integrated-swap'),v=window.__pongIntegratedOriginal;if(o){try{o.pause();o.__pongAbort&&o.__pongAbort.abort();o.__pongBlob&&URL.revokeObjectURL(o.__pongBlob)}catch(e){}o.remove()}if(v){v.style.opacity=v.dataset.pongOriginalOpacity||'';delete v.dataset.pongOriginalOpacity}window.__pongIntegratedOriginal=null};" +
+      "window.__pongApplyIntegratedSwap=s=>{try{if(!s||!s.streamUrl){window.__pongClearIntegratedSwap();return false}const original=visibleVideo();if(!original)return false;let overlay=document.getElementById('pong-integrated-swap');if(!overlay){overlay=document.createElement('video');overlay.id='pong-integrated-swap';overlay.playsInline=true;overlay.muted=true;overlay.defaultMuted=true;overlay.setAttribute('playsinline','');overlay.style.cssText='position:absolute;inset:0;width:100%;height:100%;pointer-events:none;background:#000;z-index:1;object-fit:contain;margin:0'}const parent=original.parentElement||document.body;if(getComputedStyle(parent).position==='static')parent.style.position='relative';if(overlay.parentElement!==parent)parent.appendChild(overlay);if(window.__pongIntegratedOriginal&&window.__pongIntegratedOriginal!==original){window.__pongIntegratedOriginal.style.opacity=window.__pongIntegratedOriginal.dataset.pongOriginalOpacity||''}window.__pongIntegratedOriginal=original;if(!Object.prototype.hasOwnProperty.call(original.dataset,'pongOriginalOpacity'))original.dataset.pongOriginalOpacity=original.style.opacity||'';overlay.style.objectFit=getComputedStyle(original).objectFit||'contain';const session=String(s.sessionId||'');const mediaUrl='https://v16-webapp-prime.us.tiktok.com'+String(s.streamUrl);const reveal=()=>{if(overlay.readyState>=2&&window.__pongIntegratedOriginal===original){const t=Number(s.currentTime);try{if(Number.isFinite(t)&&Math.abs(overlay.currentTime-t)>.75)overlay.currentTime=t}catch(e){}try{if(Number.isFinite(t)&&Math.abs(original.currentTime-t)>.75)original.currentTime=t}catch(e){}original.style.opacity='0';overlay.style.visibility='visible';if(s.paused===true||original.paused)overlay.pause();else overlay.play().catch(()=>{})}};if(overlay.dataset.session!==session){if(overlay.__pongAbort)overlay.__pongAbort.abort();if(overlay.__pongBlob)URL.revokeObjectURL(overlay.__pongBlob);overlay.dataset.session=session;overlay.style.visibility='hidden';const controller=new AbortController(),ms=new MediaSource(),blob=URL.createObjectURL(ms);overlay.__pongAbort=controller;overlay.__pongBlob=blob;overlay.src=blob;overlay.load();ms.addEventListener('sourceopen',async()=>{try{const sb=ms.addSourceBuffer('video/mp4; codecs=\"avc1.64001f\"'),queue=[];let ended=false;const pump=()=>{if(sb.updating||!queue.length){if(ended&&!sb.updating&&!queue.length&&ms.readyState==='open'){try{ms.endOfStream()}catch(e){}}return}try{sb.appendBuffer(queue.shift())}catch(e){controller.abort()}};sb.addEventListener('updateend',()=>{reveal();pump()});const response=await fetch(mediaUrl,{cache:'no-store',signal:controller.signal});if(!response.ok||!response.body)throw new Error('swap stream '+response.status);const reader=response.body.getReader();while(true){const part=await reader.read();if(part.done)break;if(part.value?.byteLength){queue.push(part.value);pump()}}ended=true;pump()}catch(e){if(e?.name!=='AbortError'){original.style.opacity=original.dataset.pongOriginalOpacity||'';overlay.style.visibility='hidden'}}},{once:true})}overlay.onloadeddata=reveal;overlay.onplaying=reveal;overlay.onerror=()=>{original.style.opacity=original.dataset.pongOriginalOpacity||'';overlay.style.visibility='hidden'};if(overlay.readyState>=2)reveal();return true}catch(e){return false}};" +
+      "window.__pongTikTokScan=()=>{" +
       "const found=[];document.querySelectorAll('.swiper-slide').forEach(slide=>{const id=reactId(slide),author=(slide.querySelector('a[href^=\"/@\"]')?.getAttribute('href')||'').slice(2),u=id?'https://www.tiktok.com/@'+encodeURIComponent(author||'_')+'/video/'+id:'';if(u&&!found.some(x=>x.u===u))found.push({u,s:slide.classList.contains('swiper-slide-active')?1:0,t:slide.getBoundingClientRect().top})});" +
       "document.querySelectorAll('a[href*=\"/video/\"]').forEach(a=>{const u=canonical(a.href);if(u&&!found.some(x=>x.u===u))found.push({u,s:score(a),t:a.getBoundingClientRect().top})});" +
       "found.sort((a,b)=>b.s-a.s||Math.abs(a.t)-Math.abs(b.t));let current=found[0]?.u||canonical(location.href);" +
@@ -209,7 +232,10 @@ public class MainActivity extends Activity {
     settings.setDomStorageEnabled(true);
     settings.setDatabaseEnabled(true);
     settings.setMediaPlaybackRequiresUserGesture(true);
-    settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+    // The transformed stream is served by the trusted Pong host on the local
+    // network and is composited over the HTTPS TikTok page. No other mixed
+    // content is injected by the app.
+    settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
     settings.setLoadWithOverviewMode(false);
     settings.setUseWideViewPort(true);
     settings.setCacheMode(WebSettings.LOAD_DEFAULT);
@@ -219,6 +245,45 @@ public class MainActivity extends Activity {
     tiktokWeb.addJavascriptInterface(new TikTokFeedBridge(), "PongTikTokFeed");
     tiktokWeb.setWebChromeClient(new WebChromeClient());
     tiktokWeb.setWebViewClient(new WebViewClient() {
+      @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+        Uri requested = request.getUrl();
+        String path = requested == null ? "" : String.valueOf(requested.getPath());
+        if ("https".equalsIgnoreCase(requested == null ? "" : requested.getScheme()) &&
+            path.startsWith("/__pong_swap/")) {
+          String sessionId = path.substring("/__pong_swap/".length()).replaceAll("[^A-Za-z0-9_-]", "");
+          String upstream = integratedSwapStreams.get(sessionId);
+          if (upstream == null || upstream.isEmpty()) return null;
+          try {
+            HttpURLConnection connection = (HttpURLConnection) new URL(upstream).openConnection();
+            connection.setConnectTimeout(5_000);
+            connection.setReadTimeout(0);
+            connection.setUseCaches(false);
+            connection.setRequestProperty("Accept", "video/mp4,video/*;q=0.9,*/*;q=0.1");
+            connection.setRequestProperty("Origin", "http://192.168.1.124:8787");
+            connection.setRequestProperty("Referer", "http://192.168.1.124:8787/pong");
+            connection.connect();
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+              connection.disconnect();
+              return null;
+            }
+            InputStream body = new FilterInputStream(connection.getInputStream()) {
+              @Override public void close() throws IOException {
+                try { super.close(); } finally { connection.disconnect(); }
+              }
+            };
+            HashMap<String, String> headers = new HashMap<>();
+            headers.put("Cache-Control", "no-store");
+            headers.put("Content-Type", "video/mp4");
+            headers.put("X-Content-Type-Options", "nosniff");
+            headers.put("Access-Control-Allow-Origin", "https://www.tiktok.com");
+            return new WebResourceResponse("video/mp4", null, status, "OK", headers, body);
+          } catch (Exception ignored) {
+            return null;
+          }
+        }
+        return super.shouldInterceptRequest(view, request);
+      }
       @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
         String scheme = request.getUrl().getScheme();
         // TikTok periodically tries to wake its native app. Keep this workflow
@@ -255,8 +320,13 @@ public class MainActivity extends Activity {
     tiktokStatus.setGravity(Gravity.CENTER);
     tiktokStatus.setSingleLine(true);
     tiktokStatus.setLayoutParams(new LinearLayout.LayoutParams(0, dp(48), 1));
-    Button swapButton = tiktokControlButton("Swap current");
-    swapButton.setOnClickListener(view -> swapCurrentTikTokVideo());
+    Button swapButton = tiktokControlButton("Swap on");
+    swapButton.setOnClickListener(view -> {
+      tiktokSwapEnabled = !tiktokSwapEnabled;
+      swapButton.setText(tiktokSwapEnabled ? "Swap off" : "Swap on");
+      if (tiktokSwapEnabled) requestTikTokIntegratedSwap();
+      else clearTikTokIntegratedSwap();
+    });
     tiktokControls.addView(pongButton);
     tiktokControls.addView(tiktokStatus);
     tiktokControls.addView(swapButton);
@@ -292,12 +362,14 @@ public class MainActivity extends Activity {
       tiktokControls.bringToFront();
       tiktokWeb.evaluateJavascript(tiktokObserverScript(), null);
       updateTikTokStatus(currentTikTokUrl.isEmpty() ? "Sign in or choose a video" : "Video ready");
+      if (tiktokSwapEnabled && isTikTokPageUrl(currentTikTokUrl)) requestTikTokIntegratedSwap();
     });
   }
 
   private void hideTikTokMode() {
     if (tiktokWeb == null) return;
     tiktokVisible = false;
+    clearTikTokIntegratedSwap();
     tiktokWeb.evaluateJavascript(
       "try{document.querySelectorAll('video,audio').forEach(v=>{v.pause();v.muted=true;v.volume=0})}catch(e){}",
       null
@@ -315,18 +387,80 @@ public class MainActivity extends Activity {
     ));
   }
 
-  private void swapCurrentTikTokVideo() {
+  private void requestTikTokIntegratedSwap() {
     if (!isTikTokPageUrl(currentTikTokUrl)) {
       updateTikTokStatus("Open a TikTok video first");
       if (tiktokWeb != null) tiktokWeb.evaluateJavascript(tiktokObserverScript(), null);
       return;
     }
     final String target = currentTikTokUrl;
-    hideTikTokMode();
+    final int generation = ++tiktokSwapGeneration;
+    updateTikTokStatus("Preparing swap…");
     if (web != null) web.post(() -> web.evaluateJavascript(
       "try{window.PongTikTokLiveSwapCurrent&&window.PongTikTokLiveSwapCurrent(" + JSONObject.quote(target) + ")}catch(e){}",
-      null
+      ignored -> {
+        if (generation != tiktokSwapGeneration || !tiktokSwapEnabled) return;
+        tiktokSwapHandler.removeCallbacks(tiktokSwapPoller);
+        tiktokSwapHandler.post(tiktokSwapPoller);
+      }
     ));
+  }
+
+  private static String unwrapJavascriptResult(String raw) {
+    if (raw == null || "null".equals(raw) || "undefined".equals(raw)) return "";
+    try {
+      if (raw.startsWith("\"") && raw.endsWith("\"")) return new JSONArray("[" + raw + "]").getString(0);
+    } catch (Exception ignored) {}
+    return raw;
+  }
+
+  private void pollTikTokIntegratedSwap() {
+    if (!tiktokVisible || !tiktokSwapEnabled || web == null || tiktokWeb == null) return;
+    final int generation = tiktokSwapGeneration;
+    web.evaluateJavascript(
+      "(()=>{try{return window.PongTikTokLiveIntegratedState?window.PongTikTokLiveIntegratedState():''}catch(e){return''}})()",
+      raw -> {
+        if (generation != tiktokSwapGeneration || !tiktokVisible || !tiktokSwapEnabled) return;
+        try {
+          String decoded = unwrapJavascriptResult(raw);
+          JSONObject state = decoded.isEmpty() ? new JSONObject() : new JSONObject(decoded);
+          String requestedUrl = state.optString("requestedUrl", "");
+          String streamUrl = state.optString("streamUrl", "");
+          boolean ready = state.optBoolean("ready", false);
+          if (requestedUrl.equals(currentTikTokUrl) && ready && !streamUrl.isEmpty()) {
+            String sessionId = state.optString("sessionId", "").replaceAll("[^A-Za-z0-9_-]", "");
+            if (sessionId.isEmpty()) throw new IllegalStateException("Missing swap session");
+            integratedSwapStreams.put(sessionId, streamUrl);
+            state.put("streamUrl", "/__pong_swap/" + sessionId + "?g=" + generation);
+            tiktokWeb.evaluateJavascript(
+              "try{window.__pongApplyIntegratedSwap&&window.__pongApplyIntegratedSwap(" + state + ")}catch(e){}",
+              null
+            );
+            updateTikTokStatus("Swap live · " + Math.max(1, nearbyTikTokUrls.size()) + " queued");
+          } else {
+            updateTikTokStatus("Preparing swap…");
+          }
+        } catch (Exception ignored) {
+          updateTikTokStatus("Preparing swap…");
+        }
+        tiktokSwapHandler.postDelayed(tiktokSwapPoller, readyPollDelayMs());
+      }
+    );
+  }
+
+  private int readyPollDelayMs() {
+    return 240;
+  }
+
+  private void clearTikTokIntegratedSwap() {
+    tiktokSwapGeneration += 1;
+    tiktokSwapHandler.removeCallbacks(tiktokSwapPoller);
+    integratedSwapStreams.clear();
+    if (tiktokWeb != null) tiktokWeb.evaluateJavascript(
+      "try{window.__pongClearIntegratedSwap&&window.__pongClearIntegratedSwap()}catch(e){}",
+      null
+    );
+    if (tiktokVisible) updateTikTokStatus(currentTikTokUrl.isEmpty() ? "Choose a video" : "TikTok ready");
   }
 
   private final class TikTokFeedBridge {
@@ -357,6 +491,11 @@ public class MainActivity extends Activity {
           nearbyTikTokUrls.addAll(validated);
           updateTikTokStatus("Ready · " + validated.size() + " queued");
           forwardTikTokFeedToPong(safe);
+          if (tiktokSwapEnabled) {
+            clearTikTokIntegratedSwap();
+            tiktokSwapEnabled = true;
+            requestTikTokIntegratedSwap();
+          }
         });
       } catch (Exception ignored) {}
     }

@@ -9,8 +9,8 @@ android {
     defaultConfig {
         minSdk 24
         targetSdk 35
-        versionCode 2788
-        versionName '27.88'
+        versionCode 2789
+        versionName '27.89'
         buildConfigField 'String', 'OBSERVER_PAIR', "\"${escapedObserverPair}\""
     }
     flavorDimensions 'instance'

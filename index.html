@@ -1794,7 +1794,8 @@ lastVideoUrlsInputValue = videoUrlsInput ? videoUrlsInput.value || '' : '';
 const pongTikTokLiveState = {
   current: '',
   urls: [],
-  receivedAt: 0
+  receivedAt: 0,
+  requestedUrl: ''
 };
 
 function pongCanonicalTikTokVideoPage(rawUrl) {
@@ -1859,6 +1860,16 @@ window.PongTikTokLiveSwapCurrent = rawUrl => {
     showSortingIndicator('Open a TikTok video first');
     return false;
   }
+  pongTikTokLiveState.requestedUrl = current;
+  // An ordinary Load Videos action deliberately starts without a face. TikTok
+  // live mode is different: the user explicitly enabled one persistent face
+  // for a rolling feed, so retain that selection across each post handoff.
+  const retainedFaceIds = typeof normalizePongFaceSwapFaceIds === 'function'
+    ? normalizePongFaceSwapFaceIds(pongFaceSwapState?.selectedFaceIds?.length
+      ? pongFaceSwapState.selectedFaceIds
+      : pongFaceSwapState?.selectedFaceId)
+    : [];
+  const retainPersistentSwap = Boolean(pongFaceSwapState?.enabled && retainedFaceIds.length);
   const ordered = [];
   const append = value => {
     const canonical = pongCanonicalTikTokVideoPage(value);
@@ -1904,8 +1915,53 @@ window.PongTikTokLiveSwapCurrent = rawUrl => {
   window.PongLoadAllVideosOnce = true;
   window.PongPreserveActiveImporterForNextLoad = true;
   loadVideosButton.click();
+  if (retainPersistentSwap) {
+    setPongFaceSwapSelection(retainedFaceIds);
+    setPongFaceSwapPersistentEnabled(true);
+    const activationDeadline = Date.now() + 8_000;
+    const activateMountedTikTok = () => {
+      const wrapper = pongFaceSwapCurrentWrapper();
+      const video = wrapper?.querySelector('video');
+      if (wrapper && video) {
+        void primePongFaceSwap(pongFaceSwapState.selectedFaceId);
+        return;
+      }
+      if (Date.now() < activationDeadline) requestAnimationFrame(activateMountedTikTok);
+    };
+    requestAnimationFrame(activateMountedTikTok);
+  }
   showSortingIndicator(`TikTok ready: ${playbackUrls.length} full videos`);
   return true;
+};
+
+window.PongTikTokLiveIntegratedState = () => {
+  try {
+    const wrapper = typeof pongFaceSwapCurrentWrapper === 'function'
+      ? pongFaceSwapCurrentWrapper()
+      : document.querySelector('.video-wrapper.deck-active, .video-wrapper.most-visible');
+    const video = wrapper?.querySelector('video');
+    const sessionId = String(wrapper?.dataset?.pongFaceSwapSessionId || '');
+    const currentSrc = String(video?.currentSrc || video?.src || '');
+    const streamUrl = sessionId && currentSrc.includes(`/pong-swap/sessions/${sessionId}/stream`)
+      ? currentSrc
+      : '';
+    const ready = Boolean(
+      streamUrl &&
+      wrapper?.dataset?.pongFaceSwapActive === 'true' &&
+      Number(video?.readyState || 0) >= 2
+    );
+    return JSON.stringify({
+      requestedUrl: pongTikTokLiveState.requestedUrl || pongTikTokLiveState.current,
+      streamUrl,
+      sessionId,
+      ready,
+      currentTime: Number(video?.currentTime || 0),
+      duration: Number.isFinite(Number(video?.duration)) ? Number(video.duration) : 0,
+      paused: Boolean(video?.paused)
+    });
+  } catch (_) {
+    return '';
+  }
 };
 
 function openPongTikTokLiveMode() {
