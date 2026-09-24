@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.9.3
+// @version      7.9.4
 // @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
@@ -717,29 +717,180 @@
   }
 
   function extractPageDurationSeconds(doc = document) {
-    const candidates = [];
     const add = value => {
       const seconds = Number(value || 0);
-      if (Number.isFinite(seconds) && seconds > 0 && seconds < 86400) candidates.push(seconds);
+      return Number.isFinite(seconds) && seconds > 0 && seconds < 86400 ? seconds : 0;
     };
     try {
-      doc.querySelectorAll('video,audio').forEach(media => add(media.duration));
-      doc.querySelectorAll('meta[itemprop="duration"],meta[property="video:duration"],meta[name="duration"]').forEach(meta => {
+      // The largest duration in the document is not necessarily the active
+      // movie: watch pages commonly preload many recommendation cards. Prefer
+      // the visible/largest player, then authoritative page metadata, then the
+      // first player configuration value.
+      const media = [...doc.querySelectorAll('video,audio')]
+        .map(element => ({
+          element,
+          seconds: add(element.duration),
+          area: Math.max(0, Number(element.clientWidth || 0) * Number(element.clientHeight || 0)),
+          visible: element.getClientRects?.().length > 0
+        }))
+        .filter(item => item.seconds > 0)
+        .sort((left, right) => Number(right.visible) - Number(left.visible) || right.area - left.area);
+      if (media[0]?.seconds) return media[0].seconds;
+
+      for (const meta of doc.querySelectorAll('meta[itemprop="duration"],meta[property="video:duration"],meta[name="duration"]')) {
         const value = String(meta.getAttribute('content') || '').trim();
         const iso = value.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/i);
-        if (iso) add((Number(iso[1] || 0) * 3600) + (Number(iso[2] || 0) * 60) + Number(iso[3] || 0));
-        else add(value);
-      });
-      const source = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
-      let match;
-      const numeric = /["'](?:video_)?duration["']\s*:\s*["']?(\d+(?:\.\d+)?)/gi;
-      while ((match = numeric.exec(source))) add(match[1]);
-      const isoPattern = /["']duration["']\s*:\s*["']PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)/gi;
-      while ((match = isoPattern.exec(source))) {
-        add((Number(match[1] || 0) * 3600) + (Number(match[2] || 0) * 60) + Number(match[3] || 0));
+        const seconds = iso
+          ? add((Number(iso[1] || 0) * 3600) + (Number(iso[2] || 0) * 60) + Number(iso[3] || 0))
+          : add(value);
+        if (seconds) return seconds;
       }
+      const source = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+      const numeric = source.match(/["'](?:video_)?duration["']\s*:\s*["']?(\d+(?:\.\d+)?)/i);
+      if (numeric && add(numeric[1])) return add(numeric[1]);
+      const iso = source.match(/["']duration["']\s*:\s*["']PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)/i);
+      if (iso) return add((Number(iso[1] || 0) * 3600) + (Number(iso[2] || 0) * 60) + Number(iso[3] || 0));
     } catch (_) {}
-    return candidates.length ? Math.max(...candidates) : 0;
+    return 0;
+  }
+
+  function canonicalWatchPageUrl(rawUrl, baseUrl = location.href) {
+    try {
+      const url = new URL(rawUrl, baseUrl);
+      url.hash = '';
+      for (const key of [...url.searchParams.keys()]) {
+        if (/^(?:utm_.+|ref|src|source|track|click)$/i.test(key)) url.searchParams.delete(key);
+      }
+      return url.toString();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function collectLogicalWatchPageUrls(doc = document, rawUrl = location.href, limit = 80) {
+    const currentUrl = canonicalWatchPageUrl(rawUrl, rawUrl);
+    const current = new URL(currentUrl || rawUrl, rawUrl);
+    const isPornhubWatch = /(^|\.)pornhub\.com$/i.test(current.hostname) &&
+      /\/view_video\.php\?[^#]*\bviewkey=/i.test(current.pathname + current.search);
+    const watchPath = url => (
+      /\/view_video\.php\?[^#]*\bviewkey=[^&#]+/i.test(url.pathname + url.search) ||
+      /\/(?:watch|videos?|scene|post)\/(?!search(?:[/?#]|$)|category(?:[/?#]|$)|tags?(?:[/?#]|$))[^/?#]+/i.test(url.pathname)
+    );
+    const collect = selector => {
+      const found = [];
+      const seen = new Set();
+      for (const anchor of doc.querySelectorAll(selector)) {
+        try {
+          const url = new URL(anchor.getAttribute('href') || anchor.href, current);
+          if (!['http:', 'https:'].includes(url.protocol)) continue;
+          if (url.hostname.toLowerCase() !== current.hostname.toLowerCase() || !watchPath(url)) continue;
+          const normalized = canonicalWatchPageUrl(url, current);
+          if (!normalized || normalized === currentUrl || seen.has(normalized)) continue;
+          seen.add(normalized);
+          found.push(normalized);
+        } catch (_) {}
+      }
+      return found;
+    };
+
+    let related = [];
+    if (isPornhubWatch) {
+      // Pornhub places two anchors in every card and retains additional hidden
+      // carousels. Pick one URL per card from the primary related-video group.
+      const selectors = [
+        '#relatedVideosCenter li.pcVideoListItem a[href*="view_video.php?viewkey="]',
+        '#relatedVideosVPage li.pcVideoListItem a[href*="view_video.php?viewkey="]',
+        '[id*="related" i] li.pcVideoListItem a[href*="view_video.php?viewkey="]',
+        'li.pcVideoListItem a[href*="view_video.php?viewkey="]'
+      ];
+      for (const selector of selectors) {
+        const candidates = collect(selector);
+        if (candidates.length >= 2) {
+          related = candidates;
+          break;
+        }
+      }
+      // The watch page's primary recommendation rail contains sixteen cards.
+      // Never turn hidden rails, duplicate anchors or preview assets into extra
+      // Pong videos.
+      related = related.slice(0, 16);
+    } else {
+      related = collect(
+        'li.videoBox a[href],li.pcVideoListItem a[href],article a[href],' +
+        '[data-video-vkey] a[href],[class*="video-card" i] a[href]'
+      );
+      if (!related.length) related = collect('a[href]');
+    }
+    return [currentUrl, ...related].filter(Boolean).slice(0, Math.max(1, Number(limit || 80)));
+  }
+
+  function primaryMediaEntriesFromDoc(doc = document, pageUrl = location.href) {
+    const durationSeconds = extractPageDurationSeconds(doc);
+    const prioritized = [];
+    const add = rawValue => {
+      const value = absUrl(rawValue, pageUrl);
+      if (!value || value.startsWith('blob:') || !VIDEO_EXT_RE.test(value)) return;
+      if (/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname)) return;
+      if (!prioritized.includes(value)) prioritized.push(value);
+    };
+    try {
+      const media = [...doc.querySelectorAll('video')]
+        .map(element => ({
+          element,
+          area: Math.max(0, Number(element.clientWidth || 0) * Number(element.clientHeight || 0)),
+          visible: element.getClientRects?.().length > 0
+        }))
+        .sort((left, right) => Number(right.visible) - Number(left.visible) || right.area - left.area);
+      for (const item of media.slice(0, 2)) {
+        add(item.element.currentSrc);
+        add(item.element.src);
+        item.element.querySelectorAll('source[src]').forEach(source => add(source.src || source.getAttribute('src')));
+      }
+      if (doc === document && typeof performance?.getEntriesByType === 'function') {
+        performance.getEntriesByType('resource')
+          .map(entry => String(entry?.name || ''))
+          .filter(value => /\.m3u8(?:[?#]|$)/i.test(value))
+          .reverse()
+          .slice(0, 4)
+          .forEach(add);
+      }
+      doc.querySelectorAll(
+        'meta[property="og:video"],meta[property="og:video:url"],meta[property="og:video:secure_url"],meta[itemprop="contentUrl"]'
+      ).forEach(meta => add(meta.getAttribute('content')));
+
+      const rawHtml = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+      const identity = rawHtml.match(/["']?video[_-]?id["']?\s*[:=]\s*["']?(\d{5,})/i)?.[1] || '';
+      const scriptCandidates = [];
+      for (const script of doc.querySelectorAll('script')) {
+        const text = String(script.textContent || '');
+        if (!/(?:mediaDefinitions|flashvars|videoUrl|video_url|contentUrl)/i.test(text)) continue;
+        extractVideoUrlsFromText(text, pageUrl).forEach(value => {
+          const normalized = absUrl(value, pageUrl);
+          if (normalized && !scriptCandidates.includes(normalized)) scriptCandidates.push(normalized);
+        });
+      }
+      const ownCandidates = identity
+        ? scriptCandidates.filter(value => value.includes(`/${identity}/`) || value.includes(`_${identity}.`))
+        : [];
+      const ranked = (ownCandidates.length ? ownCandidates : scriptCandidates)
+        .filter(value => !/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname))
+        .map((value, index) => ({
+          value,
+          index,
+          score: (/master\.m3u8(?:[?#]|$)/i.test(value) ? 10_000_000 : 0) +
+            (/\.m3u8(?:[?#]|$)/i.test(value) ? 1_000_000 : 0) +
+            Number(value.match(/(?:^|[/_-])(\d{3,4})P(?:[_./-]|$)/i)?.[1] || 0)
+        }))
+        .sort((left, right) => right.score - left.score || left.index - right.index);
+      ranked.slice(0, 4).forEach(item => add(item.value));
+    } catch (_) {}
+    return prioritized.slice(0, 6).map(videoUrl => ({
+      videoUrl,
+      rawVideoUrl: videoUrl,
+      postUrl: pageUrl,
+      pageUrl,
+      durationSeconds
+    }));
   }
 
   function isLikelyWatchPage(rawUrl = location.href) {
@@ -2335,8 +2486,26 @@
   async function sendCaptureToRecall(mode, channel, ignoreUnder30 = false) {
     if (busy) throw new Error('A capture is already running');
     const watchPage = isLikelyWatchPage();
-    const directPageMode = mode === 'main' || watchPage;
-    const entries = directPageMode ? [] : await doScrape(false);
+    const watchPageUrls = watchPage
+      ? (mode === 'main' ? [location.href] : collectLogicalWatchPageUrls(document, location.href, 80))
+      : [];
+    let entries = [];
+    if (watchPage) {
+      const tasks = watchPageUrls.map((pageUrl, index) => async () => {
+        const doc = index === 0 ? document : await fetchDoc(pageUrl);
+        if (!doc) return [];
+        if (index === 0) {
+          doc.__uvsRawHtml = document.documentElement?.innerHTML || '';
+          doc.__uvsUrl = location.href;
+        }
+        return primaryMediaEntriesFromDoc(doc, pageUrl);
+      });
+      entries = (await pool(tasks, Math.min(6, tasks.length))).flat();
+    } else if (mode !== 'main') {
+      entries = await doScrape(false);
+    } else {
+      entries = primaryMediaEntriesFromDoc(document, location.href);
+    }
     const cleanEntries = (entries || []).map(entry => ({
       videoUrl: String(entry?.videoUrl || ''),
       rawVideoUrl: String(entry?.rawVideoUrl || ''),
@@ -2344,9 +2513,11 @@
       pageUrl: String(entry?.postUrl || location.href),
       durationSeconds: Math.max(0, Number(entry?.durationSeconds || entry?.duration || 0))
     })).filter(entry => entry.videoUrl || entry.rawVideoUrl || entry.postUrl);
-    const pageUrls = directPageMode
-      ? [location.href]
-      : [...new Set(cleanEntries.map(entry => entry.postUrl).filter(Boolean))];
+    const pageUrls = watchPage
+      ? watchPageUrls
+      : mode === 'main'
+        ? [location.href]
+        : [...new Set(cleanEntries.map(entry => entry.postUrl).filter(Boolean))];
     if (!pageUrls.length) pageUrls.push(location.href);
     const payload = {
       id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -2359,7 +2530,9 @@
       // A browser listing can expose several renditions/previews for each
       // watch page. Send page identities, not every asset, so Recall resolves
       // one logical primary video per watch page.
-      entries: directPageMode ? [] : cleanEntries.map(entry => ({
+      entries: cleanEntries.map(entry => ({
+        videoUrl: entry.videoUrl,
+        rawVideoUrl: entry.rawVideoUrl,
         postUrl: entry.postUrl,
         pageUrl: entry.pageUrl,
         durationSeconds: entry.durationSeconds
@@ -3215,6 +3388,10 @@
     openEromeFromPong,
 
     extractVideoUrls: (doc = document) => extractVideoUrls(doc, getBaseUrl()),
+    extractPageDurationSeconds,
+    collectLogicalWatchPageUrls,
+    primaryMediaEntriesFromDoc,
+    sendCaptureToRecall,
 
     formatPongExport,
     formatPongPasteExport,
@@ -3234,7 +3411,7 @@
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.8.1 loaded on', location.href);
+  log('Universal Video Scraper v7.9.4 loaded on', location.href);
 
   if (getStoredBool(AUTO_SCRAPE_KEY, false)) {
     setTimeout(() => doScrape(false), 800);
