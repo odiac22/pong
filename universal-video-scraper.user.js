@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.9.1
+// @version      7.9.2
 // @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
@@ -58,6 +58,7 @@
   const PANEL_POS_KEY = 'uvs_panel_position_v1';
   const PANEL_COLLAPSED_KEY = 'uvs_panel_collapsed_v1';
   const RECALL_CHANNEL_KEY = 'uvs_recall_channel_v1';
+  const RECALL_MIN_30_KEY = 'uvs_recall_min_30_v1';
   const PONG_ENDPOINTS = Array.isArray(globalThis.PONG_LOCAL_ENDPOINTS)
     ? globalThis.PONG_LOCAL_ENDPOINTS
     : ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
@@ -715,6 +716,32 @@
       .filter((u, i, arr) => arr.indexOf(u) === i);
   }
 
+  function extractPageDurationSeconds(doc = document) {
+    const candidates = [];
+    const add = value => {
+      const seconds = Number(value || 0);
+      if (Number.isFinite(seconds) && seconds > 0 && seconds < 86400) candidates.push(seconds);
+    };
+    try {
+      doc.querySelectorAll('video,audio').forEach(media => add(media.duration));
+      doc.querySelectorAll('meta[itemprop="duration"],meta[property="video:duration"],meta[name="duration"]').forEach(meta => {
+        const value = String(meta.getAttribute('content') || '').trim();
+        const iso = value.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/i);
+        if (iso) add((Number(iso[1] || 0) * 3600) + (Number(iso[2] || 0) * 60) + Number(iso[3] || 0));
+        else add(value);
+      });
+      const source = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+      let match;
+      const numeric = /["'](?:video_)?duration["']\s*:\s*["']?(\d+(?:\.\d+)?)/gi;
+      while ((match = numeric.exec(source))) add(match[1]);
+      const isoPattern = /["']duration["']\s*:\s*["']PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)/gi;
+      while ((match = isoPattern.exec(source))) {
+        add((Number(match[1] || 0) * 3600) + (Number(match[2] || 0) * 60) + Number(match[3] || 0));
+      }
+    } catch (_) {}
+    return candidates.length ? Math.max(...candidates) : 0;
+  }
+
   async function makeEntryFromVideoUrl(videoUrl, postUrl, postIndex, artist) {
     const rawVideoUrl = videoUrl;
     const base = {
@@ -1005,6 +1032,10 @@
       let entries = await Promise.all(
         vids.map((videoUrl, index) => makeEntryFromVideoUrl(videoUrl, url, index, artist))
       );
+      const durationSeconds = doc ? extractPageDurationSeconds(doc) : 0;
+      if (durationSeconds > 0) {
+        entries = entries.map(entry => ({ ...entry, durationSeconds }));
+      }
 
       if (!entries.length && artist.source === 'erome') {
         entries = [
@@ -2289,7 +2320,7 @@
     }
   }
 
-  async function sendCaptureToRecall(mode, channel) {
+  async function sendCaptureToRecall(mode, channel, ignoreUnder30 = false) {
     if (busy) throw new Error('A capture is already running');
     const entries = await doScrape(mode === 'main');
     const cleanEntries = (entries || []).map(entry => ({
@@ -2309,7 +2340,8 @@
       sourceUrl: location.href,
       title: cleanTitle(document.title || location.hostname),
       pageUrls,
-      entries: cleanEntries
+      entries: cleanEntries,
+      ignoreUnder30: ignoreUnder30 === true
     };
     let lastError = '';
     for (const endpoint of PONG_ENDPOINTS) {
@@ -2354,17 +2386,21 @@
       #uvs-recall-menu button{width:100%;height:24px;margin:1px 0;padding:0 6px;border:1px solid rgba(255,255,255,.08);border-radius:6px;color:rgba(255,255,255,.88);background:rgba(51,65,85,.72);font:700 9px inherit;cursor:pointer}
       #uvs-recall-menu button[data-action]{background:rgba(37,99,235,.78)}
       #uvs-recall-channel{color:#93c5fd!important;background:rgba(30,41,59,.76)!important}
+      #uvs-recall-min30{display:flex;align-items:center;gap:5px;height:22px;margin:2px 1px;padding:0 4px;color:#cbd5e1;font-size:8px;white-space:nowrap;cursor:pointer}
+      #uvs-recall-min30 input{width:11px;height:11px;margin:0;accent-color:#22c55e}
       #uvs-recall-status{padding:3px 1px 1px;color:#94a3b8;font-size:8px;line-height:1.15;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     `;
     document.head.appendChild(style);
     const root = document.createElement('div');
     root.id = 'uvs-recall-capture';
     const stored = Number(getStoredJson(RECALL_CHANNEL_KEY, 1)) === 2 ? 2 : 1;
+    const min30 = getStoredBool(RECALL_MIN_30_KEY, false);
     root.dataset.channel = String(stored);
     root.innerHTML = `
       <button id="uvs-recall-open" type="button">Pong</button>
       <div id="uvs-recall-menu" hidden>
         <button id="uvs-recall-channel" type="button">Recall ${stored}</button>
+        <label id="uvs-recall-min30"><input type="checkbox" ${min30 ? 'checked' : ''}>Ignore &lt;30s</label>
         <button type="button" data-action="main">Main video</button>
         <button type="button" data-action="all">All videos</button>
         <div id="uvs-recall-status">Ready</div>
@@ -2373,6 +2409,7 @@
     const menu = root.querySelector('#uvs-recall-menu');
     const open = root.querySelector('#uvs-recall-open');
     const channelButton = root.querySelector('#uvs-recall-channel');
+    const min30Checkbox = root.querySelector('#uvs-recall-min30 input');
     const status = root.querySelector('#uvs-recall-status');
     open.addEventListener('click', event => {
       event.preventDefault();
@@ -2386,13 +2423,20 @@
       setStoredJson(RECALL_CHANNEL_KEY, next);
       channelButton.textContent = `Recall ${next}`;
     });
+    min30Checkbox.addEventListener('change', () => {
+      setStoredBool(RECALL_MIN_30_KEY, min30Checkbox.checked);
+    });
     root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', async event => {
       event.preventDefault();
       if (root.dataset.busy === 'true') return;
       root.dataset.busy = 'true';
       status.textContent = button.dataset.action === 'main' ? 'Capturing main…' : 'Capturing all…';
       try {
-        const result = await sendCaptureToRecall(button.dataset.action, Number(root.dataset.channel));
+        const result = await sendCaptureToRecall(
+          button.dataset.action,
+          Number(root.dataset.channel),
+          min30Checkbox.checked
+        );
         status.textContent = `${result.videos} ready in R${root.dataset.channel}`;
       } catch (error) {
         status.textContent = String(error?.message || error).slice(0, 80);
