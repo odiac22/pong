@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.9.5
+// @version      7.9.6
 // @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
@@ -424,14 +424,16 @@
 
   /* FETCH */
 
-  async function fetchText(url, attempt = 1) {
+  async function fetchText(url, attempt = 1, options = {}) {
+    const timeout = Math.max(3000, Number(options.timeout || 30000));
+    const maxRetries = Math.max(1, Number(options.maxRetries || MAX_RETRIES));
     try {
       if (typeof GM_xmlhttpRequest !== 'undefined') {
         return await new Promise((resolve, reject) => {
           GM_xmlhttpRequest({
             method: 'GET',
             url,
-            timeout: 30000,
+            timeout,
             anonymous: false,
             withCredentials: true,
             headers: {
@@ -459,17 +461,17 @@
 
       return await res.text();
     } catch (e) {
-      if (attempt >= MAX_RETRIES) throw e;
+      if (attempt >= maxRetries) throw e;
 
       await sleep(400 * attempt);
 
-      return fetchText(url, attempt + 1);
+      return fetchText(url, attempt + 1, options);
     }
   }
 
-  async function fetchDoc(url) {
+  async function fetchDoc(url, options = {}) {
     try {
-      const html = await fetchText(url);
+      const html = await fetchText(url, 1, options);
       const doc = new DOMParser().parseFromString(html, 'text/html');
 
       doc.__uvsRawHtml = html;
@@ -957,7 +959,12 @@
       );
       if (!related.length) related = collect('a[href]');
     }
-    return [currentUrl, ...related].filter(Boolean).slice(0, Math.max(1, Number(limit || 80)));
+    // A listing/profile page is only a container. Its inline autoplay/hover
+    // preview is not an extra logical video. A genuine watch page keeps its
+    // current movie as item one, followed by its related cards.
+    return [watchPath(current) ? currentUrl : '', ...related]
+      .filter(Boolean)
+      .slice(0, Math.max(1, Number(limit || 80)));
   }
 
   function primaryMediaEntriesFromDoc(doc = document, pageUrl = location.href) {
@@ -2628,15 +2635,17 @@
     let entries = [];
     if (watchPage) {
       const tasks = watchPageUrls.map((pageUrl, index) => async () => {
-        const doc = index === 0 ? document : await fetchDoc(pageUrl);
+        const doc = pageUrl === canonicalWatchPageUrl(location.href)
+          ? document
+          : await fetchDoc(pageUrl, { timeout: 12000, maxRetries: 1 });
         if (!doc) return [];
-        if (index === 0) {
+        if (doc === document) {
           doc.__uvsRawHtml = document.documentElement?.innerHTML || '';
           doc.__uvsUrl = location.href;
         }
         return primaryMediaEntriesFromDoc(doc, pageUrl);
       });
-      entries = (await pool(tasks, Math.min(6, tasks.length))).flat();
+      entries = (await pool(tasks, Math.min(12, tasks.length))).flat();
     } else if (mode !== 'main') {
       entries = await doScrape(false);
     } else {
@@ -2681,7 +2690,7 @@
       sourceIsWatchPage: watchPage,
       browserRelayClientId
     };
-    let lastError = '';
+    const endpointErrors = [];
     for (const endpoint of PONG_ENDPOINTS) {
       try {
         const result = await new Promise((resolve, reject) => {
@@ -2712,10 +2721,11 @@
         }
         return result;
       } catch (error) {
-        lastError = error?.message || String(error);
+        endpointErrors.push(error?.message || String(error));
       }
     }
-    throw new Error(lastError || 'Pong PC server is unreachable');
+    const usefulError = endpointErrors.find(message => !/connection failed/i.test(message));
+    throw new Error(usefulError || endpointErrors.at(-1) || 'Pong PC server is unreachable');
   }
 
   function addRecallCaptureButton() {
