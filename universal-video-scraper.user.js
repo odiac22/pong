@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.9.4
+// @version      7.9.5
 // @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
@@ -71,6 +71,8 @@
   let lastResult = null;
   let busy = false;
   let panelStatusEl = null;
+  let browserMediaRelayGeneration = 0;
+  const browserMediaRelayPreferredCandidates = new Map();
 
   /* HELPERS */
 
@@ -752,6 +754,140 @@
       if (iso) return add((Number(iso[1] || 0) * 3600) + (Number(iso[2] || 0) * 60) + Number(iso[3] || 0));
     } catch (_) {}
     return 0;
+  }
+
+  function responseHeaderValue(rawHeaders, name) {
+    const wanted = String(name || '').toLowerCase();
+    for (const line of String(rawHeaders || '').split(/\r?\n/)) {
+      const separator = line.indexOf(':');
+      if (separator < 1 || line.slice(0, separator).trim().toLowerCase() !== wanted) continue;
+      return line.slice(separator + 1).trim();
+    }
+    return '';
+  }
+
+  function relaySafeHeader(value, maxLength = 3000) {
+    return String(value || '').replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, maxLength);
+  }
+
+  function browserRelayRequest(options) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        ...options,
+        onload: response => resolve(response),
+        onerror: () => reject(new Error('Browser relay request failed')),
+        ontimeout: () => reject(new Error('Browser relay request timed out')),
+        onabort: () => reject(new Error('Browser relay request was aborted'))
+      });
+    });
+  }
+
+  async function fetchBrowserMediaRelayRange(job) {
+    const preferred = browserMediaRelayPreferredCandidates.get(job.sourceId);
+    const candidates = [...new Set([
+      preferred,
+      ...(Array.isArray(job.candidates) ? job.candidates : [])
+    ].map(value => String(value || '').trim()).filter(value => /^https?:\/\//i.test(value)))];
+    let lastError = 'No captured media candidate was available';
+    for (const candidate of candidates) {
+      try {
+        const response = await browserRelayRequest({
+          method: 'GET',
+          url: candidate,
+          headers: {
+            'Accept': 'video/*,application/octet-stream;q=0.9,*/*;q=0.5',
+            'Range': String(job.range || 'bytes=0-2097151'),
+            'Referer': String(job.pageUrl || location.href)
+          },
+          responseType: 'arraybuffer',
+          timeout: 12000,
+          anonymous: false
+        });
+        const body = response.response;
+        const byteLength = Number(body?.byteLength || 0);
+        const contentType = responseHeaderValue(response.responseHeaders, 'content-type');
+        if (![200, 206].includes(Number(response.status)) || !byteLength) {
+          throw new Error(`HTTP ${response.status || 0}`);
+        }
+        if (/\b(?:text\/html|application\/json)\b/i.test(contentType)) {
+          throw new Error(`Unexpected ${contentType}`);
+        }
+        if (Number(response.status) === 200 && byteLength > 2 * 1024 * 1024 + 64 * 1024) {
+          throw new Error('The media host ignored the requested byte range');
+        }
+        browserMediaRelayPreferredCandidates.set(job.sourceId, candidate);
+        return {
+          status: Number(response.status),
+          body,
+          sourceUrl: candidate,
+          contentType: contentType || 'video/mp4',
+          contentRange: responseHeaderValue(response.responseHeaders, 'content-range'),
+          acceptRanges: responseHeaderValue(response.responseHeaders, 'accept-ranges') || 'bytes'
+        };
+      } catch (error) {
+        lastError = error?.message || String(error);
+      }
+    }
+    throw new Error(lastError);
+  }
+
+  async function completeBrowserMediaRelayJob(endpoint, job) {
+    let result;
+    try {
+      result = await fetchBrowserMediaRelayRange(job);
+    } catch (error) {
+      result = {
+        status: 502,
+        body: new ArrayBuffer(0),
+        contentType: 'text/plain',
+        contentRange: '',
+        acceptRanges: 'bytes',
+        sourceUrl: '',
+        error: error?.message || String(error)
+      };
+    }
+    const response = await browserRelayRequest({
+      method: 'POST',
+      url: `${endpoint}/media-browser-relay/jobs/${encodeURIComponent(job.id)}/result`,
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Pong-SimpCity-Controller': '1',
+        'X-Pong-Relay-Status': String(result.status || 502),
+        'X-Pong-Relay-Content-Type': relaySafeHeader(result.contentType, 200),
+        'X-Pong-Relay-Content-Range': relaySafeHeader(result.contentRange, 200),
+        'X-Pong-Relay-Accept-Ranges': relaySafeHeader(result.acceptRanges, 40),
+        'X-Pong-Relay-Source-Url': relaySafeHeader(result.sourceUrl),
+        'X-Pong-Relay-Error': relaySafeHeader(result.error, 500)
+      },
+      data: result.body,
+      timeout: 30000
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`Relay upload HTTP ${response.status}`);
+    }
+  }
+
+  function startBrowserMediaRelay(rawEndpoint, clientId) {
+    const endpoint = String(rawEndpoint || '').replace(/\/+$/, '');
+    const generation = ++browserMediaRelayGeneration;
+    const worker = async () => {
+      while (generation === browserMediaRelayGeneration) {
+        try {
+          const response = await browserRelayRequest({
+            method: 'GET',
+            url: `${endpoint}/media-browser-relay/jobs?clientId=${encodeURIComponent(clientId)}`,
+            headers: { 'X-Pong-SimpCity-Controller': '1' },
+            timeout: 30000
+          });
+          if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`);
+          const payload = JSON.parse(response.responseText || '{}');
+          if (payload?.job) await completeBrowserMediaRelayJob(endpoint, payload.job);
+        } catch (_) {
+          if (generation === browserMediaRelayGeneration) await sleep(500);
+        }
+      }
+    };
+    for (let index = 0; index < 3; index++) worker();
   }
 
   function canonicalWatchPageUrl(rawUrl, baseUrl = location.href) {
@@ -2519,6 +2655,9 @@
         ? [location.href]
         : [...new Set(cleanEntries.map(entry => entry.postUrl).filter(Boolean))];
     if (!pageUrls.length) pageUrls.push(location.href);
+    const browserRelayClientId = /(?:^|\.)pornhub\.com$/i.test(location.hostname)
+      ? (globalThis.crypto?.randomUUID?.() || `relay-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+      : '';
     const payload = {
       id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       bundleId: globalThis.crypto?.randomUUID?.() || `bundle-${Date.now()}`,
@@ -2539,7 +2678,8 @@
       })),
       reportedDurationSeconds: extractPageDurationSeconds(document),
       ignoreUnder30: ignoreUnder30 === true,
-      sourceIsWatchPage: watchPage
+      sourceIsWatchPage: watchPage,
+      browserRelayClientId
     };
     let lastError = '';
     for (const endpoint of PONG_ENDPOINTS) {
@@ -2564,7 +2704,12 @@
             ontimeout: () => reject(new Error('Pong capture timed out'))
           });
         });
-        notify(`Recall ${payload.channel} ready: ${Number(result?.videos || 0)} video${Number(result?.videos || 0) === 1 ? '' : 's'}`);
+        if (result?.browserRelay?.enabled && browserRelayClientId) {
+          startBrowserMediaRelay(String(endpoint).replace(/\/+$/, ''), browserRelayClientId);
+          notify(`Recall ${payload.channel} ready: ${Number(result?.videos || 0)} playable video${Number(result?.videos || 0) === 1 ? '' : 's'}. Keep this source tab open while watching.`);
+        } else {
+          notify(`Recall ${payload.channel} ready: ${Number(result?.videos || 0)} video${Number(result?.videos || 0) === 1 ? '' : 's'}`);
+        }
         return result;
       } catch (error) {
         lastError = error?.message || String(error);
