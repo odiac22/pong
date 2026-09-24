@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.9.6
+// @version      7.9.7
 // @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
@@ -883,6 +883,11 @@
           });
           if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`);
           const payload = JSON.parse(response.responseText || '{}');
+          if (payload?.expired) {
+            browserMediaRelayGeneration++;
+            if (location.pathname === '/browser-relay-keeper') setTimeout(() => window.close(), 100);
+            return;
+          }
           if (payload?.job) await completeBrowserMediaRelayJob(endpoint, payload.job);
         } catch (_) {
           if (generation === browserMediaRelayGeneration) await sleep(500);
@@ -2688,7 +2693,12 @@
       reportedDurationSeconds: extractPageDurationSeconds(document),
       ignoreUnder30: ignoreUnder30 === true,
       sourceIsWatchPage: watchPage,
-      browserRelayClientId
+      browserRelayClientId,
+      browserRelayBrowser: /firefox/i.test(navigator.userAgent)
+        ? 'firefox'
+        : /edg\//i.test(navigator.userAgent)
+          ? 'edge'
+          : 'chrome'
     };
     const endpointErrors = [];
     for (const endpoint of PONG_ENDPOINTS) {
@@ -3486,6 +3496,16 @@
 
   /* WIRING */
 
+  const browserRelayKeeperClientId = location.pathname === '/browser-relay-keeper'
+    ? String(new URL(location.href).searchParams.get('pongBrowserRelayClientId') || '')
+    : '';
+  if (/^[a-z0-9-]{8,100}$/i.test(browserRelayKeeperClientId)) {
+    startBrowserMediaRelay(location.origin, browserRelayKeeperClientId);
+    document.documentElement.dataset.pongBrowserRelayKeeper = 'active';
+    log('Universal Video Scraper v7.9.7 browser relay keeper active');
+    return;
+  }
+
   try {
     if (typeof GM_registerMenuCommand !== 'undefined') {
       GM_registerMenuCommand('Scrape videos', () => doScrape(false));
@@ -3566,7 +3586,7 @@
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.9.4 loaded on', location.href);
+  log('Universal Video Scraper v7.9.7 loaded on', location.href);
 
   if (getStoredBool(AUTO_SCRAPE_KEY, false)) {
     setTimeout(() => doScrape(false), 800);
