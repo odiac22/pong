@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.9.2
+// @version      7.9.3
 // @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
@@ -740,6 +740,18 @@
       }
     } catch (_) {}
     return candidates.length ? Math.max(...candidates) : 0;
+  }
+
+  function isLikelyWatchPage(rawUrl = location.href) {
+    try {
+      const url = new URL(rawUrl, location.href);
+      const path = url.pathname + url.search;
+      return /\/view_video\.php\?[^#]*\bviewkey=/i.test(path) ||
+        /\/(?:watch|videos?|scene|post)\/(?!search(?:[/?#]|$)|category(?:[/?#]|$)|tags?(?:[/?#]|$))[^/?#]+/i.test(url.pathname) ||
+        Boolean(document.querySelector('meta[property="og:type"][content*="video" i],meta[property="og:video"],video'));
+    } catch (_) {
+      return false;
+    }
   }
 
   async function makeEntryFromVideoUrl(videoUrl, postUrl, postIndex, artist) {
@@ -2322,7 +2334,9 @@
 
   async function sendCaptureToRecall(mode, channel, ignoreUnder30 = false) {
     if (busy) throw new Error('A capture is already running');
-    const entries = await doScrape(mode === 'main');
+    const watchPage = isLikelyWatchPage();
+    const directPageMode = mode === 'main' || watchPage;
+    const entries = directPageMode ? [] : await doScrape(false);
     const cleanEntries = (entries || []).map(entry => ({
       videoUrl: String(entry?.videoUrl || ''),
       rawVideoUrl: String(entry?.rawVideoUrl || ''),
@@ -2330,7 +2344,9 @@
       pageUrl: String(entry?.postUrl || location.href),
       durationSeconds: Math.max(0, Number(entry?.durationSeconds || entry?.duration || 0))
     })).filter(entry => entry.videoUrl || entry.rawVideoUrl || entry.postUrl);
-    const pageUrls = [...new Set(cleanEntries.map(entry => entry.postUrl).filter(Boolean))];
+    const pageUrls = directPageMode
+      ? [location.href]
+      : [...new Set(cleanEntries.map(entry => entry.postUrl).filter(Boolean))];
     if (!pageUrls.length) pageUrls.push(location.href);
     const payload = {
       id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -2340,8 +2356,17 @@
       sourceUrl: location.href,
       title: cleanTitle(document.title || location.hostname),
       pageUrls,
-      entries: cleanEntries,
-      ignoreUnder30: ignoreUnder30 === true
+      // A browser listing can expose several renditions/previews for each
+      // watch page. Send page identities, not every asset, so Recall resolves
+      // one logical primary video per watch page.
+      entries: directPageMode ? [] : cleanEntries.map(entry => ({
+        postUrl: entry.postUrl,
+        pageUrl: entry.pageUrl,
+        durationSeconds: entry.durationSeconds
+      })),
+      reportedDurationSeconds: extractPageDurationSeconds(document),
+      ignoreUnder30: ignoreUnder30 === true,
+      sourceIsWatchPage: watchPage
     };
     let lastError = '';
     for (const endpoint of PONG_ENDPOINTS) {
