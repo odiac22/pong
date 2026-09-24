@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.8.1
-// @description  Universal video URL scraper with external-playable filtering, Erome browser-required diagnostics, page links, and remembered minimized panel.
+// @version      7.9.1
+// @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
 // @downloadURL  https://odiac22.github.io/pong/universal-video-scraper.user.js
@@ -57,6 +57,10 @@
   const AUTO_SCRAPE_KEY = 'uvs_auto_scrape_enabled_v1';
   const PANEL_POS_KEY = 'uvs_panel_position_v1';
   const PANEL_COLLAPSED_KEY = 'uvs_panel_collapsed_v1';
+  const RECALL_CHANNEL_KEY = 'uvs_recall_channel_v1';
+  const PONG_ENDPOINTS = Array.isArray(globalThis.PONG_LOCAL_ENDPOINTS)
+    ? globalThis.PONG_LOCAL_ENDPOINTS
+    : ['http://192.168.1.124:8787', 'http://127.0.0.1:8787'];
 
   const PONG_ARTIST_PREFIX = '#PA|';
   const PONG_VIDEO_PREFIX = '#PV|';
@@ -2285,12 +2289,128 @@
     }
   }
 
+  async function sendCaptureToRecall(mode, channel) {
+    if (busy) throw new Error('A capture is already running');
+    const entries = await doScrape(mode === 'main');
+    const cleanEntries = (entries || []).map(entry => ({
+      videoUrl: String(entry?.videoUrl || ''),
+      rawVideoUrl: String(entry?.rawVideoUrl || ''),
+      postUrl: String(entry?.postUrl || location.href),
+      pageUrl: String(entry?.postUrl || location.href),
+      durationSeconds: Math.max(0, Number(entry?.durationSeconds || entry?.duration || 0))
+    })).filter(entry => entry.videoUrl || entry.rawVideoUrl || entry.postUrl);
+    const pageUrls = [...new Set(cleanEntries.map(entry => entry.postUrl).filter(Boolean))];
+    if (!pageUrls.length) pageUrls.push(location.href);
+    const payload = {
+      id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      bundleId: globalThis.crypto?.randomUUID?.() || `bundle-${Date.now()}`,
+      channel: Number(channel) === 2 ? 2 : 1,
+      mode: mode === 'main' ? 'main' : 'all',
+      sourceUrl: location.href,
+      title: cleanTitle(document.title || location.hostname),
+      pageUrls,
+      entries: cleanEntries
+    };
+    let lastError = '';
+    for (const endpoint of PONG_ENDPOINTS) {
+      try {
+        const result = await new Promise((resolve, reject) => {
+          GM_xmlhttpRequest({
+            method: 'POST',
+            url: `${String(endpoint).replace(/\/+$/, '')}/media-page/recall`,
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Pong-SimpCity-Controller': '1'
+            },
+            data: JSON.stringify(payload),
+            timeout: 180000,
+            onload: response => {
+              let data = {};
+              try { data = JSON.parse(response.responseText || '{}'); } catch (_) {}
+              if (response.status >= 200 && response.status < 300 && data.ok !== false) resolve(data);
+              else reject(new Error(data.error || `HTTP ${response.status}`));
+            },
+            onerror: () => reject(new Error('Pong server connection failed')),
+            ontimeout: () => reject(new Error('Pong capture timed out'))
+          });
+        });
+        notify(`Recall ${payload.channel} ready: ${Number(result?.videos || 0)} video${Number(result?.videos || 0) === 1 ? '' : 's'}`);
+        return result;
+      } catch (error) {
+        lastError = error?.message || String(error);
+      }
+    }
+    throw new Error(lastError || 'Pong PC server is unreachable');
+  }
+
+  function addRecallCaptureButton() {
+    if (document.getElementById('uvs-recall-capture')) return;
+    const style = document.createElement('style');
+    style.textContent = `
+      #uvs-recall-capture{position:fixed;left:34%;bottom:10px;z-index:2147483647;font:700 10px ui-sans-serif,system-ui,-apple-system,sans-serif;color:#fff}
+      #uvs-recall-open{min-width:42px;height:26px;border:1px solid rgba(255,255,255,.2);border-radius:999px;background:rgba(29,78,216,.78);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);color:rgba(255,255,255,.92);padding:0 9px;box-shadow:0 3px 12px rgba(0,0,0,.34);font:700 10px inherit;cursor:pointer}
+      #uvs-recall-menu{position:absolute;left:0;bottom:32px;width:116px;padding:5px;border:1px solid rgba(255,255,255,.12);border-radius:9px;background:rgba(10,13,20,.9);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 5px 18px rgba(0,0,0,.46)}
+      #uvs-recall-menu[hidden]{display:none}
+      #uvs-recall-menu button{width:100%;height:24px;margin:1px 0;padding:0 6px;border:1px solid rgba(255,255,255,.08);border-radius:6px;color:rgba(255,255,255,.88);background:rgba(51,65,85,.72);font:700 9px inherit;cursor:pointer}
+      #uvs-recall-menu button[data-action]{background:rgba(37,99,235,.78)}
+      #uvs-recall-channel{color:#93c5fd!important;background:rgba(30,41,59,.76)!important}
+      #uvs-recall-status{padding:3px 1px 1px;color:#94a3b8;font-size:8px;line-height:1.15;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    `;
+    document.head.appendChild(style);
+    const root = document.createElement('div');
+    root.id = 'uvs-recall-capture';
+    const stored = Number(getStoredJson(RECALL_CHANNEL_KEY, 1)) === 2 ? 2 : 1;
+    root.dataset.channel = String(stored);
+    root.innerHTML = `
+      <button id="uvs-recall-open" type="button">Pong</button>
+      <div id="uvs-recall-menu" hidden>
+        <button id="uvs-recall-channel" type="button">Recall ${stored}</button>
+        <button type="button" data-action="main">Main video</button>
+        <button type="button" data-action="all">All videos</button>
+        <div id="uvs-recall-status">Ready</div>
+      </div>`;
+    document.body.appendChild(root);
+    const menu = root.querySelector('#uvs-recall-menu');
+    const open = root.querySelector('#uvs-recall-open');
+    const channelButton = root.querySelector('#uvs-recall-channel');
+    const status = root.querySelector('#uvs-recall-status');
+    open.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      menu.hidden = !menu.hidden;
+    });
+    channelButton.addEventListener('click', event => {
+      event.preventDefault();
+      const next = root.dataset.channel === '2' ? 1 : 2;
+      root.dataset.channel = String(next);
+      setStoredJson(RECALL_CHANNEL_KEY, next);
+      channelButton.textContent = `Recall ${next}`;
+    });
+    root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', async event => {
+      event.preventDefault();
+      if (root.dataset.busy === 'true') return;
+      root.dataset.busy = 'true';
+      status.textContent = button.dataset.action === 'main' ? 'Capturing main…' : 'Capturing all…';
+      try {
+        const result = await sendCaptureToRecall(button.dataset.action, Number(root.dataset.channel));
+        status.textContent = `${result.videos} ready in R${root.dataset.channel}`;
+      } catch (error) {
+        status.textContent = String(error?.message || error).slice(0, 80);
+      } finally {
+        root.dataset.busy = 'false';
+      }
+    }));
+  }
+
   function addFloatingButtons() {
     if (isPongAppPage()) {
       addPongEromeLauncher();
       return;
     }
 
+    addRecallCaptureButton();
+    const compactSite = detectSite();
+    if (compactSite !== 'erome-album' && compactSite !== 'erome-profile') return;
     if (document.getElementById('uvs-panel')) return;
 
     const css = `
