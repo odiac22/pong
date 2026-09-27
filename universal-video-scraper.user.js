@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.20.0
+// @version      7.21.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -1263,11 +1263,11 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function primaryMediaEntriesFromDoc(doc = document, pageUrl = location.href) {
     const evidence = primaryVideoEvidence(String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || ''), pageUrl);
-    if (evidence) return evidence.videoUrls.map(videoUrl => ({
+    if (evidence) return enrichRenditionQuality(doc, pageUrl, evidence.videoUrls.map(videoUrl => ({
       videoUrl, rawVideoUrl: videoUrl, postUrl: pageUrl, pageUrl,
       title: evidence.title, durationSeconds: evidence.durationSeconds,
       identityEvidence: evidence.identityEvidence
-    }));
+    })));
     const durationSeconds = extractPageDurationSeconds(doc);
     const prioritized = [];
     const add = (rawValue, declaredMedia = false) => {
@@ -1368,13 +1368,53 @@ function primaryVideoEvidence(html, pageUrl) {
         .sort((left, right) => right.score - left.score || left.index - right.index);
       ranked.slice(0, 4).forEach(item => add(item.value));
     } catch (_) {}
-    return prioritized.slice(0, 6).map(videoUrl => ({
+    return enrichRenditionQuality(doc, pageUrl, prioritized.slice(0, 12).map(videoUrl => ({
       videoUrl,
       rawVideoUrl: videoUrl,
       postUrl: pageUrl,
       pageUrl,
       durationSeconds
-    }));
+    })));
+  }
+
+  // Enrich only identity-admitted renditions. Page-wide quality labels must
+  // never import a recommendation/ad as an alternate encode of the main video.
+  function enrichRenditionQuality(doc, pageUrl, entries) {
+    const byUrl = new Map(entries.map(entry => [entry.videoUrl, { ...entry }]));
+    const html = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+    const label = (rawUrl, value) => {
+      const entry = byUrl.get(absUrl(decodeLiteralMediaValue(rawUrl), pageUrl));
+      const height = scoreMediaQuality('', value);
+      if (entry && height && !entry.height) Object.assign(entry, { height, qualityEvidence: 'player_label' });
+    };
+    for (const item of literalSourceRecordsFromText(html, pageUrl)) label(item.value, item.label);
+    for (const match of html.matchAll(/\bfile\s*:\s*["']([^"']+)["']/gi)) {
+      for (const item of match[1].split(',')) {
+        const pair = item.match(/^\s*\[([^\]]+)]\s*(https?:\/\/.+)\s*$/i);
+        if (pair) label(pair[2], pair[1]);
+      }
+    }
+    for (const video of doc.querySelectorAll('video')) {
+      if (video.closest?.('aside,[role="complementary"],[data-ad],.advertisement,.ad-container')) continue;
+      const sources = [...video.querySelectorAll('source[src]')];
+      const urls = [video.currentSrc, video.getAttribute('src'), ...sources.map(s => s.getAttribute('src'))]
+        .filter(Boolean).map(value => absUrl(value, pageUrl)).filter(value => /^https?:\/\//i.test(value));
+      const anchor = urls.map(url => byUrl.get(url)).find(Boolean);
+      if (!anchor) continue; // A shared duration alone is not identity evidence.
+      for (const url of urls) {
+        if (/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(url).pathname)) continue;
+        if (!byUrl.has(url)) byUrl.set(url, { ...anchor, videoUrl: url, rawVideoUrl: url,
+          width: null, height: null, browserCurrent: false, qualityEvidence: 'unknown' });
+      }
+      for (const source of sources) label(source.getAttribute('src'),
+        source.getAttribute('label') || source.getAttribute('res') || source.getAttribute('data-res') || source.getAttribute('size'));
+      const current = byUrl.get(absUrl(video.currentSrc || '', pageUrl));
+      if (current && video.videoWidth > 0 && video.videoHeight > 0) {
+        Object.assign(current, { width: video.videoWidth, height: video.videoHeight,
+          qualityEvidence: 'live_decoder', browserCurrent: true });
+      }
+    }
+    return [...byUrl.values()];
   }
 
   function independentVideoGroupsFromDoc(doc, pageUrl) {
@@ -1511,11 +1551,12 @@ function primaryVideoEvidence(html, pageUrl) {
             onerror: () => finish(Object.assign(new Error('YouTube resolver unavailable'), { code: 'network_error' })), ontimeout: abort, onabort: abort
           }); } catch (error) { finish(error); }
         });
-        return [{ ...entry(payload.videoUrl), durationSeconds: Number(payload.durationSeconds || durationSeconds), height: diagnosticNumber(payload.height, 32768), title: payload.title || entry('').title }];
+        return [{ ...entry(payload.videoUrl), durationSeconds: Number(payload.durationSeconds || durationSeconds), height: diagnosticNumber(payload.height, 32768), qualityEvidence: 'resolver', title: payload.title || entry('').title }];
       } catch (error) { if (options.signal?.aborted) throw error; if (error?.code === 'youtube_helper_update') helperNeedsUpdate = true; }
     }
     const formats = (player?.streamingData?.formats || []).filter(format => format.url && /^video\//.test(format.mimeType || '')).sort((a,b) => (b.height || 0) - (a.height || 0));
-    if (formats.length) return formats.map(format => entry(format.url));
+    if (formats.length) return formats.map(format => ({ ...entry(format.url), width: format.width, height: format.height,
+      fps: format.fps, bitrate: format.bitrate, qualityEvidence: 'resolver' }));
     throw Object.assign(new Error(helperNeedsUpdate ? 'Restart the updated Pong capture helper; Copy log for details' : 'YouTube stream unavailable; Copy log for details'), { code: helperNeedsUpdate ? 'youtube_helper_update' : 'youtube_stream' });
   }
 
@@ -3205,7 +3246,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function requestDiagnosticOutput(record) {
     return {
-      phase: ['start','append','complete','page_fetch','platform_resolve','media_probe','duration_probe'].includes(record.phase) ? record.phase : 'unknown',
+      phase: ['start','append','complete','page_fetch','platform_resolve','media_probe','duration_probe','quality_probe'].includes(record.phase) ? record.phase : 'unknown',
       state: ['pending','complete','failed'].includes(record.state) ? record.state : 'unknown',
       elapsedMs: diagnosticNumber(record.state === 'pending' ? Math.round(performance.now() - record.startedAt) : record.elapsedMs),
       timeoutMs: diagnosticNumber(record.timeoutMs), httpStatus: diagnosticNumber(record.httpStatus, 599), failure: diagnosticFailure(record.failure),
@@ -3350,8 +3391,8 @@ function primaryVideoEvidence(html, pageUrl) {
     });
   }
 
-  function probeCapturedDuration(url, diagnostics = null) {
-    const trace = diagnosticRequest(diagnostics, 'duration_probe', 5000);
+  function probeCapturedMetadata(url, diagnostics = null, phase = 'quality_probe', signal = null) {
+    const trace = diagnosticRequest(diagnostics, phase, 3500);
     // Unknown metadata is not proof that a video is missing. Ask the actual
     // media decoder, without playing or enabling sound, with a strict deadline.
     return new Promise(resolve => {
@@ -3361,19 +3402,48 @@ function primaryVideoEvidence(html, pageUrl) {
       let settled = false;
       const done = (value, failure = 'none') => {
         if (settled) return; settled = true; clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
         Object.assign(trace, { durationSeconds: diagnosticNumber(value), mediaReadyState: video.readyState, mediaErrorCode: video.error?.code || 0, videoWidth: video.videoWidth, videoHeight: video.videoHeight });
+        const metadata = { durationSeconds: Number.isFinite(value) && value > 0 ? value : 0,
+          width: video.videoWidth || 0, height: video.videoHeight || 0, failure };
         finishDiagnosticRequest(trace, failure);
+        video.onloadedmetadata = null; video.onerror = null;
         video.removeAttribute('src'); try { video.load(); } catch (_) {}
-        resolve(Number.isFinite(value) && value > 0 ? value : 0);
+        resolve(metadata);
       };
-      const timer = setTimeout(() => done(0, 'timeout'), 5000);
-      video.addEventListener('loadedmetadata', () => done(video.duration), { once: true });
-      video.addEventListener('error', () => done(0, 'media_unverified'), { once: true });
+      const timer = setTimeout(() => done(0, 'timeout'), 3500);
+      const abort = () => done(0, 'aborted');
+      if (signal?.aborted) { abort(); return; }
+      signal?.addEventListener('abort', abort, { once: true });
+      video.onloadedmetadata = () => done(video.duration);
+      video.onerror = () => done(0, 'media_unverified');
       video.src = url;
     });
   }
 
-  async function firstVerifiedRecallEntry(entries, pageUrl, durationHint = 0, minimumDurationSeconds = 30, diagnostics = null) {
+  async function probeCapturedDuration(url, diagnostics = null) {
+    return (await probeCapturedMetadata(url, diagnostics, 'duration_probe')).durationSeconds;
+  }
+
+  function renditionQualitySummary(entry) {
+    return { width: diagnosticNumber(entry?.width, 32768), height: diagnosticNumber(entry?.height, 32768),
+      fps: diagnosticNumber(entry?.fps, 1000), bitrate: diagnosticNumber(entry?.bitrate, 1e12),
+      evidence: ['live_decoder','metadata_decoder','player_label','resolver'].includes(entry?.qualityEvidence) ? entry.qualityEvidence : 'unknown' };
+  }
+
+  function compareRenditionQuality(a, b) {
+    // Leave adaptive manifest handling to Pong's existing highest-rendition
+    // policy. Never pretend a manifest URL is a measured progressive encode.
+    const adaptive = entry => /\.(?:m3u8|mpd)(?:[?#]|$)/i.test(entry.videoUrl);
+    const pixels = entry => adaptive(entry) && !entry.height ? Infinity :
+      Number(entry.width || 0) * Number(entry.height || 0) || Number(entry.height || 0) ** 2 * 16 / 9;
+    return pixels(b) - pixels(a) ||
+      Number(b.fps || 0) - Number(a.fps || 0) || Number(b.bitrate || 0) - Number(a.bitrate || 0) ||
+      Number(adaptive(b)) - Number(adaptive(a)) ||
+      Number(b.browserCurrent === true) - Number(a.browserCurrent === true);
+  }
+
+  async function firstVerifiedRecallEntry(entries, pageUrl, durationHint = 0, minimumDurationSeconds = 30, diagnostics = null, signal = null) {
     let durationSeconds = Math.max(
       0,
       Number(durationHint || 0),
@@ -3383,28 +3453,62 @@ function primaryVideoEvidence(html, pageUrl) {
     // masquerade as a full movie merely because its URL ends in .mp4.
     if (!durationSeconds && entries?.[0]?.videoUrl) durationSeconds = await probeCapturedDuration(entries[0].videoUrl, diagnostics);
     if (durationSeconds < Math.max(1, Number(minimumDurationSeconds || 0))) return null;
+    // URLs often have opaque names (_3.mp4, _7.mp4); a response-range check
+    // cannot measure quality. Read metadata, never play, and rank BEFORE send.
+    const renditions = (entries || []).map(entry => ({ ...entry }));
+    const pending = renditions.length > 1 ? renditions.filter(entry =>
+      !/\.(?:m3u8|mpd)(?:[?#]|$)/i.test(entry.videoUrl) && entry.qualityEvidence !== 'live_decoder') : [];
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(3, pending.length) }, async () => {
+      while (next < pending.length) {
+        if (signal?.aborted) return;
+        const entry = pending[next++];
+        const metadata = await probeCapturedMetadata(entry.videoUrl, diagnostics, 'quality_probe', signal);
+        if (metadata.durationSeconds && Math.abs(metadata.durationSeconds - durationSeconds) > Math.max(2, durationSeconds * 0.02)) {
+          entry.qualityRejected = true; continue; // Preview/wrong-duration asset.
+        }
+        if (metadata.width > 0 && metadata.height > 0) Object.assign(entry, {
+          width: metadata.width, height: metadata.height, qualityEvidence: 'metadata_decoder' });
+      }
+    }));
+    if (signal?.aborted) return null;
+    const ranked = renditions.filter(entry => !entry.qualityRejected).sort(compareRenditionQuality);
     const verifiedUrls = [];
     let verifiedContextUrl = '';
-    for (const entry of entries || []) {
+    let selected = null, failedHigher = 0;
+    for (const entry of ranked) {
       const mediaUrl = String(entry?.videoUrl || entry?.rawVideoUrl || '').trim();
       const contextUrl = String(entry?.contextUrl || pageUrl || location.href);
-      if (!mediaUrl || !await probeCapturedMediaUrl(mediaUrl, contextUrl, diagnostics)) continue;
+      if (!mediaUrl || !await probeCapturedMediaUrl(mediaUrl, contextUrl, diagnostics)) { failedHigher++; continue; }
       if (!verifiedUrls.includes(mediaUrl)) verifiedUrls.push(mediaUrl);
       if (!verifiedContextUrl) verifiedContextUrl = contextUrl;
+      selected = entry;
       // Quality ordered: deliver the best verified source without waiting for
       // lower-quality alternates or promoting unrelated recommendation clips.
       break;
     }
     if (!verifiedUrls.length) return null;
+    const qualitySelection = {
+      policy: 'highest_known_accessible', selected: renditionQualitySummary(selected),
+      candidateCount: renditions.length, rejectedDurationCount: renditions.filter(entry => entry.qualityRejected).length,
+      unresolvedQualityCount: ranked.filter(entry => !entry.height).length,
+      unmeasuredQualityCount: ranked.filter(entry => !['live_decoder','metadata_decoder'].includes(entry.qualityEvidence)).length,
+      failedHigherRankedCount: failedHigher, fallback: failedHigher > 0,
+      adaptiveManifest: /\.(?:m3u8|mpd)(?:[?#]|$)/i.test(selected.videoUrl),
+      browser: renditionQualitySummary(renditions.find(entry => entry.browserCurrent)),
+      candidates: renditions.map(entry => ({ ...renditionQualitySummary(entry), selected: entry === selected, rejectedDuration: !!entry.qualityRejected }))
+    };
     return {
+      width: selected.width || null, height: selected.height || null,
+      qualitySelection,
       videoUrl: verifiedUrls[0],
       rawVideoUrl: verifiedUrls[0],
       videoUrls: verifiedUrls,
       postUrl: String(pageUrl || entries?.[0]?.postUrl || location.href),
       pageUrl: String(pageUrl || entries?.[0]?.postUrl || location.href),
       contextUrl: verifiedContextUrl || String(pageUrl || location.href),
-      title: String(entries?.[0]?.title || ''),
-      identityEvidence: String(entries?.[0]?.identityEvidence || ''),
+      title: String(selected.title || entries?.[0]?.title || ''),
+      identityEvidence: String(selected.identityEvidence || entries?.[0]?.identityEvidence || ''),
       durationSeconds
     };
   }
@@ -3584,8 +3688,9 @@ function primaryVideoEvidence(html, pageUrl) {
           extracted,
           targetUrl,
           youtubeVideoId(targetUrl) ? Number(extracted[0]?.durationSeconds || 0) : target.directMedia ? Number(target.durationSeconds || 0) : inlineGroup ? inlineGroup.durationSeconds : Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
-          minimumDurationSeconds, attempt.requests
+          minimumDurationSeconds, attempt.requests, controller.signal
         );
+        attempt.qualitySelection = resolved?.qualitySelection || null;
         attempt.verificationMs = Math.round(performance.now() - verificationStarted);
         attempt.elapsedMs = Math.round(performance.now() - attemptStarted); attempt.stage = 'complete';
         if (resolved && target.logicalVideoId) resolved.logicalVideoId = target.logicalVideoId;
@@ -3787,7 +3892,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 2, version: '7.20.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 3, version: '7.21.0', id: session.id, createdAt: session.createdAt,
       verificationScope: 'metadata_and_bounded_response_probe_not_playback',
       mode: session.mode, channel: session.channel,
       ignoreUnder30: session.ignoreUnder30, stage: session.stage,
@@ -3844,6 +3949,7 @@ function primaryVideoEvidence(html, pageUrl) {
             failure: diagnosticFailure(attempt.failure || (attempt.stage === 'complete' ? 'none' : result?.done ? result.verificationFailure : 'pending')),
             stage: ['page_fetch','extract','verify','complete'].includes(attempt.stage) ? attempt.stage : 'unknown',
             pageFetchMode: ['current_document','resolver_only','network'].includes(attempt.pageFetchMode) ? attempt.pageFetchMode : 'unknown',
+            qualitySelection: attempt.qualitySelection || null,
             timing: { fetchMs: diagnosticNumber(attempt.fetchMs), extractionMs: diagnosticNumber(attempt.extractionMs), verificationMs: diagnosticNumber(attempt.verificationMs),
               elapsedMs: diagnosticNumber(attempt.elapsedMs ?? (result.done ? result.resolutionMs : Math.round(performance.now() - attempt.startedAt))) },
             streams: (attempt.streams || []).map(stream => ({ type: ['hls','dash','mp4','webm','blob','unknown'].includes(stream.type) ? stream.type : 'unknown', signedQueryPresent: stream.signedQueryPresent === true,
@@ -4248,7 +4354,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.20.0 loaded on', location.href);
+  log('Universal Video Scraper v7.21.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
