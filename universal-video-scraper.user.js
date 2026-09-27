@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.24.0
+// @version      7.25.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -928,7 +928,7 @@ function primaryVideoEvidence(html, pageUrl) {
   async function fetchBrowserMediaRelayRange(job) {
     const preferred = browserMediaRelayPreferredCandidates.get(job.sourceId);
     const candidates = [...new Set([
-      preferred,
+      ...(job.pinCandidate ? [] : [preferred]),
       ...(Array.isArray(job.candidates) ? job.candidates : [])
     ].map(value => String(value || '').trim()).filter(value => /^https?:\/\//i.test(value)))];
     let lastError = 'No captured media candidate was available';
@@ -941,7 +941,8 @@ function primaryVideoEvidence(html, pageUrl) {
             headers: {
               'Accept': 'video/*,application/octet-stream;q=0.9,*/*;q=0.5',
               'Range': String(job.range || 'bytes=0-2097151'),
-              'Referer': String(job.pageUrl || location.href)
+              'Referer': String(job.pageUrl || location.href),
+              ...(job.validator ? { 'If-Range': String(job.validator) } : {})
             },
             responseType: 'arraybuffer',
             timeout: 12000,
@@ -966,6 +967,8 @@ function primaryVideoEvidence(html, pageUrl) {
             sourceUrl: candidate,
             contentType: contentType || 'video/mp4',
             contentRange: responseHeaderValue(response.responseHeaders, 'content-range'),
+            etag: responseHeaderValue(response.responseHeaders, 'etag'),
+            lastModified: responseHeaderValue(response.responseHeaders, 'last-modified'),
             acceptRanges: responseHeaderValue(response.responseHeaders, 'accept-ranges') || 'bytes'
           };
         } catch (error) {
@@ -978,8 +981,10 @@ function primaryVideoEvidence(html, pageUrl) {
     // captured resolutions first adds several doomed round trips before the
     // useful refresh, so go straight to the fresh-player path for this host.
     const forceFreshPlayer = /(?:^|\.)hqporner\.com\b/i.test(String(job.pageUrl || ''));
-    const capturedResult = forceFreshPlayer ? null : await tryCandidates(candidates);
+    const capturedResult = forceFreshPlayer && !job.pinCandidate ? null : await tryCandidates(job.pinCandidate ? candidates.slice(0, 1) : candidates);
     if (capturedResult) return capturedResult;
+    // Never mix a refreshed/lower-quality rendition into an in-progress file.
+    if (job.pinCandidate) throw new Error('The selected file could not be transferred. Keep Firefox open and send again.');
 
     // Some HQPorner CDN URLs are short-lived per-page grants: the 1 KiB proof
     // succeeds, but the same path can become 404 before Android requests its
@@ -1049,6 +1054,8 @@ function primaryVideoEvidence(html, pageUrl) {
         'X-Pong-Relay-Content-Range': relaySafeHeader(result.contentRange, 200),
         'X-Pong-Relay-Accept-Ranges': relaySafeHeader(result.acceptRanges, 40),
         'X-Pong-Relay-Source-Url': relaySafeHeader(result.sourceUrl),
+        'X-Pong-Relay-Etag': relaySafeHeader(result.etag, 300),
+        'X-Pong-Relay-Last-Modified': relaySafeHeader(result.lastModified, 100),
         'X-Pong-Relay-Error': relaySafeHeader(result.error, 500)
       },
       data: result.body,
@@ -1089,6 +1096,24 @@ function primaryVideoEvidence(html, pageUrl) {
     // Two Recall channels can coexist without six idle long-polls occupying
     // every browser connection slot needed for capture acknowledgements.
     for (let index = 0; index < (channel ? 2 : 3); index++) worker();
+  }
+
+  async function waitForPhoneTransfer(endpoint, clientId, sourceId, onProgress) {
+    const request = async (method, suffix, data) => {
+      const response = await browserRelayRequest({ method, url: `${endpoint}/media-browser-relay/transfers${suffix}`, headers: { 'X-Pong-SimpCity-Controller': '1', 'Content-Type': 'application/json' }, ...(data ? { data: JSON.stringify(data) } : {}), timeout: 8000 });
+      if (response.status !== 200) throw new Error('Phone transfer is unavailable. Keep Firefox open and send again.');
+      return JSON.parse(response.responseText || '{}').transfer;
+    };
+    let transfer = await request('POST', '', { clientId, sourceId });
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 60 * 60_000) {
+      if (transfer?.state === 'ready') return transfer;
+      if (!transfer || transfer.state === 'error') throw Object.assign(new Error(`Phone transfer failed (${transfer?.error || 'unknown'}). Nothing is ready to switch.`), { code: 'phone_transfer_failed' });
+      onProgress?.(transfer);
+      await sleep(750);
+      transfer = await request('GET', `/${encodeURIComponent(sourceId)}`);
+    }
+    throw new Error('Phone transfer took too long. Keep Firefox foregrounded and send again.');
   }
 
   function canonicalWatchPageUrl(rawUrl, baseUrl = location.href) {
@@ -3561,6 +3586,7 @@ function primaryVideoEvidence(html, pageUrl) {
       sourceIsWatchPage: isLikelyWatchPage(),
       browserRelayClientId,
       phoneConnectionOnly,
+      phoneTransferBeforeReady: phoneConnectionOnly,
       browserRelayBrowser: /firefox/i.test(navigator.userAgent)
         ? 'firefox'
         : /edg\//i.test(navigator.userAgent)
@@ -3574,7 +3600,7 @@ function primaryVideoEvidence(html, pageUrl) {
       try {
         if (phoneConnectionOnly) {
           const preflight = await browserRelayRequest({ method: 'GET', url: `${String(candidate).replace(/\/+$/, '')}/media-browser-relay/capabilities`, headers: { 'X-Pong-SimpCity-Controller': '1' }, timeout: 5000 });
-          if (preflight.status !== 200 || JSON.parse(preflight.responseText || '{}').phoneConnectionFiles !== true) {
+          if (preflight.status !== 200 || JSON.parse(preflight.responseText || '{}').phoneTransferBeforeReady !== true) {
             throw new Error('Restart the updated Pong server to enable phone connection. Recall was not changed.');
           }
         }
@@ -3595,7 +3621,7 @@ function primaryVideoEvidence(html, pageUrl) {
       const usefulError = endpointErrors.find(message => !/connection failed/i.test(message));
       throw new Error(usefulError || endpointErrors.at(-1) || 'Pong PC server is unreachable');
     }
-    if (phoneConnectionOnly && !started?.capabilities?.phoneConnectionFiles) {
+    if (phoneConnectionOnly && !started?.capabilities?.phoneTransferBeforeReady) {
       await postRecallCapturePayload(endpoint, { ...basePayload, capturePhase: 'complete', completedPages: 0, pageUrls: [], entries: [] }, 8000);
       throw new Error('Restart the updated Pong server before using the phone connection. Nothing was sent.');
     }
@@ -3608,6 +3634,7 @@ function primaryVideoEvidence(html, pageUrl) {
     let deliveredVideos = Number(started?.videos || 0);
     let verifiedSentThisRun = 0;
     let relayStarted = false;
+    const phoneTransferErrors = [];
     let appendChain = Promise.resolve();
     const captureDiagnostics = [];
     const publishCaptureDiagnostics = () => {
@@ -3642,11 +3669,20 @@ function primaryVideoEvidence(html, pageUrl) {
           throw new Error('Pong did not confirm phone-only routing');
         }
         deliveredVideos = Math.max(deliveredVideos, Number(result?.videos || 0));
-        if (entry) verifiedSentThisRun++;
         if (!relayStarted && result?.browserRelay?.enabled) {
           relayStarted = true;
           startBrowserMediaRelay(endpoint, browserRelayClientId, captureChannel);
         }
+        if (entry && phoneConnectionOnly) {
+          const sourceId = result?.browserRelay?.sourceIds?.[0];
+          if (!sourceId) throw new Error('Pong did not provide a phone transfer ID. Update the helper.');
+          diagnostic.phoneTransfer = await waitForPhoneTransfer(endpoint, browserRelayClientId, sourceId, transfer => {
+            diagnostic.phoneTransfer = transfer;
+            const label = `Transferring ${transfer.percent || 0}% · keep Firefox open`;
+            selection?.onStatus?.(target, label); setPanelStatus(label);
+          });
+        }
+        if (entry) verifiedSentThisRun++;
         setPanelStatus(`${verifiedSentThisRun}/${targets.length} sent · ${completedAtQueue}/${targets.length} checked`);
         return result;
         } finally { diagnostic.deliveryMs = Math.round(performance.now() - deliveryStart); }
@@ -3761,12 +3797,13 @@ function primaryVideoEvidence(html, pageUrl) {
       try {
         await queueAppend(target, verified, diagnostic);
         diagnostic.delivered = !!verified;
-        selection?.onStatus?.(target, verified ? 'Sent' : failureLabel);
+        selection?.onStatus?.(target, verified ? (phoneConnectionOnly ? 'Ready to switch' : 'Sent') : failureLabel);
       } catch (error) {
         diagnostic.appendError = true;
+        if (phoneConnectionOnly) phoneTransferErrors.push(error?.message || 'Phone transfer failed');
         diagnostic.deliveryFailure = diagnosticFailure(error?.code || 'delivery_failed');
         diagnostic.failure = diagnostic.deliveryFailure;
-        selection?.onStatus?.(target, 'Delivery failed');
+        selection?.onStatus?.(target, phoneConnectionOnly ? 'Transfer failed — not ready' : 'Delivery failed');
         publishCaptureDiagnostics();
       }
       diagnostic.elapsedMs = Math.round(performance.now() - targetStarted);
@@ -3801,13 +3838,14 @@ function primaryVideoEvidence(html, pageUrl) {
         ignoreUnder30
       });
     } catch (_) {}
+    if (!verifiedSentThisRun && phoneTransferErrors.length) throw new Error(phoneTransferErrors[0]);
     if (!verifiedSentThisRun) throw new Error(ignoreUnder30
       ? 'No verified playable video of at least 30 seconds was found; uncheck Skip <30s for short clips'
       : 'No verified playable video was found');
     notify(
       `Recall ${captureChannel} ready: ${verifiedSentThisRun}/${targets.length} sent this run` +
       (deliveredVideos !== verifiedSentThisRun ? ` (${deliveredVideos} total in Recall)` : '') +
-      (relayStarted ? '. Keep this source tab open for authenticated fallback playback.' : '')
+      (phoneConnectionOnly ? '. Transfer complete. Ready to switch to Pong.' : relayStarted ? '. Keep this source tab open for authenticated fallback playback.' : '')
     );
     return result;
   }
@@ -3923,7 +3961,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 3, version: '7.24.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 3, version: '7.25.0', id: session.id, createdAt: session.createdAt,
       phoneConnectionOnly: session.phoneConnectionOnly === true,
       verificationScope: 'metadata_and_bounded_response_probe_not_playback',
       mode: session.mode, channel: session.channel,
@@ -3972,6 +4010,7 @@ function primaryVideoEvidence(html, pageUrl) {
           deliveryFailure: diagnosticFailure(result?.deliveryFailure || 'none'),
           timing: { resolutionMs: diagnosticNumber(result?.resolutionMs), resolutionTimeoutMs: diagnosticNumber(result?.resolutionTimeoutMs),
             queueWaitMs: diagnosticNumber(result?.queueWaitMs), deliveryMs: diagnosticNumber(result?.deliveryMs) },
+          phoneTransfer: result?.phoneTransfer ? { state: ['queued','downloading','ready','error'].includes(result.phoneTransfer.state) ? result.phoneTransfer.state : 'unknown', bytes: diagnosticNumber(result.phoneTransfer.bytes, 1e12), totalBytes: diagnosticNumber(result.phoneTransfer.totalBytes, 1e12), percent: diagnosticNumber(result.phoneTransfer.percent, 100), error: ['file_too_large','cache_full','disk_space_low','invalid_range','source_changed','not_video','browser_unavailable','transfer_interrupted'].includes(result.phoneTransfer.error) ? result.phoneTransfer.error : null } : null,
           mediaBefore: result?.mediaBefore || null, mediaNow: videoDiagnosticSnapshot(candidate.element), mediaAfter: result?.mediaAfter || null,
           deliveryRequests: (result?.deliveryRequests || []).map(requestDiagnosticOutput),
           attempts: (result?.attempts || []).map(attempt => ({
@@ -4065,7 +4104,7 @@ function primaryVideoEvidence(html, pageUrl) {
     const phoneInput = node('input', '', phoneLabel); phoneInput.type = 'checkbox'; phoneInput.dataset.do = 'phone';
     phoneInput.checked = session.phoneConnectionOnly;
     node('span', '', phoneLabel, 'Use phone connection (direct video files)');
-    phoneLabel.title = 'MP4/WebM only. Keep this Firefox tab open. Uses this browser’s connection; does not enable a VPN.';
+    phoneLabel.title = 'Direct files only. Keep Firefox foregrounded until the full transfer is Ready to switch. Uses temporary PC storage; does not enable a VPN.';
     const statusNode = node('div', 'status', bar, 'Tap red boxes to select, then Send.');
     statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
     document.body.appendChild(host);
@@ -4171,7 +4210,7 @@ function primaryVideoEvidence(html, pageUrl) {
       setStoredJson(PHONE_CONNECTION_KEY, session.phoneConnectionOnly);
       session.results.clear(); session.captureTrace = null; session.captureFailure = null; session.stage = 'selection';
       for (const candidate of session.candidates) candidate.status = '';
-      status.textContent = session.phoneConnectionOnly ? 'Phone route: direct video files only. Keep this tab open during playback.' : 'Normal connection selected.';
+      status.textContent = session.phoneConnectionOnly ? 'Keep Firefox foregrounded until the full transfer says Ready to switch.' : 'Normal connection selected.';
       update();
     };
     channelButton.onclick = event => {
@@ -4210,6 +4249,7 @@ function primaryVideoEvidence(html, pageUrl) {
           onResult: (target, result) => session.results.set(target.previewId, result)
         });
         status.textContent = `${[...session.results.values()].filter(item => item.delivered).length}/${targets.length} sent to Recall ${channel}.`;
+        if (session.phoneConnectionOnly) status.textContent = `${[...session.results.values()].filter(item => item.delivered).length}/${targets.length} ready. Ready to switch to Pong for completed videos.`;
         session.stage = 'complete';
       } catch (error) {
         status.textContent = error.message; session.stage = 'failed';
@@ -4436,7 +4476,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.24.0 loaded on', location.href);
+  log('Universal Video Scraper v7.25.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
