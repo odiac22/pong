@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.16.0
+// @version      7.17.0
 // @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
@@ -824,6 +824,67 @@ function primaryVideoEvidence(html, pageUrl) {
     return 0;
   }
 
+  function scoreMediaQuality(value, label = '') {
+    const text = `${value || ''} ${label || ''}`;
+    if (/\b(?:4k|uhd|2160p?)\b/i.test(text)) return 2160;
+    if (/\b(?:full\s*hd|fhd|1080p?)\b/i.test(text)) return 1080;
+    if (/\b(?:hd|720p?)\b/i.test(text)) return 720;
+    const dimensions = text.match(/(?:^|[_/-])(\d{3,4})[_x](\d{3,4})(?:[_./-]|$)/i);
+    if (dimensions) return Math.max(Number(dimensions[1] || 0), Number(dimensions[2] || 0));
+    const height = Number(text.match(/(?:^|[^a-z0-9])(\d{3,4})p?(?:[^a-z0-9]|$)/i)?.[1] || 0);
+    return height >= 144 && height <= 4320 ? height : 0;
+  }
+
+  function decodeLiteralMediaValue(raw) {
+    return String(raw || '')
+      .replace(/\\\//g, '/')
+      .replace(/\\u0026/gi, '&')
+      .replace(/\\u003d/gi, '=')
+      .replace(/&amp;/gi, '&')
+      .trim();
+  }
+
+  function literalSourceRecordsFromText(text, baseUrl) {
+    const source = String(text || '');
+    const records = [];
+    const seen = new Set();
+    const addRecord = (rawValue, label = '', order = records.length, declaredMedia = false) => {
+      const value = absUrl(decodeLiteralMediaValue(rawValue), baseUrl);
+      if (!value || !/^https?:\/\//i.test(value)) return;
+      if (!declaredMedia && !VIDEO_EXT_RE.test(value)) return;
+      if (/(?:^|[/_-])(?:ad|ads|advert|advertising|poster|preview|promo|sprite|thumb|thumbnail|trailer|watermark)(?:[/_.-]|$)/i.test(new URL(value).pathname)) return;
+      const key = value;
+      if (seen.has(key)) return;
+      seen.add(key);
+      records.push({ value, height: scoreMediaQuality(value, label), label: String(label || ''), order });
+    };
+    const literalValue = /(?:^|,)\s*["']?(?:file|src|url|videoUrl|video_url|contentUrl|hls|dash|mp4)["']?\s*:\s*(["'])(.*?)\1/gi;
+    for (const arrays of source.matchAll(/["']?(?:sources|mediaDefinitions|media_definitions|files|qualities|renditions)["']?\s*:\s*\[([\s\S]*?)\]/gi)) {
+      for (const object of arrays[1].matchAll(/\{([^{}]*)\}/g)) {
+        const body = object[1];
+        let value = '';
+        literalValue.lastIndex = 0;
+        const valueMatch = literalValue.exec(body);
+        if (valueMatch) value = valueMatch[2];
+        const label = [
+          body.match(/["']?(?:label|quality|res|resolution|height|format)["']?\s*:\s*(["']?)([^"',}]+)\1/i)?.[2],
+          body.match(/["']?type["']?\s*:\s*(["'])(.*?)\1/i)?.[2]
+        ].filter(Boolean).join(' ');
+        const declaredMedia = /(?:video\/|mpegurl|dash\+xml|mp4|webm|mov|hls|dash)/i.test(label) || VIDEO_EXT_RE.test(value);
+        addRecord(value, label, records.length, declaredMedia);
+      }
+    }
+    for (const match of source.matchAll(/\b(?:file|src|url|videoUrl|video_url|contentUrl|hls|dash|mp4)\b\s*:\s*(["'])(https?:\/\/.*?)\1/gi)) {
+      const windowText = source.slice(Math.max(0, match.index - 120), Math.min(source.length, match.index + match[0].length + 160));
+      if (/\b(?:advertising|adTag|poster|image|thumbnail|sprite|preview|trailer)\b/i.test(windowText)) continue;
+      const declaredMedia = VIDEO_EXT_RE.test(match[2]) || /\b(?:video\/|mpegurl|dash\+xml|mp4|webm|mov|m3u8|mpd)\b/i.test(windowText);
+      addRecord(match[2], windowText, records.length, declaredMedia);
+    }
+    return records
+      .sort((left, right) => right.height - left.height || left.order - right.order)
+      .filter((record, index, array) => array.findIndex(item => item.value === record.value) === index);
+  }
+
   function responseHeaderValue(rawHeaders, name) {
     const wanted = String(name || '').toLowerCase();
     for (const line of String(rawHeaders || '').split(/\r?\n/)) {
@@ -1212,20 +1273,15 @@ function primaryVideoEvidence(html, pageUrl) {
           const labelled = item.match(/^\s*\[([^\]]+)]\s*(https?:\/\/.+)\s*$/i);
           if (!labelled) continue;
           const label = labelled[1].trim().toLowerCase();
-          const numeric = Number(label.match(/(\d{3,4})/)?.[1] || 0);
-          const height = numeric || (/\b(?:4k|uhd)\b/i.test(label)
-            ? 2160
-            : /\b(?:full\s*hd|fhd)\b/i.test(label)
-              ? 1080
-              : /\bhd\b/i.test(label)
-                ? 720
-                : 0);
+          const height = scoreMediaQuality(labelled[2], label);
           labelledSources.push({ value: labelled[2], height, order: labelledSources.length });
         }
       }
       labelledSources
         .sort((left, right) => right.height - left.height || left.order - right.order)
         .forEach(source => add(source.value));
+      literalSourceRecordsFromText(rawHtml, pageUrl)
+        .forEach(source => add(source.value, true));
 
       const media = [...doc.querySelectorAll('video')]
         .map(element => ({
@@ -1274,6 +1330,7 @@ function primaryVideoEvidence(html, pageUrl) {
             if (index >= 0) { prioritized.splice(index, 1); prioritized.unshift(value); }
           }
         }
+        literalSourceRecordsFromText(text, pageUrl).forEach(source => add(source.value, true));
         if (!/(?:mediaDefinitions|flashvars|videoUrl|video_url|contentUrl)/i.test(text)) continue;
         extractVideoUrlsFromText(text, pageUrl).forEach(value => {
           const normalized = absUrl(value, pageUrl);
@@ -3235,6 +3292,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
     let completedPages = 0;
     let deliveredVideos = Number(started?.videos || 0);
+    let verifiedSentThisRun = 0;
     let relayStarted = false;
     let appendChain = Promise.resolve();
     const captureDiagnostics = [];
@@ -3255,11 +3313,12 @@ function primaryVideoEvidence(html, pageUrl) {
           entries: entry ? [entry] : []
         }, 45000, 3);
         deliveredVideos = Math.max(deliveredVideos, Number(result?.videos || 0));
+        if (entry) verifiedSentThisRun++;
         if (!relayStarted && result?.browserRelay?.enabled) {
           relayStarted = true;
           startBrowserMediaRelay(endpoint, browserRelayClientId);
         }
-        setPanelStatus(`${deliveredVideos} ready · ${completedAtQueue}/${targets.length} checked`);
+        setPanelStatus(`${verifiedSentThisRun}/${targets.length} sent · ${completedAtQueue}/${targets.length} checked`);
         return result;
       });
       return appendChain;
@@ -3351,11 +3410,21 @@ function primaryVideoEvidence(html, pageUrl) {
       entries: []
     }, 45000, 3);
     deliveredVideos = Number(result?.videos || deliveredVideos || 0);
-    if (!deliveredVideos) throw new Error(ignoreUnder30
+    try {
+      document.documentElement.dataset.uvsCaptureSummary = JSON.stringify({
+        checkedTargets: targets.length,
+        sentThisRun: verifiedSentThisRun,
+        recallVideosAfterRun: deliveredVideos,
+        skippedTargets: Math.max(0, targets.length - verifiedSentThisRun),
+        ignoreUnder30
+      });
+    } catch (_) {}
+    if (!verifiedSentThisRun) throw new Error(ignoreUnder30
       ? 'No verified playable video of at least 30 seconds was found; uncheck Skip <30s for short clips'
       : 'No verified playable video was found');
     notify(
-      `Recall ${captureChannel} ready: ${deliveredVideos} verified video${deliveredVideos === 1 ? '' : 's'}` +
+      `Recall ${captureChannel} ready: ${verifiedSentThisRun}/${targets.length} sent this run` +
+      (deliveredVideos !== verifiedSentThisRun ? ` (${deliveredVideos} total in Recall)` : '') +
       (relayStarted ? '. Keep this source tab open for authenticated fallback playback.' : '')
     );
     return result;
@@ -4149,7 +4218,7 @@ function primaryVideoEvidence(html, pageUrl) {
   if (/^[a-z0-9-]{8,100}$/i.test(browserRelayKeeperClientId)) {
     startBrowserMediaRelay(location.origin, browserRelayKeeperClientId);
     document.documentElement.dataset.pongBrowserRelayKeeper = 'active';
-    log('Universal Video Scraper v7.16.0 browser relay keeper active');
+    log('Universal Video Scraper v7.17.0 browser relay keeper active');
     return;
   }
 
@@ -4236,7 +4305,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.16.0 loaded on', location.href);
+  log('Universal Video Scraper v7.17.0 loaded on', location.href);
 
   if (getStoredBool(AUTO_SCRAPE_KEY, false)) {
     setTimeout(() => doScrape(false), 800);
