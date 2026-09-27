@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.21.0
+// @version      7.22.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -3892,7 +3892,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 3, version: '7.21.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 3, version: '7.22.0', id: session.id, createdAt: session.createdAt,
       verificationScope: 'metadata_and_bounded_response_probe_not_playback',
       mode: session.mode, channel: session.channel,
       ignoreUnder30: session.ignoreUnder30, stage: session.stage,
@@ -4022,7 +4022,10 @@ function primaryVideoEvidence(html, pageUrl) {
     const row = node('div', 'row', bar); node('div', 'summary', row);
     node('button', '', row, 'Send').dataset.do = 'send';
     node('button', '', row, 'Copy log').dataset.do = 'copy';
-    const statusNode = node('div', 'status', bar, 'Tap red boxes to select. Tap Pong again to close.');
+    const close = node('button', '', row, '×'); close.type = 'button'; close.dataset.do = 'close';
+    close.setAttribute('aria-label', 'Close video selection');
+    close.title = 'Close panel; an active send continues in the background';
+    const statusNode = node('div', 'status', bar, 'Tap red boxes to select, then Send.');
     statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
     document.body.appendChild(host);
     const boxRoot = shadow.querySelector('.boxes'), status = shadow.querySelector('.status');
@@ -4102,13 +4105,20 @@ function primaryVideoEvidence(html, pageUrl) {
     });
     mutation.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class','style','hidden'] });
     window.addEventListener('scroll', schedulePosition, true); window.addEventListener('resize', schedulePosition);
-    const onKey = event => { if (event.key === 'Escape' && !session.sending) session.close(); };
+    const onKey = event => { if (event.key === 'Escape') session.dismiss(); };
     window.addEventListener('keydown', onKey);
     session.close = () => {
       closed = true; resize.disconnect(); mutation.disconnect(); cancelAnimationFrame(animation); clearTimeout(rescanTimer);
       window.removeEventListener('scroll', schedulePosition, true); window.removeEventListener('resize', schedulePosition); window.removeEventListener('keydown', onKey);
       host.remove(); if (activeTargetPreview === session) activeTargetPreview = null;
     };
+    session.dismiss = () => {
+      if (session.sending) host.hidden = true;
+      else session.close();
+    };
+    session.isHidden = () => host.hidden;
+    session.show = () => { host.hidden = false; position(); };
+    close.onclick = event => { event.preventDefault(); event.stopPropagation(); session.dismiss(); };
     shadow.querySelector('[data-do=copy]').onclick = async () => {
       const copied = await copyTextToClipboard(JSON.stringify(buildDetectionFeedback(session), null, 2));
       status.textContent = copied ? 'Log copied. Paste it in chat; no cookies or media URLs included.' : 'Clipboard blocked. Allow clipboard access and try again.';
@@ -4152,8 +4162,8 @@ function primaryVideoEvidence(html, pageUrl) {
     root.appendChild(open); document.body.appendChild(root);
     open.onclick = event => {
       event.preventDefault(); event.stopPropagation();
-      if (activeTargetPreview?.sending) return;
-      if (activeTargetPreview) activeTargetPreview.close();
+      if (activeTargetPreview?.isHidden()) activeTargetPreview.show();
+      else if (activeTargetPreview) activeTargetPreview.dismiss();
       else openTargetPreview('all', Number(root.dataset.channel), false);
     };
     // Preserve the silent qualification hook without adding visible controls.
@@ -4354,7 +4364,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.21.0 loaded on', location.href);
+  log('Universal Video Scraper v7.22.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
