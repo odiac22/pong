@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.18.1
-// @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
+// @version      7.19.0
+// @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
 // @downloadURL  https://odiac22.github.io/pong/universal-video-scraper.user.js
@@ -787,6 +787,8 @@ function primaryVideoEvidence(html, pageUrl) {
   }
 
   function extractPageDurationSeconds(doc = document) {
+    const youtube = youtubePlayerData(doc, doc.__uvsUrl || location.href);
+    if (youtube) return Number(youtube.videoDetails?.lengthSeconds || 0);
     const evidence = primaryVideoEvidence(String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || ''), doc.__uvsUrl || location.href);
     if (evidence?.durationSeconds > 0) return evidence.durationSeconds;
     const add = value => {
@@ -1083,6 +1085,9 @@ function primaryVideoEvidence(html, pageUrl) {
       const base = typeof baseUrl === 'object' && baseUrl?.href ? baseUrl.href : String(baseUrl || location.href);
       const url = new URL(raw, base);
       url.hash = '';
+      if (/(^|\.)youtube\.com$/i.test(url.hostname) && url.pathname === '/watch' && url.searchParams.get('v')) {
+        const videoId = url.searchParams.get('v'); url.search = ''; url.searchParams.set('v', videoId);
+      }
       const queryKeys = [];
       url.searchParams.forEach((_value, key) => queryKeys.push(key));
       for (const key of queryKeys) {
@@ -1132,6 +1137,7 @@ function primaryVideoEvidence(html, pageUrl) {
       const host = url.hostname.replace(/^www\./i, '').toLowerCase();
       const path = url.pathname + url.search;
       if (!['http:', 'https:'].includes(url.protocol)) return false;
+      if (/(^|\.)youtube\.com$/i.test(url.hostname) || /(^|\.)youtu\.be$/i.test(url.hostname)) return !!youtubeVideoId(url.href);
       if (host === 'pornhub.com') return /\/view_video\.php\?[^#]*\bviewkey=[^&#]+/i.test(path);
       if (host.endsWith('hqporner.com')) return /^\/hdporn\/[^/?#]+/i.test(url.pathname);
       if (host.endsWith('suj.mobi')) return /\/(?:[a-z]{2}\/)?scene\/[^/?#]+/i.test(url.pathname);
@@ -1420,7 +1426,91 @@ function primaryVideoEvidence(html, pageUrl) {
     return values.slice(0, Math.max(1, Number(limit || 4)));
   }
 
+  function youtubeVideoId(rawUrl) {
+    try {
+      const url = new URL(rawUrl, location.href);
+      if (!/(^|\.)youtube\.com$/i.test(url.hostname) && url.hostname !== 'youtu.be') return '';
+      const id = url.hostname === 'youtu.be' ? url.pathname.slice(1) : url.searchParams.get('v') || url.pathname.match(/^\/(?:embed|shorts)\/([^/]+)/)?.[1];
+      return /^[\w-]{11}$/.test(id || '') ? id : '';
+    } catch (_) { return ''; }
+  }
+
+  function youtubePlayerData(doc, pageUrl) {
+    const id = youtubeVideoId(pageUrl);
+    if (!id) return null;
+    const matches = value => value?.videoDetails?.videoId === id;
+    if (doc === document) {
+      try {
+        const pageWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+        const live = pageWindow.document?.getElementById('movie_player')?.getPlayerResponse?.();
+        if (matches(live)) return live;
+        if (matches(pageWindow.ytInitialPlayerResponse)) return pageWindow.ytInitialPlayerResponse;
+      } catch (_) {}
+    }
+    const html = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+    for (const match of html.matchAll(/(?:ytInitialPlayerResponse\s*=|["']ytInitialPlayerResponse["']\s*\]\s*=)\s*\{/g)) {
+      const start = match.index + match[0].lastIndexOf('{');
+      let depth = 0, quoted = false, escaped = false;
+      for (let i = start; i < Math.min(html.length, start + 2000000); i++) {
+        const char = html[i];
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (char === '\\') escaped = true;
+          else if (char === '"') quoted = false;
+        } else if (char === '"') quoted = true;
+        else if (char === '{') depth++;
+        else if (char === '}' && --depth === 0) {
+          try { const value = JSON.parse(html.slice(start, i + 1)); if (matches(value)) return value; } catch (_) {}
+          break;
+        }
+      }
+    }
+    return null;
+  }
+
+  async function youtubeMediaEntries(doc, pageUrl, options = {}) {
+    const player = youtubePlayerData(doc, pageUrl);
+    const status = player?.playabilityStatus?.status;
+    if (status && status !== 'OK') throw Object.assign(new Error('YouTube requires access in the browser'), { code: 'youtube_access' });
+    const durationSeconds = Number(player?.videoDetails?.lengthSeconds || 0);
+    const entry = url => ({ videoUrl: url, postUrl: pageUrl, pageUrl, contextUrl: pageUrl,
+      durationSeconds, title: String(player?.videoDetails?.title || ''), identityEvidence: 'youtube-video-id' });
+    if (player?.streamingData?.hlsManifestUrl) return [entry(player.streamingData.hlsManifestUrl)];
+    // Public YouTube commonly exposes SABR rather than reusable URLs. Resolve
+    // its public HLS master on the Pong PC, preserving video AND audio tracks.
+    const receivers = PONG_ENDPOINTS.map(endpoint => { const url = new URL(endpoint); url.port = '8797'; return url.origin; });
+    let helperNeedsUpdate = false;
+    for (const receiver of receivers) {
+      if (options.signal?.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
+      try {
+        const payload = await new Promise((resolve, reject) => {
+          let request, settled = false;
+          const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); options.signal?.removeEventListener('abort', abort); error ? reject(error) : resolve(value); };
+          const abort = () => { finish(Object.assign(new Error('Timed out'), { code: 'timeout' })); try { request?.abort(); } catch (_) {} };
+          const timer = setTimeout(abort, 26000);
+          options.signal?.addEventListener('abort', abort, { once: true });
+          try { request = GM_xmlhttpRequest({ method: 'POST', url: `${receiver}/media-page/youtube-resolve`,
+            headers: { 'Content-Type': 'application/json' }, data: JSON.stringify({ videoId: youtubeVideoId(pageUrl) }), timeout: 25000,
+            onload: response => { try {
+              if (response.status === 404) throw Object.assign(new Error('Pong capture helper needs restart'), { code: 'youtube_helper_update' });
+              const data = JSON.parse(response.responseText || '{}');
+              if (response.status !== 200 || data.videoId !== youtubeVideoId(pageUrl) || !data.videoUrl) throw new Error('No YouTube stream');
+              finish(null, data);
+            } catch (error) { finish(error); } },
+            onerror: () => finish(new Error('YouTube resolver unavailable')), ontimeout: abort, onabort: abort
+          }); } catch (error) { finish(error); }
+        });
+        return [{ ...entry(payload.videoUrl), durationSeconds: Number(payload.durationSeconds || durationSeconds), title: payload.title || entry('').title }];
+      } catch (error) { if (options.signal?.aborted) throw error; if (error?.code === 'youtube_helper_update') helperNeedsUpdate = true; }
+    }
+    const formats = (player?.streamingData?.formats || []).filter(format => format.url && /^video\//.test(format.mimeType || '')).sort((a,b) => (b.height || 0) - (a.height || 0));
+    if (formats.length) return formats.map(format => entry(format.url));
+    throw Object.assign(new Error(helperNeedsUpdate ? 'Restart the updated Pong capture helper; Copy log for details' : 'YouTube stream unavailable; Copy log for details'), { code: helperNeedsUpdate ? 'youtube_helper_update' : 'youtube_stream' });
+  }
+
   async function browserResolvedMediaEntries(doc, pageUrl, durationHint = 0, depth = 0, seen = new Set(), options = {}) {
+    if (options.signal?.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
+    if (youtubeVideoId(pageUrl)) return youtubeMediaEntries(doc, pageUrl, options);
     const durationSeconds = Math.max(Number(durationHint || 0), extractPageDurationSeconds(doc));
     const direct = primaryMediaEntriesFromDoc(doc, pageUrl).map(entry => ({
       ...entry,
@@ -1442,6 +1532,7 @@ function primaryVideoEvidence(html, pageUrl) {
         }));
     }
     for (const playerUrl of embeddedPlayerPageUrls(doc, pageUrl)) {
+      if (options.signal?.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
       if (seen.has(playerUrl)) continue;
       seen.add(playerUrl);
       const playerDoc = await fetchDoc(playerUrl, {
@@ -3313,7 +3404,8 @@ function primaryVideoEvidence(html, pageUrl) {
           completedPages: completedAtQueue,
           pageUrls: [target.url],
           entries: entry ? [entry] : []
-        }, 45000, 3);
+        }, 12000, 2);
+        if (entry && Number(result?.accepted || 0) < 1) throw new Error('Pong could not verify this video; Copy log for details');
         deliveredVideos = Math.max(deliveredVideos, Number(result?.videos || 0));
         if (entry) verifiedSentThisRun++;
         if (!relayStarted && result?.browserRelay?.enabled) {
@@ -3336,13 +3428,24 @@ function primaryVideoEvidence(html, pageUrl) {
         targetDuration: Number(target.durationSeconds || 0),
         attempts: []
       };
+      selection?.onResult?.(target, diagnostic);
+      const controller = new AbortController();
+      let deadline;
+      const timedOut = new Promise((_, reject) => {
+        deadline = setTimeout(() => {
+          controller.abort();
+          reject(Object.assign(new Error('Target resolution timed out'), { code: 'timeout' }));
+        }, 35000);
+      });
       const resolveAttempt = async cacheBust => {
+        if (controller.signal.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
         if (target.element && (!target.element.isConnected || (target.logicalVideoId &&
           [...document.querySelectorAll('video')][Number(target.logicalVideoId.match(/(\d+)$/)?.[1]) - 1] !== target.element))) {
           throw new Error('The selected target changed; reopen selection');
         }
         const doc = target.directMedia ? document : targetUrl === currentUrl
           ? document
+          : youtubeVideoId(targetUrl) ? document.implementation.createHTMLDocument('YouTube selection')
           : await fetchDoc(targetUrl, { timeout: 12000, maxRetries: cacheBust ? 1 : 2, cacheBust });
         const attempt = { cacheBust: cacheBust === true, fetched: !!doc, verified: false };
         diagnostic.attempts.push(attempt);
@@ -3361,12 +3464,13 @@ function primaryVideoEvidence(html, pageUrl) {
           Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
           0,
           new Set(),
-          { cacheBust, maxRetries: 1 }
+          { cacheBust, maxRetries: 1, signal: controller.signal }
         );
+        if (controller.signal.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
         const resolved = await firstVerifiedRecallEntry(
           extracted,
           targetUrl,
-          target.directMedia ? Number(target.durationSeconds || 0) : inlineGroup ? inlineGroup.durationSeconds : Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
+          youtubeVideoId(targetUrl) ? Number(extracted[0]?.durationSeconds || 0) : target.directMedia ? Number(target.durationSeconds || 0) : inlineGroup ? inlineGroup.durationSeconds : Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
           minimumDurationSeconds
         );
         if (resolved && target.logicalVideoId) resolved.logicalVideoId = target.logicalVideoId;
@@ -3385,23 +3489,26 @@ function primaryVideoEvidence(html, pageUrl) {
         return resolved;
       };
       try {
-        verified = await resolveAttempt(false);
-        if (!verified && targetUrl !== currentUrl) {
+        verified = await Promise.race([timedOut, (async () => {
+          const first = await resolveAttempt(false);
+          if (first || targetUrl === currentUrl || youtubeVideoId(targetUrl)) return first;
           await sleep(250 + index * 20);
-          verified = await resolveAttempt(true);
-        }
+          return resolveAttempt(true);
+        })()]);
       } catch (error) {
         diagnostic.error = error?.message || String(error);
-      }
+        diagnostic.failure = ['timeout','youtube_access','youtube_stream','youtube_helper_update'].includes(error?.code) ? error.code : 'extraction_error';
+      } finally { clearTimeout(deadline); controller.abort(); }
       diagnostic.verified = !!verified;
-      if (diagnostic.error) diagnostic.failure = 'extraction_error';
       diagnostic.fetchFailed = diagnostic.attempts.every(attempt => !attempt.fetched);
       captureDiagnostics[index] = diagnostic;
       publishCaptureDiagnostics();
+      const failureLabel = diagnostic.failure === 'timeout' ? 'Timed out' : diagnostic.failure === 'youtube_access' ? 'Browser access required' : diagnostic.failure === 'youtube_helper_update' ? 'Pong helper needs restart' : 'Not verified';
+      selection?.onStatus?.(target, verified ? 'Sending' : failureLabel);
       try {
         await queueAppend(target, verified);
         diagnostic.delivered = !!verified;
-        selection?.onStatus?.(target, verified ? 'Sent' : 'Not verified');
+        selection?.onStatus?.(target, verified ? 'Sent' : failureLabel);
       } catch (error) {
         diagnostic.appendError = error?.message || String(error);
         selection?.onStatus?.(target, 'Delivery failed');
@@ -3415,18 +3522,18 @@ function primaryVideoEvidence(html, pageUrl) {
     // fills its per-origin socket pool. Four concurrent page/probe pipelines
     // keep results streaming without the last ten cards sitting indefinitely
     // behind stale sockets; other sources retain the faster ten-way capture.
-    const captureConcurrency = /(?:^|\.)porneec\.com$/i.test(location.hostname)
+    const captureConcurrency = targets.some(target => youtubeVideoId(target.url)) ? 2 : /(?:^|\.)porneec\.com$/i.test(location.hostname)
       ? Math.min(4, RECALL_CAPTURE_CONCURRENCY)
       : RECALL_CAPTURE_CONCURRENCY;
     await pool(tasks, Math.min(captureConcurrency, tasks.length));
-    await appendChain;
+    await appendChain.catch(error => { endpointErrors.push(error?.message || String(error)); });
     const result = await postRecallCapturePayloadWithRetry(endpoint, {
       ...basePayload,
       capturePhase: 'complete',
       completedPages: targets.length,
       pageUrls: [],
       entries: []
-    }, 45000, 3);
+    }, 12000, 2);
     deliveredVideos = Number(result?.videos || deliveredVideos || 0);
     try {
       document.documentElement.dataset.uvsCaptureSummary = JSON.stringify({
@@ -3460,6 +3567,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function videoLinkEvidence(element, url) {
     if (!url || element.closest('#uvs-recall-capture,#uvs-panel,#uvs-target-preview,[data-ad],.advertisement,.ad-container')) return '';
+    try { if (/(^|\.)(youtube\.com|youtu\.be)$/i.test(new URL(url).hostname) && !youtubeVideoId(url)) return ''; } catch (_) { return ''; }
     if (/\.(?:jpe?g|png|gif|webp|svg|avif|pdf|zip)(?:[?#]|$)/i.test(url)) return '';
     if (VIDEO_EXT_RE.test(url)) return 'direct';
     if (isLogicalVideoPageUrl(url, location.href, element)) return 'path';
@@ -3467,12 +3575,12 @@ function primaryVideoEvidence(html, pageUrl) {
     // even when its destination is an opaque slug, redirect, or another host.
     // Never execute onclick handlers or navigate to establish that evidence.
     if (element.closest('nav,header,footer,[role="navigation"]')) return '';
-    const card = element.closest('article,li,[class*="card" i],[class*="thumb" i]') || element;
+    const card = element.closest('ytm-video-with-context-renderer,ytd-compact-video-renderer,ytd-rich-item-renderer,ytm-compact-video-renderer,article,li,[class*="card" i],[class*="thumb" i]') || element;
     const text = `${element.getAttribute('aria-label') || ''} ${element.getAttribute('title') || ''} ${element.textContent || ''}`;
     if (element.hasAttribute('data-video-url') || element.hasAttribute('data-watch-url')) return 'video_attribute';
     if (/\b(?:watch|play)\b.{0,32}\b(?:video|clip|film)\b|\b(?:video|clip)\b.{0,32}\b(?:watch|play)\b/i.test(text)) return 'text';
     if (card.querySelector('[class*="play" i],[aria-label*="play" i],[data-duration],time') || parseDurationHintSeconds(card.textContent)) return 'play_or_duration';
-    if (element.querySelector('img,picture,video,[poster]')) return 'thumbnail';
+    if (card.querySelector('img,picture,video,[poster]')) return 'thumbnail';
     if (/url\(/i.test(getComputedStyle(element).backgroundImage || '')) return 'thumbnail';
     return '';
   }
@@ -3484,9 +3592,13 @@ function primaryVideoEvidence(html, pageUrl) {
     const links = [...document.querySelectorAll('a[href],[role="link"][data-href],[data-video-url],[data-watch-url]')];
     const visibleArea = element => {
       const rect = element?.getBoundingClientRect();
-      return rect && element.getClientRects().length ? rect.width * rect.height : 0;
+      return rect && targetElementVisible(element) ? rect.width * rect.height : 0;
     };
-    const mainElement = videos.slice().sort((a, b) => visibleArea(b) - visibleArea(a))[0];
+    // YouTube parks its <video> above the poster before playback. Highlight
+    // the visible player surface, not that offscreen decoder element.
+    const youtubeSurface = youtubeVideoId(currentUrl) ? ['#movie_player','#player-container-id','#player-container','ytd-player','ytm-player']
+      .map(selector => document.querySelector(selector)).find(item => visibleArea(item) > 0) : null;
+    const mainElement = youtubeSurface || videos.slice().filter(item => visibleArea(item) > 0).sort((a, b) => visibleArea(b) - visibleArea(a))[0];
     const embeddedUrls = embeddedPlayerPageUrls(document, currentUrl, 80);
     const players = [...document.querySelectorAll('iframe[src],embed[src],object[data]')].filter(element => {
       const value = element.getAttribute('src') || element.getAttribute('data');
@@ -3539,12 +3651,22 @@ function primaryVideoEvidence(html, pageUrl) {
     // destination, not a second movie. Keep the card as the selectable target.
     const filtered = candidates.filter(candidate => candidate.kind !== 'player' ||
       !candidates.some(other => other.kind === 'link' && other.element?.contains(candidate.element)));
-    return filtered.slice(0, mode === 'main' ? 1 : 80).map((candidate, index) => ({ ...candidate, previewId: index + 1 }));
+    return filtered.slice(0, mode === 'main' ? 1 : 80).map((candidate, index) => ({ ...candidate,
+      ...(candidate.url === currentUrl && youtubeVideoId(currentUrl) ? { durationSeconds: extractPageDurationSeconds(document) } : {}), previewId: index + 1 }));
+  }
+
+  function targetElementVisible(element) {
+    if (!element?.isConnected || !element.getClientRects().length) return false;
+    for (let node = element; node && node !== document.body; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0) return false;
+    }
+    return true;
   }
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, version: '7.18.1', id: session.id, createdAt: session.createdAt,
+      schema: 1, version: '7.19.0', id: session.id, createdAt: session.createdAt,
       site: location.hostname, mode: session.mode, channel: session.channel,
       ignoreUnder30: session.ignoreUnder30, stage: session.stage,
       evidence: {
@@ -3553,6 +3675,7 @@ function primaryVideoEvidence(html, pageUrl) {
         structuredDataBlocks: document.querySelectorAll('script[type="application/ld+json"]').length,
         players: [
           ['videojs', '.video-js'], ['plyr', '.plyr'], ['jwplayer', '.jwplayer'],
+          ['youtube', '#movie_player,ytm-player,ytd-player'],
           ['flowplayer', '.flowplayer'], ['mediaelement', '.mejs-container']
         ].filter(([, selector]) => document.querySelector(selector)).map(([name]) => name)
       },
@@ -3610,826 +3733,181 @@ function primaryVideoEvidence(html, pageUrl) {
     throw new Error('Report saved in this browser. Pong needs the updated receiver; tap Retry report later.');
   }
 
-  function openTargetPreview(mode, channel, ignoreUnder30, includeAllLinks = false) {
-    if (activeTargetPreview?.sending) return;
+  function openTargetPreview(mode = 'all', channel = 1, ignoreUnder30 = false) {
+    if (activeTargetPreview?.sending) return activeTargetPreview;
     activeTargetPreview?.close();
     const session = {
       id: globalThis.crypto?.randomUUID?.() || `selection-${Date.now()}`,
       createdAt: new Date().toISOString(), mode, channel, ignoreUnder30,
-      candidates: collectSelectableTargets(mode, includeAllLinks), selected: new Set(), results: new Map(), stage: 'selection', sending: false
+      candidates: [], selected: new Set(), results: new Map(), stage: 'selection', sending: false
     };
     const host = document.createElement('div');
     host.id = 'uvs-target-preview';
     host.style.cssText = 'position:fixed;inset:0;z-index:2147483646;pointer-events:none';
     const shadow = host.attachShadow({ mode: 'open' });
-    shadow.innerHTML = `<style>
-      :host{font:12px system-ui;color:white}button{font:inherit;cursor:pointer;color:white;border:1px solid #ffffff44;border-radius:7px;background:#263244;padding:7px}
+    // Use DOM nodes, not HTML sinks: YouTube enforces Trusted Types.
+    const previewStyle = document.createElement('style');
+    previewStyle.textContent = `
+      :host{font:12px system-ui;color:white}button{font:inherit;cursor:pointer;color:white;border:1px solid #ffffff44;border-radius:7px;background:#263244;padding:8px 12px}
       .box{position:fixed;background:#ff22222b;border:2px solid #ff5757;border-radius:6px;pointer-events:auto;padding:0;text-align:left;touch-action:manipulation}
       .box[aria-pressed=true]{background:#ff22224a;border-color:#fff}.box span{position:absolute;left:0;top:0;background:#851e24;padding:3px 5px;border-radius:3px;font-size:11px}
-      .bar{position:fixed;left:8px;right:8px;bottom:46px;margin:auto;max-width:520px;background:#101723f5;border:1px solid #ffffff33;border-radius:12px;padding:10px;pointer-events:auto;box-shadow:0 3px 16px #0008}
-      .actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}.summary{font-weight:700}.hint,.status{font-size:11px;color:#cbd5e1;margin-top:5px}.list{display:flex;gap:4px;flex-wrap:wrap;max-height:85px;overflow:auto;margin-top:6px}.list button[aria-pressed=true]{background:#851e24}button:disabled{opacity:.5;cursor:default}
-    </style><div class="boxes"></div><div class="bar" role="region" aria-label="Select video targets">
-      <div class="summary"></div><div class="hint">Tap red boxes to check videos. Candidates are not yet verified.</div><div class="list"></div>
-      <div class="actions"><button data-do="all">Select all</button><button data-do="links" ${mode === 'main' ? 'hidden' : ''}>${includeAllLinks ? 'Fewer links' : 'Show all links'}</button><button data-do="send">Send selected</button><button data-do="report">Send report only</button><button data-do="retry">Retry report</button><button data-do="close">Close</button></div>
-      <div class="status" role="status" aria-live="polite"></div></div>`;
+      .bar{position:fixed;left:8px;right:8px;bottom:46px;margin:auto;max-width:420px;background:#101723f5;border:1px solid #ffffff33;border-radius:12px;padding:8px;pointer-events:auto;box-shadow:0 3px 16px #0008}
+      .row{display:flex;align-items:center;gap:6px}.summary{flex:1;font-size:11px}.status{font-size:11px;color:#cbd5e1;margin-top:4px}button:disabled{opacity:.5;cursor:default}
+    `;
+    const node = (tag, className, parent, text = '') => {
+      const element = document.createElement(tag); element.className = className; element.textContent = text; parent.appendChild(element); return element;
+    };
+    shadow.appendChild(previewStyle);
+    node('div', 'boxes', shadow);
+    const bar = node('div', 'bar', shadow); bar.setAttribute('role', 'region'); bar.setAttribute('aria-label', 'Select video targets');
+    const row = node('div', 'row', bar); node('div', 'summary', row);
+    node('button', '', row, 'Send').dataset.do = 'send';
+    node('button', '', row, 'Copy log').dataset.do = 'copy';
+    const statusNode = node('div', 'status', bar, 'Tap red boxes to select. Tap Pong again to close.');
+    statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
     document.body.appendChild(host);
-    const boxRoot = shadow.querySelector('.boxes'), list = shadow.querySelector('.list');
-    const status = shadow.querySelector('.status'), send = shadow.querySelector('[data-do=send]');
-    const controls = new Map();
+    const boxRoot = shadow.querySelector('.boxes'), status = shadow.querySelector('.status');
+    const send = shadow.querySelector('[data-do=send]'), controls = new Map();
+    let animation = 0, rescanTimer = 0, closed = false, pageUrl = canonicalWatchPageUrl(location.href, location.href);
+    const key = candidate => canonicalWatchPageUrl(candidate.url, location.href) + '\n' + (candidate.logicalVideoId || '');
     const update = () => {
-      shadow.querySelector('.summary').textContent = `${session.selected.size} selected · ${session.candidates.length} targets · Recall ${channel}`;
+      shadow.querySelector('.summary').textContent = `${session.selected.size} selected · Recall ${channel}`;
       send.disabled = !session.selected.size || session.sending;
       for (const candidate of session.candidates) {
+        const box = controls.get(candidate.previewId);
         const selected = session.selected.has(candidate.previewId);
-        for (const button of controls.get(candidate.previewId) || []) {
-          button.setAttribute('aria-pressed', String(selected));
-          const label = {player:'Player',embed:'Embedded player',direct:'Direct video',link:'Video link'}[candidate.kind];
-          button.querySelector('span').textContent = `${selected ? '✓ ' : ''}${candidate.previewId} ${label}${candidate.status ? ' · ' + candidate.status : ''}`;
-          button.disabled = session.sending;
-        }
+        box.setAttribute('aria-pressed', String(selected));
+        const label = candidate.kind === 'player' ? 'Video' : 'Video link';
+        const seconds = Math.round(candidate.durationSeconds || 0);
+        const duration = seconds ? ` · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : '';
+        box.firstChild.textContent = `${selected ? '✓ ' : ''}${label}${duration}${candidate.status ? ' · ' + candidate.status : ''}`;
+        box.disabled = session.sending;
       }
     };
-    for (const candidate of session.candidates) {
-      const buttons = [];
-      for (const container of [boxRoot, list]) {
-        const button = document.createElement('button'); button.type = 'button';
-        button.dataset.target = String(candidate.previewId); button.appendChild(document.createElement('span'));
-        if (container === boxRoot) button.className = 'box';
-        button.addEventListener('click', event => {
+    const position = () => {
+      animation = 0;
+      if (closed) return;
+      for (const candidate of session.candidates) {
+        const box = controls.get(candidate.previewId);
+        const rect = candidate.element?.isConnected ? candidate.element.getBoundingClientRect() : null;
+        const visible = rect && targetElementVisible(candidate.element) && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+        box.hidden = !visible;
+        if (visible) Object.assign(box.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+      }
+    };
+    const schedulePosition = () => { if (!animation && !closed) animation = requestAnimationFrame(position); };
+    const resize = new ResizeObserver(schedulePosition);
+    const rescan = () => {
+      if (closed || session.sending) return;
+      if (pageUrl !== canonicalWatchPageUrl(location.href, location.href)) { session.close(); return; }
+      document.__uvsRawHtml = document.documentElement?.innerHTML || '';
+      document.__uvsUrl = location.href;
+      const found = collectSelectableTargets(mode);
+      for (const candidate of found) {
+        const existing = session.candidates.find(item => key(item) === key(candidate));
+        if (existing) {
+          if (existing.element !== candidate.element) { if (existing.element) resize.unobserve(existing.element); existing.element = candidate.element; if (existing.element) resize.observe(existing.element); }
+          existing.durationSeconds = candidate.durationSeconds || existing.durationSeconds;
+          continue;
+        }
+        candidate.previewId = (session.candidates.at(-1)?.previewId || 0) + 1;
+        session.candidates.push(candidate);
+        const box = document.createElement('button');
+        box.type = 'button'; box.className = 'box'; box.dataset.target = String(candidate.previewId);
+        box.appendChild(document.createElement('span'));
+        box.onclick = event => {
           event.preventDefault(); event.stopPropagation();
           if (session.sending) return;
           if (session.selected.has(candidate.previewId)) session.selected.delete(candidate.previewId);
           else session.selected.add(candidate.previewId);
           update();
-        });
-        container.appendChild(button); buttons.push(button);
+        };
+        boxRoot.appendChild(box); controls.set(candidate.previewId, box);
+        if (candidate.element) resize.observe(candidate.element);
       }
-      controls.set(candidate.previewId, buttons);
-    }
-    let animation = 0;
-    const position = () => {
-      animation = 0;
-      for (const candidate of session.candidates) {
-        const box = controls.get(candidate.previewId)[0];
-        const rect = candidate.element?.isConnected ? candidate.element.getBoundingClientRect() : null;
-        const visible = rect && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
-        box.hidden = !visible;
-        if (visible) Object.assign(box.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+      // Keep a selected, disappeared target so it can fail explicitly at Send.
+      for (const candidate of [...session.candidates]) {
+        if (!session.selected.has(candidate.previewId) && !found.some(item => key(item) === key(candidate))) {
+          controls.get(candidate.previewId).remove(); controls.delete(candidate.previewId);
+          if (candidate.element) resize.unobserve(candidate.element);
+          session.candidates = session.candidates.filter(item => item !== candidate);
+        }
       }
+      update(); schedulePosition();
     };
-    const schedulePosition = () => { if (!animation) animation = requestAnimationFrame(position); };
-    const resize = new ResizeObserver(schedulePosition);
-    for (const candidate of session.candidates) if (candidate.element) resize.observe(candidate.element);
-    const mutation = new MutationObserver(schedulePosition);
+    const mutation = new MutationObserver(records => {
+      schedulePosition();
+      if (records.some(record => !host.contains(record.target) && record.type === 'childList')) {
+        clearTimeout(rescanTimer); rescanTimer = setTimeout(rescan, 350);
+      }
+    });
     mutation.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class','style','hidden'] });
     window.addEventListener('scroll', schedulePosition, true); window.addEventListener('resize', schedulePosition);
     const onKey = event => { if (event.key === 'Escape' && !session.sending) session.close(); };
     window.addEventListener('keydown', onKey);
     session.close = () => {
-      resize.disconnect(); mutation.disconnect(); cancelAnimationFrame(animation);
+      closed = true; resize.disconnect(); mutation.disconnect(); cancelAnimationFrame(animation); clearTimeout(rescanTimer);
       window.removeEventListener('scroll', schedulePosition, true); window.removeEventListener('resize', schedulePosition); window.removeEventListener('keydown', onKey);
       host.remove(); if (activeTargetPreview === session) activeTargetPreview = null;
     };
-    const report = async () => {
-      status.textContent = 'Saving report to Pong…';
-      try { await sendDetectionFeedback(buildDetectionFeedback(session)); status.textContent = 'Report saved to Pong. No cookies, page text, images, or media URLs included.'; }
-      catch (error) { status.textContent = error.message; }
-    };
-    shadow.querySelector('[data-do=all]').onclick = () => {
-      if (session.sending) return;
-      session.selected = session.selected.size === session.candidates.length ? new Set() : new Set(session.candidates.map(item => item.previewId)); update();
-    };
-    shadow.querySelector('[data-do=close]').onclick = () => { if (!session.sending) session.close(); };
-    shadow.querySelector('[data-do=links]').onclick = () => {
-      if (session.sending) return;
-      const selectedKeys = new Set(session.candidates.filter(item => session.selected.has(item.previewId)).map(item => `${item.url}\n${item.logicalVideoId || ''}`));
-      const replacement = openTargetPreview(mode, channel, ignoreUnder30, !includeAllLinks);
-      for (const item of replacement.candidates) {
-        if (selectedKeys.has(`${item.url}\n${item.logicalVideoId || ''}`)) replacement.selected.add(item.previewId);
-      }
-      replacement.update();
-    };
-    shadow.querySelector('[data-do=report]').onclick = () => { if (!session.sending) void report(); };
-    shadow.querySelector('[data-do=retry]').onclick = async () => {
-      if (session.sending) return;
-      const pending = getStoredJson(DETECTION_FEEDBACK_KEY, null);
-      if (!pending) { status.textContent = 'No pending report.'; return; }
-      try { await sendDetectionFeedback(pending); status.textContent = 'Pending report saved to Pong.'; }
-      catch (error) { status.textContent = error.message; }
+    shadow.querySelector('[data-do=copy]').onclick = async () => {
+      const copied = await copyTextToClipboard(JSON.stringify(buildDetectionFeedback(session), null, 2));
+      status.textContent = copied ? 'Log copied. Paste it in chat; no cookies or media URLs included.' : 'Clipboard blocked. Allow clipboard access and try again.';
     };
     send.onclick = async () => {
       if (session.sending || !session.selected.size) return;
-      session.sending = true; session.stage = 'capture'; update();
-      for (const button of shadow.querySelectorAll('.actions button')) button.disabled = true;
-      let captureMessage = '';
+      session.sending = true; session.stage = 'capture';
+      const targets = session.candidates.filter(candidate => session.selected.has(candidate.previewId));
+      for (const target of targets) { target.status = 'Queued'; session.results.delete(target.previewId); }
+      status.textContent = 'Checking selected videos…'; update();
       try {
-        const targets = session.candidates.filter(candidate => session.selected.has(candidate.previewId));
         await sendCaptureToRecall(mode, channel, ignoreUnder30, {
           targets,
           onStatus: (target, text) => { target.status = text; update(); },
           onResult: (target, result) => session.results.set(target.previewId, result)
         });
-        captureMessage = `${[...session.results.values()].filter(item => item.delivered).length}/${targets.length} sent. `;
+        status.textContent = `${[...session.results.values()].filter(item => item.delivered).length}/${targets.length} sent to Recall ${channel}.`;
         session.stage = 'complete';
-      } catch (error) { captureMessage = `${error.message}. `; session.stage = 'failed'; }
-      await report();
-      status.textContent = captureMessage + status.textContent;
-      session.sending = false;
-      for (const button of shadow.querySelectorAll('.actions button')) button.disabled = false;
-      update();
+      } catch (error) {
+        status.textContent = error.message; session.stage = 'failed';
+        for (const target of targets) if (['Queued','Checking','Sending'].includes(target.status)) target.status = 'Not sent';
+      } finally { session.sending = false; update(); }
     };
     session.update = update;
-    activeTargetPreview = session; update(); position();
+    activeTargetPreview = session; rescan(); position();
     return session;
   }
 
   function addRecallCaptureButton() {
     if (document.getElementById('uvs-recall-capture')) return;
-    const style = document.createElement('style');
-    style.textContent = `
-      #uvs-recall-capture{position:fixed;left:34%;bottom:10px;z-index:2147483647;font:700 10px ui-sans-serif,system-ui,-apple-system,sans-serif;color:#fff}
-      #uvs-recall-open{min-width:42px;height:26px;border:1px solid rgba(255,255,255,.2);border-radius:999px;background:rgba(29,78,216,.78);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);color:rgba(255,255,255,.92);padding:0 9px;box-shadow:0 3px 12px rgba(0,0,0,.34);font:700 10px inherit;cursor:pointer}
-      #uvs-recall-menu{position:absolute;left:0;bottom:32px;width:116px;padding:5px;border:1px solid rgba(255,255,255,.12);border-radius:9px;background:rgba(10,13,20,.9);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 5px 18px rgba(0,0,0,.46)}
-      #uvs-recall-menu[hidden]{display:none}
-      #uvs-recall-menu button{width:100%;height:24px;margin:1px 0;padding:0 6px;border:1px solid rgba(255,255,255,.08);border-radius:6px;color:rgba(255,255,255,.88);background:rgba(51,65,85,.72);font:700 9px inherit;cursor:pointer}
-      #uvs-recall-menu button[data-action]{background:rgba(37,99,235,.78)}
-      #uvs-recall-channel{color:#93c5fd!important;background:rgba(30,41,59,.76)!important}
-      #uvs-recall-min30{display:flex;align-items:center;gap:5px;height:22px;margin:2px 1px;padding:0 4px;color:#cbd5e1;font-size:8px;white-space:nowrap;cursor:pointer}
-      #uvs-recall-min30 input{width:11px;height:11px;margin:0;accent-color:#22c55e}
-      #uvs-recall-status{padding:3px 1px 1px;color:#94a3b8;font-size:8px;line-height:1.15;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    `;
-    document.head.appendChild(style);
     const root = document.createElement('div');
     root.id = 'uvs-recall-capture';
-    const stored = Number(getStoredJson(RECALL_CHANNEL_KEY, 1)) === 2 ? 2 : 1;
-    const min30 = getStoredBool(RECALL_MIN_30_KEY, true) !== false;
-    root.dataset.channel = String(stored);
-    root.innerHTML = `
-      <button id="uvs-recall-open" type="button">Pong</button>
-      <div id="uvs-recall-menu" hidden>
-        <button id="uvs-recall-channel" type="button">Recall ${stored}</button>
-        <label id="uvs-recall-min30" title="Uncheck to include verified short videos"><input type="checkbox" ${min30 ? 'checked' : ''}>Skip &lt;30s</label>
-        <button type="button" data-action="main">Main video</button>
-        <button type="button" data-action="all">All videos</button>
-        <div id="uvs-recall-status">Ready</div>
-      </div>`;
-    document.body.appendChild(root);
-    const menu = root.querySelector('#uvs-recall-menu');
-    const open = root.querySelector('#uvs-recall-open');
-    const channelButton = root.querySelector('#uvs-recall-channel');
-    const min30Checkbox = root.querySelector('#uvs-recall-min30 input');
-    const status = root.querySelector('#uvs-recall-status');
-    open.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      menu.hidden = !menu.hidden;
-    });
-    channelButton.addEventListener('click', event => {
-      event.preventDefault();
-      const next = root.dataset.channel === '2' ? 1 : 2;
-      root.dataset.channel = String(next);
-      setStoredJson(RECALL_CHANNEL_KEY, next);
-      channelButton.textContent = `Recall ${next}`;
-    });
-    min30Checkbox.addEventListener('change', () => {
-      setStoredBool(RECALL_MIN_30_KEY, min30Checkbox.checked);
-    });
-    const runRecallCapture = async (
-      action,
-      requestedChannel = Number(root.dataset.channel),
-      requestedIgnoreUnder30 = min30Checkbox.checked
-    ) => {
+    root.style.cssText = 'position:fixed;left:34%;bottom:10px;z-index:2147483647';
+    root.dataset.channel = String(Number(getStoredJson(RECALL_CHANNEL_KEY, 1)) === 2 ? 2 : 1);
+    const open = document.createElement('button');
+    open.id = 'uvs-recall-open'; open.type = 'button'; open.textContent = 'Pong';
+    open.style.cssText = 'height:28px;border:1px solid #ffffff33;border-radius:999px;background:#1d4ed8de;color:white;padding:0 11px;font:700 11px system-ui;cursor:pointer';
+    root.appendChild(open); document.body.appendChild(root);
+    open.onclick = event => {
+      event.preventDefault(); event.stopPropagation();
+      if (activeTargetPreview?.sending) return;
+      if (activeTargetPreview) activeTargetPreview.close();
+      else openTargetPreview('all', Number(root.dataset.channel), false);
+    };
+    // Preserve the silent qualification hook without adding visible controls.
+    document.addEventListener('pong:universal-video-recall', async event => {
       if (root.dataset.busy === 'true' || activeTargetPreview?.sending) return;
       root.dataset.busy = 'true';
-      const captureAction = action === 'main' ? 'main' : 'all';
-      const captureChannel = Number(requestedChannel) === 2 ? 2 : 1;
-      root.dataset.channel = String(captureChannel);
-      channelButton.textContent = `Recall ${captureChannel}`;
-      status.textContent = captureAction === 'main' ? 'Capturing main…' : 'Capturing all…';
       try {
-        const result = await sendCaptureToRecall(
-          captureAction,
-          captureChannel,
-          requestedIgnoreUnder30 !== false
-        );
-        status.textContent = `${result.videos} ready in R${root.dataset.channel}`;
-      } catch (error) {
-        status.textContent = String(error?.message || error).slice(0, 80);
-      } finally {
-        root.dataset.busy = 'false';
-      }
-    };
-    root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      if (root.dataset.busy === 'true') return;
-      menu.hidden = true;
-      openTargetPreview(button.dataset.action, Number(root.dataset.channel), min30Checkbox.checked);
-    }));
-    // A private/headless qualification browser must not synthesize a normal
-    // site click: ad-heavy pages can intercept that click before this panel and
-    // freeze or navigate the source tab. This namespaced event invokes the same
-    // production capture path without exposing media or credentials.
-    document.addEventListener('pong:universal-video-recall', event => {
-      const detail = event?.detail || {};
-      void runRecallCapture(
-        detail.mode || root.dataset.harnessMode,
-        detail.channel || Number(root.dataset.harnessChannel || root.dataset.channel),
-        detail.ignoreUnder30 === undefined ? min30Checkbox.checked : detail.ignoreUnder30
-      );
+        await sendCaptureToRecall(event.detail?.mode || 'all', event.detail?.channel || Number(root.dataset.channel), event.detail?.ignoreUnder30 === true);
+      } catch (error) { root.dataset.error = String(error.message).slice(0, 120); }
+      finally { root.dataset.busy = 'false'; }
     });
   }
 
   function addFloatingButtons() {
-    if (isPongAppPage()) {
-      addPongEromeLauncher();
-      return;
-    }
-
+    if (isPongAppPage()) { addPongEromeLauncher(); return; }
     addRecallCaptureButton();
-    const compactSite = detectSite();
-    if (compactSite !== 'erome-album' && compactSite !== 'erome-profile') return;
-    if (document.getElementById('uvs-panel')) return;
-
-    const css = `
-      #uvs-panel {
-        position: fixed;
-        z-index: 2147483647;
-        right: 12px;
-        bottom: 12px;
-        width: 206px;
-        background: rgba(17, 17, 17, 0.96);
-        color: #fff;
-        font-family: Arial, sans-serif;
-        font-size: 12px;
-        line-height: 1.25;
-        border-radius: 8px;
-        box-shadow: 0 4px 18px rgba(0,0,0,.45);
-        padding: 8px;
-        box-sizing: border-box;
-      }
-
-      #uvs-panel * {
-        box-sizing: border-box;
-      }
-
-      #uvs-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        cursor: move;
-        user-select: none;
-        margin-bottom: 6px;
-        font-weight: bold;
-        color: #fff;
-      }
-
-      #uvs-mini {
-        background: #333;
-        color: #fff;
-        border: 0;
-        border-radius: 6px;
-        width: 25px;
-        height: 22px;
-        cursor: pointer;
-        font-weight: bold;
-      }
-
-      #uvs-panel.uvs-collapsed {
-        width: 54px;
-        padding: 7px;
-      }
-
-      #uvs-panel.uvs-collapsed #uvs-body {
-        display: none;
-      }
-
-      #uvs-panel.uvs-collapsed #uvs-title {
-        display: none;
-      }
-
-      #uvs-panel button.uvs-btn {
-        width: 100%;
-        margin: 3px 0;
-        padding: 8px 6px;
-        border: 0;
-        border-radius: 7px;
-        color: #fff;
-        font-size: 12px;
-        font-weight: bold;
-        cursor: pointer;
-        background: #2d6cdf;
-      }
-
-      #uvs-panel button.uvs-btn:hover {
-        filter: brightness(1.12);
-      }
-
-      #uvs-panel button.uvs-copy {
-        background: #168a3a;
-      }
-
-      #uvs-panel button.uvs-page {
-        background: #5b47c8;
-      }
-
-      #uvs-panel button.uvs-warn {
-        background: #8a5a16;
-      }
-
-      #uvs-panel button.uvs-close {
-        background: #8a1c1c;
-      }
-
-      #uvs-status {
-        margin-top: 6px;
-        color: #ddd;
-        min-height: 16px;
-        word-break: break-word;
-      }
-
-      #uvs-count {
-        margin-top: 4px;
-        color: #9fe29f;
-        font-weight: bold;
-      }
-
-      #uvs-note {
-        margin-top: 5px;
-        color: #aaa;
-        font-size: 11px;
-      }
-
-      html.uvs-erome-player-open,
-      body.uvs-erome-player-open {
-        overflow: hidden !important;
-        touch-action: none !important;
-      }
-
-      #uvs-erome-player {
-        position: fixed;
-        inset: 0;
-        z-index: 2147483646;
-        background: #000;
-        color: #fff;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-        overflow: hidden;
-        touch-action: none;
-      }
-
-      #uvs-erome-player * {
-        box-sizing: border-box;
-      }
-
-      #uvs-erome-player .uvs-erome-close {
-        position: absolute;
-        top: 10px;
-        left: 10px;
-        z-index: 50;
-        width: 34px;
-        height: 34px;
-        border: 1px solid rgba(255,255,255,0.12);
-        border-radius: 999px;
-        background: rgba(8,12,16,0.42);
-        color: rgba(255,255,255,0.72);
-        font-size: 18px;
-        line-height: 1;
-        font-weight: 700;
-        cursor: pointer;
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-      }
-
-      #uvs-erome-player .uvs-erome-container {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        background: #000;
-        touch-action: none;
-      }
-
-      #uvs-erome-player .video-wrapper {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        overflow: hidden;
-        opacity: 1;
-        transform: translate3d(0, 0, 0) scale(1);
-        transition: opacity 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
-        touch-action: manipulation;
-        -webkit-tap-highlight-color: transparent;
-        cursor: pointer;
-      }
-
-      #uvs-erome-player .video-wrapper.deck-enter-up {
-        animation: uvsDeckEnterUp 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
-      }
-
-      #uvs-erome-player .video-wrapper.deck-enter-down {
-        animation: uvsDeckEnterDown 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
-      }
-
-      #uvs-erome-player .video-wrapper.deck-enter-ready {
-        animation: uvsDeckEnterReady 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
-      }
-
-      @keyframes uvsDeckEnterUp {
-        from { opacity: 0; transform: translate3d(0, 34px, 0) scale(0.992); }
-        to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
-      }
-
-      @keyframes uvsDeckEnterDown {
-        from { opacity: 0; transform: translate3d(0, -34px, 0) scale(0.992); }
-        to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
-      }
-
-      @keyframes uvsDeckEnterReady {
-        from { opacity: 0; transform: translate3d(0, 12px, 0) scale(0.992); }
-        to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
-      }
-
-      #uvs-erome-player .video-wrapper.video-playing {
-        box-shadow: inset 0 0 0 2px rgba(103,232,249,0.38);
-      }
-
-      #uvs-erome-player .video-wrapper[data-ready-playable="true"] {
-        box-shadow: inset 0 0 0 2px rgba(34,197,94,0.55);
-      }
-
-      #uvs-erome-player .video-player {
-        width: 100%;
-        height: 100%;
-        object-fit: contain;
-        background: #000;
-        outline: none;
-        transform: translateZ(0);
-        backface-visibility: hidden;
-        will-change: transform;
-        pointer-events: auto !important;
-        -webkit-appearance: none;
-        appearance: none;
-        cursor: pointer !important;
-        touch-action: none !important;
-      }
-
-      #uvs-erome-player .tap-area {
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 30px;
-        z-index: 5;
-        background: transparent;
-        cursor: pointer;
-        touch-action: manipulation;
-        -webkit-tap-highlight-color: transparent;
-        pointer-events: auto;
-        user-select: none;
-        -webkit-user-select: none;
-      }
-
-      #uvs-erome-player .video-wrapper:not(.video-playing) .tap-area::before {
-        content: '';
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        border-style: solid;
-        border-width: 30px 0 30px 50px;
-        border-color: transparent transparent transparent rgba(255,255,255,0.6);
-        opacity: 0.7;
-        z-index: 3;
-      }
-
-      #uvs-erome-player .seek-flash {
-        position: absolute;
-        top: 0;
-        bottom: 30px;
-        width: 40%;
-        z-index: 8;
-        pointer-events: none;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        opacity: 0;
-        transition: opacity 0.15s;
-        background: rgba(255,255,255,0.1);
-      }
-
-      #uvs-erome-player .seek-flash.left {
-        left: 0;
-        border-radius: 0 50% 50% 0;
-      }
-
-      #uvs-erome-player .seek-flash.right {
-        right: 0;
-        border-radius: 50% 0 0 50%;
-      }
-
-      #uvs-erome-player .seek-flash.show {
-        opacity: 1;
-      }
-
-      #uvs-erome-player .seek-flash span {
-        color: #fff;
-        font-size: 20px;
-        font-weight: 700;
-        text-shadow: 0 0 8px rgba(0,0,0,0.9);
-      }
-
-      #uvs-erome-player .video-progress-container {
-        position: absolute;
-        bottom: 0;
-        left: 0;
-        right: 0;
-        height: 30px;
-        display: flex;
-        flex-direction: column;
-        justify-content: flex-end;
-        z-index: 20;
-        opacity: 1;
-        pointer-events: auto;
-        background: linear-gradient(to top, rgba(0,0,0,0.6), transparent);
-        padding: 5px 0;
-        touch-action: none;
-        user-select: none;
-        -webkit-user-select: none;
-        -webkit-touch-callout: none;
-        -webkit-tap-highlight-color: transparent;
-      }
-
-      #uvs-erome-player .video-progress-bar {
-        width: 100%;
-        height: 8px;
-        background: rgba(255,255,255,0.3);
-        border-radius: 4px;
-        overflow: visible;
-        cursor: pointer;
-        position: relative;
-        margin-bottom: 2px;
-        touch-action: none;
-        user-select: none;
-        -webkit-user-select: none;
-      }
-
-      #uvs-erome-player .video-progress-fill {
-        height: 100%;
-        width: 0;
-        background: #67e8f9;
-        border-radius: 5px;
-        transition: width 0.1s linear;
-        position: relative;
-        will-change: width;
-        z-index: 1;
-      }
-
-      #uvs-erome-player .video-progress-fill.active-scrubbing {
-        transition: none;
-        background: #a7f3d0;
-      }
-
-      #uvs-erome-player .scrubber-handle {
-        position: absolute;
-        right: -8px;
-        top: -4px;
-        width: 16px;
-        height: 16px;
-        background: #67e8f9;
-        border-radius: 50%;
-        box-shadow: 0 0 6px rgba(0,0,0,0.7);
-        display: none;
-        pointer-events: none;
-        z-index: 5;
-      }
-
-      #uvs-erome-player .preview-fill {
-        position: absolute;
-        height: 100%;
-        width: 0;
-        background: rgba(103,232,249,0.34);
-        border-radius: 5px;
-        top: 0;
-        left: 0;
-        z-index: 0;
-        pointer-events: none;
-      }
-
-      #uvs-erome-player .video-duration {
-        color: #fff;
-        font-size: 12px;
-        text-shadow: 1px 1px 1px rgba(0,0,0,0.5);
-        text-align: right;
-        padding-right: 5px;
-      }
-
-      #uvs-erome-player .artist-label {
-        position: absolute;
-        left: 50%;
-        bottom: 36px;
-        transform: translateX(-50%);
-        max-width: min(66vw, 280px);
-        padding: 2px 7px;
-        border-radius: 999px;
-        background: rgba(8,12,16,0.34);
-        color: rgba(255,255,255,0.58);
-        border: 1px solid rgba(255,255,255,0.08);
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-        font-size: 9px;
-        line-height: 1.2;
-        font-weight: 600;
-        text-align: center;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        z-index: 22;
-        pointer-events: none;
-        text-shadow: 0 1px 2px rgba(0,0,0,0.55);
-      }
-
-      #uvs-erome-player .video-ready-loader {
-        position: absolute;
-        left: 50%;
-        top: calc(50% + 42px);
-        transform: translate(-50%,-50%);
-        z-index: 24;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        pointer-events: none;
-        opacity: 0.84;
-        transition: opacity 0.18s ease, transform 0.18s ease;
-      }
-
-      #uvs-erome-player .video-ready-loader.ready {
-        opacity: 0;
-        transform: translate(-50%,-50%) scale(0.9);
-      }
-
-      #uvs-erome-player .video-ready-percent {
-        min-width: 24px;
-        text-align: center;
-        font-size: 9px;
-        line-height: 1;
-        color: rgba(255,255,255,0.66);
-        background: rgba(8,12,16,0.32);
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 999px;
-        padding: 2px 4px;
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-      }
-
-      #uvs-erome-player .video-ready-percent.not-ready {
-        color: rgba(255,255,255,0.92);
-        background: rgba(239,68,68,0.58);
-        border-color: rgba(248,113,113,0.68);
-        box-shadow: 0 0 12px rgba(239,68,68,0.28);
-      }
-
-      #uvs-erome-player .video-loading-indicator {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        width: 36px;
-        height: 36px;
-        margin: -18px 0 0 -18px;
-        border: 3px solid rgba(255,255,255,0.25);
-        border-top-color: #67e8f9;
-        border-radius: 50%;
-        animation: uvsEromeSpin 0.9s linear infinite;
-        display: none;
-        z-index: 23;
-        pointer-events: none;
-      }
-
-      @keyframes uvsEromeSpin {
-        to { transform: rotate(360deg); }
-      }
-
-      #uvs-erome-player .time-indicator,
-      #uvs-erome-player .uvs-erome-status {
-        position: absolute;
-        left: 50%;
-        top: 50%;
-        transform: translate(-50%, -50%);
-        z-index: 30;
-        min-width: 128px;
-        min-height: 42px;
-        padding: 8px 12px;
-        align-items: center;
-        justify-content: center;
-        border-radius: 999px;
-        background: rgba(8,12,16,0.64);
-        border: 1px solid rgba(255,255,255,0.1);
-        color: rgba(255,255,255,0.86);
-        font-size: 13px;
-        font-weight: 700;
-        text-align: center;
-        pointer-events: none;
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-        text-shadow: 0 1px 2px rgba(0,0,0,0.65);
-      }
-
-      #uvs-erome-player .time-indicator.fade-out {
-        opacity: 0 !important;
-        transition: opacity 0.35s ease;
-      }
-
-      #uvs-erome-player .uvs-erome-status {
-        display: none;
-        max-width: 80vw;
-      }
-    `;
-
-    try {
-      if (typeof GM_addStyle !== 'undefined') {
-        GM_addStyle(css);
-      } else {
-        const style = document.createElement('style');
-        style.textContent = css;
-        document.head.appendChild(style);
-      }
-    } catch (e) {}
-
-    const panel = document.createElement('div');
-    const site = detectSite();
-    const isEromePage = site === 'erome-album' || site === 'erome-profile';
-    const panelButtons = isEromePage
-      ? `
-        <button id="uvs-erome-play" class="uvs-btn uvs-copy">Player</button>
-        <button id="uvs-copy-pages" class="uvs-btn uvs-page">Copy Page Links</button>
-      `
-      : `
-        <button id="uvs-scrape-copy" class="uvs-btn uvs-copy">Scrape + Copy</button>
-        <button id="uvs-copy-pong" class="uvs-btn uvs-copy">Copy Last</button>
-      `;
-
-    panel.id = 'uvs-panel';
-
-    panel.innerHTML = `
-      <div id="uvs-header">
-        <span id="uvs-title">${isEromePage ? 'Erome' : 'Video Scraper'}</span>
-        <button id="uvs-mini" title="Minimize / Expand">+</button>
-      </div>
-
-      <div id="uvs-body">
-        ${panelButtons}
-
-        <div id="uvs-count">0 playable / 0 entries</div>
-        <div id="uvs-status">Ready</div>
-        <div id="uvs-note">${isEromePage ? 'Swipe up/down. Tap to play.' : 'For Coomer/direct links.'}</div>
-      </div>
-    `;
-
-    document.body.appendChild(panel);
-
-    panelStatusEl = panel.querySelector('#uvs-status');
-
-    const savedPos = getStoredJson(PANEL_POS_KEY, null);
-
-    if (savedPos && Number.isFinite(savedPos.left) && Number.isFinite(savedPos.top)) {
-      panel.style.left = `${savedPos.left}px`;
-      panel.style.top = `${savedPos.top}px`;
-      panel.style.right = 'auto';
-      panel.style.bottom = 'auto';
-    }
-
-    panel.querySelector('#uvs-scrape')?.addEventListener('click', () => doScrape(false));
-    panel.querySelector('#uvs-current')?.addEventListener('click', () => doScrapeCurrentOnly());
-    panel.querySelector('#uvs-erome-play')?.addEventListener('click', () => openEromePagePlayer());
-
-    panel.querySelector('#uvs-copy')?.addEventListener('click', () => doCopyStructured());
-    panel.querySelector('#uvs-copy-pong')?.addEventListener('click', () => doCopyPongPaste());
-    panel.querySelector('#uvs-copy-plain')?.addEventListener('click', () => doCopyPlain());
-    panel.querySelector('#uvs-copy-pages')?.addEventListener('click', () => doCopyPagesOnly());
-    panel.querySelector('#uvs-copy-readable')?.addEventListener('click', () => doCopyReadable());
-
-    panel.querySelector('#uvs-scrape-copy')?.addEventListener('click', () => doScrapeAndCopy());
-    panel.querySelector('#uvs-auto')?.addEventListener('click', () => toggleAuto());
-    panel.querySelector('#uvs-close')?.addEventListener('click', () => closeCurrentTab());
-
-    panel.querySelector('#uvs-mini').addEventListener('click', e => {
-      e.stopPropagation();
-
-      const collapsed = !panel.classList.contains('uvs-collapsed');
-
-      setPanelCollapsed(panel, collapsed);
-    });
-
-    makePanelDraggable(panel, panel.querySelector('#uvs-header'));
-
-    // Erome needs the Player button visible; other sites keep the remembered state.
-    setPanelCollapsed(panel, isEromePage ? false : getStoredBool(PANEL_COLLAPSED_KEY, true));
-
-    updatePanelCount();
   }
 
   function updatePanelCount() {
@@ -4539,20 +4017,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   try {
     if (typeof GM_registerMenuCommand !== 'undefined') {
-      GM_registerMenuCommand('Scrape videos', () => doScrape(false));
-      GM_registerMenuCommand('Scrape current page only', () => doScrapeCurrentOnly());
-      GM_registerMenuCommand('Open Erome card player', () => openEromePagePlayer());
-      GM_registerMenuCommand('Open Erome from Pong', () => openEromeFromPong());
-
-      GM_registerMenuCommand('Copy Pong paste text', () => doCopyPongPaste());
-      GM_registerMenuCommand('Copy structured', () => doCopyStructured());
-      GM_registerMenuCommand('Copy external-playable URLs only', () => doCopyPlain());
-      GM_registerMenuCommand('Copy source page links', () => doCopyPagesOnly());
-      GM_registerMenuCommand('Copy diagnostic page + raw video list', () => doCopyReadable());
-
-      GM_registerMenuCommand('Scrape + copy Pong paste text', () => doScrapeAndCopy());
-      GM_registerMenuCommand('Close tab', () => closeCurrentTab());
-      GM_registerMenuCommand('Toggle auto-scrape', () => toggleAuto());
+      GM_registerMenuCommand('Select videos for Pong', () => openTargetPreview('all', Number(getStoredJson(RECALL_CHANNEL_KEY, 1)), false));
     }
   } catch (e) {
     console.error(TAG, 'Menu registration failed:', e);
@@ -4600,6 +4065,9 @@ function primaryVideoEvidence(html, pageUrl) {
     collectLogicalWatchPageUrls,
     primaryMediaEntriesFromDoc,
     independentVideoGroupsFromDoc,
+    youtubeVideoId,
+    youtubePlayerData,
+    youtubeMediaEntries,
     sendCaptureToRecall,
     collectSelectableTargets,
     openTargetPreview,
@@ -4623,9 +4091,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.18.1 loaded on', location.href);
+  log('Universal Video Scraper v7.19.0 loaded on', location.href);
 
-  if (getStoredBool(AUTO_SCRAPE_KEY, false)) {
-    setTimeout(() => doScrape(false), 800);
-  }
+  // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
