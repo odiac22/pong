@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.9.7
+// @version      7.15.0
 // @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
@@ -16,6 +16,9 @@
 // @grant        GM_addStyle
 // @grant        unsafeWindow
 // @connect      *
+// @connect      localhost
+// @connect      127.0.0.1
+// @connect      192.168.1.124
 // @run-at       document-idle
 // @license      MIT
 // ==/UserScript==
@@ -25,10 +28,10 @@
 
   /* CONFIG */
 
-  const VIDEO_EXT_RE = /\.(mp4|m4v|mov|webm|mkv|m3u8)(\?|#|$)/i;
+  const VIDEO_EXT_RE = /\.(mp4|m4v|mov|webm|mkv|m3u8|ogv)(\?|#|$)/i;
 
   const RAW_VIDEO_URL_RE =
-    /(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:mp4|m4v|mov|webm|mkv|m3u8)(?:\?[^\s"'<>\\]*)?/gi;
+    /(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:mp4|m4v|mov|webm|mkv|m3u8|ogv)(?:\?[^\s"'<>\\]*)?/gi;
 
   const EROME_ALBUM_RE =
     /^https?:\/\/(?:www\.)?erome\.com\/a\/[\w-]+\/?$/i;
@@ -45,6 +48,7 @@
   // Slower = less likely to fail or trigger rate limits.
   const POST_CONCURRENCY = 4;
   const FOLLOW_CONCURRENCY = 2;
+  const RECALL_CAPTURE_CONCURRENCY = 10;
 
   const MAX_FOLLOW_PAGES = 60;
   const MAX_FOLLOW_LINKS = 250;
@@ -73,6 +77,56 @@
   let panelStatusEl = null;
   let browserMediaRelayGeneration = 0;
   const browserMediaRelayPreferredCandidates = new Map();
+
+  // BEGIN SHARED PRIMARY VIDEO POLICY
+function primaryVideoEvidence(html, pageUrl) {
+  const source=String(html||'');
+  const canonical=value=>{try{const u=new URL(typeof value==='object'?value?.['@id']||value?.url:value,pageUrl);u.hash='';return u.href.replace(/\/$/,'');}catch{return '';}};
+  const page=canonical(pageUrl),objects=[];
+  const walk=(v,depth=0)=>{
+    if(!v||typeof v!=='object'||depth>12)return;
+    if([v['@type']].flat().some(t=>/(?:^|\/)VideoObject$/.test(String(t))))objects.push(v);
+    for(const [k,item]of Object.entries(v))if(k==='@graph'||k==='mainEntity'||Array.isArray(v))walk(item,depth+1);
+  };
+  for(const m of source.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)){
+    if(!/\btype\s*=\s*["']application\/ld\+json["']/i.test(m[1]))continue;
+    try{walk(JSON.parse(m[2]));}catch{}
+  }
+  const matched=objects.filter(o=>[o.url,o['@id'],o.mainEntityOfPage,o.acquireLicensePage].some(v=>v&&canonical(v)===page));
+  const chosen=matched.length===1?matched[0]:objects.length===1?objects[0]:null;
+  if(!chosen)return null;
+  const content=typeof chosen.contentUrl==='string'?chosen.contentUrl:'';
+  let anchor;try{anchor=new URL(content,pageUrl);if(!/^https?:$/.test(anchor.protocol)||!content)return null;}catch{return null;}
+  const media=/\.(?:mp4|m4v|mov|webm|mkv|m3u8|ogv)(?:[?#]|$)/i;
+  if(!media.test(anchor.href))return null;
+  // Alternate encodes may share the authoritative content's asset directory.
+  // Generic /video/ or /media/ buckets are NOT an identity proof.
+  const parent=anchor.pathname.slice(0,anchor.pathname.lastIndexOf('/')+1);
+  const parts=parent.split('/').filter(Boolean);
+  const safeDirectory=parts.length>=2&&!/^(?:videos?|media|files?|assets?|uploads?|download|mp4|hd|sd|(?:19|20)\d{2})$/i.test(parts.at(-1)||'');
+  const decoded=source.replace(/\\u002f/gi,'/').replace(/\\u0026/gi,'&').replace(/\\\//g,'/').replace(/&amp;/gi,'&');
+  const urls=[anchor.href];
+  if(safeDirectory){
+    for(const m of decoded.matchAll(/https?:\/\/[^\s"'<>\\]+?\.(?:mp4|m4v|mov|webm|mkv|m3u8|ogv)(?:\?[^\s"'<>\\]*)?/gi)){
+      try{const u=new URL(m[0]);if(u.origin===anchor.origin&&u.pathname.startsWith(parent)&&u.pathname.slice(parent.length).indexOf('/')<0&&!/(?:preview|trailer|thumb|watermark)/i.test(u.pathname)&&!urls.includes(u.href))urls.push(u.href);}catch{}
+    }
+  }
+  const score=value=>{
+    const pathname=new URL(value).pathname;
+    const dimensions=pathname.match(/(?:^|[_/-])(\d{3,4})[_x](\d{3,4})(?:[_./-]|$)/i);
+    if(dimensions)return Number(dimensions[1])*Number(dimensions[2]);
+    const height=Number(pathname.match(/(?:^|[_/-])(\d{3,4})p?(?:\.[a-z0-9]+$|[_/-])/i)?.[1]||0);
+    return height>=144&&height<=4320?height*height*16/9:0;
+  };
+  // Known rendition sizes rank above unknown progressive files; the declared
+  // content remains the tie-breaker. HLS masters are kept authoritative.
+  urls.sort((a,b)=>Number(/master\.m3u8/i.test(b))-Number(/master\.m3u8/i.test(a))||score(b)-score(a));
+  const rawDuration=String(chosen.duration||'');
+  const iso=rawDuration.match(/^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/i);
+  const durationSeconds=iso&&!Number(iso[1])&&!Number(iso[2])?Number(iso[3]||0)*86400+Number(iso[4]||0)*3600+Number(iso[5]||0)*60+Number(iso[6]||0):Number(rawDuration)||0;
+  return {videoUrls:urls.slice(0,12),title:String(chosen.name||'').trim(),durationSeconds,contentUrl:anchor.href,identityEvidence:'page-video-object'};
+}
+  // END SHARED PRIMARY VIDEO POLICY
 
   /* HELPERS */
 
@@ -427,17 +481,27 @@
   async function fetchText(url, attempt = 1, options = {}) {
     const timeout = Math.max(3000, Number(options.timeout || 30000));
     const maxRetries = Math.max(1, Number(options.maxRetries || MAX_RETRIES));
+    let requestUrl = url;
+    if (options.cacheBust) {
+      try {
+        const freshUrl = new URL(url, location.href);
+        freshUrl.searchParams.set('_pong_relay', `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+        requestUrl = freshUrl.toString();
+      } catch (_) {}
+    }
     try {
       if (typeof GM_xmlhttpRequest !== 'undefined') {
         return await new Promise((resolve, reject) => {
           GM_xmlhttpRequest({
             method: 'GET',
-            url,
+            url: requestUrl,
             timeout,
             anonymous: false,
             withCredentials: true,
             headers: {
-              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              ...(options.cacheBust ? { 'Cache-Control': 'no-cache', Pragma: 'no-cache' } : {}),
+              ...(options.headers || {})
             },
             onload: res => {
               if (res.status >= 200 && res.status < 400) {
@@ -452,7 +516,7 @@
         });
       }
 
-      const res = await fetch(url, {
+      const res = await fetch(requestUrl, {
         credentials: 'include',
         cache: 'no-store'
       });
@@ -721,6 +785,8 @@
   }
 
   function extractPageDurationSeconds(doc = document) {
+    const evidence = primaryVideoEvidence(String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || ''), doc.__uvsUrl || location.href);
+    if (evidence?.durationSeconds > 0) return evidence.durationSeconds;
     const add = value => {
       const seconds = Number(value || 0);
       return Number.isFinite(seconds) && seconds > 0 && seconds < 86400 ? seconds : 0;
@@ -791,44 +857,93 @@
       ...(Array.isArray(job.candidates) ? job.candidates : [])
     ].map(value => String(value || '').trim()).filter(value => /^https?:\/\//i.test(value)))];
     let lastError = 'No captured media candidate was available';
-    for (const candidate of candidates) {
-      try {
-        const response = await browserRelayRequest({
-          method: 'GET',
-          url: candidate,
-          headers: {
-            'Accept': 'video/*,application/octet-stream;q=0.9,*/*;q=0.5',
-            'Range': String(job.range || 'bytes=0-2097151'),
-            'Referer': String(job.pageUrl || location.href)
-          },
-          responseType: 'arraybuffer',
-          timeout: 12000,
-          anonymous: false
-        });
-        const body = response.response;
-        const byteLength = Number(body?.byteLength || 0);
-        const contentType = responseHeaderValue(response.responseHeaders, 'content-type');
-        if (![200, 206].includes(Number(response.status)) || !byteLength) {
-          throw new Error(`HTTP ${response.status || 0}`);
+    const tryCandidates = async values => {
+      for (const candidate of values) {
+        try {
+          const response = await browserRelayRequest({
+            method: 'GET',
+            url: candidate,
+            headers: {
+              'Accept': 'video/*,application/octet-stream;q=0.9,*/*;q=0.5',
+              'Range': String(job.range || 'bytes=0-2097151'),
+              'Referer': String(job.pageUrl || location.href)
+            },
+            responseType: 'arraybuffer',
+            timeout: 12000,
+            anonymous: false
+          });
+          const body = response.response;
+          const byteLength = Number(body?.byteLength || 0);
+          const contentType = responseHeaderValue(response.responseHeaders, 'content-type');
+          if (![200, 206].includes(Number(response.status)) || !byteLength) {
+            throw new Error(`HTTP ${response.status || 0} from ${candidate}`);
+          }
+          if (/\b(?:text\/html|application\/json)\b/i.test(contentType)) {
+            throw new Error(`Unexpected ${contentType}`);
+          }
+          if (Number(response.status) === 200 && byteLength > 2 * 1024 * 1024 + 64 * 1024) {
+            throw new Error('The media host ignored the requested byte range');
+          }
+          browserMediaRelayPreferredCandidates.set(job.sourceId, candidate);
+          return {
+            status: Number(response.status),
+            body,
+            sourceUrl: candidate,
+            contentType: contentType || 'video/mp4',
+            contentRange: responseHeaderValue(response.responseHeaders, 'content-range'),
+            acceptRanges: responseHeaderValue(response.responseHeaders, 'accept-ranges') || 'bytes'
+          };
+        } catch (error) {
+          lastError = error?.message || String(error);
         }
-        if (/\b(?:text\/html|application\/json)\b/i.test(contentType)) {
-          throw new Error(`Unexpected ${contentType}`);
-        }
-        if (Number(response.status) === 200 && byteLength > 2 * 1024 * 1024 + 64 * 1024) {
-          throw new Error('The media host ignored the requested byte range');
-        }
-        browserMediaRelayPreferredCandidates.set(job.sourceId, candidate);
-        return {
-          status: Number(response.status),
-          body,
-          sourceUrl: candidate,
-          contentType: contentType || 'video/mp4',
-          contentRange: responseHeaderValue(response.responseHeaders, 'content-range'),
-          acceptRanges: responseHeaderValue(response.responseHeaders, 'accept-ranges') || 'bytes'
-        };
-      } catch (error) {
-        lastError = error?.message || String(error);
       }
+      return null;
+    };
+    // HQPorner's nested player URLs are intentionally short-lived. Trying all
+    // captured resolutions first adds several doomed round trips before the
+    // useful refresh, so go straight to the fresh-player path for this host.
+    const forceFreshPlayer = /(?:^|\.)hqporner\.com\b/i.test(String(job.pageUrl || ''));
+    const capturedResult = forceFreshPlayer ? null : await tryCandidates(candidates);
+    if (capturedResult) return capturedResult;
+
+    // Some HQPorner CDN URLs are short-lived per-page grants: the 1 KiB proof
+    // succeeds, but the same path can become 404 before Android requests its
+    // first frame. Refresh that exact logical page inside the authenticated
+    // source browser and retry the requested range against newly minted URLs.
+    try {
+      const pageUrl = String(job.pageUrl || location.href);
+      // A normal HTTP/browser cache hit is harmful here. The nested HQPorner
+      // player intentionally mints a different short-lived CDN path on every
+      // fresh request, so force both the watch page and its player document to
+      // be fetched again for each relay recovery.
+      const pageDoc = await fetchDoc(pageUrl, {
+        timeout: 12000,
+        maxRetries: 2,
+        cacheBust: true,
+        headers: { Referer: pageUrl }
+      }) || (pageUrl === location.href ? document : null);
+      const refreshedEntries = pageDoc
+        ? await browserResolvedMediaEntries(
+            pageDoc,
+            pageUrl,
+            extractPageDurationSeconds(pageDoc),
+            0,
+            new Set(),
+            { cacheBust: true }
+          )
+        : [];
+      // Reloading an HQPorner page can refresh the browser-side grant/cookie
+      // while deliberately returning the *same* CDN URL. Do not discard that
+      // URL as a duplicate: it must be retried after the page refresh. Keep the
+      // page's freshly observed order first, then retry the captured fallbacks.
+      const refreshedCandidates = [...new Set([
+        ...refreshedEntries.flatMap(entry => [entry?.videoUrl, entry?.rawVideoUrl]),
+        ...candidates
+      ].map(value => String(value || '').trim()).filter(value => /^https?:\/\//i.test(value)))];
+      const refreshedResult = await tryCandidates(refreshedCandidates);
+      if (refreshedResult) return refreshedResult;
+    } catch (error) {
+      lastError = error?.message || String(error);
     }
     throw new Error(lastError);
   }
@@ -899,47 +1014,120 @@
 
   function canonicalWatchPageUrl(rawUrl, baseUrl = location.href) {
     try {
-      const url = new URL(rawUrl, baseUrl);
+      // Firefox extension compartments do not reliably coerce a page-owned URL
+      // object when it crosses into the userscript world. Normalize explicitly.
+      const raw = typeof rawUrl === 'object' && rawUrl?.href ? rawUrl.href : String(rawUrl || '');
+      const base = typeof baseUrl === 'object' && baseUrl?.href ? baseUrl.href : String(baseUrl || location.href);
+      const url = new URL(raw, base);
       url.hash = '';
-      for (const key of [...url.searchParams.keys()]) {
+      const queryKeys = [];
+      url.searchParams.forEach((_value, key) => queryKeys.push(key));
+      for (const key of queryKeys) {
         if (/^(?:utm_.+|ref|src|source|track|click)$/i.test(key)) url.searchParams.delete(key);
       }
       return url.toString();
-    } catch (_) {
+    } catch (error) {
+      try { document.documentElement.dataset.uvsCanonicalError = error?.message || String(error); } catch (_) {}
       return '';
     }
   }
 
-  function collectLogicalWatchPageUrls(doc = document, rawUrl = location.href, limit = 80) {
+  function parseDurationHintSeconds(rawText) {
+    const text = String(rawText || '').replace(/\s+/g, ' ').trim();
+    if (!text) return 0;
+    const words = text.match(/(?:(\d{1,2})\s*h(?:ours?)?\s*)?(?:(\d{1,3})\s*m(?:in(?:ute)?s?)?\.?\s*)?(\d{1,2})\s*s(?:ec(?:ond)?s?)?\.?/i);
+    if (words && (words[1] || words[2])) {
+      const seconds = Number(words[1] || 0) * 3600 + Number(words[2] || 0) * 60 + Number(words[3] || 0);
+      if (seconds > 0 && seconds < 86400) return seconds;
+    }
+    const clock = text.match(/(?:^|\s)(?:(\d{1,2}):)?(\d{1,3}):(\d{2})(?:\s|$)/);
+    if (clock) {
+      const seconds = Number(clock[1] || 0) * 3600 + Number(clock[2] || 0) * 60 + Number(clock[3] || 0);
+      if (Number(clock[3]) < 60 && seconds > 0 && seconds < 86400) return seconds;
+    }
+    return 0;
+  }
+
+  function logicalPageDurationHint(anchor) {
+    if (!anchor) return 0;
+    const candidates = [
+      anchor.textContent,
+      anchor.closest('article,li,[class*="video-card" i],[class*="thumb" i]')?.textContent
+    ];
+    // HQPorner puts the clock in the second sibling after the image link.
+    let sibling = anchor.parentElement;
+    for (let index = 0; sibling && index < 3; index++) {
+      sibling = sibling.nextElementSibling;
+      if (sibling) candidates.push(sibling.textContent);
+    }
+    return candidates.reduce((best, value) => Math.max(best, parseDurationHintSeconds(value)), 0);
+  }
+
+  function isLogicalVideoPageUrl(rawUrl, baseUrl = location.href, anchor = null) {
+    try {
+      const url = new URL(rawUrl, baseUrl);
+      const host = url.hostname.replace(/^www\./i, '').toLowerCase();
+      const path = url.pathname + url.search;
+      if (!['http:', 'https:'].includes(url.protocol)) return false;
+      if (host === 'pornhub.com') return /\/view_video\.php\?[^#]*\bviewkey=[^&#]+/i.test(path);
+      if (host.endsWith('hqporner.com')) return /^\/hdporn\/[^/?#]+/i.test(url.pathname);
+      if (host.endsWith('suj.mobi')) return /\/(?:[a-z]{2}\/)?scene\/[^/?#]+/i.test(url.pathname);
+      if (host === 'porneec.com') {
+        if (anchor?.closest?.('article.thumb-block,article.video-preview-item')) return true;
+        const reserved = /^(?:channels?|actors?|disclaimer|privacy-policy|dmca|2257-statement|page|c|category|tag|wp-|feed)(?:\/|$)/i;
+        const slug = url.pathname.replace(/^\/+|\/+$/g, '');
+        return !!slug && !slug.includes('/') && !reserved.test(slug);
+      }
+      if (/\/(?:free-stock-video|free-video|premium-video)\/[^/?#]*[-_]\d+\/?$/i.test(url.pathname)) return true;
+      if (/\/[^/]+\/\d+-[^/]+\/?$/.test(url.pathname)) return true;
+      if (/\/wiki\/File:[^/]+\.(?:webm|mp4|ogv)$/i.test(url.pathname)) return true;
+      if (/^(?:www\.)?vimeo\.com$/.test(url.hostname) && /^\/\d+$/.test(url.pathname)) return true;
+      if (/(?:^|\.)youtube\.com$/.test(url.hostname) && url.pathname === '/watch' && url.searchParams.get('v')) return true;
+      return /\/(?:watch|videos?|scene|post|talks|details)\/(?!search(?:[/?#]|$)|category(?:[/?#]|$)|tags?(?:[/?#]|$))[^/?#]+/i.test(url.pathname);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function collectLogicalWatchPageTargets(doc = document, rawUrl = location.href, limit = 80) {
     const currentUrl = canonicalWatchPageUrl(rawUrl, rawUrl);
     const current = new URL(currentUrl || rawUrl, rawUrl);
     const isPornhubWatch = /(^|\.)pornhub\.com$/i.test(current.hostname) &&
       /\/view_video\.php\?[^#]*\bviewkey=/i.test(current.pathname + current.search);
-    const watchPath = url => (
-      /\/view_video\.php\?[^#]*\bviewkey=[^&#]+/i.test(url.pathname + url.search) ||
-      /\/(?:watch|videos?|scene|post)\/(?!search(?:[/?#]|$)|category(?:[/?#]|$)|tags?(?:[/?#]|$))[^/?#]+/i.test(url.pathname)
-    );
-    const collect = selector => {
+    let collectError = '';
+    let collectStats = {};
+    const collect = (selector, prevalidated = false) => {
       const found = [];
-      const seen = new Set();
+      const seen = new Map();
+      const stats = { matched: 0, foreign: 0, invalid: 0, empty: 0, same: 0, added: 0 };
       for (const anchor of doc.querySelectorAll(selector)) {
+        stats.matched++;
         try {
           const url = new URL(anchor.getAttribute('href') || anchor.href, current);
-          if (!['http:', 'https:'].includes(url.protocol)) continue;
-          if (url.hostname.toLowerCase() !== current.hostname.toLowerCase() || !watchPath(url)) continue;
+          if (url.hostname.toLowerCase() !== current.hostname.toLowerCase()) { stats.foreign++; continue; }
+          if (!prevalidated && !isLogicalVideoPageUrl(url, current, anchor)) { stats.invalid++; continue; }
           const normalized = canonicalWatchPageUrl(url, current);
-          if (!normalized || normalized === currentUrl || seen.has(normalized)) continue;
-          seen.add(normalized);
-          found.push(normalized);
-        } catch (_) {}
+          if (!normalized) { stats.empty++; continue; }
+          if (normalized === currentUrl) { stats.same++; continue; }
+          const durationSeconds = logicalPageDurationHint(anchor);
+          if (seen.has(normalized)) {
+            const existing = found[seen.get(normalized)];
+            existing.durationSeconds = Math.max(existing.durationSeconds, durationSeconds);
+            continue;
+          }
+          seen.set(normalized, found.length);
+          found.push({ url: normalized, durationSeconds });
+          stats.added++;
+        } catch (error) {
+          collectError = error?.message || String(error);
+        }
       }
+      collectStats = stats;
       return found;
     };
 
     let related = [];
     if (isPornhubWatch) {
-      // Pornhub places two anchors in every card and retains additional hidden
-      // carousels. Pick one URL per card from the primary related-video group.
       const selectors = [
         '#relatedVideosCenter li.pcVideoListItem a[href*="view_video.php?viewkey="]',
         '#relatedVideosVPage li.pcVideoListItem a[href*="view_video.php?viewkey="]',
@@ -947,32 +1135,58 @@
         'li.pcVideoListItem a[href*="view_video.php?viewkey="]'
       ];
       for (const selector of selectors) {
-        const candidates = collect(selector);
+        const candidates = collect(selector, true);
         if (candidates.length >= 2) {
           related = candidates;
           break;
         }
       }
-      // The watch page's primary recommendation rail contains sixteen cards.
-      // Never turn hidden rails, duplicate anchors or preview assets into extra
-      // Pong videos.
-      related = related.slice(0, 16);
+      // Main plus the first nineteen genuine recommendation cards is the
+      // twenty-video watch-page Recall contract. Hidden carousels stay out.
+      related = related.slice(0, 19);
     } else {
-      related = collect(
-        'li.videoBox a[href],li.pcVideoListItem a[href],article a[href],' +
-        '[data-video-vkey] a[href],[class*="video-card" i] a[href]'
-      );
+      const host = current.hostname.replace(/^www\./i, '').toLowerCase();
+      const selector = host.endsWith('hqporner.com')
+        ? 'a[href*="/hdporn/"]'
+        : host.endsWith('suj.mobi')
+          ? 'a[href*="/scene/"]'
+          : host === 'porneec.com'
+            ? 'article.thumb-block a[href],article.video-preview-item a[href]'
+            : host === 'pornhub.com'
+              ? 'li.pcVideoListItem a[href*="view_video.php?viewkey="],a.latestThumb[href*="view_video.php?viewkey="],[data-video-vkey] a[href]'
+              : 'li.videoBox a[href],li.pcVideoListItem a[href],article a[href],[data-video-vkey] a[href],[class*="video-card" i] a[href]';
+      related = collect(selector, host.endsWith('hqporner.com') || host.endsWith('suj.mobi'));
       if (!related.length) related = collect('a[href]');
+      try {
+        document.documentElement.dataset.uvsTargetDiagnostics = JSON.stringify({
+          host,
+          selector,
+          matched: doc.querySelectorAll(selector).length,
+          related: related.length,
+          collectError,
+          collectStats,
+          canonicalError: document.documentElement.dataset.uvsCanonicalError || ''
+        });
+      } catch (_) {}
     }
-    // A listing/profile page is only a container. Its inline autoplay/hover
-    // preview is not an extra logical video. A genuine watch page keeps its
-    // current movie as item one, followed by its related cards.
-    return [watchPath(current) ? currentUrl : '', ...related]
-      .filter(Boolean)
+    const currentTarget = isLogicalVideoPageUrl(current, current)
+      ? [{ url: currentUrl, durationSeconds: extractPageDurationSeconds(doc) }]
+      : [];
+    return [...currentTarget, ...related]
       .slice(0, Math.max(1, Number(limit || 80)));
   }
 
+  function collectLogicalWatchPageUrls(doc = document, rawUrl = location.href, limit = 80) {
+    return collectLogicalWatchPageTargets(doc, rawUrl, limit).map(target => target.url);
+  }
+
   function primaryMediaEntriesFromDoc(doc = document, pageUrl = location.href) {
+    const evidence = primaryVideoEvidence(String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || ''), pageUrl);
+    if (evidence) return evidence.videoUrls.map(videoUrl => ({
+      videoUrl, rawVideoUrl: videoUrl, postUrl: pageUrl, pageUrl,
+      title: evidence.title, durationSeconds: evidence.durationSeconds,
+      identityEvidence: evidence.identityEvidence
+    }));
     const durationSeconds = extractPageDurationSeconds(doc);
     const prioritized = [];
     const add = rawValue => {
@@ -982,6 +1196,33 @@
       if (!prioritized.includes(value)) prioritized.push(value);
     };
     try {
+      // Playerjs/KVS pages often put every rendition in one labelled `file`
+      // string while the live <video> element points at the site's low default.
+      // Preserve those labels and put the highest declared rendition first;
+      // opaque filenames such as `_7.mp4` do not otherwise reveal that they
+      // are HD while `_3.mp4` is only 360p.
+      const rawHtml = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+      const labelledSources = [];
+      for (const match of rawHtml.matchAll(/\bfile\s*:\s*["']([^"']+)["']/gi)) {
+        for (const item of match[1].split(',')) {
+          const labelled = item.match(/^\s*\[([^\]]+)]\s*(https?:\/\/.+)\s*$/i);
+          if (!labelled) continue;
+          const label = labelled[1].trim().toLowerCase();
+          const numeric = Number(label.match(/(\d{3,4})/)?.[1] || 0);
+          const height = numeric || (/\b(?:4k|uhd)\b/i.test(label)
+            ? 2160
+            : /\b(?:full\s*hd|fhd)\b/i.test(label)
+              ? 1080
+              : /\bhd\b/i.test(label)
+                ? 720
+                : 0);
+          labelledSources.push({ value: labelled[2], height, order: labelledSources.length });
+        }
+      }
+      labelledSources
+        .sort((left, right) => right.height - left.height || left.order - right.order)
+        .forEach(source => add(source.value));
+
       const media = [...doc.querySelectorAll('video')]
         .map(element => ({
           element,
@@ -1006,7 +1247,6 @@
         'meta[property="og:video"],meta[property="og:video:url"],meta[property="og:video:secure_url"],meta[itemprop="contentUrl"]'
       ).forEach(meta => add(meta.getAttribute('content')));
 
-      const rawHtml = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
       const identity = rawHtml.match(/["']?video[_-]?id["']?\s*[:=]\s*["']?(\d{5,})/i)?.[1] || '';
       const scriptCandidates = [];
       for (const script of doc.querySelectorAll('script')) {
@@ -1041,13 +1281,98 @@
     }));
   }
 
+  function embeddedPlayerPageUrls(doc, pageUrl, limit = 4) {
+    const values = [];
+    const add = rawValue => {
+      try {
+        const url = new URL(rawValue, pageUrl);
+        if (!['http:', 'https:'].includes(url.protocol)) return;
+        if (/(?:adtng|doubleclick|googlesyndication|trafficjunky|smartpop|splash\.php)/i.test(url.href)) return;
+        url.hash = '';
+        const normalized = url.toString();
+        if (normalized !== pageUrl && !values.includes(normalized)) values.push(normalized);
+      } catch (_) {}
+    };
+    try {
+      doc.querySelectorAll(
+        '#playerWrapper iframe[src],.video-container iframe[src],[class*="player" i] iframe[src],' +
+        'iframe[src*="/video/"],iframe[src*="/embed/"],iframe[src*="player"]'
+      ).forEach(frame => add(frame.getAttribute('src') || frame.src));
+      // Public players are often declared in metadata before an iframe exists.
+      // Use only explicitly declared player links, never arbitrary script URLs.
+      doc.querySelectorAll('meta[name="twitter:player"],meta[property="og:video"],meta[property="og:video:secure_url"],link[itemprop="embedUrl"]')
+        .forEach(element => {
+          const value = element.getAttribute('content') || element.getAttribute('href');
+          if (value && !VIDEO_EXT_RE.test(value)) add(value);
+        });
+      const rawHtml = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+      const patterns = [
+        /(?:nativeplayer|altplayer)\.php\?i=([^"'&\s<>]+)/gi,
+        /<iframe[^>]+src=["']([^"']*(?:\/video\/|\/embed\/|player)[^"']*)["']/gi
+      ];
+      for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.exec(rawHtml))) add(match[1]);
+      }
+    } catch (_) {}
+    return values.slice(0, Math.max(1, Number(limit || 4)));
+  }
+
+  async function browserResolvedMediaEntries(doc, pageUrl, durationHint = 0, depth = 0, seen = new Set(), options = {}) {
+    const durationSeconds = Math.max(Number(durationHint || 0), extractPageDurationSeconds(doc));
+    const direct = primaryMediaEntriesFromDoc(doc, pageUrl).map(entry => ({
+      ...entry,
+      durationSeconds: Math.max(Number(entry.durationSeconds || 0), durationSeconds),
+      contextUrl: pageUrl
+    }));
+    if (direct.length) return direct;
+    if (depth >= 2) {
+      return extractVideoUrls(doc, pageUrl)
+        .filter(value => !/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname))
+        .slice(0, 8)
+        .map(videoUrl => ({
+          videoUrl,
+          rawVideoUrl: videoUrl,
+          postUrl: pageUrl,
+          pageUrl,
+          contextUrl: pageUrl,
+          durationSeconds
+        }));
+    }
+    for (const playerUrl of embeddedPlayerPageUrls(doc, pageUrl)) {
+      if (seen.has(playerUrl)) continue;
+      seen.add(playerUrl);
+      const playerDoc = await fetchDoc(playerUrl, {
+        timeout: 12000,
+        maxRetries: Math.max(1, Number(options.maxRetries || 2)),
+        cacheBust: options.cacheBust === true,
+        headers: { Referer: pageUrl }
+      });
+      if (!playerDoc) continue;
+      const broad = extractVideoUrls(playerDoc, playerUrl)
+        .filter(value => !/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname))
+        .slice(0, 8)
+        .map(videoUrl => ({
+          videoUrl,
+          rawVideoUrl: videoUrl,
+          postUrl: pageUrl,
+          pageUrl,
+          contextUrl: playerUrl,
+          durationSeconds
+        }));
+      if (broad.length) return broad;
+      const nested = await browserResolvedMediaEntries(playerDoc, playerUrl, durationSeconds, depth + 1, seen, options);
+      if (nested.length) return nested.map(entry => ({ ...entry, postUrl: pageUrl, pageUrl }));
+    }
+    return [];
+  }
+
   function isLikelyWatchPage(rawUrl = location.href) {
     try {
       const url = new URL(rawUrl, location.href);
-      const path = url.pathname + url.search;
-      return /\/view_video\.php\?[^#]*\bviewkey=/i.test(path) ||
-        /\/(?:watch|videos?|scene|post)\/(?!search(?:[/?#]|$)|category(?:[/?#]|$)|tags?(?:[/?#]|$))[^/?#]+/i.test(url.pathname) ||
-        Boolean(document.querySelector('meta[property="og:type"][content*="video" i],meta[property="og:video"],video'));
+      return isLogicalVideoPageUrl(url, location.href) || Boolean(document.querySelector(
+        'meta[property="og:type"][content^="video" i],meta[property="og:video"],meta[itemprop="contentUrl"]'
+      ));
     } catch (_) {
       return false;
     }
@@ -2631,68 +2956,206 @@
     }
   }
 
-  async function sendCaptureToRecall(mode, channel, ignoreUnder30 = false) {
-    if (busy) throw new Error('A capture is already running');
-    const watchPage = isLikelyWatchPage();
-    const watchPageUrls = watchPage
-      ? (mode === 'main' ? [location.href] : collectLogicalWatchPageUrls(document, location.href, 80))
-      : [];
-    let entries = [];
-    if (watchPage) {
-      const tasks = watchPageUrls.map((pageUrl, index) => async () => {
-        const doc = pageUrl === canonicalWatchPageUrl(location.href)
-          ? document
-          : await fetchDoc(pageUrl, { timeout: 12000, maxRetries: 1 });
-        if (!doc) return [];
-        if (doc === document) {
-          doc.__uvsRawHtml = document.documentElement?.innerHTML || '';
-          doc.__uvsUrl = location.href;
-        }
-        return primaryMediaEntriesFromDoc(doc, pageUrl);
-      });
-      entries = (await pool(tasks, Math.min(12, tasks.length))).flat();
-    } else if (mode !== 'main') {
-      entries = await doScrape(false);
-    } else {
-      entries = primaryMediaEntriesFromDoc(document, location.href);
+  function postRecallCapturePayload(endpoint, payload, timeout = 45000) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let request;
+      const finish = (error, data) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        if (error) reject(error); else resolve(data);
+      };
+      // A manager permission dialog can pause GM's own network timeout.
+      const deadline = setTimeout(() => {
+        finish(new Error('Pong capture timed out. Check Tampermonkey permission to access the Pong server.'));
+        try { request?.abort(); } catch (_) {}
+      }, timeout + 1000);
+      try { request = GM_xmlhttpRequest({
+        method: 'POST',
+        url: `${String(endpoint).replace(/\/+$/, '')}/media-page/recall`,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Pong-SimpCity-Controller': '1'
+        },
+        data: JSON.stringify(payload),
+        timeout,
+        onload: response => {
+          let data = {};
+          try { data = JSON.parse(response.responseText || '{}'); } catch (_) {}
+          if (response.status >= 200 && response.status < 300 && data.ok !== false) finish(null, data);
+          else finish(new Error(data.error || `HTTP ${response.status}`));
+        },
+        onerror: response => finish(new Error(
+          `Pong server connection failed${response?.error ? `: ${response.error}` : ''}`
+        )),
+        ontimeout: () => finish(new Error('Pong capture timed out')),
+        onabort: () => finish(new Error('Pong capture aborted'))
+      }); } catch (error) { finish(error); }
+    });
+  }
+
+  async function postRecallCapturePayloadWithRetry(endpoint, payload, timeout = 45000, attempts = 3) {
+    let lastError = null;
+    const maximumAttempts = Math.max(1, Number(attempts || 1));
+    for (let attempt = 1; attempt <= maximumAttempts; attempt++) {
+      try {
+        return await postRecallCapturePayload(endpoint, payload, timeout);
+      } catch (error) {
+        lastError = error;
+        if (attempt < maximumAttempts) await sleep(250 * attempt);
+      }
     }
-    const cleanEntries = (entries || []).map(entry => ({
-      videoUrl: String(entry?.videoUrl || ''),
-      rawVideoUrl: String(entry?.rawVideoUrl || ''),
-      postUrl: String(entry?.postUrl || location.href),
-      pageUrl: String(entry?.postUrl || location.href),
-      durationSeconds: Math.max(0, Number(entry?.durationSeconds || entry?.duration || 0))
-    })).filter(entry => entry.videoUrl || entry.rawVideoUrl || entry.postUrl);
-    const pageUrls = watchPage
-      ? watchPageUrls
-      : mode === 'main'
-        ? [location.href]
-        : [...new Set(cleanEntries.map(entry => entry.postUrl).filter(Boolean))];
-    if (!pageUrls.length) pageUrls.push(location.href);
-    const browserRelayClientId = /(?:^|\.)pornhub\.com$/i.test(location.hostname)
+    throw lastError || new Error('Pong capture failed');
+  }
+
+  function probeCapturedMediaUrl(rawUrl, pageUrl) {
+    const url = String(rawUrl || '').trim();
+    if (!/^https?:\/\//i.test(url)) return Promise.resolve(false);
+    return new Promise(resolve => {
+      let settled = false;
+      let request = null;
+      const finish = value => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        resolve(value === true);
+      };
+      const deadline = setTimeout(() => {
+        finish(false);
+        try { request?.abort?.(); } catch (_) {}
+      }, 9000);
+      const mediaResponse = response => {
+        const status = Number(response?.status || 0);
+        const type = responseHeaderValue(response?.responseHeaders, 'content-type');
+        if (![200, 206].includes(status) || /(?:text\/html|application\/(?:json|xml))/i.test(type)) return false;
+        return /^video\//i.test(type) || /mpegurl|octet-stream/i.test(type) || VIDEO_EXT_RE.test(url);
+      };
+      const rangeProbe = () => {
+        request = GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          anonymous: false,
+          withCredentials: true,
+          responseType: 'arraybuffer',
+          timeout: 8000,
+          headers: {
+            Accept: 'video/*,application/vnd.apple.mpegurl,application/x-mpegURL,application/octet-stream;q=0.8,*/*;q=0.2',
+            Referer: String(pageUrl || location.href),
+            Range: 'bytes=0-1023'
+          },
+          onreadystatechange: response => {
+            if (Number(response?.readyState || 0) !== 2) return;
+            const length = Number(responseHeaderValue(response.responseHeaders, 'content-length') || 0);
+            // Do not let a server that ignores Range make a probe download a movie.
+            if (Number(response.status) === 200 && length > 131072) {
+              finish(mediaResponse(response));
+              try { request?.abort?.(); } catch (_) {}
+            }
+          },
+          onload: response => finish(mediaResponse(response)),
+          onerror: () => finish(false),
+          ontimeout: () => finish(false),
+          onabort: () => { if (!settled) finish(false); }
+        });
+      };
+      // A surprising number of expired CDN links answer HEAD successfully and
+      // then return 403/404 to the first real byte request. Recall only accepts
+      // a URL after the same bounded Range GET that video playback will use.
+      try { rangeProbe(); } catch (_) { finish(false); }
+    });
+  }
+
+  function probeCapturedDuration(url) {
+    // Unknown metadata is not proof that a video is missing. Ask the actual
+    // media decoder, without playing or enabling sound, with a strict deadline.
+    return new Promise(resolve => {
+      const video = document.createElement('video');
+      video.muted = true; video.defaultMuted = true; video.volume = 0;
+      video.preload = 'metadata';
+      let settled = false;
+      const done = value => {
+        if (settled) return; settled = true; clearTimeout(timer);
+        video.removeAttribute('src'); try { video.load(); } catch (_) {}
+        resolve(Number.isFinite(value) && value > 0 ? value : 0);
+      };
+      const timer = setTimeout(() => done(0), 5000);
+      video.addEventListener('loadedmetadata', () => done(video.duration), { once: true });
+      video.addEventListener('error', () => done(0), { once: true });
+      video.src = url;
+    });
+  }
+
+  async function firstVerifiedRecallEntry(entries, pageUrl, durationHint = 0, minimumDurationSeconds = 30) {
+    let durationSeconds = Math.max(
+      0,
+      Number(durationHint || 0),
+      ...(entries || []).map(entry => Number(entry?.durationSeconds || entry?.duration || 0))
+    );
+    // Unknown duration is rejected too: otherwise an autoplay preview can
+    // masquerade as a full movie merely because its URL ends in .mp4.
+    if (!durationSeconds && entries?.[0]?.videoUrl) durationSeconds = await probeCapturedDuration(entries[0].videoUrl);
+    if (durationSeconds < Math.max(1, Number(minimumDurationSeconds || 0))) return null;
+    const verifiedUrls = [];
+    let verifiedContextUrl = '';
+    for (const entry of entries || []) {
+      const mediaUrl = String(entry?.videoUrl || entry?.rawVideoUrl || '').trim();
+      const contextUrl = String(entry?.contextUrl || pageUrl || location.href);
+      if (!mediaUrl || !await probeCapturedMediaUrl(mediaUrl, contextUrl)) continue;
+      if (!verifiedUrls.includes(mediaUrl)) verifiedUrls.push(mediaUrl);
+      if (!verifiedContextUrl) verifiedContextUrl = contextUrl;
+      // Quality ordered: deliver the best verified source without waiting for
+      // lower-quality alternates or promoting unrelated recommendation clips.
+      break;
+    }
+    if (!verifiedUrls.length) return null;
+    return {
+      videoUrl: verifiedUrls[0],
+      rawVideoUrl: verifiedUrls[0],
+      videoUrls: verifiedUrls,
+      postUrl: String(pageUrl || entries?.[0]?.postUrl || location.href),
+      pageUrl: String(pageUrl || entries?.[0]?.postUrl || location.href),
+      contextUrl: verifiedContextUrl || String(pageUrl || location.href),
+      title: String(entries?.[0]?.title || ''),
+      identityEvidence: String(entries?.[0]?.identityEvidence || ''),
+      durationSeconds
+    };
+  }
+
+  async function sendCaptureToRecall(mode, channel, _ignoreUnder30 = true) {
+    if (busy) throw new Error('A capture is already running');
+    const captureMode = mode === 'main' ? 'main' : 'all';
+    // A complete, authoritative VideoObject does not need the 600 ms lazy-load
+    // delay. Dynamic players and All listings still get their settling pass.
+    const declaredMain = captureMode === 'main' && document.readyState !== 'loading' &&
+      primaryVideoEvidence(document.documentElement?.innerHTML || '', location.href);
+    if (!declaredMain) await waitForPageSettled();
+    const ignoreUnder30 = _ignoreUnder30 !== false;
+    const minimumDurationSeconds = ignoreUnder30 ? 30 : 1;
+    const currentUrl = canonicalWatchPageUrl(location.href, location.href) || location.href;
+    const targets = captureMode === 'main'
+      ? [{ url: currentUrl, durationSeconds: extractPageDurationSeconds(document) }]
+      : collectLogicalWatchPageTargets(document, location.href, 80);
+    if (!targets.length) throw new Error('No logical video pages were found');
+    const captureId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const bundleId = globalThis.crypto?.randomUUID?.() || `bundle-${Date.now()}`;
+    const captureChannel = Number(channel) === 2 ? 2 : 1;
+    // Keep authenticated relay workers for sites whose media commonly depends
+    // on browser cookies. Public CDNs play faster through Pong's range proxy
+    // and should not spend Firefox's per-host sockets on idle relay polls.
+    const browserRelayClientId = /(?:^|\.)(?:pornhub\.com|hqporner\.com|erome\.com|simpcity\.[a-z]+)$/i.test(location.hostname)
       ? (globalThis.crypto?.randomUUID?.() || `relay-${Date.now()}-${Math.random().toString(16).slice(2)}`)
       : '';
-    const payload = {
-      id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      bundleId: globalThis.crypto?.randomUUID?.() || `bundle-${Date.now()}`,
-      channel: Number(channel) === 2 ? 2 : 1,
-      mode: mode === 'main' ? 'main' : 'all',
+    const basePayload = {
+      id: captureId,
+      captureId,
+      bundleId,
+      channel: captureChannel,
+      mode: captureMode,
       sourceUrl: location.href,
       title: cleanTitle(document.title || location.hostname),
-      pageUrls,
-      // A browser listing can expose several renditions/previews for each
-      // watch page. Send page identities, not every asset, so Recall resolves
-      // one logical primary video per watch page.
-      entries: cleanEntries.map(entry => ({
-        videoUrl: entry.videoUrl,
-        rawVideoUrl: entry.rawVideoUrl,
-        postUrl: entry.postUrl,
-        pageUrl: entry.pageUrl,
-        durationSeconds: entry.durationSeconds
-      })),
-      reportedDurationSeconds: extractPageDurationSeconds(document),
-      ignoreUnder30: ignoreUnder30 === true,
-      sourceIsWatchPage: watchPage,
+      ignoreUnder30,
+      sourceIsWatchPage: isLikelyWatchPage(),
       browserRelayClientId,
       browserRelayBrowser: /firefox/i.test(navigator.userAgent)
         ? 'firefox'
@@ -2701,41 +3164,149 @@
           : 'chrome'
     };
     const endpointErrors = [];
-    for (const endpoint of PONG_ENDPOINTS) {
+    let endpoint = '';
+    let started = null;
+    for (const candidate of PONG_ENDPOINTS) {
       try {
-        const result = await new Promise((resolve, reject) => {
-          GM_xmlhttpRequest({
-            method: 'POST',
-            url: `${String(endpoint).replace(/\/+$/, '')}/media-page/recall`,
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Pong-SimpCity-Controller': '1'
-            },
-            data: JSON.stringify(payload),
-            timeout: 180000,
-            onload: response => {
-              let data = {};
-              try { data = JSON.parse(response.responseText || '{}'); } catch (_) {}
-              if (response.status >= 200 && response.status < 300 && data.ok !== false) resolve(data);
-              else reject(new Error(data.error || `HTTP ${response.status}`));
-            },
-            onerror: () => reject(new Error('Pong server connection failed')),
-            ontimeout: () => reject(new Error('Pong capture timed out'))
-          });
-        });
-        if (result?.browserRelay?.enabled && browserRelayClientId) {
-          startBrowserMediaRelay(String(endpoint).replace(/\/+$/, ''), browserRelayClientId);
-          notify(`Recall ${payload.channel} ready: ${Number(result?.videos || 0)} playable video${Number(result?.videos || 0) === 1 ? '' : 's'}. Keep this source tab open while watching.`);
-        } else {
-          notify(`Recall ${payload.channel} ready: ${Number(result?.videos || 0)} video${Number(result?.videos || 0) === 1 ? '' : 's'}`);
-        }
-        return result;
+        started = await postRecallCapturePayload(candidate, {
+          ...basePayload,
+          capturePhase: 'start',
+          totalPages: targets.length,
+          pageUrls: [],
+          entries: []
+        }, 8000);
+        endpoint = String(candidate).replace(/\/+$/, '');
+        break;
       } catch (error) {
         endpointErrors.push(error?.message || String(error));
       }
     }
-    const usefulError = endpointErrors.find(message => !/connection failed/i.test(message));
-    throw new Error(usefulError || endpointErrors.at(-1) || 'Pong PC server is unreachable');
+    if (!endpoint) {
+      const usefulError = endpointErrors.find(message => !/connection failed/i.test(message));
+      throw new Error(usefulError || endpointErrors.at(-1) || 'Pong PC server is unreachable');
+    }
+
+    let completedPages = 0;
+    let deliveredVideos = Number(started?.videos || 0);
+    let relayStarted = false;
+    let appendChain = Promise.resolve();
+    const captureDiagnostics = [];
+    const publishCaptureDiagnostics = () => {
+      try { document.documentElement.dataset.uvsCaptureDiagnostics = JSON.stringify(captureDiagnostics); } catch (_) {}
+    };
+    const queueAppend = (target, entry) => {
+      const completedAtQueue = ++completedPages;
+      appendChain = appendChain.catch(error => {
+        endpointErrors.push(error?.message || String(error));
+        return null;
+      }).then(async () => {
+        const result = await postRecallCapturePayloadWithRetry(endpoint, {
+          ...basePayload,
+          capturePhase: 'append',
+          completedPages: completedAtQueue,
+          pageUrls: [target.url],
+          entries: entry ? [entry] : []
+        }, 45000, 3);
+        deliveredVideos = Math.max(deliveredVideos, Number(result?.videos || 0));
+        if (!relayStarted && result?.browserRelay?.enabled) {
+          relayStarted = true;
+          startBrowserMediaRelay(endpoint, browserRelayClientId);
+        }
+        setPanelStatus(`${deliveredVideos} ready · ${completedAtQueue}/${targets.length} checked`);
+        return result;
+      });
+      return appendChain;
+    };
+
+    const tasks = targets.map((target, index) => async () => {
+      const targetUrl = target.url;
+      let verified = null;
+      const diagnostic = {
+        index,
+        targetDuration: Number(target.durationSeconds || 0),
+        attempts: []
+      };
+      const resolveAttempt = async cacheBust => {
+        const doc = targetUrl === currentUrl
+          ? document
+          : await fetchDoc(targetUrl, { timeout: 12000, maxRetries: cacheBust ? 1 : 2, cacheBust });
+        const attempt = { cacheBust: cacheBust === true, fetched: !!doc, verified: false };
+        diagnostic.attempts.push(attempt);
+        if (!doc) return null;
+        if (doc === document) {
+          doc.__uvsRawHtml = document.documentElement?.innerHTML || '';
+          doc.__uvsUrl = location.href;
+        }
+        const extracted = await browserResolvedMediaEntries(
+          doc,
+          targetUrl,
+          Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
+          0,
+          new Set(),
+          { cacheBust, maxRetries: 1 }
+        );
+        const resolved = await firstVerifiedRecallEntry(
+          extracted,
+          targetUrl,
+          Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
+          minimumDurationSeconds
+        );
+        if (resolved && !resolved.title) resolved.title = cleanTitle(
+          doc.querySelector('meta[property="og:title"]')?.getAttribute('content') || doc.title || ''
+        );
+        attempt.pageDuration = extractPageDurationSeconds(doc);
+        attempt.embeddedPlayers = embeddedPlayerPageUrls(doc, targetUrl).length;
+        attempt.extracted = extracted.length;
+        attempt.mediaHost = extracted[0]?.videoUrl ? new URL(extracted[0].videoUrl).hostname : '';
+        attempt.verified = !!resolved;
+        return resolved;
+      };
+      try {
+        verified = await resolveAttempt(false);
+        if (!verified && targetUrl !== currentUrl) {
+          await sleep(250 + index * 20);
+          verified = await resolveAttempt(true);
+        }
+      } catch (error) {
+        diagnostic.error = error?.message || String(error);
+      }
+      diagnostic.verified = !!verified;
+      diagnostic.fetchFailed = diagnostic.attempts.every(attempt => !attempt.fetched);
+      captureDiagnostics[index] = diagnostic;
+      publishCaptureDiagnostics();
+      try {
+        await queueAppend(target, verified);
+      } catch (error) {
+        diagnostic.appendError = error?.message || String(error);
+        publishCaptureDiagnostics();
+      }
+      return verified;
+    });
+    // Porneec's player host can strand Firefox requests once a large burst
+    // fills its per-origin socket pool. Four concurrent page/probe pipelines
+    // keep results streaming without the last ten cards sitting indefinitely
+    // behind stale sockets; other sources retain the faster ten-way capture.
+    const captureConcurrency = /(?:^|\.)porneec\.com$/i.test(location.hostname)
+      ? Math.min(4, RECALL_CAPTURE_CONCURRENCY)
+      : RECALL_CAPTURE_CONCURRENCY;
+    await pool(tasks, Math.min(captureConcurrency, tasks.length));
+    await appendChain;
+    const result = await postRecallCapturePayloadWithRetry(endpoint, {
+      ...basePayload,
+      capturePhase: 'complete',
+      completedPages: targets.length,
+      pageUrls: [],
+      entries: []
+    }, 45000, 3);
+    deliveredVideos = Number(result?.videos || deliveredVideos || 0);
+    if (!deliveredVideos) throw new Error(ignoreUnder30
+      ? 'No verified playable video of at least 30 seconds was found; uncheck Skip <30s for short clips'
+      : 'No verified playable video was found');
+    notify(
+      `Recall ${captureChannel} ready: ${deliveredVideos} verified video${deliveredVideos === 1 ? '' : 's'}` +
+      (relayStarted ? '. Keep this source tab open for authenticated fallback playback.' : '')
+    );
+    return result;
   }
 
   function addRecallCaptureButton() {
@@ -2757,13 +3328,13 @@
     const root = document.createElement('div');
     root.id = 'uvs-recall-capture';
     const stored = Number(getStoredJson(RECALL_CHANNEL_KEY, 1)) === 2 ? 2 : 1;
-    const min30 = getStoredBool(RECALL_MIN_30_KEY, false);
+    const min30 = getStoredBool(RECALL_MIN_30_KEY, true) !== false;
     root.dataset.channel = String(stored);
     root.innerHTML = `
       <button id="uvs-recall-open" type="button">Pong</button>
       <div id="uvs-recall-menu" hidden>
         <button id="uvs-recall-channel" type="button">Recall ${stored}</button>
-        <label id="uvs-recall-min30"><input type="checkbox" ${min30 ? 'checked' : ''}>Ignore &lt;30s</label>
+        <label id="uvs-recall-min30" title="Uncheck to include verified short videos"><input type="checkbox" ${min30 ? 'checked' : ''}>Skip &lt;30s</label>
         <button type="button" data-action="main">Main video</button>
         <button type="button" data-action="all">All videos</button>
         <div id="uvs-recall-status">Ready</div>
@@ -2789,16 +3360,23 @@
     min30Checkbox.addEventListener('change', () => {
       setStoredBool(RECALL_MIN_30_KEY, min30Checkbox.checked);
     });
-    root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', async event => {
-      event.preventDefault();
+    const runRecallCapture = async (
+      action,
+      requestedChannel = Number(root.dataset.channel),
+      requestedIgnoreUnder30 = min30Checkbox.checked
+    ) => {
       if (root.dataset.busy === 'true') return;
       root.dataset.busy = 'true';
-      status.textContent = button.dataset.action === 'main' ? 'Capturing main…' : 'Capturing all…';
+      const captureAction = action === 'main' ? 'main' : 'all';
+      const captureChannel = Number(requestedChannel) === 2 ? 2 : 1;
+      root.dataset.channel = String(captureChannel);
+      channelButton.textContent = `Recall ${captureChannel}`;
+      status.textContent = captureAction === 'main' ? 'Capturing main…' : 'Capturing all…';
       try {
         const result = await sendCaptureToRecall(
-          button.dataset.action,
-          Number(root.dataset.channel),
-          min30Checkbox.checked
+          captureAction,
+          captureChannel,
+          requestedIgnoreUnder30 !== false
         );
         status.textContent = `${result.videos} ready in R${root.dataset.channel}`;
       } catch (error) {
@@ -2806,7 +3384,24 @@
       } finally {
         root.dataset.busy = 'false';
       }
+    };
+    root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void runRecallCapture(button.dataset.action, Number(root.dataset.channel));
     }));
+    // A private/headless qualification browser must not synthesize a normal
+    // site click: ad-heavy pages can intercept that click before this panel and
+    // freeze or navigate the source tab. This namespaced event invokes the same
+    // production capture path without exposing media or credentials.
+    document.addEventListener('pong:universal-video-recall', event => {
+      const detail = event?.detail || {};
+      void runRecallCapture(
+        detail.mode || root.dataset.harnessMode,
+        detail.channel || Number(root.dataset.harnessChannel || root.dataset.channel),
+        detail.ignoreUnder30 === undefined ? min30Checkbox.checked : detail.ignoreUnder30
+      );
+    });
   }
 
   function addFloatingButtons() {
@@ -3502,7 +4097,7 @@
   if (/^[a-z0-9-]{8,100}$/i.test(browserRelayKeeperClientId)) {
     startBrowserMediaRelay(location.origin, browserRelayKeeperClientId);
     document.documentElement.dataset.pongBrowserRelayKeeper = 'active';
-    log('Universal Video Scraper v7.9.7 browser relay keeper active');
+    log('Universal Video Scraper v7.14.0 browser relay keeper active');
     return;
   }
 
@@ -3564,6 +4159,8 @@
 
     extractVideoUrls: (doc = document) => extractVideoUrls(doc, getBaseUrl()),
     extractPageDurationSeconds,
+    parseDurationHintSeconds,
+    collectLogicalWatchPageTargets,
     collectLogicalWatchPageUrls,
     primaryMediaEntriesFromDoc,
     sendCaptureToRecall,
@@ -3586,7 +4183,7 @@
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.9.7 loaded on', location.href);
+  log('Universal Video Scraper v7.15.0 loaded on', location.href);
 
   if (getStoredBool(AUTO_SCRAPE_KEY, false)) {
     setTimeout(() => doScrape(false), 800);
