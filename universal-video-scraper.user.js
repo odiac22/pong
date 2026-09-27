@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.29.0
+// @version      7.30.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -3228,7 +3228,8 @@ function primaryVideoEvidence(html, pageUrl) {
     const code = aliases[value] || value;
     return ['none','pending','timeout','aborted','network_error','request_error','http_error','server_rejected','invalid_response','not_accepted',
       'platform_access','platform_stream','helper_update','extraction_error','no_media','duration_filter','media_unverified','page_fetch',
-      'non_media_response','invalid_url','delivery_failed'].includes(code) ? code : 'request_error';
+      'non_media_response','invalid_url','delivery_failed','identity_unverified','superseded','vpn_required','desktop_timeout',
+      'no_video','source_unavailable','duration_unverified','vpn_unavailable','resolution_failed','quality_unverified'].includes(code) ? code : 'request_error';
   }
 
   function diagnosticMime(value) {
@@ -3261,7 +3262,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function requestDiagnosticOutput(record) {
     return {
-      phase: ['start','append','complete','page_fetch','platform_resolve','media_probe','duration_probe','quality_probe'].includes(record.phase) ? record.phase : 'unknown',
+      phase: ['start','append','complete','page_fetch','platform_resolve','media_probe','duration_probe','quality_probe','desktop_submit','desktop_status','desktop_capabilities'].includes(record.phase) ? record.phase : 'unknown',
       state: ['pending','complete','failed'].includes(record.state) ? record.state : 'unknown',
       elapsedMs: diagnosticNumber(record.state === 'pending' ? Math.round(performance.now() - record.startedAt) : record.elapsedMs),
       timeoutMs: diagnosticNumber(record.timeoutMs), httpStatus: diagnosticNumber(record.httpStatus, 599), failure: diagnosticFailure(record.failure),
@@ -3623,7 +3624,97 @@ function primaryVideoEvidence(html, pageUrl) {
     return state;
   }
 
-  async function sendCaptureToRecall(mode, channel, _ignoreUnder30 = true, selection = null) {
+  async function sendCaptureToRecall(mode, channel, ignoreUnder30 = true, selection = null) {
+    if (busy) throw new Error('A capture is already running');
+    const targets = selection?.targets || collectSelectableTargets(mode === 'main' ? 'main' : 'all');
+    if (!targets.length) throw new Error('Select at least one video or video link');
+    const trace = { startedAt: performance.now(), requests: [], desktopOwned: true };
+    selection?.onCaptureDiagnostics?.(trace);
+    const request = async (endpoint, method, suffix = '', body = null) => {
+      const record = diagnosticRequest(trace.requests, method === 'POST' ? 'desktop_submit' : suffix ? 'desktop_status' : 'desktop_capabilities', 8000);
+      try {
+        const response = await browserRelayRequest({ method, url: endpoint + '/media-page/desktop-capture' + suffix,
+          headers: { 'Content-Type': 'application/json', 'X-Pong-SimpCity-Controller': '1' },
+          ...(body ? { data: JSON.stringify(body) } : {}), timeout: 8000 });
+        record.httpStatus = response.status;
+        let result; try { result = JSON.parse(response.responseText); } catch { throw Object.assign(new Error('PC returned an invalid response'), { code: 'invalid_response' }); }
+        record.parsedResponse = true;
+        if (response.status === 404) throw Object.assign(new Error('Restart the updated Pong PC helper (30.15 or newer). No phone fallback will be used.'), { code: 'helper_update' });
+        if (![200,202].includes(response.status) || !result.ok || result.desktopOwned !== true) {
+          throw Object.assign(new Error('PC could not accept this job. Check PC status and Copy log.'), { code: 'server_rejected' });
+        }
+        finishDiagnosticRequest(record); return result;
+      } catch (error) { finishDiagnosticRequest(record, error.code || 'network_error'); throw error; }
+    };
+    let requiredEndpoint = '';
+    if (requiresCaliforniaVpn(location.href) || targets.some(target => requiresCaliforniaVpn(target.url))) {
+      requiredEndpoint = vpnEndpoint();
+      await runVpnAction(selection?.vpnAuthorization === VPN_USER_ACTION ? 'connect' : 'verify', selection?.onVpnStatus, requiredEndpoint);
+    }
+    let endpoint = '', lastError;
+    for (const candidate of PONG_ENDPOINTS) {
+      const base = String(candidate).replace(/\/+$/, '');
+      if (requiredEndpoint && base !== requiredEndpoint) continue;
+      try { await request(base, 'GET'); endpoint = base; break; } catch (error) { lastError = error; }
+    }
+    if (!endpoint) throw lastError || new Error('Pong PC is unreachable');
+    const id = globalThis.crypto?.randomUUID?.() || 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const n = crypto.getRandomValues(new Uint8Array(1))[0] & 15; return (c === 'x' ? n : (n & 3) | 8).toString(16);
+    });
+    const payload = { id, channel: Number(channel) === 2 ? 2 : 1, mode: mode === 'main' ? 'main' : 'all',
+      sourceUrl: targets[0].url, ignoreUnder30: ignoreUnder30 !== false,
+      // Only selected links and identity hints leave the phone. Never media,
+      // cookies, HTML, browser sessions, or relay-worker registrations.
+      targets: targets.map(target => ({ url: target.url,
+        ...(target.logicalVideoId ? { logicalVideoId: target.logicalVideoId } : {}),
+        durationSeconds: Math.max(0, Number(target.durationSeconds) || 0) })) };
+    const diagnostics = targets.map(target => {
+      const result = { startedAt: performance.now(), done: false, delivered: false, desktopOwned: true,
+        attempts: [], deliveryRequests: [], failure: 'pending' };
+      selection?.onResult?.(target, result); selection?.onStatus?.(target, 'Sending link'); return result;
+    });
+    let response;
+    // Retry only against the same PC and with the same id: an uncertain reply
+    // must not create a second job or replace Recall on a different PC.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { response = await request(endpoint, 'POST', '', payload); break; }
+      catch (error) { if (attempt || ['helper_update','server_rejected'].includes(error.code)) throw error; }
+    }
+    trace.jobId = id;
+    selection?.onAccepted?.();
+    const updateJob = job => {
+      if (!job || job.id !== id || !Array.isArray(job.targets)) throw new Error('PC job response did not match this send');
+      for (const item of job.targets) {
+        const index = Number(item.index), target = targets[index], result = diagnostics[index];
+        if (!target || !result) continue;
+        result.desktopState = ['queued','resolving','verifying','ready','failed'].includes(item.state) ? item.state : 'queued';
+        result.done = ['ready','failed'].includes(item.state);
+        result.delivered = item.state === 'ready'; result.verified = result.delivered;
+        result.failure = result.delivered ? 'none' : result.done ? diagnosticFailure(item.error) : 'pending';
+        result.resolutionMs = diagnosticNumber(item.resolutionMs); result.verificationMs = diagnosticNumber(item.verificationMs);
+        result.width = diagnosticNumber(item.width, 32768); result.height = diagnosticNumber(item.height, 32768);
+        result.elapsedMs = Math.round(performance.now() - result.startedAt);
+        selection?.onResult?.(target, result);
+        selection?.onStatus?.(target, ({ queued: 'PC queued', resolving: 'PC resolving', verifying: 'PC verifying', ready: 'Ready in Pong', failed: 'PC failed · ' + result.failure })[result.desktopState]);
+      }
+      return !['queued','running'].includes(job.state);
+    };
+    let finished = updateJob(response.job), pollFailures = 0;
+    const deadline = performance.now() + 120000;
+    while (!finished && performance.now() < deadline) {
+      await sleep(1200);
+      try { response = await request(endpoint, 'GET', '?id=' + encodeURIComponent(id)); finished = updateJob(response.job); pollFailures = 0; }
+      catch { if (++pollFailures >= 3) break; }
+    }
+    trace.elapsedMs = Math.round(performance.now() - trace.startedAt);
+    if (!finished) return { desktopOwned: true, pending: true, videos: diagnostics.filter(r => r.delivered).length };
+    if (!diagnostics.some(result => result.delivered)) throw new Error('PC could not prepare the selected videos. Copy log shows the desktop failure; no phone relay was used.');
+    return { desktopOwned: true, videos: diagnostics.filter(r => r.delivered).length };
+  }
+
+  // Historical capture implementation retained for extraction regression tools;
+  // no panel or exported Send path calls it. Desktop captures never use it.
+  async function sendLegacyCaptureToRecall(mode, channel, _ignoreUnder30 = true, selection = null) {
     if (busy) throw new Error('A capture is already running');
     const captureTrace = { startedAt: performance.now(), requests: [] };
     selection?.onCaptureDiagnostics?.(captureTrace);
@@ -4041,7 +4132,8 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 4, version: '7.29.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 5, version: '7.30.0', id: session.id, createdAt: session.createdAt,
+      deliveryMode: 'desktop_owned',
       vpn: vpnSafeStatus(session.vpn || {}),
       phoneConnectionOnly: session.phoneConnectionOnly === true,
       verificationScope: 'metadata_and_bounded_response_probe_not_playback',
@@ -4059,6 +4151,7 @@ function primaryVideoEvidence(html, pageUrl) {
         downlinkMbps: diagnosticNumber(navigator.connection?.downlink, 100000), rttMs: diagnosticNumber(navigator.connection?.rtt)
       },
       capture: {
+        jobId: /^[a-f0-9-]{36}$/i.test(session.captureTrace?.jobId || '') ? session.captureTrace.jobId : null,
         elapsedMs: diagnosticNumber(session.captureTrace ? session.captureTrace.elapsedMs ?? Math.round(performance.now() - session.captureTrace.startedAt) : null),
         failure: session.captureFailure ? diagnosticFailure(session.captureFailure) : 'none',
         requests: (session.captureTrace?.requests || []).map(requestDiagnosticOutput)
@@ -4089,6 +4182,8 @@ function primaryVideoEvidence(html, pageUrl) {
           failure: diagnosticFailure(result?.failure || (result && !result.done ? 'pending' : 'none')),
           verificationFailure: diagnosticFailure(result?.verificationFailure || 'none'),
           deliveryFailure: diagnosticFailure(result?.deliveryFailure || 'none'),
+          desktop: result?.desktopOwned ? { state: result.desktopState || 'queued', width: result.width ?? null, height: result.height ?? null,
+            verificationMs: result.verificationMs ?? null, phoneRelayUsed: false } : null,
           timing: { resolutionMs: diagnosticNumber(result?.resolutionMs), resolutionTimeoutMs: diagnosticNumber(result?.resolutionTimeoutMs),
             queueWaitMs: diagnosticNumber(result?.queueWaitMs), deliveryMs: diagnosticNumber(result?.deliveryMs) },
           mediaBefore: result?.mediaBefore || null, mediaNow: videoDiagnosticSnapshot(candidate.element), mediaAfter: result?.mediaAfter || null,
@@ -4164,15 +4259,15 @@ function primaryVideoEvidence(html, pageUrl) {
       :host{font:10.5px system-ui;color:white}button{font:inherit;cursor:pointer;color:white;border:1px solid #ffffff44;border-radius:6px;background:#263244;padding:4px 7px}
       .box{position:fixed;background:#ff22222b;border:2px solid #ff5757;border-radius:6px;pointer-events:auto;padding:0;text-align:left;touch-action:manipulation}
       .box[aria-pressed=true]{background:#ff22224a;border-color:#fff}.box span{position:absolute;left:0;top:0;background:#851e24;padding:3px 5px;border-radius:3px;font-size:11px}
+      .box[data-ready=true]{background:#22c55e30;border-color:#4ade80}.box[data-ready=true] span{background:#166534}
       .bar{position:fixed;left:8px;right:8px;bottom:54px;margin:auto;max-width:380px;background:#101723f5;border:1px solid #ffffff33;border-radius:10px;padding:6px;pointer-events:auto;box-shadow:0 3px 16px #0008}
       .row{display:flex;flex-wrap:wrap;align-items:center;gap:4px}.row button{padding:4px 7px;min-height:25px}.summary{flex:1;font-size:10px}.status{font-size:10px;line-height:1.3;color:#cbd5e1;margin-top:3px}button:disabled{opacity:.5;cursor:default}
       .bar{background:linear-gradient(145deg,#17243bf5,#18182cf5);border-color:#818cf85c}
       .bar button{transition:filter .12s ease,border-color .12s ease}.bar button:hover:not(:disabled){filter:brightness(1.18)}
-      [data-do=channel]{background:#6744aa;border-color:#c4b5fd88}[data-do=send]{background:#166b49;border-color:#6ee7b788}
-      [data-do=copy]{background:#155e87;border-color:#7dd3fc88}[data-do=close]{background:#9b3547;border-color:#fda4af88}
-      [data-vpn=connect]{background:#0d6565;border-color:#5eead488}[data-vpn=disconnect]{background:#9a4c20;border-color:#fdba7488}
-      [data-vpn=status]{background:#3d51a7;border-color:#a5b4fc88}[data-vpn=pair]{background:#8d367f;border-color:#f0abfc88}
-      [data-do=pair-copy]{background:#775521;border-color:#fde68a88}
+      [data-do=channel]{background:#334155}[data-do=send]{background:#2563eb;border-color:#93c5fd88}
+      [data-do=copy],[data-do=close],[data-vpn=status],[data-vpn=pair],[data-do=pair-copy]{background:#263244}
+      [data-vpn=connect]{background:#0f766e;border-color:#5eead488}[data-vpn=disconnect]{background:#78362b;border-color:#fb923c88}
+      .section-label{font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8;margin:6px 0 4px}.pairing{margin-top:5px;border-top:1px solid #ffffff18;padding-top:4px}.pairing summary{cursor:pointer;color:#94a3b8}.pairing .row{margin-top:4px}
     `;
     const node = (tag, className, parent, text = '') => {
       const element = document.createElement(tag); element.className = className; element.textContent = text; parent.appendChild(element); return element;
@@ -4187,13 +4282,17 @@ function primaryVideoEvidence(html, pageUrl) {
     const close = node('button', '', row, '×'); close.type = 'button'; close.dataset.do = 'close';
     close.setAttribute('aria-label', 'Close video selection');
     close.title = 'Close panel; an active send continues in the background';
-    const statusNode = node('div', 'status', bar, 'Tap red boxes to select, then Send.');
+    const statusNode = node('div', 'status', bar, 'Select links → PC prepares videos → Pong plays.');
     statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
-    const vpnRow = node('div', 'row vpn-row', bar); vpnRow.style.marginTop = '4px';
-    for (const [action,label] of [['connect','Connect California'],['disconnect','Disconnect'],['status','VPN status'],['pair','Paste key & connect']]) {
+    node('div', 'section-label', bar, 'Desktop connection');
+    const vpnRow = node('div', 'row vpn-row', bar);
+    for (const [action,label] of [['connect','Connect California'],['disconnect','Disconnect'],['status','VPN status']]) {
       const button = node('button', '', vpnRow, label); button.type = 'button'; button.dataset.vpn = action;
     }
-    const pairingLink = node('button', '', vpnRow, 'Copy pairing link');
+    const pairing = node('details', 'pairing', bar); node('summary', '', pairing, 'Pair PC · one-time setup');
+    const pairingRow = node('div', 'row', pairing);
+    const pairButton = node('button', '', pairingRow, 'Paste key & connect'); pairButton.type = 'button'; pairButton.dataset.vpn = 'pair';
+    const pairingLink = node('button', '', pairingRow, 'Copy pairing link');
     pairingLink.type = 'button'; pairingLink.dataset.do = 'pair-copy';
     pairingLink.title = 'Copy the PC pairing page address to open in your browser';
     const vpnStatus = node('div', 'vpn-status', bar, 'PC VPN not checked. Phone VPN is separate.');
@@ -4209,7 +4308,7 @@ function primaryVideoEvidence(html, pageUrl) {
       const copied = await copyTextToClipboard(`${endpoint}/vpn/setup`);
       vpnStatus.textContent = copied ? 'Pairing link copied. Paste it into your browser, copy the key there, then use Paste key & connect.' : 'Could not copy the pairing link. Allow clipboard access and try again.';
     };
-    const vpnButtons = [...vpnRow.querySelectorAll('[data-vpn]')];
+    const vpnButtons = [...bar.querySelectorAll('[data-vpn]')];
     let vpnWorking = false;
     for (const button of vpnButtons) button.onclick = async event => {
       event.preventDefault(); event.stopPropagation();
@@ -4219,7 +4318,11 @@ function primaryVideoEvidence(html, pageUrl) {
         // Read only on this explicit click. Browsers that block clipboard reads
         // use a native paste prompt, never a website-readable input field.
         let key = '';
-        try { if (navigator.clipboard?.readText) key = await navigator.clipboard.readText(); } catch (_) {}
+        try {
+          if (navigator.clipboard?.readText) key = await Promise.race([
+            navigator.clipboard.readText(), sleep(1000).then(() => '')
+          ]);
+        } catch (_) {}
         if (!/^[a-f0-9]{64}$/.test(key.trim())) key = window.prompt('Paste the key from the PC pairing page. Press OK to save it and automatically connect the PC VPN to California.');
         if (key === null) return;
         if (!/^[a-f0-9]{64}$/.test(key.trim())) { vpnStatus.textContent = 'Pairing key must be the 64-character key from your PC. Never paste your NordVPN password.'; return; }
@@ -4250,6 +4353,7 @@ function primaryVideoEvidence(html, pageUrl) {
         const box = controls.get(candidate.previewId);
         const selected = session.selected.has(candidate.previewId);
         box.setAttribute('aria-pressed', String(selected));
+        box.dataset.ready = String(session.results.get(candidate.previewId)?.delivered === true);
         const label = candidate.kind === 'player' ? 'Video' : 'Video link';
         const seconds = Math.round(candidate.durationSeconds || 0);
         const duration = seconds ? ` · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : '';
@@ -4356,20 +4460,21 @@ function primaryVideoEvidence(html, pageUrl) {
       session.captureTrace = null; session.captureFailure = null;
       const targets = session.candidates.filter(candidate => session.selected.has(candidate.previewId));
       for (const target of targets) { target.status = 'Queued'; session.results.delete(target.previewId); }
-      status.textContent = 'Checking selected videos…'; update();
+      status.textContent = 'Sending selected links to your PC…'; update();
       try {
-        await sendCaptureToRecall(mode, channel, ignoreUnder30, {
+        const receipt = await sendCaptureToRecall(mode, channel, ignoreUnder30, {
           targets,
           vpnAuthorization: event instanceof MouseEvent && event.isTrusted ? VPN_USER_ACTION : null,
           onVpnStatus: showVpn,
           phoneConnectionOnly: session.phoneConnectionOnly,
           onCaptureDiagnostics: trace => { session.captureTrace = trace; },
+          onAccepted: () => { status.textContent = 'PC accepted the links. You can close Firefox; the PC continues preparing videos.'; },
           onStatus: (target, text) => { target.status = text; update(); },
-          onResult: (target, result) => session.results.set(target.previewId, result)
+          onResult: (target, result) => { session.results.set(target.previewId, result); update(); }
         });
-        status.textContent = `${[...session.results.values()].filter(item => item.delivered).length}/${targets.length} sent to Recall ${channel}.`;
-        if (session.phoneConnectionOnly) status.textContent += ' Phone streaming needs Firefox active; playback not yet tested.';
-        session.stage = 'complete';
+        status.textContent = receipt.pending ? 'PC accepted the links; processing continues on desktop. Open Recall in Pong. Firefox is not needed.'
+          : `${receipt.videos}/${targets.length} ready in Recall ${channel}. Served by PC; Firefox can close.`;
+        session.stage = receipt.pending ? 'processing' : 'complete';
       } catch (error) {
         status.textContent = error.message; session.stage = 'failed';
         session.captureFailure = error?.code || 'request_error';
@@ -4626,7 +4731,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.29.0 loaded on', location.href);
+  log('Universal Video Scraper v7.30.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
