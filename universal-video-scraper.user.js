@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.25.0
+// @version      7.26.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -1096,24 +1096,6 @@ function primaryVideoEvidence(html, pageUrl) {
     // Two Recall channels can coexist without six idle long-polls occupying
     // every browser connection slot needed for capture acknowledgements.
     for (let index = 0; index < (channel ? 2 : 3); index++) worker();
-  }
-
-  async function waitForPhoneTransfer(endpoint, clientId, sourceId, onProgress) {
-    const request = async (method, suffix, data) => {
-      const response = await browserRelayRequest({ method, url: `${endpoint}/media-browser-relay/transfers${suffix}`, headers: { 'X-Pong-SimpCity-Controller': '1', 'Content-Type': 'application/json' }, ...(data ? { data: JSON.stringify(data) } : {}), timeout: 8000 });
-      if (response.status !== 200) throw new Error('Phone transfer is unavailable. Keep Firefox open and send again.');
-      return JSON.parse(response.responseText || '{}').transfer;
-    };
-    let transfer = await request('POST', '', { clientId, sourceId });
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < 60 * 60_000) {
-      if (transfer?.state === 'ready') return transfer;
-      if (!transfer || transfer.state === 'error') throw Object.assign(new Error(`Phone transfer failed (${transfer?.error || 'unknown'}). Nothing is ready to switch.`), { code: 'phone_transfer_failed' });
-      onProgress?.(transfer);
-      await sleep(750);
-      transfer = await request('GET', `/${encodeURIComponent(sourceId)}`);
-    }
-    throw new Error('Phone transfer took too long. Keep Firefox foregrounded and send again.');
   }
 
   function canonicalWatchPageUrl(rawUrl, baseUrl = location.href) {
@@ -3586,7 +3568,8 @@ function primaryVideoEvidence(html, pageUrl) {
       sourceIsWatchPage: isLikelyWatchPage(),
       browserRelayClientId,
       phoneConnectionOnly,
-      phoneTransferBeforeReady: phoneConnectionOnly,
+      // Phone routing is streaming again; never start a full-file download.
+      phoneTransferBeforeReady: false,
       browserRelayBrowser: /firefox/i.test(navigator.userAgent)
         ? 'firefox'
         : /edg\//i.test(navigator.userAgent)
@@ -3600,7 +3583,7 @@ function primaryVideoEvidence(html, pageUrl) {
       try {
         if (phoneConnectionOnly) {
           const preflight = await browserRelayRequest({ method: 'GET', url: `${String(candidate).replace(/\/+$/, '')}/media-browser-relay/capabilities`, headers: { 'X-Pong-SimpCity-Controller': '1' }, timeout: 5000 });
-          if (preflight.status !== 200 || JSON.parse(preflight.responseText || '{}').phoneTransferBeforeReady !== true) {
+          if (preflight.status !== 200 || JSON.parse(preflight.responseText || '{}').phoneConnectionFiles !== true) {
             throw new Error('Restart the updated Pong server to enable phone connection. Recall was not changed.');
           }
         }
@@ -3621,7 +3604,7 @@ function primaryVideoEvidence(html, pageUrl) {
       const usefulError = endpointErrors.find(message => !/connection failed/i.test(message));
       throw new Error(usefulError || endpointErrors.at(-1) || 'Pong PC server is unreachable');
     }
-    if (phoneConnectionOnly && !started?.capabilities?.phoneTransferBeforeReady) {
+    if (phoneConnectionOnly && !started?.capabilities?.phoneConnectionFiles) {
       await postRecallCapturePayload(endpoint, { ...basePayload, capturePhase: 'complete', completedPages: 0, pageUrls: [], entries: [] }, 8000);
       throw new Error('Restart the updated Pong server before using the phone connection. Nothing was sent.');
     }
@@ -3634,7 +3617,7 @@ function primaryVideoEvidence(html, pageUrl) {
     let deliveredVideos = Number(started?.videos || 0);
     let verifiedSentThisRun = 0;
     let relayStarted = false;
-    const phoneTransferErrors = [];
+    const phoneRouteErrors = [];
     let appendChain = Promise.resolve();
     const captureDiagnostics = [];
     const publishCaptureDiagnostics = () => {
@@ -3672,15 +3655,6 @@ function primaryVideoEvidence(html, pageUrl) {
         if (!relayStarted && result?.browserRelay?.enabled) {
           relayStarted = true;
           startBrowserMediaRelay(endpoint, browserRelayClientId, captureChannel);
-        }
-        if (entry && phoneConnectionOnly) {
-          const sourceId = result?.browserRelay?.sourceIds?.[0];
-          if (!sourceId) throw new Error('Pong did not provide a phone transfer ID. Update the helper.');
-          diagnostic.phoneTransfer = await waitForPhoneTransfer(endpoint, browserRelayClientId, sourceId, transfer => {
-            diagnostic.phoneTransfer = transfer;
-            const label = `Transferring ${transfer.percent || 0}% · keep Firefox open`;
-            selection?.onStatus?.(target, label); setPanelStatus(label);
-          });
         }
         if (entry) verifiedSentThisRun++;
         setPanelStatus(`${verifiedSentThisRun}/${targets.length} sent · ${completedAtQueue}/${targets.length} checked`);
@@ -3797,13 +3771,13 @@ function primaryVideoEvidence(html, pageUrl) {
       try {
         await queueAppend(target, verified, diagnostic);
         diagnostic.delivered = !!verified;
-        selection?.onStatus?.(target, verified ? (phoneConnectionOnly ? 'Ready to switch' : 'Sent') : failureLabel);
+        selection?.onStatus?.(target, verified ? 'Sent' : failureLabel);
       } catch (error) {
         diagnostic.appendError = true;
-        if (phoneConnectionOnly) phoneTransferErrors.push(error?.message || 'Phone transfer failed');
+        if (phoneConnectionOnly) phoneRouteErrors.push(error?.message || 'Phone routing failed');
         diagnostic.deliveryFailure = diagnosticFailure(error?.code || 'delivery_failed');
         diagnostic.failure = diagnostic.deliveryFailure;
-        selection?.onStatus?.(target, phoneConnectionOnly ? 'Transfer failed — not ready' : 'Delivery failed');
+        selection?.onStatus?.(target, 'Delivery failed');
         publishCaptureDiagnostics();
       }
       diagnostic.elapsedMs = Math.round(performance.now() - targetStarted);
@@ -3838,14 +3812,14 @@ function primaryVideoEvidence(html, pageUrl) {
         ignoreUnder30
       });
     } catch (_) {}
-    if (!verifiedSentThisRun && phoneTransferErrors.length) throw new Error(phoneTransferErrors[0]);
+    if (!verifiedSentThisRun && phoneRouteErrors.length) throw new Error(phoneRouteErrors[0]);
     if (!verifiedSentThisRun) throw new Error(ignoreUnder30
       ? 'No verified playable video of at least 30 seconds was found; uncheck Skip <30s for short clips'
       : 'No verified playable video was found');
     notify(
       `Recall ${captureChannel} ready: ${verifiedSentThisRun}/${targets.length} sent this run` +
       (deliveredVideos !== verifiedSentThisRun ? ` (${deliveredVideos} total in Recall)` : '') +
-      (phoneConnectionOnly ? '. Transfer complete. Ready to switch to Pong.' : relayStarted ? '. Keep this source tab open for authenticated fallback playback.' : '')
+      (phoneConnectionOnly ? '. Link received, not playback-tested. Firefox must remain active for phone streaming.' : relayStarted ? '. Keep this source tab open for authenticated fallback playback.' : '')
     );
     return result;
   }
@@ -3961,7 +3935,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 3, version: '7.25.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 3, version: '7.26.0', id: session.id, createdAt: session.createdAt,
       phoneConnectionOnly: session.phoneConnectionOnly === true,
       verificationScope: 'metadata_and_bounded_response_probe_not_playback',
       mode: session.mode, channel: session.channel,
@@ -4010,7 +3984,6 @@ function primaryVideoEvidence(html, pageUrl) {
           deliveryFailure: diagnosticFailure(result?.deliveryFailure || 'none'),
           timing: { resolutionMs: diagnosticNumber(result?.resolutionMs), resolutionTimeoutMs: diagnosticNumber(result?.resolutionTimeoutMs),
             queueWaitMs: diagnosticNumber(result?.queueWaitMs), deliveryMs: diagnosticNumber(result?.deliveryMs) },
-          phoneTransfer: result?.phoneTransfer ? { state: ['queued','downloading','ready','error'].includes(result.phoneTransfer.state) ? result.phoneTransfer.state : 'unknown', bytes: diagnosticNumber(result.phoneTransfer.bytes, 1e12), totalBytes: diagnosticNumber(result.phoneTransfer.totalBytes, 1e12), percent: diagnosticNumber(result.phoneTransfer.percent, 100), error: ['file_too_large','cache_full','disk_space_low','invalid_range','source_changed','not_video','browser_unavailable','transfer_interrupted'].includes(result.phoneTransfer.error) ? result.phoneTransfer.error : null } : null,
           mediaBefore: result?.mediaBefore || null, mediaNow: videoDiagnosticSnapshot(candidate.element), mediaAfter: result?.mediaAfter || null,
           deliveryRequests: (result?.deliveryRequests || []).map(requestDiagnosticOutput),
           attempts: (result?.attempts || []).map(attempt => ({
@@ -4104,7 +4077,7 @@ function primaryVideoEvidence(html, pageUrl) {
     const phoneInput = node('input', '', phoneLabel); phoneInput.type = 'checkbox'; phoneInput.dataset.do = 'phone';
     phoneInput.checked = session.phoneConnectionOnly;
     node('span', '', phoneLabel, 'Use phone connection (direct video files)');
-    phoneLabel.title = 'Direct files only. Keep Firefox foregrounded until the full transfer is Ready to switch. Uses temporary PC storage; does not enable a VPN.';
+    phoneLabel.title = 'Stream direct files through Firefox without a full download. Firefox must remain active; Android may suspend it when switching apps. Does not enable a VPN.';
     const statusNode = node('div', 'status', bar, 'Tap red boxes to select, then Send.');
     statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
     document.body.appendChild(host);
@@ -4210,7 +4183,7 @@ function primaryVideoEvidence(html, pageUrl) {
       setStoredJson(PHONE_CONNECTION_KEY, session.phoneConnectionOnly);
       session.results.clear(); session.captureTrace = null; session.captureFailure = null; session.stage = 'selection';
       for (const candidate of session.candidates) candidate.status = '';
-      status.textContent = session.phoneConnectionOnly ? 'Keep Firefox foregrounded until the full transfer says Ready to switch.' : 'Normal connection selected.';
+      status.textContent = session.phoneConnectionOnly ? 'Phone streaming selected. Keep Firefox active; switching apps may interrupt playback.' : 'Normal connection selected.';
       update();
     };
     channelButton.onclick = event => {
@@ -4249,7 +4222,7 @@ function primaryVideoEvidence(html, pageUrl) {
           onResult: (target, result) => session.results.set(target.previewId, result)
         });
         status.textContent = `${[...session.results.values()].filter(item => item.delivered).length}/${targets.length} sent to Recall ${channel}.`;
-        if (session.phoneConnectionOnly) status.textContent = `${[...session.results.values()].filter(item => item.delivered).length}/${targets.length} ready. Ready to switch to Pong for completed videos.`;
+        if (session.phoneConnectionOnly) status.textContent += ' Phone streaming needs Firefox active; playback not yet tested.';
         session.stage = 'complete';
       } catch (error) {
         status.textContent = error.message; session.stage = 'failed';
@@ -4476,7 +4449,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.25.0 loaded on', location.href);
+  log('Universal Video Scraper v7.26.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
