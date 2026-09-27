@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.22.0
+// @version      7.23.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -3892,7 +3892,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 3, version: '7.22.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 3, version: '7.23.0', id: session.id, createdAt: session.createdAt,
       verificationScope: 'metadata_and_bounded_response_probe_not_playback',
       mode: session.mode, channel: session.channel,
       ignoreUnder30: session.ignoreUnder30, stage: session.stage,
@@ -3995,6 +3995,7 @@ function primaryVideoEvidence(html, pageUrl) {
   function openTargetPreview(mode = 'all', channel = 1, ignoreUnder30 = false) {
     if (activeTargetPreview?.sending) return activeTargetPreview;
     activeTargetPreview?.close();
+    channel = Number(channel) === 2 ? 2 : 1;
     const session = {
       id: globalThis.crypto?.randomUUID?.() || `selection-${Date.now()}`,
       createdAt: new Date().toISOString(), mode, channel, ignoreUnder30,
@@ -4011,7 +4012,7 @@ function primaryVideoEvidence(html, pageUrl) {
       .box{position:fixed;background:#ff22222b;border:2px solid #ff5757;border-radius:6px;pointer-events:auto;padding:0;text-align:left;touch-action:manipulation}
       .box[aria-pressed=true]{background:#ff22224a;border-color:#fff}.box span{position:absolute;left:0;top:0;background:#851e24;padding:3px 5px;border-radius:3px;font-size:11px}
       .bar{position:fixed;left:8px;right:8px;bottom:46px;margin:auto;max-width:420px;background:#101723f5;border:1px solid #ffffff33;border-radius:12px;padding:8px;pointer-events:auto;box-shadow:0 3px 16px #0008}
-      .row{display:flex;align-items:center;gap:6px}.summary{flex:1;font-size:11px}.status{font-size:11px;color:#cbd5e1;margin-top:4px}button:disabled{opacity:.5;cursor:default}
+      .row{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.row button{padding:8px}.summary{flex:1;font-size:11px}.status{font-size:11px;color:#cbd5e1;margin-top:4px}button:disabled{opacity:.5;cursor:default}
     `;
     const node = (tag, className, parent, text = '') => {
       const element = document.createElement(tag); element.className = className; element.textContent = text; parent.appendChild(element); return element;
@@ -4020,6 +4021,7 @@ function primaryVideoEvidence(html, pageUrl) {
     node('div', 'boxes', shadow);
     const bar = node('div', 'bar', shadow); bar.setAttribute('role', 'region'); bar.setAttribute('aria-label', 'Select video targets');
     const row = node('div', 'row', bar); node('div', 'summary', row);
+    const channelButton = node('button', '', row); channelButton.type = 'button'; channelButton.dataset.do = 'channel';
     node('button', '', row, 'Send').dataset.do = 'send';
     node('button', '', row, 'Copy log').dataset.do = 'copy';
     const close = node('button', '', row, '×'); close.type = 'button'; close.dataset.do = 'close';
@@ -4033,7 +4035,11 @@ function primaryVideoEvidence(html, pageUrl) {
     let animation = 0, rescanTimer = 0, closed = false, pageUrl = canonicalWatchPageUrl(location.href, location.href);
     const key = candidate => canonicalWatchPageUrl(candidate.url, location.href) + '\n' + (candidate.logicalVideoId || '');
     const update = () => {
-      shadow.querySelector('.summary').textContent = `${session.selected.size} selected · Recall ${channel}`;
+      shadow.querySelector('.summary').textContent = `${session.selected.size} selected`;
+      channelButton.textContent = `Recall ${channel}`;
+      channelButton.setAttribute('aria-label', `Destination: Recall ${channel}. Switch to Recall ${channel === 1 ? 2 : 1}`);
+      channelButton.title = session.sending ? 'Destination is fixed while sending' : 'Tap to switch Recall destination';
+      channelButton.disabled = session.sending;
       send.disabled = !session.selected.size || session.sending;
       for (const candidate of session.candidates) {
         const box = controls.get(candidate.previewId);
@@ -4119,6 +4125,22 @@ function primaryVideoEvidence(html, pageUrl) {
     session.isHidden = () => host.hidden;
     session.show = () => { host.hidden = false; position(); };
     close.onclick = event => { event.preventDefault(); event.stopPropagation(); session.dismiss(); };
+    channelButton.onclick = event => {
+      event.preventDefault(); event.stopPropagation();
+      if (session.sending) return;
+      channel = channel === 1 ? 2 : 1;
+      session.channel = channel;
+      setStoredJson(RECALL_CHANNEL_KEY, channel);
+      const launcher = document.getElementById('uvs-recall-capture');
+      if (launcher) launcher.dataset.channel = String(channel);
+      // Keep checkmarks, but never relabel an earlier destination's receipt.
+      session.id = globalThis.crypto?.randomUUID?.() || `selection-${Date.now()}`;
+      session.createdAt = new Date().toISOString(); session.stage = 'selection';
+      session.results.clear(); session.captureTrace = null; session.captureFailure = null;
+      for (const candidate of session.candidates) candidate.status = '';
+      status.textContent = `Selected videos will go to Recall ${channel}.`;
+      update();
+    };
     shadow.querySelector('[data-do=copy]').onclick = async () => {
       const copied = await copyTextToClipboard(JSON.stringify(buildDetectionFeedback(session), null, 2));
       status.textContent = copied ? 'Log copied. Paste it in chat; no cookies or media URLs included.' : 'Clipboard blocked. Allow clipboard access and try again.';
@@ -4364,7 +4386,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.22.0 loaded on', location.href);
+  log('Universal Video Scraper v7.23.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
