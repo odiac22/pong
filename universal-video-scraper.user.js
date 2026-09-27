@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.15.0
+// @version      7.16.0
 // @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
@@ -28,10 +28,10 @@
 
   /* CONFIG */
 
-  const VIDEO_EXT_RE = /\.(mp4|m4v|mov|webm|mkv|m3u8|ogv)(\?|#|$)/i;
+  const VIDEO_EXT_RE = /\.(mp4|m4v|mov|webm|mkv|m3u8|mpd|ogv)(\?|#|$)/i;
 
   const RAW_VIDEO_URL_RE =
-    /(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:mp4|m4v|mov|webm|mkv|m3u8|ogv)(?:\?[^\s"'<>\\]*)?/gi;
+    /(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:mp4|m4v|mov|webm|mkv|m3u8|mpd|ogv)(?:\?[^\s"'<>\\]*)?/gi;
 
   const EROME_ALBUM_RE =
     /^https?:\/\/(?:www\.)?erome\.com\/a\/[\w-]+\/?$/i;
@@ -1169,9 +1169,13 @@ function primaryVideoEvidence(html, pageUrl) {
         });
       } catch (_) {}
     }
-    const currentTarget = isLogicalVideoPageUrl(current, current)
-      ? [{ url: currentUrl, durationSeconds: extractPageDurationSeconds(doc) }]
-      : [];
+    const groups = related.length ? [] : independentVideoGroupsFromDoc(doc, currentUrl);
+    const hasPlayer = primaryMediaEntriesFromDoc(doc, currentUrl).length > 0 || embeddedPlayerPageUrls(doc, currentUrl).length > 0;
+    const currentTarget = groups.length > 1
+      ? groups.map(group => ({ url: currentUrl, durationSeconds: group.durationSeconds, logicalVideoId: group.logicalVideoId }))
+      : isLogicalVideoPageUrl(current, current) || (!related.length && hasPlayer)
+        ? [{ url: currentUrl, durationSeconds: extractPageDurationSeconds(doc) }]
+        : [];
     return [...currentTarget, ...related]
       .slice(0, Math.max(1, Number(limit || 80)));
   }
@@ -1189,9 +1193,9 @@ function primaryVideoEvidence(html, pageUrl) {
     }));
     const durationSeconds = extractPageDurationSeconds(doc);
     const prioritized = [];
-    const add = rawValue => {
+    const add = (rawValue, declaredMedia = false) => {
       const value = absUrl(rawValue, pageUrl);
-      if (!value || value.startsWith('blob:') || !VIDEO_EXT_RE.test(value)) return;
+      if (!value || !/^https?:\/\//i.test(value) || (!declaredMedia && !VIDEO_EXT_RE.test(value))) return;
       if (/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname)) return;
       if (!prioritized.includes(value)) prioritized.push(value);
     };
@@ -1231,14 +1235,14 @@ function primaryVideoEvidence(html, pageUrl) {
         }))
         .sort((left, right) => Number(right.visible) - Number(left.visible) || right.area - left.area);
       for (const item of media.slice(0, 2)) {
-        add(item.element.currentSrc);
-        add(item.element.src);
-        item.element.querySelectorAll('source[src]').forEach(source => add(source.src || source.getAttribute('src')));
+        add(item.element.currentSrc, true);
+        add(item.element.getAttribute('src'), true);
+        item.element.querySelectorAll('source[src]').forEach(source => add(source.getAttribute('src'), true));
       }
       if (doc === document && typeof performance?.getEntriesByType === 'function') {
         performance.getEntriesByType('resource')
           .map(entry => String(entry?.name || ''))
-          .filter(value => /\.m3u8(?:[?#]|$)/i.test(value))
+          .filter(value => /\.(?:m3u8|mpd)(?:[?#]|$)/i.test(value))
           .reverse()
           .slice(0, 4)
           .forEach(add);
@@ -1251,6 +1255,25 @@ function primaryVideoEvidence(html, pageUrl) {
       const scriptCandidates = [];
       for (const script of doc.querySelectorAll('script')) {
         const text = String(script.textContent || '');
+        // Read literal source records only; never evaluate a page's player code.
+        // Restrict this to sources arrays so advertising.file and poster URLs
+        // cannot masquerade as the main JW Player/video.js source.
+        for (const sources of text.matchAll(/["']?sources["']?\s*:\s*\[([^\]]*)\]/gi)) {
+          const literalSources = [];
+          for (const object of sources[1].matchAll(/\{([^{}]*)\}/g)) {
+            const raw = object[1].match(/(?:^|,)\s*["']?(?:file|src)["']?\s*:\s*(["'])(.*?)\1\s*(?=,|$)/i)?.[2];
+            if (!raw) continue;
+            const value = raw.replace(/\\\//g, '/').replace(/\\u0026/gi, '&').replace(/&amp;/gi, '&');
+            const label = object[1].match(/["']?(?:label|res|height)["']?\s*:\s*["']?(\d{3,4})/i)?.[1];
+            literalSources.push({ value, height: Number(label || 0) });
+          }
+          literalSources.sort((a, b) => b.height - a.height).forEach(item => add(item.value, true));
+          // Explicit resolution labels outrank a live player's low default.
+          for (const item of literalSources.filter(item => item.height > 0).reverse()) {
+            const value = absUrl(item.value, pageUrl), index = prioritized.indexOf(value);
+            if (index >= 0) { prioritized.splice(index, 1); prioritized.unshift(value); }
+          }
+        }
         if (!/(?:mediaDefinitions|flashvars|videoUrl|video_url|contentUrl)/i.test(text)) continue;
         extractVideoUrlsFromText(text, pageUrl).forEach(value => {
           const normalized = absUrl(value, pageUrl);
@@ -1279,6 +1302,26 @@ function primaryVideoEvidence(html, pageUrl) {
       pageUrl,
       durationSeconds
     }));
+  }
+
+  function independentVideoGroupsFromDoc(doc, pageUrl) {
+    if (primaryVideoEvidence(String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || ''), pageUrl)) return [];
+    const groups = [];
+    for (const [index, video] of [...doc.querySelectorAll('video')].entries()) {
+      if (video.closest('aside,[role="complementary"],[data-ad],.advertisement,.ad-container')) continue;
+      const isolated = doc.implementation.createHTMLDocument('');
+      const base = isolated.createElement('base'); base.href = pageUrl; isolated.head.appendChild(base);
+      isolated.body.appendChild(video.cloneNode(true));
+      isolated.__uvsUrl = pageUrl;
+      const durationSeconds = Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration : Number(video.getAttribute('data-duration') || 0);
+      const entries = primaryMediaEntriesFromDoc(isolated, pageUrl).map(entry => ({
+        ...entry, durationSeconds,
+        title: video.getAttribute('title') || video.getAttribute('aria-label') || ''
+      }));
+      if (entries.length) groups.push({ logicalVideoId: `inline-video-${index + 1}`, durationSeconds, entries });
+    }
+    return groups;
   }
 
   function embeddedPlayerPageUrls(doc, pageUrl, limit = 4) {
@@ -3029,7 +3072,7 @@ function primaryVideoEvidence(html, pageUrl) {
         const status = Number(response?.status || 0);
         const type = responseHeaderValue(response?.responseHeaders, 'content-type');
         if (![200, 206].includes(status) || /(?:text\/html|application\/(?:json|xml))/i.test(type)) return false;
-        return /^video\//i.test(type) || /mpegurl|octet-stream/i.test(type) || VIDEO_EXT_RE.test(url);
+        return /^video\//i.test(type) || /mpegurl|dash\+xml|octet-stream/i.test(type) || VIDEO_EXT_RE.test(url);
       };
       const rangeProbe = () => {
         request = GM_xmlhttpRequest({
@@ -3185,6 +3228,10 @@ function primaryVideoEvidence(html, pageUrl) {
       const usefulError = endpointErrors.find(message => !/connection failed/i.test(message));
       throw new Error(usefulError || endpointErrors.at(-1) || 'Pong PC server is unreachable');
     }
+    if (targets.some(target => target.logicalVideoId) && !started?.capabilities?.independentVideoIdentity) {
+      await postRecallCapturePayload(endpoint, { ...basePayload, capturePhase: 'complete', completedPages: 0, pageUrls: [], entries: [] }, 8000);
+      throw new Error('This page has multiple videos. Restart the updated Pong 30.07 server to capture them separately.');
+    }
 
     let completedPages = 0;
     let deliveredVideos = Number(started?.videos || 0);
@@ -3237,7 +3284,11 @@ function primaryVideoEvidence(html, pageUrl) {
           doc.__uvsRawHtml = document.documentElement?.innerHTML || '';
           doc.__uvsUrl = location.href;
         }
-        const extracted = await browserResolvedMediaEntries(
+        const inlineGroup = target.logicalVideoId
+          ? independentVideoGroupsFromDoc(doc, targetUrl).find(group => group.logicalVideoId === target.logicalVideoId)
+          : null;
+        if (target.logicalVideoId && !inlineGroup) throw new Error('The selected video element changed; capture this page again');
+        const extracted = inlineGroup ? inlineGroup.entries : await browserResolvedMediaEntries(
           doc,
           targetUrl,
           Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
@@ -3248,9 +3299,10 @@ function primaryVideoEvidence(html, pageUrl) {
         const resolved = await firstVerifiedRecallEntry(
           extracted,
           targetUrl,
-          Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
+          inlineGroup ? inlineGroup.durationSeconds : Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
           minimumDurationSeconds
         );
+        if (resolved && target.logicalVideoId) resolved.logicalVideoId = target.logicalVideoId;
         if (resolved && !resolved.title) resolved.title = cleanTitle(
           doc.querySelector('meta[property="og:title"]')?.getAttribute('content') || doc.title || ''
         );
@@ -4097,7 +4149,7 @@ function primaryVideoEvidence(html, pageUrl) {
   if (/^[a-z0-9-]{8,100}$/i.test(browserRelayKeeperClientId)) {
     startBrowserMediaRelay(location.origin, browserRelayKeeperClientId);
     document.documentElement.dataset.pongBrowserRelayKeeper = 'active';
-    log('Universal Video Scraper v7.14.0 browser relay keeper active');
+    log('Universal Video Scraper v7.16.0 browser relay keeper active');
     return;
   }
 
@@ -4163,6 +4215,7 @@ function primaryVideoEvidence(html, pageUrl) {
     collectLogicalWatchPageTargets,
     collectLogicalWatchPageUrls,
     primaryMediaEntriesFromDoc,
+    independentVideoGroupsFromDoc,
     sendCaptureToRecall,
 
     formatPongExport,
@@ -4183,7 +4236,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.15.0 loaded on', location.href);
+  log('Universal Video Scraper v7.16.0 loaded on', location.href);
 
   if (getStoredBool(AUTO_SCRAPE_KEY, false)) {
     setTimeout(() => doScrape(false), 800);
