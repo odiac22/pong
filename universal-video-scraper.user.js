@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.27.0
+// @version      7.28.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -3567,7 +3567,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function vpnMessage(status) {
     const errors = {
-      pairing_required: 'Pair PC once: open the pairing page, copy its key, then tap Pair PC.',
+      pairing_required: 'Copy pairing link, open it in your browser, copy the key, then tap Paste key & connect.',
       helper_update: 'PC helper needs version 30.14 and a restart. The userscript update alone is not enough.',
       pc_unreachable: 'PC helper unreachable. Keep PC awake, use the same Wi-Fi, and allow local-network access in NordVPN. A VPN switch may briefly interrupt the connection.',
       nord_not_installed: 'NordVPN is not installed at its standard Windows location. Install it and sign in on the PC.',
@@ -4042,7 +4042,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 4, version: '7.27.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 4, version: '7.28.0', id: session.id, createdAt: session.createdAt,
       vpn: vpnSafeStatus(session.vpn || {}),
       phoneConnectionOnly: session.phoneConnectionOnly === true,
       verificationScope: 'metadata_and_bounded_response_probe_not_playback',
@@ -4166,6 +4166,14 @@ function primaryVideoEvidence(html, pageUrl) {
       .box[aria-pressed=true]{background:#ff22224a;border-color:#fff}.box span{position:absolute;left:0;top:0;background:#851e24;padding:3px 5px;border-radius:3px;font-size:11px}
       .bar{position:fixed;left:8px;right:8px;bottom:46px;margin:auto;max-width:420px;background:#101723f5;border:1px solid #ffffff33;border-radius:12px;padding:8px;pointer-events:auto;box-shadow:0 3px 16px #0008}
       .row{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.row button{padding:8px}.summary{flex:1;font-size:11px}.status{font-size:11px;color:#cbd5e1;margin-top:4px}button:disabled{opacity:.5;cursor:default}
+      .bar{background:linear-gradient(145deg,#17243bf5,#18182cf5);border-color:#818cf85c}
+      .bar button{transition:filter .12s ease,border-color .12s ease}.bar button:hover:not(:disabled){filter:brightness(1.18)}
+      [data-do=channel]{background:#6744aa;border-color:#c4b5fd88}[data-do=send]{background:#166b49;border-color:#6ee7b788}
+      [data-do=copy]{background:#155e87;border-color:#7dd3fc88}[data-do=close]{background:#9b3547;border-color:#fda4af88}
+      [data-vpn=connect]{background:#0d6565;border-color:#5eead488}[data-vpn=disconnect]{background:#9a4c20;border-color:#fdba7488}
+      [data-vpn=status]{background:#3d51a7;border-color:#a5b4fc88}[data-vpn=pair]{background:#8d367f;border-color:#f0abfc88}
+      [data-do=pair-copy]{background:#775521;border-color:#fde68a88;margin-top:6px;padding:6px 9px;font-size:11px}
+      input[type=checkbox]{accent-color:#a78bfa}
     `;
     const node = (tag, className, parent, text = '') => {
       const element = document.createElement(tag); element.className = className; element.textContent = text; parent.appendChild(element); return element;
@@ -4189,18 +4197,24 @@ function primaryVideoEvidence(html, pageUrl) {
     const statusNode = node('div', 'status', bar, 'Tap red boxes to select, then Send.');
     statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
     const vpnRow = node('div', 'row vpn-row', bar); vpnRow.style.marginTop = '6px';
-    for (const [action,label] of [['connect','Connect California'],['disconnect','Disconnect'],['status','VPN status'],['pair','Pair PC']]) {
+    for (const [action,label] of [['connect','Connect California'],['disconnect','Disconnect'],['status','VPN status'],['pair','Paste key & connect']]) {
       const button = node('button', '', vpnRow, label); button.type = 'button'; button.dataset.vpn = action;
     }
-    const pairingLink = node('a', '', bar, 'Open PC pairing page');
-    pairingLink.href = `${vpnEndpoint()}/vpn/setup`; pairingLink.target = '_blank'; pairingLink.rel = 'noopener noreferrer';
-    pairingLink.style.cssText = 'display:none;color:#93c5fd;margin-top:5px';
+    const pairingLink = node('button', '', bar, 'Copy pairing link');
+    pairingLink.type = 'button'; pairingLink.dataset.do = 'pair-copy';
+    pairingLink.title = 'Copy the PC pairing page address to open in your browser';
     const vpnStatus = node('div', 'vpn-status', bar, 'PC VPN not checked. Phone VPN is separate.');
     vpnStatus.style.cssText = 'font-size:11px;color:#cbd5e1;margin-top:4px;overflow-wrap:anywhere';
     vpnStatus.setAttribute('role','status'); vpnStatus.setAttribute('aria-live','polite');
     const showVpn = value => {
       session.vpn = vpnSafeStatus(value); vpnStatus.textContent = vpnMessage(session.vpn);
-      if (session.vpn.error === 'pairing_required') pairingLink.style.display = 'block';
+    };
+    pairingLink.onclick = async event => {
+      event.preventDefault(); event.stopPropagation();
+      const endpoint = vpnEndpoint();
+      if (!endpoint) { showVpn({phase:'error',error:'local_network_required'}); return; }
+      const copied = await copyTextToClipboard(`${endpoint}/vpn/setup`);
+      vpnStatus.textContent = copied ? 'Pairing link copied. Paste it into your browser, copy the key there, then use Paste key & connect.' : 'Could not copy the pairing link. Allow clipboard access and try again.';
     };
     const vpnButtons = [...vpnRow.querySelectorAll('button')];
     let vpnWorking = false;
@@ -4209,9 +4223,11 @@ function primaryVideoEvidence(html, pageUrl) {
       if (!(event instanceof MouseEvent) || !event.isTrusted || session.sending || vpnWorking) return;
       const action = button.dataset.vpn;
       if (action === 'pair') {
-        pairingLink.style.display = 'block';
-        // Native prompt, never a website-readable text field or localStorage.
-        const key = window.prompt('First open the PC pairing page below and copy its key. Then tap Pair PC again and paste the key here. Cancel to open the page.');
+        // Read only on this explicit click. Browsers that block clipboard reads
+        // use a native paste prompt, never a website-readable input field.
+        let key = '';
+        try { if (navigator.clipboard?.readText) key = await navigator.clipboard.readText(); } catch (_) {}
+        if (!/^[a-f0-9]{64}$/.test(key.trim())) key = window.prompt('Paste the key from the PC pairing page. Press OK to save it and automatically connect the PC VPN to California.');
         if (key === null) return;
         if (!/^[a-f0-9]{64}$/.test(key.trim())) { vpnStatus.textContent = 'Pairing key must be the 64-character key from your PC. Never paste your NordVPN password.'; return; }
         if (typeof GM_setValue !== 'function') { vpnStatus.textContent = 'Tampermonkey private storage is unavailable. Pairing was not saved.'; return; }
@@ -4220,7 +4236,7 @@ function primaryVideoEvidence(html, pageUrl) {
       if (action === 'disconnect' && !window.confirm('Disconnect the PC VPN? This affects other PC apps and can interrupt video playback.')) return;
       vpnWorking = true; vpnButtons.forEach(b => b.disabled = true); send.disabled = true;
       showVpn({phase:action === 'disconnect' ? 'disconnecting' : 'checking',busy:true});
-      try { await runVpnAction(action === 'pair' ? 'status' : action, showVpn); }
+      try { await runVpnAction(action === 'pair' ? 'connect' : action, showVpn); }
       catch (error) { showVpn({...session.vpn,phase:'error',busy:false,error:error.code || 'vpn_unavailable'}); }
       finally { vpnWorking = false; vpnButtons.forEach(b => b.disabled = session.sending); update(); }
     };
@@ -4627,7 +4643,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.27.0 loaded on', location.href);
+  log('Universal Video Scraper v7.28.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
