@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.19.0
+// @version      7.20.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -482,6 +482,8 @@ function primaryVideoEvidence(html, pageUrl) {
 
   async function fetchText(url, attempt = 1, options = {}) {
     const timeout = Math.max(3000, Number(options.timeout || 30000));
+    const trace = diagnosticRequest(options.diagnostics, 'page_fetch', timeout);
+    trace.credentialsEnabled = true; trace.refererSupplied = !!options.headers?.Referer;
     const maxRetries = Math.max(1, Number(options.maxRetries || MAX_RETRIES));
     let requestUrl = url;
     if (options.cacheBust) {
@@ -506,14 +508,17 @@ function primaryVideoEvidence(html, pageUrl) {
               ...(options.headers || {})
             },
             onload: res => {
+              trace.httpStatus = res.status; trace.contentType = diagnosticMime(responseHeaderValue(res.responseHeaders, 'content-type'));
+              trace.redirected = res.finalUrl ? res.finalUrl !== requestUrl : null;
+              finishDiagnosticRequest(trace, res.status >= 200 && res.status < 400 ? 'none' : 'http_error');
               if (res.status >= 200 && res.status < 400) {
                 resolve(res.responseText || '');
               } else {
                 reject(new Error(`HTTP ${res.status}`));
               }
             },
-            onerror: () => reject(new Error('Network error')),
-            ontimeout: () => reject(new Error('Request timed out'))
+            onerror: () => { finishDiagnosticRequest(trace, 'network_error'); reject(new Error('Network error')); },
+            ontimeout: () => { finishDiagnosticRequest(trace, 'timeout'); reject(new Error('Request timed out')); }
           });
         });
       }
@@ -523,10 +528,13 @@ function primaryVideoEvidence(html, pageUrl) {
         cache: 'no-store'
       });
 
+      trace.httpStatus = res.status; trace.contentType = diagnosticMime(res.headers.get('content-type')); trace.redirected = res.redirected;
+      finishDiagnosticRequest(trace, res.ok ? 'none' : 'http_error');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
       return await res.text();
     } catch (e) {
+      finishDiagnosticRequest(trace, 'request_error');
       if (attempt >= maxRetries) throw e;
 
       await sleep(400 * attempt);
@@ -1482,25 +1490,28 @@ function primaryVideoEvidence(html, pageUrl) {
     let helperNeedsUpdate = false;
     for (const receiver of receivers) {
       if (options.signal?.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
+      const trace = diagnosticRequest(options.diagnostics, 'platform_resolve', 25000);
       try {
         const payload = await new Promise((resolve, reject) => {
           let request, settled = false;
-          const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); options.signal?.removeEventListener('abort', abort); error ? reject(error) : resolve(value); };
+          const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); options.signal?.removeEventListener('abort', abort); finishDiagnosticRequest(trace, error ? error.code || 'request_error' : 'none'); error ? reject(error) : resolve(value); };
           const abort = () => { finish(Object.assign(new Error('Timed out'), { code: 'timeout' })); try { request?.abort(); } catch (_) {} };
           const timer = setTimeout(abort, 26000);
           options.signal?.addEventListener('abort', abort, { once: true });
           try { request = GM_xmlhttpRequest({ method: 'POST', url: `${receiver}/media-page/youtube-resolve`,
             headers: { 'Content-Type': 'application/json' }, data: JSON.stringify({ videoId: youtubeVideoId(pageUrl) }), timeout: 25000,
             onload: response => { try {
+              trace.httpStatus = response.status;
               if (response.status === 404) throw Object.assign(new Error('Pong capture helper needs restart'), { code: 'youtube_helper_update' });
               const data = JSON.parse(response.responseText || '{}');
+              trace.parsedResponse = true; trace.helperVersion = data.helperVersion;
               if (response.status !== 200 || data.videoId !== youtubeVideoId(pageUrl) || !data.videoUrl) throw new Error('No YouTube stream');
               finish(null, data);
             } catch (error) { finish(error); } },
-            onerror: () => finish(new Error('YouTube resolver unavailable')), ontimeout: abort, onabort: abort
+            onerror: () => finish(Object.assign(new Error('YouTube resolver unavailable'), { code: 'network_error' })), ontimeout: abort, onabort: abort
           }); } catch (error) { finish(error); }
         });
-        return [{ ...entry(payload.videoUrl), durationSeconds: Number(payload.durationSeconds || durationSeconds), title: payload.title || entry('').title }];
+        return [{ ...entry(payload.videoUrl), durationSeconds: Number(payload.durationSeconds || durationSeconds), height: diagnosticNumber(payload.height, 32768), title: payload.title || entry('').title }];
       } catch (error) { if (options.signal?.aborted) throw error; if (error?.code === 'youtube_helper_update') helperNeedsUpdate = true; }
     }
     const formats = (player?.streamingData?.formats || []).filter(format => format.url && /^video\//.test(format.mimeType || '')).sort((a,b) => (b.height || 0) - (a.height || 0));
@@ -1539,6 +1550,7 @@ function primaryVideoEvidence(html, pageUrl) {
         timeout: 12000,
         maxRetries: Math.max(1, Number(options.maxRetries || 2)),
         cacheBust: options.cacheBust === true,
+        diagnostics: options.diagnostics,
         headers: { Referer: pageUrl }
       });
       if (!playerDoc) continue;
@@ -3149,7 +3161,91 @@ function primaryVideoEvidence(html, pageUrl) {
     }
   }
 
-  function postRecallCapturePayload(endpoint, payload, timeout = 45000) {
+  // Diagnostic output is an allowlist: never copy URLs, headers, response
+  // bodies, page text, cookie values, or exception messages into a shared log.
+  function diagnosticNumber(value, max = 86400000) {
+    return value !== null && value !== undefined && Number.isFinite(Number(value)) ? Math.min(max, Math.max(0, Number(value))) : null;
+  }
+
+  function diagnosticFailure(value) {
+    const aliases = { youtube_access: 'platform_access', youtube_stream: 'platform_stream', youtube_helper_update: 'helper_update' };
+    const code = aliases[value] || value;
+    return ['none','pending','timeout','aborted','network_error','request_error','http_error','server_rejected','invalid_response','not_accepted',
+      'platform_access','platform_stream','helper_update','extraction_error','no_media','duration_filter','media_unverified','page_fetch',
+      'non_media_response','invalid_url','delivery_failed'].includes(code) ? code : 'request_error';
+  }
+
+  function diagnosticMime(value) {
+    const type = String(value || '').split(';')[0].trim().toLowerCase();
+    if (type === 'unknown' || type === 'other') return type;
+    return ['video/mp4','video/webm','video/quicktime','video/ogg','video/x-matroska','application/vnd.apple.mpegurl','application/x-mpegurl',
+      'audio/mpegurl','audio/x-mpegurl','application/dash+xml','application/octet-stream','text/html','text/plain','application/json','application/xml'].includes(type) ? type : type ? 'other' : 'unknown';
+  }
+
+  function diagnosticStreamType(value) {
+    const url = String(value || '');
+    if (/\.m3u8(?:[?#]|$)|\/manifest\/hls|\/api\/manifest\/hls/i.test(url)) return 'hls';
+    if (/\.mpd(?:[?#]|$)|\/manifest\/dash/i.test(url)) return 'dash';
+    if (/\.mp4(?:[?#]|$)/i.test(url)) return 'mp4';
+    if (/\.webm(?:[?#]|$)/i.test(url)) return 'webm';
+    return /^blob:/i.test(url) ? 'blob' : 'unknown';
+  }
+
+  function diagnosticRequest(list, phase, timeoutMs) {
+    const record = { phase, timeoutMs, startedAt: performance.now(), state: 'pending', httpStatus: null, failure: 'pending' };
+    if (Array.isArray(list) && list.length < 40) list.push(record);
+    return record;
+  }
+
+  function finishDiagnosticRequest(record, failure = 'none') {
+    if (record.state !== 'pending') return;
+    record.elapsedMs = Math.round(performance.now() - record.startedAt);
+    record.state = failure === 'none' ? 'complete' : 'failed'; record.failure = diagnosticFailure(failure);
+  }
+
+  function requestDiagnosticOutput(record) {
+    return {
+      phase: ['start','append','complete','page_fetch','platform_resolve','media_probe','duration_probe'].includes(record.phase) ? record.phase : 'unknown',
+      state: ['pending','complete','failed'].includes(record.state) ? record.state : 'unknown',
+      elapsedMs: diagnosticNumber(record.state === 'pending' ? Math.round(performance.now() - record.startedAt) : record.elapsedMs),
+      timeoutMs: diagnosticNumber(record.timeoutMs), httpStatus: diagnosticNumber(record.httpStatus, 599), failure: diagnosticFailure(record.failure),
+      credentialsEnabled: typeof record.credentialsEnabled === 'boolean' ? record.credentialsEnabled : null,
+      refererSupplied: typeof record.refererSupplied === 'boolean' ? record.refererSupplied : null,
+      rangeRequested: record.rangeRequested === true, partialResponse: record.httpStatus === 206,
+      redirected: typeof record.redirected === 'boolean' ? record.redirected : null,
+      contentType: diagnosticMime(record.contentType), contentLength: diagnosticNumber(record.contentLength, 1e13),
+      responseBytes: diagnosticNumber(record.responseBytes, 1e13), loadedBytes: diagnosticNumber(record.loadedBytes, 1e13),
+      totalBytes: diagnosticNumber(record.totalBytes, 1e13),
+      headersOnly: record.headersOnly === true,
+      streamType: ['hls','dash','mp4','webm','blob','unknown'].includes(record.streamType) ? record.streamType : 'unknown',
+      serverAccepted: diagnosticNumber(record.serverAccepted, 500), serverVideoCount: diagnosticNumber(record.serverVideoCount, 10000),
+      parsedResponse: typeof record.parsedResponse === 'boolean' ? record.parsedResponse : null,
+      helperVersion: /^\d+\.\d+\.\d+$/.test(record.helperVersion || '') ? record.helperVersion : null,
+      mediaErrorCode: diagnosticNumber(record.mediaErrorCode, 4), mediaReadyState: diagnosticNumber(record.mediaReadyState, 4),
+      videoWidth: diagnosticNumber(record.videoWidth, 32768), videoHeight: diagnosticNumber(record.videoHeight, 32768), durationSeconds: diagnosticNumber(record.durationSeconds),
+      contentRange: record.contentRange ? { start: diagnosticNumber(record.contentRange.start, 1e13), end: diagnosticNumber(record.contentRange.end, 1e13), total: diagnosticNumber(record.contentRange.total, 1e13) } : null
+    };
+  }
+
+  function videoDiagnosticSnapshot(element) {
+    const video = element?.tagName === 'VIDEO' ? element : element?.querySelector?.('video');
+    if (!video) return null;
+    const ranges = value => {
+      const out = []; for (let i = 0; value && i < Math.min(value.length, 12); i++) out.push([diagnosticNumber(value.start(i)), diagnosticNumber(value.end(i))]); return out;
+    };
+    let quality; try { quality = video.getVideoPlaybackQuality?.(); } catch (_) {}
+    return { readyState: video.readyState, networkState: video.networkState, paused: video.paused, ended: video.ended,
+      seeking: video.seeking, muted: video.muted, autoplay: video.autoplay, loop: video.loop,
+      currentTime: diagnosticNumber(video.currentTime), durationSeconds: diagnosticNumber(video.duration),
+      playbackRate: diagnosticNumber(video.playbackRate, 100), videoWidth: video.videoWidth, videoHeight: video.videoHeight,
+      buffered: ranges(video.buffered), seekable: ranges(video.seekable), mediaErrorCode: video.error?.code || 0,
+      sourceKind: /^blob:/i.test(video.currentSrc) ? 'blob' : /^https?:/i.test(video.currentSrc) ? 'network' : video.currentSrc ? 'other' : 'none',
+      totalVideoFrames: diagnosticNumber(quality?.totalVideoFrames, 1e12), droppedVideoFrames: diagnosticNumber(quality?.droppedVideoFrames, 1e12),
+      decodedVideoFrames: diagnosticNumber(video.webkitDecodedFrameCount, 1e12), encryptedMediaAttached: !!video.mediaKeys };
+  }
+
+  function postRecallCapturePayload(endpoint, payload, timeout = 45000, diagnostics = null) {
+    const trace = diagnosticRequest(diagnostics, payload.capturePhase, timeout);
     return new Promise((resolve, reject) => {
       let settled = false;
       let request;
@@ -3157,11 +3253,12 @@ function primaryVideoEvidence(html, pageUrl) {
         if (settled) return;
         settled = true;
         clearTimeout(deadline);
+        finishDiagnosticRequest(trace, error ? (error.code || 'request_error') : 'none');
         if (error) reject(error); else resolve(data);
       };
       // A manager permission dialog can pause GM's own network timeout.
       const deadline = setTimeout(() => {
-        finish(new Error('Pong capture timed out. Check Tampermonkey permission to access the Pong server.'));
+        finish(Object.assign(new Error('Pong capture timed out. Check Tampermonkey permission to access the Pong server.'), { code: 'timeout' }));
         try { request?.abort(); } catch (_) {}
       }, timeout + 1000);
       try { request = GM_xmlhttpRequest({
@@ -3174,26 +3271,28 @@ function primaryVideoEvidence(html, pageUrl) {
         data: JSON.stringify(payload),
         timeout,
         onload: response => {
+          trace.httpStatus = response.status;
           let data = {};
-          try { data = JSON.parse(response.responseText || '{}'); } catch (_) {}
+          try { data = JSON.parse(response.responseText || '{}'); trace.parsedResponse = true; } catch (_) { trace.parsedResponse = false; }
+          trace.serverAccepted = data.accepted; trace.serverVideoCount = data.videos;
           if (response.status >= 200 && response.status < 300 && data.ok !== false) finish(null, data);
-          else finish(new Error(data.error || `HTTP ${response.status}`));
+          else finish(Object.assign(new Error(data.error || `HTTP ${response.status}`), { code: data.ok === false ? 'server_rejected' : 'http_error' }));
         },
-        onerror: response => finish(new Error(
+        onerror: response => finish(Object.assign(new Error(
           `Pong server connection failed${response?.error ? `: ${response.error}` : ''}`
-        )),
-        ontimeout: () => finish(new Error('Pong capture timed out')),
-        onabort: () => finish(new Error('Pong capture aborted'))
+        ), { code: 'network_error' })),
+        ontimeout: () => finish(Object.assign(new Error('Pong capture timed out'), { code: 'timeout' })),
+        onabort: () => finish(Object.assign(new Error('Pong capture aborted'), { code: 'aborted' }))
       }); } catch (error) { finish(error); }
     });
   }
 
-  async function postRecallCapturePayloadWithRetry(endpoint, payload, timeout = 45000, attempts = 3) {
+  async function postRecallCapturePayloadWithRetry(endpoint, payload, timeout = 45000, attempts = 3, diagnostics = null) {
     let lastError = null;
     const maximumAttempts = Math.max(1, Number(attempts || 1));
     for (let attempt = 1; attempt <= maximumAttempts; attempt++) {
       try {
-        return await postRecallCapturePayload(endpoint, payload, timeout);
+        return await postRecallCapturePayload(endpoint, payload, timeout, diagnostics);
       } catch (error) {
         lastError = error;
         if (attempt < maximumAttempts) await sleep(250 * attempt);
@@ -3202,64 +3301,57 @@ function primaryVideoEvidence(html, pageUrl) {
     throw lastError || new Error('Pong capture failed');
   }
 
-  function probeCapturedMediaUrl(rawUrl, pageUrl) {
+  function probeCapturedMediaUrl(rawUrl, pageUrl, diagnostics = null) {
     const url = String(rawUrl || '').trim();
-    if (!/^https?:\/\//i.test(url)) return Promise.resolve(false);
+    const trace = diagnosticRequest(diagnostics, 'media_probe', 8000);
+    Object.assign(trace, { credentialsEnabled: true, refererSupplied: !!pageUrl, rangeRequested: true, streamType: diagnosticStreamType(url) });
+    if (!/^https?:\/\//i.test(url)) { finishDiagnosticRequest(trace, 'invalid_url'); return Promise.resolve(false); }
     return new Promise(resolve => {
-      let settled = false;
-      let request = null;
-      const finish = value => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(deadline);
-        resolve(value === true);
+      let settled = false, request = null;
+      const finish = (value, failure = 'none') => {
+        if (settled) return; settled = true; clearTimeout(deadline);
+        finishDiagnosticRequest(trace, failure); resolve(value === true);
       };
-      const deadline = setTimeout(() => {
-        finish(false);
-        try { request?.abort?.(); } catch (_) {}
-      }, 9000);
-      const mediaResponse = response => {
-        const status = Number(response?.status || 0);
-        const type = responseHeaderValue(response?.responseHeaders, 'content-type');
-        if (![200, 206].includes(status) || /(?:text\/html|application\/(?:json|xml))/i.test(type)) return false;
-        return /^video\//i.test(type) || /mpegurl|dash\+xml|octet-stream/i.test(type) || VIDEO_EXT_RE.test(url);
+      const deadline = setTimeout(() => { finish(false, 'timeout'); try { request?.abort?.(); } catch (_) {} }, 9000);
+      const recordResponse = response => {
+        trace.httpStatus = Number(response?.status || 0);
+        trace.contentType = diagnosticMime(responseHeaderValue(response?.responseHeaders, 'content-type'));
+        const length = responseHeaderValue(response?.responseHeaders, 'content-length');
+        trace.contentLength = length ? diagnosticNumber(length, 1e13) : null;
+        const range = responseHeaderValue(response?.responseHeaders, 'content-range').match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+        if (range) trace.contentRange = { start: Number(range[1]), end: Number(range[2]), total: range[3] === '*' ? null : Number(range[3]) };
+        trace.redirected = response?.finalUrl ? response.finalUrl !== url : null;
+        trace.responseBytes = response?.response?.byteLength ?? null;
       };
-      const rangeProbe = () => {
-        request = GM_xmlhttpRequest({
-          method: 'GET',
-          url,
-          anonymous: false,
-          withCredentials: true,
-          responseType: 'arraybuffer',
-          timeout: 8000,
-          headers: {
-            Accept: 'video/*,application/vnd.apple.mpegurl,application/x-mpegURL,application/octet-stream;q=0.8,*/*;q=0.2',
-            Referer: String(pageUrl || location.href),
-            Range: 'bytes=0-1023'
-          },
-          onreadystatechange: response => {
-            if (Number(response?.readyState || 0) !== 2) return;
-            const length = Number(responseHeaderValue(response.responseHeaders, 'content-length') || 0);
-            // Do not let a server that ignores Range make a probe download a movie.
-            if (Number(response.status) === 200 && length > 131072) {
-              finish(mediaResponse(response));
-              try { request?.abort?.(); } catch (_) {}
-            }
-          },
-          onload: response => finish(mediaResponse(response)),
-          onerror: () => finish(false),
-          ontimeout: () => finish(false),
-          onabort: () => { if (!settled) finish(false); }
-        });
+      const check = response => {
+        recordResponse(response);
+        if (![200,206].includes(trace.httpStatus)) { finish(false, 'http_error'); return; }
+        // Redaction must not change which valid media MIME types we accept.
+        const rawType = responseHeaderValue(response?.responseHeaders, 'content-type');
+        const accepted = !/(?:text\/html|application\/(?:json|xml))/i.test(rawType) &&
+          (/^video\//i.test(rawType) || /mpegurl|dash\+xml|octet-stream/i.test(rawType) || VIDEO_EXT_RE.test(url));
+        finish(accepted, accepted ? 'none' : 'non_media_response');
       };
-      // A surprising number of expired CDN links answer HEAD successfully and
-      // then return 403/404 to the first real byte request. Recall only accepts
-      // a URL after the same bounded Range GET that video playback will use.
-      try { rangeProbe(); } catch (_) { finish(false); }
+      try { request = GM_xmlhttpRequest({
+        method: 'GET', url, anonymous: false, withCredentials: true, responseType: 'arraybuffer', timeout: 8000,
+        headers: { Accept: 'video/*,application/vnd.apple.mpegurl,application/x-mpegURL,application/octet-stream;q=0.8,*/*;q=0.2',
+          Referer: String(pageUrl || location.href), Range: 'bytes=0-1023' },
+        onreadystatechange: response => {
+          if (settled || Number(response?.readyState || 0) !== 2) return;
+          recordResponse(response);
+          if (trace.httpStatus === 200 && trace.contentLength > 131072) {
+            trace.headersOnly = true; check(response); try { request?.abort?.(); } catch (_) {}
+          }
+        },
+        onprogress: event => { if (!settled) { trace.loadedBytes = diagnosticNumber(event.loaded, 1e13); trace.totalBytes = event.lengthComputable ? diagnosticNumber(event.total, 1e13) : null; } },
+        onload: response => { if (!settled) check(response); },
+        onerror: () => finish(false, 'network_error'), ontimeout: () => finish(false, 'timeout'), onabort: () => finish(false, 'aborted')
+      }); } catch (_) { finish(false, 'request_error'); }
     });
   }
 
-  function probeCapturedDuration(url) {
+  function probeCapturedDuration(url, diagnostics = null) {
+    const trace = diagnosticRequest(diagnostics, 'duration_probe', 5000);
     // Unknown metadata is not proof that a video is missing. Ask the actual
     // media decoder, without playing or enabling sound, with a strict deadline.
     return new Promise(resolve => {
@@ -3267,19 +3359,21 @@ function primaryVideoEvidence(html, pageUrl) {
       video.muted = true; video.defaultMuted = true; video.volume = 0;
       video.preload = 'metadata';
       let settled = false;
-      const done = value => {
+      const done = (value, failure = 'none') => {
         if (settled) return; settled = true; clearTimeout(timer);
+        Object.assign(trace, { durationSeconds: diagnosticNumber(value), mediaReadyState: video.readyState, mediaErrorCode: video.error?.code || 0, videoWidth: video.videoWidth, videoHeight: video.videoHeight });
+        finishDiagnosticRequest(trace, failure);
         video.removeAttribute('src'); try { video.load(); } catch (_) {}
         resolve(Number.isFinite(value) && value > 0 ? value : 0);
       };
-      const timer = setTimeout(() => done(0), 5000);
+      const timer = setTimeout(() => done(0, 'timeout'), 5000);
       video.addEventListener('loadedmetadata', () => done(video.duration), { once: true });
-      video.addEventListener('error', () => done(0), { once: true });
+      video.addEventListener('error', () => done(0, 'media_unverified'), { once: true });
       video.src = url;
     });
   }
 
-  async function firstVerifiedRecallEntry(entries, pageUrl, durationHint = 0, minimumDurationSeconds = 30) {
+  async function firstVerifiedRecallEntry(entries, pageUrl, durationHint = 0, minimumDurationSeconds = 30, diagnostics = null) {
     let durationSeconds = Math.max(
       0,
       Number(durationHint || 0),
@@ -3287,14 +3381,14 @@ function primaryVideoEvidence(html, pageUrl) {
     );
     // Unknown duration is rejected too: otherwise an autoplay preview can
     // masquerade as a full movie merely because its URL ends in .mp4.
-    if (!durationSeconds && entries?.[0]?.videoUrl) durationSeconds = await probeCapturedDuration(entries[0].videoUrl);
+    if (!durationSeconds && entries?.[0]?.videoUrl) durationSeconds = await probeCapturedDuration(entries[0].videoUrl, diagnostics);
     if (durationSeconds < Math.max(1, Number(minimumDurationSeconds || 0))) return null;
     const verifiedUrls = [];
     let verifiedContextUrl = '';
     for (const entry of entries || []) {
       const mediaUrl = String(entry?.videoUrl || entry?.rawVideoUrl || '').trim();
       const contextUrl = String(entry?.contextUrl || pageUrl || location.href);
-      if (!mediaUrl || !await probeCapturedMediaUrl(mediaUrl, contextUrl)) continue;
+      if (!mediaUrl || !await probeCapturedMediaUrl(mediaUrl, contextUrl, diagnostics)) continue;
       if (!verifiedUrls.includes(mediaUrl)) verifiedUrls.push(mediaUrl);
       if (!verifiedContextUrl) verifiedContextUrl = contextUrl;
       // Quality ordered: deliver the best verified source without waiting for
@@ -3317,6 +3411,8 @@ function primaryVideoEvidence(html, pageUrl) {
 
   async function sendCaptureToRecall(mode, channel, _ignoreUnder30 = true, selection = null) {
     if (busy) throw new Error('A capture is already running');
+    const captureTrace = { startedAt: performance.now(), requests: [] };
+    selection?.onCaptureDiagnostics?.(captureTrace);
     const captureMode = mode === 'main' ? 'main' : 'all';
     // A complete, authoritative VideoObject does not need the 600 ms lazy-load
     // delay. Dynamic players and All listings still get their settling pass.
@@ -3367,7 +3463,7 @@ function primaryVideoEvidence(html, pageUrl) {
           totalPages: targets.length,
           pageUrls: [],
           entries: []
-        }, 8000);
+        }, 8000, captureTrace.requests);
         endpoint = String(candidate).replace(/\/+$/, '');
         break;
       } catch (error) {
@@ -3392,20 +3488,24 @@ function primaryVideoEvidence(html, pageUrl) {
     const publishCaptureDiagnostics = () => {
       try { document.documentElement.dataset.uvsCaptureDiagnostics = JSON.stringify(captureDiagnostics); } catch (_) {}
     };
-    const queueAppend = (target, entry) => {
+    const queueAppend = (target, entry, diagnostic) => {
       const completedAtQueue = ++completedPages;
+      const queuedAt = performance.now();
       appendChain = appendChain.catch(error => {
         endpointErrors.push(error?.message || String(error));
         return null;
       }).then(async () => {
+        diagnostic.queueWaitMs = Math.round(performance.now() - queuedAt);
+        const deliveryStart = performance.now();
+        try {
         const result = await postRecallCapturePayloadWithRetry(endpoint, {
           ...basePayload,
           capturePhase: 'append',
           completedPages: completedAtQueue,
           pageUrls: [target.url],
           entries: entry ? [entry] : []
-        }, 12000, 2);
-        if (entry && Number(result?.accepted || 0) < 1) throw new Error('Pong could not verify this video; Copy log for details');
+        }, 12000, 2, diagnostic.deliveryRequests);
+        if (entry && Number(result?.accepted || 0) < 1) throw Object.assign(new Error('Pong could not verify this video; Copy log for details'), { code: 'not_accepted' });
         deliveredVideos = Math.max(deliveredVideos, Number(result?.videos || 0));
         if (entry) verifiedSentThisRun++;
         if (!relayStarted && result?.browserRelay?.enabled) {
@@ -3414,6 +3514,7 @@ function primaryVideoEvidence(html, pageUrl) {
         }
         setPanelStatus(`${verifiedSentThisRun}/${targets.length} sent · ${completedAtQueue}/${targets.length} checked`);
         return result;
+        } finally { diagnostic.deliveryMs = Math.round(performance.now() - deliveryStart); }
       });
       return appendChain;
     };
@@ -3425,8 +3526,10 @@ function primaryVideoEvidence(html, pageUrl) {
       let verified = null;
       const diagnostic = {
         index,
+        startedAt: targetStarted,
         targetDuration: Number(target.durationSeconds || 0),
-        attempts: []
+        attempts: [], deliveryRequests: [], mediaBefore: videoDiagnosticSnapshot(target.element),
+        queueWaitMs: 0, deliveryMs: 0, resolutionTimeoutMs: 35000, done: false
       };
       selection?.onResult?.(target, diagnostic);
       const controller = new AbortController();
@@ -3438,6 +3541,9 @@ function primaryVideoEvidence(html, pageUrl) {
         }, 35000);
       });
       const resolveAttempt = async cacheBust => {
+        const attemptStarted = performance.now();
+        const attempt = { cacheBust: cacheBust === true, fetched: false, verified: false, requests: [], startedAt: attemptStarted, stage: 'page_fetch' };
+        diagnostic.attempts.push(attempt);
         if (controller.signal.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
         if (target.element && (!target.element.isConnected || (target.logicalVideoId &&
           [...document.querySelectorAll('video')][Number(target.logicalVideoId.match(/(\d+)$/)?.[1]) - 1] !== target.element))) {
@@ -3446,10 +3552,11 @@ function primaryVideoEvidence(html, pageUrl) {
         const doc = target.directMedia ? document : targetUrl === currentUrl
           ? document
           : youtubeVideoId(targetUrl) ? document.implementation.createHTMLDocument('YouTube selection')
-          : await fetchDoc(targetUrl, { timeout: 12000, maxRetries: cacheBust ? 1 : 2, cacheBust });
-        const attempt = { cacheBust: cacheBust === true, fetched: !!doc, verified: false };
-        diagnostic.attempts.push(attempt);
-        if (!doc) return null;
+          : await fetchDoc(targetUrl, { timeout: 12000, maxRetries: cacheBust ? 1 : 2, cacheBust, diagnostics: attempt.requests });
+        attempt.fetched = !!doc;
+        attempt.fetchMs = Math.round(performance.now() - attemptStarted);
+        attempt.pageFetchMode = target.directMedia || targetUrl === currentUrl ? 'current_document' : youtubeVideoId(targetUrl) ? 'resolver_only' : 'network';
+        if (!doc) { attempt.failure = 'page_fetch'; attempt.stage = 'complete'; return null; }
         if (doc === document) {
           doc.__uvsRawHtml = document.documentElement?.innerHTML || '';
           doc.__uvsUrl = location.href;
@@ -3458,21 +3565,29 @@ function primaryVideoEvidence(html, pageUrl) {
           ? independentVideoGroupsFromDoc(doc, targetUrl).find(group => group.logicalVideoId === target.logicalVideoId)
           : null;
         if (target.logicalVideoId && !inlineGroup) throw new Error('The selected video element changed; capture this page again');
+        attempt.stage = 'extract'; const extractionStarted = performance.now();
         const extracted = target.directMedia ? [{ videoUrl: target.url, durationSeconds: target.durationSeconds }] : inlineGroup ? inlineGroup.entries : await browserResolvedMediaEntries(
           doc,
           targetUrl,
           Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
           0,
           new Set(),
-          { cacheBust, maxRetries: 1, signal: controller.signal }
+          { cacheBust, maxRetries: 1, signal: controller.signal, diagnostics: attempt.requests }
         );
+        attempt.extractionMs = Math.round(performance.now() - extractionStarted);
+        attempt.extracted = extracted.length;
+        attempt.streams = extracted.slice(0, 12).map(entry => ({ type: diagnosticStreamType(entry.videoUrl), signedQueryPresent: hasSignedLikeQuery(entry.videoUrl), durationSeconds: diagnosticNumber(entry.durationSeconds),
+          width: diagnosticNumber(entry.width, 32768), height: diagnosticNumber(entry.height, 32768), fps: diagnosticNumber(entry.fps, 1000), bitrate: diagnosticNumber(entry.bitrate, 1e12) }));
         if (controller.signal.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
+        attempt.stage = 'verify'; const verificationStarted = performance.now();
         const resolved = await firstVerifiedRecallEntry(
           extracted,
           targetUrl,
           youtubeVideoId(targetUrl) ? Number(extracted[0]?.durationSeconds || 0) : target.directMedia ? Number(target.durationSeconds || 0) : inlineGroup ? inlineGroup.durationSeconds : Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
-          minimumDurationSeconds
+          minimumDurationSeconds, attempt.requests
         );
+        attempt.verificationMs = Math.round(performance.now() - verificationStarted);
+        attempt.elapsedMs = Math.round(performance.now() - attemptStarted); attempt.stage = 'complete';
         if (resolved && target.logicalVideoId) resolved.logicalVideoId = target.logicalVideoId;
         if (resolved && !resolved.title) resolved.title = cleanTitle(
           doc.querySelector('meta[property="og:title"]')?.getAttribute('content') || doc.title || ''
@@ -3480,7 +3595,6 @@ function primaryVideoEvidence(html, pageUrl) {
         attempt.pageDuration = extractPageDurationSeconds(doc);
         attempt.embeddedPlayers = embeddedPlayerPageUrls(doc, targetUrl).length;
         attempt.extracted = extracted.length;
-        attempt.mediaHost = extracted[0]?.videoUrl ? new URL(extracted[0].videoUrl).hostname : '';
         attempt.verified = !!resolved;
         attempt.failure = resolved ? 'none' : !extracted.length ? 'no_media'
           : Math.max(Number(target.durationSeconds || 0), inlineGroup?.durationSeconds || 0, extractPageDurationSeconds(doc)) > 0 &&
@@ -3496,25 +3610,31 @@ function primaryVideoEvidence(html, pageUrl) {
           return resolveAttempt(true);
         })()]);
       } catch (error) {
-        diagnostic.error = error?.message || String(error);
+        diagnostic.error = true;
         diagnostic.failure = ['timeout','youtube_access','youtube_stream','youtube_helper_update'].includes(error?.code) ? error.code : 'extraction_error';
       } finally { clearTimeout(deadline); controller.abort(); }
       diagnostic.verified = !!verified;
+      diagnostic.resolutionMs = Math.round(performance.now() - targetStarted);
+      diagnostic.verificationFailure = verified ? 'none' : diagnostic.failure || diagnostic.attempts.at(-1)?.failure || 'media_unverified';
+      diagnostic.failure ||= diagnostic.verificationFailure;
       diagnostic.fetchFailed = diagnostic.attempts.every(attempt => !attempt.fetched);
       captureDiagnostics[index] = diagnostic;
       publishCaptureDiagnostics();
       const failureLabel = diagnostic.failure === 'timeout' ? 'Timed out' : diagnostic.failure === 'youtube_access' ? 'Browser access required' : diagnostic.failure === 'youtube_helper_update' ? 'Pong helper needs restart' : 'Not verified';
       selection?.onStatus?.(target, verified ? 'Sending' : failureLabel);
       try {
-        await queueAppend(target, verified);
+        await queueAppend(target, verified, diagnostic);
         diagnostic.delivered = !!verified;
         selection?.onStatus?.(target, verified ? 'Sent' : failureLabel);
       } catch (error) {
-        diagnostic.appendError = error?.message || String(error);
+        diagnostic.appendError = true;
+        diagnostic.deliveryFailure = diagnosticFailure(error?.code || 'delivery_failed');
+        diagnostic.failure = diagnostic.deliveryFailure;
         selection?.onStatus?.(target, 'Delivery failed');
         publishCaptureDiagnostics();
       }
       diagnostic.elapsedMs = Math.round(performance.now() - targetStarted);
+      diagnostic.mediaAfter = videoDiagnosticSnapshot(target.element); diagnostic.done = true;
       selection?.onResult?.(target, diagnostic);
       return verified;
     });
@@ -3533,7 +3653,8 @@ function primaryVideoEvidence(html, pageUrl) {
       completedPages: targets.length,
       pageUrls: [],
       entries: []
-    }, 12000, 2);
+    }, 12000, 2, captureTrace.requests);
+    captureTrace.elapsedMs = Math.round(performance.now() - captureTrace.startedAt);
     deliveredVideos = Number(result?.videos || deliveredVideos || 0);
     try {
       document.documentElement.dataset.uvsCaptureSummary = JSON.stringify({
@@ -3666,16 +3787,33 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, version: '7.19.0', id: session.id, createdAt: session.createdAt,
-      site: location.hostname, mode: session.mode, channel: session.channel,
+      schema: 1, diagnosticsVersion: 2, version: '7.20.0', id: session.id, createdAt: session.createdAt,
+      verificationScope: 'metadata_and_bounded_response_probe_not_playback',
+      mode: session.mode, channel: session.channel,
       ignoreUnder30: session.ignoreUnder30, stage: session.stage,
+      environment: {
+        browser: /firefox/i.test(navigator.userAgent) ? 'firefox' : /edg\//i.test(navigator.userAgent) ? 'edge' : /chrome/i.test(navigator.userAgent) ? 'chrome' : 'other',
+        browserMajor: diagnosticNumber(navigator.userAgent.match(/(?:Firefox|Edg|Chrome)\/(\d+)/i)?.[1], 1000),
+        mobile: /android|iphone|ipad/i.test(navigator.userAgent), online: navigator.onLine,
+        cookiesEnabled: navigator.cookieEnabled, secureContext: window.isSecureContext,
+        visibility: ['visible','hidden'].includes(document.visibilityState) ? document.visibilityState : 'unknown',
+        viewportWidth: innerWidth, viewportHeight: innerHeight, pixelRatio: devicePixelRatio,
+        connectionType: ['slow-2g','2g','3g','4g'].includes(navigator.connection?.effectiveType) ? navigator.connection.effectiveType : null,
+        saveData: typeof navigator.connection?.saveData === 'boolean' ? navigator.connection.saveData : null,
+        downlinkMbps: diagnosticNumber(navigator.connection?.downlink, 100000), rttMs: diagnosticNumber(navigator.connection?.rtt)
+      },
+      capture: {
+        elapsedMs: diagnosticNumber(session.captureTrace ? session.captureTrace.elapsedMs ?? Math.round(performance.now() - session.captureTrace.startedAt) : null),
+        failure: session.captureFailure ? diagnosticFailure(session.captureFailure) : 'none',
+        requests: (session.captureTrace?.requests || []).map(requestDiagnosticOutput)
+      },
       evidence: {
         videoElements: document.querySelectorAll('video').length,
         iframeElements: document.querySelectorAll('iframe').length,
         structuredDataBlocks: document.querySelectorAll('script[type="application/ld+json"]').length,
         players: [
           ['videojs', '.video-js'], ['plyr', '.plyr'], ['jwplayer', '.jwplayer'],
-          ['youtube', '#movie_player,ytm-player,ytd-player'],
+          ['platform-player', '#movie_player,ytm-player,ytd-player'],
           ['flowplayer', '.flowplayer'], ['mediaelement', '.mejs-container']
         ].filter(([, selector]) => document.querySelector(selector)).map(([name]) => name)
       },
@@ -3690,13 +3828,28 @@ function primaryVideoEvidence(html, pageUrl) {
           durationSeconds: Number(candidate.durationSeconds || 0),
           width: Math.round(rect?.width || 0), height: Math.round(rect?.height || 0),
           mapped: !!candidate.element, independent: !!candidate.logicalVideoId,
-          outcome: result ? (result.appendError ? 'delivery_failed' : result.delivered ? 'sent' : result.fetchFailed ? 'fetch_failed' : 'not_verified') : 'not_checked',
-          elapsedMs: result?.elapsedMs || 0, failure: result?.failure || 'none',
+          outcome: result ? (!result.done ? 'in_progress' : result.appendError ? 'delivery_failed' : result.delivered ? 'sent' : result.fetchFailed ? 'fetch_failed' : 'not_verified') : 'not_checked',
+          elapsedMs: result ? diagnosticNumber(result.elapsedMs ?? Math.round(performance.now() - result.startedAt)) : 0,
+          failure: diagnosticFailure(result?.failure || (result && !result.done ? 'pending' : 'none')),
+          verificationFailure: diagnosticFailure(result?.verificationFailure || 'none'),
+          deliveryFailure: diagnosticFailure(result?.deliveryFailure || 'none'),
+          timing: { resolutionMs: diagnosticNumber(result?.resolutionMs), resolutionTimeoutMs: diagnosticNumber(result?.resolutionTimeoutMs),
+            queueWaitMs: diagnosticNumber(result?.queueWaitMs), deliveryMs: diagnosticNumber(result?.deliveryMs) },
+          mediaBefore: result?.mediaBefore || null, mediaNow: videoDiagnosticSnapshot(candidate.element), mediaAfter: result?.mediaAfter || null,
+          deliveryRequests: (result?.deliveryRequests || []).map(requestDiagnosticOutput),
           attempts: (result?.attempts || []).map(attempt => ({
             fetched: !!attempt.fetched, verified: !!attempt.verified,
             extracted: Number(attempt.extracted || 0), embeddedPlayers: Number(attempt.embeddedPlayers || 0),
             pageDuration: Number(attempt.pageDuration || 0), retry: !!attempt.cacheBust,
-            failure: attempt.failure || (attempt.fetched ? 'none' : 'page_fetch')
+            failure: diagnosticFailure(attempt.failure || (attempt.stage === 'complete' ? 'none' : result?.done ? result.verificationFailure : 'pending')),
+            stage: ['page_fetch','extract','verify','complete'].includes(attempt.stage) ? attempt.stage : 'unknown',
+            pageFetchMode: ['current_document','resolver_only','network'].includes(attempt.pageFetchMode) ? attempt.pageFetchMode : 'unknown',
+            timing: { fetchMs: diagnosticNumber(attempt.fetchMs), extractionMs: diagnosticNumber(attempt.extractionMs), verificationMs: diagnosticNumber(attempt.verificationMs),
+              elapsedMs: diagnosticNumber(attempt.elapsedMs ?? (result.done ? result.resolutionMs : Math.round(performance.now() - attempt.startedAt))) },
+            streams: (attempt.streams || []).map(stream => ({ type: ['hls','dash','mp4','webm','blob','unknown'].includes(stream.type) ? stream.type : 'unknown', signedQueryPresent: stream.signedQueryPresent === true,
+              durationSeconds: diagnosticNumber(stream.durationSeconds), width: diagnosticNumber(stream.width, 32768), height: diagnosticNumber(stream.height, 32768),
+              fps: diagnosticNumber(stream.fps, 1000), bitrate: diagnosticNumber(stream.bitrate, 1e12) })),
+            requests: (attempt.requests || []).map(requestDiagnosticOutput)
           }))
         };
       })
@@ -3857,12 +4010,14 @@ function primaryVideoEvidence(html, pageUrl) {
     send.onclick = async () => {
       if (session.sending || !session.selected.size) return;
       session.sending = true; session.stage = 'capture';
+      session.captureTrace = null; session.captureFailure = null;
       const targets = session.candidates.filter(candidate => session.selected.has(candidate.previewId));
       for (const target of targets) { target.status = 'Queued'; session.results.delete(target.previewId); }
       status.textContent = 'Checking selected videos…'; update();
       try {
         await sendCaptureToRecall(mode, channel, ignoreUnder30, {
           targets,
+          onCaptureDiagnostics: trace => { session.captureTrace = trace; },
           onStatus: (target, text) => { target.status = text; update(); },
           onResult: (target, result) => session.results.set(target.previewId, result)
         });
@@ -3870,8 +4025,9 @@ function primaryVideoEvidence(html, pageUrl) {
         session.stage = 'complete';
       } catch (error) {
         status.textContent = error.message; session.stage = 'failed';
+        session.captureFailure = error?.code || 'request_error';
         for (const target of targets) if (['Queued','Checking','Sending'].includes(target.status)) target.status = 'Not sent';
-      } finally { session.sending = false; update(); }
+      } finally { if (session.captureTrace) session.captureTrace.elapsedMs = Math.round(performance.now() - session.captureTrace.startedAt); session.sending = false; update(); }
     };
     session.update = update;
     activeTargetPreview = session; rescan(); position();
@@ -4072,6 +4228,7 @@ function primaryVideoEvidence(html, pageUrl) {
     collectSelectableTargets,
     openTargetPreview,
     buildDetectionFeedback,
+    requestDiagnosticOutput,
 
     formatPongExport,
     formatPongPasteExport,
@@ -4091,7 +4248,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.19.0 loaded on', location.href);
+  log('Universal Video Scraper v7.20.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
