@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.23.0
+// @version      7.24.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -62,6 +62,7 @@
   const PANEL_POS_KEY = 'uvs_panel_position_v1';
   const PANEL_COLLAPSED_KEY = 'uvs_panel_collapsed_v1';
   const RECALL_CHANNEL_KEY = 'uvs_recall_channel_v1';
+  const PHONE_CONNECTION_KEY = 'uvs_phone_connection_v1';
   const RECALL_MIN_30_KEY = 'uvs_recall_min_30_v1';
   const PONG_ENDPOINTS = Array.isArray(globalThis.PONG_LOCAL_ENDPOINTS)
     ? globalThis.PONG_LOCAL_ENDPOINTS
@@ -78,6 +79,7 @@
   let activeTargetPreview = null;
   const DETECTION_FEEDBACK_KEY = 'uvs_detection_feedback_pending_v1';
   let browserMediaRelayGeneration = 0;
+  const browserMediaRelayRuns = new Map();
   const browserMediaRelayPreferredCandidates = new Map();
 
   // BEGIN SHARED PRIMARY VIDEO POLICY
@@ -1057,11 +1059,13 @@ function primaryVideoEvidence(html, pageUrl) {
     }
   }
 
-  function startBrowserMediaRelay(rawEndpoint, clientId) {
+  function startBrowserMediaRelay(rawEndpoint, clientId, channel = 0) {
     const endpoint = String(rawEndpoint || '').replace(/\/+$/, '');
     const generation = ++browserMediaRelayGeneration;
+    const key = `${endpoint}|${channel}`;
+    browserMediaRelayRuns.set(key, generation);
     const worker = async () => {
-      while (generation === browserMediaRelayGeneration) {
+      while (generation === browserMediaRelayRuns.get(key)) {
         try {
           const response = await browserRelayRequest({
             method: 'GET',
@@ -1072,17 +1076,19 @@ function primaryVideoEvidence(html, pageUrl) {
           if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`);
           const payload = JSON.parse(response.responseText || '{}');
           if (payload?.expired) {
-            browserMediaRelayGeneration++;
+            if (generation === browserMediaRelayRuns.get(key)) browserMediaRelayRuns.delete(key);
             if (location.pathname === '/browser-relay-keeper') setTimeout(() => window.close(), 100);
             return;
           }
           if (payload?.job) await completeBrowserMediaRelayJob(endpoint, payload.job);
         } catch (_) {
-          if (generation === browserMediaRelayGeneration) await sleep(500);
+          if (generation === browserMediaRelayRuns.get(key)) await sleep(500);
         }
       }
     };
-    for (let index = 0; index < 3; index++) worker();
+    // Two Recall channels can coexist without six idle long-polls occupying
+    // every browser connection slot needed for capture acknowledgements.
+    for (let index = 0; index < (channel ? 2 : 3); index++) worker();
   }
 
   function canonicalWatchPageUrl(rawUrl, baseUrl = location.href) {
@@ -3533,10 +3539,14 @@ function primaryVideoEvidence(html, pageUrl) {
     const captureId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const bundleId = globalThis.crypto?.randomUUID?.() || `bundle-${Date.now()}`;
     const captureChannel = Number(channel) === 2 ? 2 : 1;
+    const phoneConnectionOnly = selection?.phoneConnectionOnly === true;
+    if (phoneConnectionOnly && targets.some(target => youtubeVideoId(target.url))) {
+      throw new Error('Phone connection currently supports direct MP4/WebM files, not YouTube or playlists. Uncheck it to use normal routing.');
+    }
     // Keep authenticated relay workers for sites whose media commonly depends
     // on browser cookies. Public CDNs play faster through Pong's range proxy
     // and should not spend Firefox's per-host sockets on idle relay polls.
-    const browserRelayClientId = /(?:^|\.)(?:pornhub\.com|hqporner\.com|erome\.com|simpcity\.[a-z]+)$/i.test(location.hostname)
+    const browserRelayClientId = (phoneConnectionOnly || /(?:^|\.)(?:pornhub\.com|hqporner\.com|erome\.com|simpcity\.[a-z]+)$/i.test(location.hostname))
       ? (globalThis.crypto?.randomUUID?.() || `relay-${Date.now()}-${Math.random().toString(16).slice(2)}`)
       : '';
     const basePayload = {
@@ -3550,6 +3560,7 @@ function primaryVideoEvidence(html, pageUrl) {
       ignoreUnder30,
       sourceIsWatchPage: isLikelyWatchPage(),
       browserRelayClientId,
+      phoneConnectionOnly,
       browserRelayBrowser: /firefox/i.test(navigator.userAgent)
         ? 'firefox'
         : /edg\//i.test(navigator.userAgent)
@@ -3561,6 +3572,12 @@ function primaryVideoEvidence(html, pageUrl) {
     let started = null;
     for (const candidate of PONG_ENDPOINTS) {
       try {
+        if (phoneConnectionOnly) {
+          const preflight = await browserRelayRequest({ method: 'GET', url: `${String(candidate).replace(/\/+$/, '')}/media-browser-relay/capabilities`, headers: { 'X-Pong-SimpCity-Controller': '1' }, timeout: 5000 });
+          if (preflight.status !== 200 || JSON.parse(preflight.responseText || '{}').phoneConnectionFiles !== true) {
+            throw new Error('Restart the updated Pong server to enable phone connection. Recall was not changed.');
+          }
+        }
         started = await postRecallCapturePayload(candidate, {
           ...basePayload,
           capturePhase: 'start',
@@ -3578,6 +3595,10 @@ function primaryVideoEvidence(html, pageUrl) {
       const usefulError = endpointErrors.find(message => !/connection failed/i.test(message));
       throw new Error(usefulError || endpointErrors.at(-1) || 'Pong PC server is unreachable');
     }
+    if (phoneConnectionOnly && !started?.capabilities?.phoneConnectionFiles) {
+      await postRecallCapturePayload(endpoint, { ...basePayload, capturePhase: 'complete', completedPages: 0, pageUrls: [], entries: [] }, 8000);
+      throw new Error('Restart the updated Pong server before using the phone connection. Nothing was sent.');
+    }
     if (targets.some(target => target.logicalVideoId) && !started?.capabilities?.independentVideoIdentity) {
       await postRecallCapturePayload(endpoint, { ...basePayload, capturePhase: 'complete', completedPages: 0, pageUrls: [], entries: [] }, 8000);
       throw new Error('This page has multiple videos. Restart the updated Pong 30.07 server to capture them separately.');
@@ -3593,6 +3614,13 @@ function primaryVideoEvidence(html, pageUrl) {
       try { document.documentElement.dataset.uvsCaptureDiagnostics = JSON.stringify(captureDiagnostics); } catch (_) {}
     };
     const queueAppend = (target, entry, diagnostic) => {
+      if (phoneConnectionOnly && entry) {
+        // Do not replace a selected high-quality playlist with a lower MP4.
+        if (!/\.(?:mp4|webm|mov|m4v)(?:[?#]|$)/i.test(String(entry.videoUrl || ''))) {
+          throw new Error('Phone connection supports direct video files only; this source needs normal routing.');
+        }
+        entry = { ...entry, rawVideoUrl: entry.videoUrl, videoUrls: [entry.videoUrl] };
+      }
       const completedAtQueue = ++completedPages;
       const queuedAt = performance.now();
       appendChain = appendChain.catch(error => {
@@ -3610,11 +3638,14 @@ function primaryVideoEvidence(html, pageUrl) {
           entries: entry ? [entry] : []
         }, 12000, 2, diagnostic.deliveryRequests);
         if (entry && Number(result?.accepted || 0) < 1) throw Object.assign(new Error('Pong could not verify this video; Copy log for details'), { code: 'not_accepted' });
+        if (entry && phoneConnectionOnly && result?.browserRelay?.phoneConnectionOnly !== true) {
+          throw new Error('Pong did not confirm phone-only routing');
+        }
         deliveredVideos = Math.max(deliveredVideos, Number(result?.videos || 0));
         if (entry) verifiedSentThisRun++;
         if (!relayStarted && result?.browserRelay?.enabled) {
           relayStarted = true;
-          startBrowserMediaRelay(endpoint, browserRelayClientId);
+          startBrowserMediaRelay(endpoint, browserRelayClientId, captureChannel);
         }
         setPanelStatus(`${verifiedSentThisRun}/${targets.length} sent · ${completedAtQueue}/${targets.length} checked`);
         return result;
@@ -3892,7 +3923,8 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 3, version: '7.23.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 3, version: '7.24.0', id: session.id, createdAt: session.createdAt,
+      phoneConnectionOnly: session.phoneConnectionOnly === true,
       verificationScope: 'metadata_and_bounded_response_probe_not_playback',
       mode: session.mode, channel: session.channel,
       ignoreUnder30: session.ignoreUnder30, stage: session.stage,
@@ -3999,6 +4031,7 @@ function primaryVideoEvidence(html, pageUrl) {
     const session = {
       id: globalThis.crypto?.randomUUID?.() || `selection-${Date.now()}`,
       createdAt: new Date().toISOString(), mode, channel, ignoreUnder30,
+      phoneConnectionOnly: getStoredJson(PHONE_CONNECTION_KEY, false) === true,
       candidates: [], selected: new Set(), results: new Map(), stage: 'selection', sending: false
     };
     const host = document.createElement('div');
@@ -4027,6 +4060,12 @@ function primaryVideoEvidence(html, pageUrl) {
     const close = node('button', '', row, '×'); close.type = 'button'; close.dataset.do = 'close';
     close.setAttribute('aria-label', 'Close video selection');
     close.title = 'Close panel; an active send continues in the background';
+    const phoneLabel = node('label', '', bar);
+    phoneLabel.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px';
+    const phoneInput = node('input', '', phoneLabel); phoneInput.type = 'checkbox'; phoneInput.dataset.do = 'phone';
+    phoneInput.checked = session.phoneConnectionOnly;
+    node('span', '', phoneLabel, 'Use phone connection (direct video files)');
+    phoneLabel.title = 'MP4/WebM only. Keep this Firefox tab open. Uses this browser’s connection; does not enable a VPN.';
     const statusNode = node('div', 'status', bar, 'Tap red boxes to select, then Send.');
     statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
     document.body.appendChild(host);
@@ -4040,6 +4079,7 @@ function primaryVideoEvidence(html, pageUrl) {
       channelButton.setAttribute('aria-label', `Destination: Recall ${channel}. Switch to Recall ${channel === 1 ? 2 : 1}`);
       channelButton.title = session.sending ? 'Destination is fixed while sending' : 'Tap to switch Recall destination';
       channelButton.disabled = session.sending;
+      phoneInput.disabled = session.sending;
       send.disabled = !session.selected.size || session.sending;
       for (const candidate of session.candidates) {
         const box = controls.get(candidate.previewId);
@@ -4125,6 +4165,15 @@ function primaryVideoEvidence(html, pageUrl) {
     session.isHidden = () => host.hidden;
     session.show = () => { host.hidden = false; position(); };
     close.onclick = event => { event.preventDefault(); event.stopPropagation(); session.dismiss(); };
+    phoneInput.onchange = () => {
+      if (session.sending) { phoneInput.checked = session.phoneConnectionOnly; return; }
+      session.phoneConnectionOnly = phoneInput.checked;
+      setStoredJson(PHONE_CONNECTION_KEY, session.phoneConnectionOnly);
+      session.results.clear(); session.captureTrace = null; session.captureFailure = null; session.stage = 'selection';
+      for (const candidate of session.candidates) candidate.status = '';
+      status.textContent = session.phoneConnectionOnly ? 'Phone route: direct video files only. Keep this tab open during playback.' : 'Normal connection selected.';
+      update();
+    };
     channelButton.onclick = event => {
       event.preventDefault(); event.stopPropagation();
       if (session.sending) return;
@@ -4155,6 +4204,7 @@ function primaryVideoEvidence(html, pageUrl) {
       try {
         await sendCaptureToRecall(mode, channel, ignoreUnder30, {
           targets,
+          phoneConnectionOnly: session.phoneConnectionOnly,
           onCaptureDiagnostics: trace => { session.captureTrace = trace; },
           onStatus: (target, text) => { target.status = text; update(); },
           onResult: (target, result) => session.results.set(target.previewId, result)
@@ -4386,7 +4436,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.23.0 loaded on', location.href);
+  log('Universal Video Scraper v7.24.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
