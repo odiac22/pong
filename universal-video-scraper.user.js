@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.28.0
+// @version      7.29.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -62,7 +62,6 @@
   const PANEL_POS_KEY = 'uvs_panel_position_v1';
   const PANEL_COLLAPSED_KEY = 'uvs_panel_collapsed_v1';
   const RECALL_CHANNEL_KEY = 'uvs_recall_channel_v1';
-  const PHONE_CONNECTION_KEY = 'uvs_phone_connection_v1';
   const LAUNCHER_POS_KEY = 'uvs_launcher_position_v1';
   const VPN_PAIR_KEY = 'uvs_vpn_pair_v1';
   const VPN_USER_ACTION = Symbol('trusted VPN action');
@@ -4042,7 +4041,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 4, version: '7.28.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 4, version: '7.29.0', id: session.id, createdAt: session.createdAt,
       vpn: vpnSafeStatus(session.vpn || {}),
       phoneConnectionOnly: session.phoneConnectionOnly === true,
       verificationScope: 'metadata_and_bounded_response_probe_not_playback',
@@ -4151,7 +4150,8 @@ function primaryVideoEvidence(html, pageUrl) {
     const session = {
       id: globalThis.crypto?.randomUUID?.() || `selection-${Date.now()}`,
       createdAt: new Date().toISOString(), mode, channel, ignoreUnder30,
-      phoneConnectionOnly: getStoredJson(PHONE_CONNECTION_KEY, false) === true,
+      // The phone-only option was removed. Ignore its old saved preference.
+      phoneConnectionOnly: false,
       candidates: [], selected: new Set(), results: new Map(), stage: 'selection', sending: false
     };
     const host = document.createElement('div');
@@ -4161,19 +4161,18 @@ function primaryVideoEvidence(html, pageUrl) {
     // Use DOM nodes, not HTML sinks: YouTube enforces Trusted Types.
     const previewStyle = document.createElement('style');
     previewStyle.textContent = `
-      :host{font:12px system-ui;color:white}button{font:inherit;cursor:pointer;color:white;border:1px solid #ffffff44;border-radius:7px;background:#263244;padding:8px 12px}
+      :host{font:10.5px system-ui;color:white}button{font:inherit;cursor:pointer;color:white;border:1px solid #ffffff44;border-radius:6px;background:#263244;padding:4px 7px}
       .box{position:fixed;background:#ff22222b;border:2px solid #ff5757;border-radius:6px;pointer-events:auto;padding:0;text-align:left;touch-action:manipulation}
       .box[aria-pressed=true]{background:#ff22224a;border-color:#fff}.box span{position:absolute;left:0;top:0;background:#851e24;padding:3px 5px;border-radius:3px;font-size:11px}
-      .bar{position:fixed;left:8px;right:8px;bottom:46px;margin:auto;max-width:420px;background:#101723f5;border:1px solid #ffffff33;border-radius:12px;padding:8px;pointer-events:auto;box-shadow:0 3px 16px #0008}
-      .row{display:flex;flex-wrap:wrap;align-items:center;gap:6px}.row button{padding:8px}.summary{flex:1;font-size:11px}.status{font-size:11px;color:#cbd5e1;margin-top:4px}button:disabled{opacity:.5;cursor:default}
+      .bar{position:fixed;left:8px;right:8px;bottom:54px;margin:auto;max-width:380px;background:#101723f5;border:1px solid #ffffff33;border-radius:10px;padding:6px;pointer-events:auto;box-shadow:0 3px 16px #0008}
+      .row{display:flex;flex-wrap:wrap;align-items:center;gap:4px}.row button{padding:4px 7px;min-height:25px}.summary{flex:1;font-size:10px}.status{font-size:10px;line-height:1.3;color:#cbd5e1;margin-top:3px}button:disabled{opacity:.5;cursor:default}
       .bar{background:linear-gradient(145deg,#17243bf5,#18182cf5);border-color:#818cf85c}
       .bar button{transition:filter .12s ease,border-color .12s ease}.bar button:hover:not(:disabled){filter:brightness(1.18)}
       [data-do=channel]{background:#6744aa;border-color:#c4b5fd88}[data-do=send]{background:#166b49;border-color:#6ee7b788}
       [data-do=copy]{background:#155e87;border-color:#7dd3fc88}[data-do=close]{background:#9b3547;border-color:#fda4af88}
       [data-vpn=connect]{background:#0d6565;border-color:#5eead488}[data-vpn=disconnect]{background:#9a4c20;border-color:#fdba7488}
       [data-vpn=status]{background:#3d51a7;border-color:#a5b4fc88}[data-vpn=pair]{background:#8d367f;border-color:#f0abfc88}
-      [data-do=pair-copy]{background:#775521;border-color:#fde68a88;margin-top:6px;padding:6px 9px;font-size:11px}
-      input[type=checkbox]{accent-color:#a78bfa}
+      [data-do=pair-copy]{background:#775521;border-color:#fde68a88}
     `;
     const node = (tag, className, parent, text = '') => {
       const element = document.createElement(tag); element.className = className; element.textContent = text; parent.appendChild(element); return element;
@@ -4188,23 +4187,17 @@ function primaryVideoEvidence(html, pageUrl) {
     const close = node('button', '', row, '×'); close.type = 'button'; close.dataset.do = 'close';
     close.setAttribute('aria-label', 'Close video selection');
     close.title = 'Close panel; an active send continues in the background';
-    const phoneLabel = node('label', '', bar);
-    phoneLabel.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px';
-    const phoneInput = node('input', '', phoneLabel); phoneInput.type = 'checkbox'; phoneInput.dataset.do = 'phone';
-    phoneInput.checked = session.phoneConnectionOnly;
-    node('span', '', phoneLabel, 'Use phone connection (direct video files)');
-    phoneLabel.title = 'Stream direct files through Firefox without a full download. Firefox must remain active; Android may suspend it when switching apps. Does not enable a VPN.';
     const statusNode = node('div', 'status', bar, 'Tap red boxes to select, then Send.');
     statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
-    const vpnRow = node('div', 'row vpn-row', bar); vpnRow.style.marginTop = '6px';
+    const vpnRow = node('div', 'row vpn-row', bar); vpnRow.style.marginTop = '4px';
     for (const [action,label] of [['connect','Connect California'],['disconnect','Disconnect'],['status','VPN status'],['pair','Paste key & connect']]) {
       const button = node('button', '', vpnRow, label); button.type = 'button'; button.dataset.vpn = action;
     }
-    const pairingLink = node('button', '', bar, 'Copy pairing link');
+    const pairingLink = node('button', '', vpnRow, 'Copy pairing link');
     pairingLink.type = 'button'; pairingLink.dataset.do = 'pair-copy';
     pairingLink.title = 'Copy the PC pairing page address to open in your browser';
     const vpnStatus = node('div', 'vpn-status', bar, 'PC VPN not checked. Phone VPN is separate.');
-    vpnStatus.style.cssText = 'font-size:11px;color:#cbd5e1;margin-top:4px;overflow-wrap:anywhere';
+    vpnStatus.style.cssText = 'font-size:10px;line-height:1.3;color:#cbd5e1;margin-top:3px;overflow-wrap:anywhere';
     vpnStatus.setAttribute('role','status'); vpnStatus.setAttribute('aria-live','polite');
     const showVpn = value => {
       session.vpn = vpnSafeStatus(value); vpnStatus.textContent = vpnMessage(session.vpn);
@@ -4216,7 +4209,7 @@ function primaryVideoEvidence(html, pageUrl) {
       const copied = await copyTextToClipboard(`${endpoint}/vpn/setup`);
       vpnStatus.textContent = copied ? 'Pairing link copied. Paste it into your browser, copy the key there, then use Paste key & connect.' : 'Could not copy the pairing link. Allow clipboard access and try again.';
     };
-    const vpnButtons = [...vpnRow.querySelectorAll('button')];
+    const vpnButtons = [...vpnRow.querySelectorAll('[data-vpn]')];
     let vpnWorking = false;
     for (const button of vpnButtons) button.onclick = async event => {
       event.preventDefault(); event.stopPropagation();
@@ -4251,7 +4244,6 @@ function primaryVideoEvidence(html, pageUrl) {
       channelButton.setAttribute('aria-label', `Destination: Recall ${channel}. Switch to Recall ${channel === 1 ? 2 : 1}`);
       channelButton.title = session.sending ? 'Destination is fixed while sending' : 'Tap to switch Recall destination';
       channelButton.disabled = session.sending;
-      phoneInput.disabled = session.sending;
       send.disabled = !session.selected.size || session.sending || vpnWorking;
       vpnButtons.forEach(button => button.disabled = session.sending || vpnWorking);
       for (const candidate of session.candidates) {
@@ -4338,15 +4330,6 @@ function primaryVideoEvidence(html, pageUrl) {
     session.isHidden = () => host.hidden;
     session.show = () => { host.hidden = false; position(); };
     close.onclick = event => { event.preventDefault(); event.stopPropagation(); session.dismiss(); };
-    phoneInput.onchange = () => {
-      if (session.sending) { phoneInput.checked = session.phoneConnectionOnly; return; }
-      session.phoneConnectionOnly = phoneInput.checked;
-      setStoredJson(PHONE_CONNECTION_KEY, session.phoneConnectionOnly);
-      session.results.clear(); session.captureTrace = null; session.captureFailure = null; session.stage = 'selection';
-      for (const candidate of session.candidates) candidate.status = '';
-      status.textContent = session.phoneConnectionOnly ? 'Phone streaming selected. Keep Firefox active; switching apps may interrupt playback.' : 'Normal connection selected.';
-      update();
-    };
     channelButton.onclick = event => {
       event.preventDefault(); event.stopPropagation();
       if (session.sending) return;
@@ -4406,7 +4389,7 @@ function primaryVideoEvidence(html, pageUrl) {
     root.dataset.channel = String(Number(getStoredJson(RECALL_CHANNEL_KEY, 1)) === 2 ? 2 : 1);
     const open = document.createElement('button');
     open.id = 'uvs-recall-open'; open.type = 'button'; open.textContent = 'Pong';
-    open.style.cssText = 'height:28px;border:1px solid #ffffff33;border-radius:999px;background:#1d4ed8de;color:white;padding:0 11px;font:700 11px system-ui;cursor:pointer';
+    open.style.cssText = 'height:36px;border:1px solid #ffffff33;border-radius:999px;background:#1d4ed8de;color:white;padding:0 14px;font:700 12px system-ui;cursor:pointer';
     root.appendChild(open); document.body.appendChild(root);
     open.style.touchAction = 'none'; open.style.userSelect = 'none';
     open.title = 'Tap to select videos. Drag to move; position is remembered.';
@@ -4643,7 +4626,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.28.0 loaded on', location.href);
+  log('Universal Video Scraper v7.29.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
