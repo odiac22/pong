@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.17.0
+// @version      7.18.0
 // @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
@@ -75,6 +75,8 @@
   let lastResult = null;
   let busy = false;
   let panelStatusEl = null;
+  let activeTargetPreview = null;
+  const DETECTION_FEEDBACK_KEY = 'uvs_detection_feedback_pending_v1';
   let browserMediaRelayGeneration = 0;
   const browserMediaRelayPreferredCandidates = new Map();
 
@@ -3222,7 +3224,7 @@ function primaryVideoEvidence(html, pageUrl) {
     };
   }
 
-  async function sendCaptureToRecall(mode, channel, _ignoreUnder30 = true) {
+  async function sendCaptureToRecall(mode, channel, _ignoreUnder30 = true, selection = null) {
     if (busy) throw new Error('A capture is already running');
     const captureMode = mode === 'main' ? 'main' : 'all';
     // A complete, authoritative VideoObject does not need the 600 ms lazy-load
@@ -3233,9 +3235,9 @@ function primaryVideoEvidence(html, pageUrl) {
     const ignoreUnder30 = _ignoreUnder30 !== false;
     const minimumDurationSeconds = ignoreUnder30 ? 30 : 1;
     const currentUrl = canonicalWatchPageUrl(location.href, location.href) || location.href;
-    const targets = captureMode === 'main'
+    const targets = selection?.targets || (captureMode === 'main'
       ? [{ url: currentUrl, durationSeconds: extractPageDurationSeconds(document) }]
-      : collectLogicalWatchPageTargets(document, location.href, 80);
+      : collectLogicalWatchPageTargets(document, location.href, 80));
     if (!targets.length) throw new Error('No logical video pages were found');
     const captureId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const bundleId = globalThis.crypto?.randomUUID?.() || `bundle-${Date.now()}`;
@@ -3325,6 +3327,8 @@ function primaryVideoEvidence(html, pageUrl) {
     };
 
     const tasks = targets.map((target, index) => async () => {
+      selection?.onStatus?.(target, 'Checking');
+      const targetStarted = performance.now();
       const targetUrl = target.url;
       let verified = null;
       const diagnostic = {
@@ -3333,7 +3337,11 @@ function primaryVideoEvidence(html, pageUrl) {
         attempts: []
       };
       const resolveAttempt = async cacheBust => {
-        const doc = targetUrl === currentUrl
+        if (target.element && (!target.element.isConnected || (target.logicalVideoId &&
+          [...document.querySelectorAll('video')][Number(target.logicalVideoId.match(/(\d+)$/)?.[1]) - 1] !== target.element))) {
+          throw new Error('The selected target changed; reopen selection');
+        }
+        const doc = target.directMedia ? document : targetUrl === currentUrl
           ? document
           : await fetchDoc(targetUrl, { timeout: 12000, maxRetries: cacheBust ? 1 : 2, cacheBust });
         const attempt = { cacheBust: cacheBust === true, fetched: !!doc, verified: false };
@@ -3347,7 +3355,7 @@ function primaryVideoEvidence(html, pageUrl) {
           ? independentVideoGroupsFromDoc(doc, targetUrl).find(group => group.logicalVideoId === target.logicalVideoId)
           : null;
         if (target.logicalVideoId && !inlineGroup) throw new Error('The selected video element changed; capture this page again');
-        const extracted = inlineGroup ? inlineGroup.entries : await browserResolvedMediaEntries(
+        const extracted = target.directMedia ? [{ videoUrl: target.url, durationSeconds: target.durationSeconds }] : inlineGroup ? inlineGroup.entries : await browserResolvedMediaEntries(
           doc,
           targetUrl,
           Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
@@ -3358,7 +3366,7 @@ function primaryVideoEvidence(html, pageUrl) {
         const resolved = await firstVerifiedRecallEntry(
           extracted,
           targetUrl,
-          inlineGroup ? inlineGroup.durationSeconds : Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
+          target.directMedia ? Number(target.durationSeconds || 0) : inlineGroup ? inlineGroup.durationSeconds : Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
           minimumDurationSeconds
         );
         if (resolved && target.logicalVideoId) resolved.logicalVideoId = target.logicalVideoId;
@@ -3370,6 +3378,10 @@ function primaryVideoEvidence(html, pageUrl) {
         attempt.extracted = extracted.length;
         attempt.mediaHost = extracted[0]?.videoUrl ? new URL(extracted[0].videoUrl).hostname : '';
         attempt.verified = !!resolved;
+        attempt.failure = resolved ? 'none' : !extracted.length ? 'no_media'
+          : Math.max(Number(target.durationSeconds || 0), inlineGroup?.durationSeconds || 0, extractPageDurationSeconds(doc)) > 0 &&
+            Math.max(Number(target.durationSeconds || 0), inlineGroup?.durationSeconds || 0, extractPageDurationSeconds(doc)) < minimumDurationSeconds
+            ? 'duration_filter' : 'media_unverified';
         return resolved;
       };
       try {
@@ -3382,15 +3394,21 @@ function primaryVideoEvidence(html, pageUrl) {
         diagnostic.error = error?.message || String(error);
       }
       diagnostic.verified = !!verified;
+      if (diagnostic.error) diagnostic.failure = 'extraction_error';
       diagnostic.fetchFailed = diagnostic.attempts.every(attempt => !attempt.fetched);
       captureDiagnostics[index] = diagnostic;
       publishCaptureDiagnostics();
       try {
         await queueAppend(target, verified);
+        diagnostic.delivered = !!verified;
+        selection?.onStatus?.(target, verified ? 'Sent' : 'Not verified');
       } catch (error) {
         diagnostic.appendError = error?.message || String(error);
+        selection?.onStatus?.(target, 'Delivery failed');
         publishCaptureDiagnostics();
       }
+      diagnostic.elapsedMs = Math.round(performance.now() - targetStarted);
+      selection?.onResult?.(target, diagnostic);
       return verified;
     });
     // Porneec's player host can strand Firefox requests once a large burst
@@ -3428,6 +3446,249 @@ function primaryVideoEvidence(html, pageUrl) {
       (relayStarted ? '. Keep this source tab open for authenticated fallback playback.' : '')
     );
     return result;
+  }
+
+  // Keep DOM references only in this short-lived selection session. Feedback is
+  // constructed from an allowlist, never from outerHTML, URLs, or error text.
+  function collectSelectableTargets(mode = 'all') {
+    const currentUrl = canonicalWatchPageUrl(location.href, location.href) || location.href;
+    const videos = [...document.querySelectorAll('video')];
+    const groups = independentVideoGroupsFromDoc(document, currentUrl);
+    const links = [...document.querySelectorAll('a[href]')];
+    const visibleArea = element => {
+      const rect = element?.getBoundingClientRect();
+      return rect && element.getClientRects().length ? rect.width * rect.height : 0;
+    };
+    const mainElement = videos.slice().sort((a, b) => visibleArea(b) - visibleArea(a))[0];
+    const embeddedUrls = embeddedPlayerPageUrls(document, currentUrl, 80);
+    const players = [...document.querySelectorAll('iframe[src],embed[src],object[data]')].filter(element => {
+      const value = element.getAttribute('src') || element.getAttribute('data');
+      return embeddedUrls.includes(absUrl(value, currentUrl));
+    });
+    let targets = collectLogicalWatchPageTargets(document, currentUrl, 80);
+    if (groups.length > 1) {
+      targets = targets.filter(target => target.url !== currentUrl);
+      targets.unshift(...groups.map(group => ({ url: currentUrl, logicalVideoId: group.logicalVideoId, durationSeconds: group.durationSeconds })));
+    }
+    if (mainElement && !targets.some(target => target.url === currentUrl)) {
+      targets.unshift({ url: currentUrl, durationSeconds: extractPageDurationSeconds(document) });
+    }
+    if (mode !== 'main' && !mainElement && players.length > 1) {
+      targets = targets.filter(target => target.url !== currentUrl);
+      targets.unshift(...players.map(element => ({ url: absUrl(element.getAttribute('src') || element.getAttribute('data'), currentUrl), durationSeconds: logicalPageDurationHint(element) })));
+    }
+    if (mode === 'main') {
+      const index = videos.indexOf(mainElement);
+      const group = groups.find(item => item.logicalVideoId === `inline-video-${index + 1}`);
+      targets = mainElement || players.length || primaryMediaEntriesFromDoc(document, currentUrl).length
+        ? [{ url: currentUrl, durationSeconds: group?.durationSeconds || extractPageDurationSeconds(document),
+          ...(groups.length > 1 && group ? { logicalVideoId: group.logicalVideoId } : {}) }]
+        : targets.slice(0, 1);
+    }
+    const candidates = targets.map(target => {
+      const index = Number(target.logicalVideoId?.match(/^inline-video-(\d+)$/)?.[1] || 0) - 1;
+      const matches = links.filter(link => canonicalWatchPageUrl(link.href, currentUrl) === target.url);
+      const embedded = players.find(element => absUrl(element.getAttribute('src') || element.getAttribute('data'), currentUrl) === target.url);
+      const element = target.url === currentUrl ? (index >= 0 ? videos[index] : mainElement || players[0])
+        : embedded || matches.sort((a, b) => visibleArea(b) - visibleArea(a))[0];
+      return { ...target, element, kind: ['IFRAME','EMBED','OBJECT'].includes(element?.tagName) ? 'embed' : target.url === currentUrl ? 'player' : 'link' };
+    });
+    if (mode !== 'main') {
+      for (const link of links) {
+        if (!VIDEO_EXT_RE.test(link.href) || candidates.some(item => item.url === link.href)) continue;
+        candidates.push({ url: link.href, durationSeconds: logicalPageDurationHint(link), element: link, kind: 'direct', directMedia: true });
+      }
+    }
+    return candidates.slice(0, 80).map((candidate, index) => ({ ...candidate, previewId: index + 1 }));
+  }
+
+  function buildDetectionFeedback(session) {
+    return {
+      schema: 1, version: '7.18.0', id: session.id, createdAt: session.createdAt,
+      site: location.hostname, mode: session.mode, channel: session.channel,
+      ignoreUnder30: session.ignoreUnder30, stage: session.stage,
+      evidence: {
+        videoElements: document.querySelectorAll('video').length,
+        iframeElements: document.querySelectorAll('iframe').length,
+        structuredDataBlocks: document.querySelectorAll('script[type="application/ld+json"]').length,
+        players: [
+          ['videojs', '.video-js'], ['plyr', '.plyr'], ['jwplayer', '.jwplayer'],
+          ['flowplayer', '.flowplayer'], ['mediaelement', '.mejs-container']
+        ].filter(([, selector]) => document.querySelector(selector)).map(([name]) => name)
+      },
+      candidates: session.candidates.map(candidate => {
+        const result = session.results.get(candidate.previewId);
+        const rect = candidate.element?.getBoundingClientRect();
+        return {
+          index: candidate.previewId, kind: candidate.kind,
+          tag: ['VIDEO','IFRAME','A','EMBED','OBJECT'].includes(candidate.element?.tagName) ? candidate.element.tagName : 'OTHER',
+          selected: session.selected.has(candidate.previewId),
+          durationSeconds: Number(candidate.durationSeconds || 0),
+          width: Math.round(rect?.width || 0), height: Math.round(rect?.height || 0),
+          mapped: !!candidate.element, independent: !!candidate.logicalVideoId,
+          outcome: result ? (result.appendError ? 'delivery_failed' : result.delivered ? 'sent' : result.fetchFailed ? 'fetch_failed' : 'not_verified') : 'not_checked',
+          elapsedMs: result?.elapsedMs || 0, failure: result?.failure || 'none',
+          attempts: (result?.attempts || []).map(attempt => ({
+            fetched: !!attempt.fetched, verified: !!attempt.verified,
+            extracted: Number(attempt.extracted || 0), embeddedPlayers: Number(attempt.embeddedPlayers || 0),
+            pageDuration: Number(attempt.pageDuration || 0), retry: !!attempt.cacheBust,
+            failure: attempt.failure || (attempt.fetched ? 'none' : 'page_fetch')
+          }))
+        };
+      })
+    };
+  }
+
+  async function sendDetectionFeedback(report) {
+    // Preserve an unsent report across refreshes; no browsing history is stored.
+    setStoredJson(DETECTION_FEEDBACK_KEY, report);
+    const receivers = [...PONG_ENDPOINTS];
+    // The small feedback receiver can run alongside an older Pong process so
+    // collecting reports never requires discarding its in-memory Recall queue.
+    for (const endpoint of PONG_ENDPOINTS) {
+      try { const url = new URL(endpoint); url.port = '8797'; receivers.push(url.origin); } catch (_) {}
+    }
+    for (const endpoint of [...new Set(receivers)]) {
+      try {
+        const result = await new Promise((resolve, reject) => GM_xmlhttpRequest({
+          method: 'POST', url: `${String(endpoint).replace(/\/+$/, '')}/media-page/detection-feedback`,
+          headers: { 'Content-Type': 'application/json' }, data: JSON.stringify(report), timeout: 5000,
+          onload: response => {
+            try {
+              const body = JSON.parse(response.responseText);
+              if (response.status !== 200 || body.saved !== true) throw new Error('Report not saved');
+              resolve(body);
+            } catch (error) { reject(error); }
+          },
+          onerror: () => reject(new Error('Pong unavailable')), ontimeout: () => reject(new Error('Pong unavailable'))
+        }));
+        setStoredJson(DETECTION_FEEDBACK_KEY, null);
+        return result;
+      } catch (_) {}
+    }
+    throw new Error('Report saved in this browser. Pong needs the updated receiver; tap Retry report later.');
+  }
+
+  function openTargetPreview(mode, channel, ignoreUnder30) {
+    if (activeTargetPreview?.sending) return;
+    activeTargetPreview?.close();
+    const session = {
+      id: globalThis.crypto?.randomUUID?.() || `selection-${Date.now()}`,
+      createdAt: new Date().toISOString(), mode, channel, ignoreUnder30,
+      candidates: collectSelectableTargets(mode), selected: new Set(), results: new Map(), stage: 'selection', sending: false
+    };
+    const host = document.createElement('div');
+    host.id = 'uvs-target-preview';
+    host.style.cssText = 'position:fixed;inset:0;z-index:2147483646;pointer-events:none';
+    const shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = `<style>
+      :host{font:12px system-ui;color:white}button{font:inherit;cursor:pointer;color:white;border:1px solid #ffffff44;border-radius:7px;background:#263244;padding:7px}
+      .box{position:fixed;background:#ff22222b;border:2px solid #ff5757;border-radius:6px;pointer-events:auto;padding:0;text-align:left;touch-action:manipulation}
+      .box[aria-pressed=true]{background:#ff22224a;border-color:#fff}.box span{position:absolute;left:0;top:0;background:#851e24;padding:3px 5px;border-radius:3px;font-size:11px}
+      .bar{position:fixed;left:8px;right:8px;bottom:46px;margin:auto;max-width:520px;background:#101723f5;border:1px solid #ffffff33;border-radius:12px;padding:10px;pointer-events:auto;box-shadow:0 3px 16px #0008}
+      .actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}.summary{font-weight:700}.hint,.status{font-size:11px;color:#cbd5e1;margin-top:5px}.list{display:flex;gap:4px;flex-wrap:wrap;max-height:85px;overflow:auto;margin-top:6px}.list button[aria-pressed=true]{background:#851e24}button:disabled{opacity:.5;cursor:default}
+    </style><div class="boxes"></div><div class="bar" role="region" aria-label="Select video targets">
+      <div class="summary"></div><div class="hint">Tap red boxes to check videos. Candidates are not yet verified.</div><div class="list"></div>
+      <div class="actions"><button data-do="all">Select all</button><button data-do="send">Send selected</button><button data-do="report">Send report only</button><button data-do="retry">Retry report</button><button data-do="close">Close</button></div>
+      <div class="status" role="status" aria-live="polite"></div></div>`;
+    document.body.appendChild(host);
+    const boxRoot = shadow.querySelector('.boxes'), list = shadow.querySelector('.list');
+    const status = shadow.querySelector('.status'), send = shadow.querySelector('[data-do=send]');
+    const controls = new Map();
+    const update = () => {
+      shadow.querySelector('.summary').textContent = `${session.selected.size} selected · ${session.candidates.length} targets · Recall ${channel}`;
+      send.disabled = !session.selected.size || session.sending;
+      for (const candidate of session.candidates) {
+        const selected = session.selected.has(candidate.previewId);
+        for (const button of controls.get(candidate.previewId) || []) {
+          button.setAttribute('aria-pressed', String(selected));
+          button.querySelector('span').textContent = `${selected ? '✓ ' : ''}${candidate.previewId} ${candidate.kind}${candidate.status ? ' · ' + candidate.status : ''}`;
+          button.disabled = session.sending;
+        }
+      }
+    };
+    for (const candidate of session.candidates) {
+      const buttons = [];
+      for (const container of [boxRoot, list]) {
+        const button = document.createElement('button'); button.type = 'button';
+        button.dataset.target = String(candidate.previewId); button.appendChild(document.createElement('span'));
+        if (container === boxRoot) button.className = 'box';
+        button.addEventListener('click', event => {
+          event.preventDefault(); event.stopPropagation();
+          if (session.sending) return;
+          if (session.selected.has(candidate.previewId)) session.selected.delete(candidate.previewId);
+          else session.selected.add(candidate.previewId);
+          update();
+        });
+        container.appendChild(button); buttons.push(button);
+      }
+      controls.set(candidate.previewId, buttons);
+    }
+    let animation = 0;
+    const position = () => {
+      animation = 0;
+      for (const candidate of session.candidates) {
+        const box = controls.get(candidate.previewId)[0];
+        const rect = candidate.element?.isConnected ? candidate.element.getBoundingClientRect() : null;
+        const visible = rect && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+        box.hidden = !visible;
+        if (visible) Object.assign(box.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+      }
+    };
+    const schedulePosition = () => { if (!animation) animation = requestAnimationFrame(position); };
+    const resize = new ResizeObserver(schedulePosition);
+    for (const candidate of session.candidates) if (candidate.element) resize.observe(candidate.element);
+    const mutation = new MutationObserver(schedulePosition);
+    mutation.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class','style','hidden'] });
+    window.addEventListener('scroll', schedulePosition, true); window.addEventListener('resize', schedulePosition);
+    const onKey = event => { if (event.key === 'Escape' && !session.sending) session.close(); };
+    window.addEventListener('keydown', onKey);
+    session.close = () => {
+      resize.disconnect(); mutation.disconnect(); cancelAnimationFrame(animation);
+      window.removeEventListener('scroll', schedulePosition, true); window.removeEventListener('resize', schedulePosition); window.removeEventListener('keydown', onKey);
+      host.remove(); if (activeTargetPreview === session) activeTargetPreview = null;
+    };
+    const report = async () => {
+      status.textContent = 'Saving report to Pong…';
+      try { await sendDetectionFeedback(buildDetectionFeedback(session)); status.textContent = 'Report saved to Pong. No cookies, page text, images, or media URLs included.'; }
+      catch (error) { status.textContent = error.message; }
+    };
+    shadow.querySelector('[data-do=all]').onclick = () => {
+      if (session.sending) return;
+      session.selected = session.selected.size === session.candidates.length ? new Set() : new Set(session.candidates.map(item => item.previewId)); update();
+    };
+    shadow.querySelector('[data-do=close]').onclick = () => { if (!session.sending) session.close(); };
+    shadow.querySelector('[data-do=report]').onclick = () => { if (!session.sending) void report(); };
+    shadow.querySelector('[data-do=retry]').onclick = async () => {
+      if (session.sending) return;
+      const pending = getStoredJson(DETECTION_FEEDBACK_KEY, null);
+      if (!pending) { status.textContent = 'No pending report.'; return; }
+      try { await sendDetectionFeedback(pending); status.textContent = 'Pending report saved to Pong.'; }
+      catch (error) { status.textContent = error.message; }
+    };
+    send.onclick = async () => {
+      if (session.sending || !session.selected.size) return;
+      session.sending = true; session.stage = 'capture'; update();
+      for (const button of shadow.querySelectorAll('.actions button')) button.disabled = true;
+      let captureMessage = '';
+      try {
+        const targets = session.candidates.filter(candidate => session.selected.has(candidate.previewId));
+        await sendCaptureToRecall(mode, channel, ignoreUnder30, {
+          targets,
+          onStatus: (target, text) => { target.status = text; update(); },
+          onResult: (target, result) => session.results.set(target.previewId, result)
+        });
+        captureMessage = `${[...session.results.values()].filter(item => item.delivered).length}/${targets.length} sent. `;
+        session.stage = 'complete';
+      } catch (error) { captureMessage = `${error.message}. `; session.stage = 'failed'; }
+      await report();
+      status.textContent = captureMessage + status.textContent;
+      session.sending = false;
+      for (const button of shadow.querySelectorAll('.actions button')) button.disabled = false;
+      update();
+    };
+    activeTargetPreview = session; update(); position();
+    return session;
   }
 
   function addRecallCaptureButton() {
@@ -3486,7 +3747,7 @@ function primaryVideoEvidence(html, pageUrl) {
       requestedChannel = Number(root.dataset.channel),
       requestedIgnoreUnder30 = min30Checkbox.checked
     ) => {
-      if (root.dataset.busy === 'true') return;
+      if (root.dataset.busy === 'true' || activeTargetPreview?.sending) return;
       root.dataset.busy = 'true';
       const captureAction = action === 'main' ? 'main' : 'all';
       const captureChannel = Number(requestedChannel) === 2 ? 2 : 1;
@@ -3509,7 +3770,9 @@ function primaryVideoEvidence(html, pageUrl) {
     root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', event => {
       event.preventDefault();
       event.stopImmediatePropagation();
-      void runRecallCapture(button.dataset.action, Number(root.dataset.channel));
+      if (root.dataset.busy === 'true') return;
+      menu.hidden = true;
+      openTargetPreview(button.dataset.action, Number(root.dataset.channel), min30Checkbox.checked);
     }));
     // A private/headless qualification browser must not synthesize a normal
     // site click: ad-heavy pages can intercept that click before this panel and
@@ -4286,6 +4549,9 @@ function primaryVideoEvidence(html, pageUrl) {
     primaryMediaEntriesFromDoc,
     independentVideoGroupsFromDoc,
     sendCaptureToRecall,
+    collectSelectableTargets,
+    openTargetPreview,
+    buildDetectionFeedback,
 
     formatPongExport,
     formatPongPasteExport,
@@ -4305,7 +4571,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.17.0 loaded on', location.href);
+  log('Universal Video Scraper v7.18.0 loaded on', location.href);
 
   if (getStoredBool(AUTO_SCRAPE_KEY, false)) {
     setTimeout(() => doScrape(false), 800);
