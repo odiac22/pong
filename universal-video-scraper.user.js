@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.26.0
+// @version      7.27.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -63,6 +63,9 @@
   const PANEL_COLLAPSED_KEY = 'uvs_panel_collapsed_v1';
   const RECALL_CHANNEL_KEY = 'uvs_recall_channel_v1';
   const PHONE_CONNECTION_KEY = 'uvs_phone_connection_v1';
+  const LAUNCHER_POS_KEY = 'uvs_launcher_position_v1';
+  const VPN_PAIR_KEY = 'uvs_vpn_pair_v1';
+  const VPN_USER_ACTION = Symbol('trusted VPN action');
   const RECALL_MIN_30_KEY = 'uvs_recall_min_30_v1';
   const PONG_ENDPOINTS = Array.isArray(globalThis.PONG_LOCAL_ENDPOINTS)
     ? globalThis.PONG_LOCAL_ENDPOINTS
@@ -3526,6 +3529,101 @@ function primaryVideoEvidence(html, pageUrl) {
     };
   }
 
+  function requiresCaliforniaVpn(value) {
+    try { const host = new URL(value).hostname; return ['pornhub.com','phncdn.com'].some(d => host === d || host.endsWith('.' + d)); } catch (_) { return false; }
+  }
+
+  function vpnEndpoint() {
+    // Never send a pairing secret to a page-provided public endpoint.
+    return PONG_ENDPOINTS.map(value => { try {
+      const u = new URL(value), h = u.hostname;
+      const octets = h.split('.').map(Number);
+      const ipv4 = /^\d+\.\d+\.\d+\.\d+$/.test(h) && octets.every(n => n >= 0 && n <= 255);
+      const local = h === 'localhost' || h === '[::1]' || (ipv4 && (octets[0] === 127 || octets[0] === 10 || (octets[0] === 192 && octets[1] === 168) || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)));
+      return local && ['http:','https:'].includes(u.protocol) && !u.username && !u.password ? u.origin : '';
+    } catch (_) { return ''; } }).find(Boolean) || '';
+  }
+
+  function vpnPairings() {
+    // Credentials must NEVER fall back to website-readable localStorage.
+    try { const value = GM_getValue(VPN_PAIR_KEY, '{}'); const parsed = JSON.parse(value); return parsed && typeof parsed === 'object' ? parsed : {}; } catch (_) { return {}; }
+  }
+
+  function vpnSafeStatus(value = {}) {
+    const phases = ['unknown','checking','finding_servers','connecting','connected','disconnecting','disconnected','error'];
+    const safeCode = v => /^[a-z_]{1,48}$/.test(String(v || '')) ? v : null;
+    return {
+      phase: phases.includes(value.phase) ? value.phase : 'unknown', verified: value.verified === true,
+      protected: typeof value.protected === 'boolean' ? value.protected : null,
+      city: ['San Francisco','San Jose','Los Angeles'].includes(value.city) ? value.city : null,
+      helperVersion: /^\d+\.\d+(?:\.\d+)?$/.test(value.helperVersion || '') ? value.helperVersion : null,
+      attempt: Math.max(0, Math.min(3, Number(value.attempt) || 0)), maxAttempts: Math.max(0, Math.min(3, Number(value.maxAttempts) || 0)),
+      server: /^United States #\d+$/.test(value.server || '') ? value.server : null,
+      elapsedMs: Math.max(0, Number(value.elapsedMs) || 0), checkedAt: Number(value.checkedAt) || null,
+      busy: value.busy === true, error: safeCode(value.error),
+      events: (Array.isArray(value.events) ? value.events : []).slice(-16).map(e => ({ phase: phases.includes(e.phase) ? e.phase : 'unknown', elapsedMs: Math.max(0, Number(e.elapsedMs) || 0), attempt: Math.max(0, Math.min(3, Number(e.attempt) || 0)) }))
+    };
+  }
+
+  function vpnMessage(status) {
+    const errors = {
+      pairing_required: 'Pair PC once: open the pairing page, copy its key, then tap Pair PC.',
+      helper_update: 'PC helper needs version 30.14 and a restart. The userscript update alone is not enough.',
+      pc_unreachable: 'PC helper unreachable. Keep PC awake, use the same Wi-Fi, and allow local-network access in NordVPN. A VPN switch may briefly interrupt the connection.',
+      nord_not_installed: 'NordVPN is not installed at its standard Windows location. Install it and sign in on the PC.',
+      launch_failed: 'Cannot launch NordVPN. Check the PC for login or Windows approval.',
+      catalog_unavailable: 'California server list unavailable. Check PC internet and try again.',
+      verification_unavailable: 'Cannot verify the PC VPN location. Source requests are blocked.',
+      connection_timeout: 'California connection not confirmed. NordVPN may need login or approval on the PC. No video was sent.',
+      disconnect_timeout: 'Disconnect not confirmed. Check NordVPN on the PC.',
+      local_network_required: 'VPN control needs a direct home-network connection to the PC.',
+      vpn_required: 'PC VPN is not verified in California. Connect California before sending.',
+      user_action_required: 'Tap Send or Connect California yourself to authorize PC VPN connection.',
+      vpn_unavailable: 'VPN control failed. Copy log and check NordVPN on the PC.'
+    };
+    if (status.error) return errors[status.error] || errors.vpn_unavailable;
+    if (status.busy) return `${status.phase.replaceAll('_',' ')} · ${Math.round(status.elapsedMs / 1000)}s${status.attempt ? ` · attempt ${status.attempt}/${status.maxAttempts}` : ''}${status.server ? ` · ${status.server}` : ''}`;
+    if (status.verified) return `PC protected · ${status.city}, California · helper ${status.helperVersion || '?'}${status.checkedAt ? ' · checked ' + new Date(status.checkedAt).toLocaleTimeString() : ''}`;
+    return status.phase === 'disconnected' ? 'PC VPN not connected in California. VPN-dependent videos may stop.' : 'PC VPN not checked. Phone VPN is separate.';
+  }
+
+  async function vpnRequest(action, endpoint = vpnEndpoint()) {
+    const fail = code => Object.assign(new Error(vpnMessage({error:code})), {code});
+    const key = vpnPairings()[endpoint];
+    if (!endpoint) throw fail('local_network_required');
+    if (!/^[a-f0-9]{64}$/.test(key || '')) throw fail('pairing_required');
+    let response;
+    try { response = await browserRelayRequest({method:action === 'status' ? 'GET' : 'POST',url:`${endpoint}/vpn/${action}`,headers:{'X-Pong-Vpn-Key':key},timeout:12000}); }
+    catch (_) { throw fail('pc_unreachable'); }
+    let body; try { body = JSON.parse(response.responseText || '{}'); } catch (_) { body = {}; }
+    if (response.status === 404) throw fail('helper_update');
+    if (response.status === 401) throw fail('pairing_required');
+    if (response.status < 200 || response.status >= 300) throw fail(/^[a-z_]+$/.test(body.error || '') ? body.error : 'vpn_unavailable');
+    return vpnSafeStatus(body.status);
+  }
+
+  async function runVpnAction(action, onStatus, endpoint = vpnEndpoint()) {
+    let state = await vpnRequest(action, endpoint); onStatus?.(state);
+    const deadline = Date.now() + 120000;
+    let networkRetries = 0;
+    while (state.busy && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      try { state = await vpnRequest('status', endpoint); networkRetries = 0; }
+      catch (error) {
+        if (error.code !== 'pc_unreachable' || ++networkRetries > 3) throw error;
+        onStatus?.({...state,error:'pc_unreachable',busy:true}); continue;
+      }
+      onStatus?.(state);
+    }
+    if (state.busy) state = {...state, error:action === 'disconnect' ? 'disconnect_timeout' : 'connection_timeout'};
+    if (state.error) { onStatus?.(state); throw Object.assign(new Error(vpnMessage(state)), {code:state.error}); }
+    if (action === 'connect' || action === 'verify') {
+      state = await vpnRequest('verify', endpoint); onStatus?.(state);
+      if (!state.verified || state.busy) throw Object.assign(new Error(vpnMessage({error:'vpn_required'})), {code:'vpn_required'});
+    }
+    return state;
+  }
+
   async function sendCaptureToRecall(mode, channel, _ignoreUnder30 = true, selection = null) {
     if (busy) throw new Error('A capture is already running');
     const captureTrace = { startedAt: performance.now(), requests: [] };
@@ -3547,6 +3645,14 @@ function primaryVideoEvidence(html, pageUrl) {
     const bundleId = globalThis.crypto?.randomUUID?.() || `bundle-${Date.now()}`;
     const captureChannel = Number(channel) === 2 ? 2 : 1;
     const phoneConnectionOnly = selection?.phoneConnectionOnly === true;
+    let requiredVpnEndpoint = '';
+    if (!phoneConnectionOnly && (requiresCaliforniaVpn(currentUrl) || targets.some(t => requiresCaliforniaVpn(t.url)))) {
+      requiredVpnEndpoint = vpnEndpoint();
+      // Custom DOM events cannot authorize launching a system VPN. They may
+      // proceed only if the paired PC is already verified.
+      try { await runVpnAction(selection?.vpnAuthorization === VPN_USER_ACTION ? 'connect' : 'verify', selection?.onVpnStatus, requiredVpnEndpoint); }
+      catch (error) { selection?.onVpnStatus?.({phase:'error',error:error.code || 'vpn_unavailable'}); throw error; }
+    }
     if (phoneConnectionOnly && targets.some(target => youtubeVideoId(target.url))) {
       throw new Error('Phone connection currently supports direct MP4/WebM files, not YouTube or playlists. Uncheck it to use normal routing.');
     }
@@ -3580,6 +3686,7 @@ function primaryVideoEvidence(html, pageUrl) {
     let endpoint = '';
     let started = null;
     for (const candidate of PONG_ENDPOINTS) {
+      if (requiredVpnEndpoint && String(candidate).replace(/\/+$/, '') !== requiredVpnEndpoint) continue;
       try {
         if (phoneConnectionOnly) {
           const preflight = await browserRelayRequest({ method: 'GET', url: `${String(candidate).replace(/\/+$/, '')}/media-browser-relay/capabilities`, headers: { 'X-Pong-SimpCity-Controller': '1' }, timeout: 5000 });
@@ -3935,7 +4042,8 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 3, version: '7.26.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 4, version: '7.27.0', id: session.id, createdAt: session.createdAt,
+      vpn: vpnSafeStatus(session.vpn || {}),
       phoneConnectionOnly: session.phoneConnectionOnly === true,
       verificationScope: 'metadata_and_bounded_response_probe_not_playback',
       mode: session.mode, channel: session.channel,
@@ -4080,6 +4188,42 @@ function primaryVideoEvidence(html, pageUrl) {
     phoneLabel.title = 'Stream direct files through Firefox without a full download. Firefox must remain active; Android may suspend it when switching apps. Does not enable a VPN.';
     const statusNode = node('div', 'status', bar, 'Tap red boxes to select, then Send.');
     statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
+    const vpnRow = node('div', 'row vpn-row', bar); vpnRow.style.marginTop = '6px';
+    for (const [action,label] of [['connect','Connect California'],['disconnect','Disconnect'],['status','VPN status'],['pair','Pair PC']]) {
+      const button = node('button', '', vpnRow, label); button.type = 'button'; button.dataset.vpn = action;
+    }
+    const pairingLink = node('a', '', bar, 'Open PC pairing page');
+    pairingLink.href = `${vpnEndpoint()}/vpn/setup`; pairingLink.target = '_blank'; pairingLink.rel = 'noopener noreferrer';
+    pairingLink.style.cssText = 'display:none;color:#93c5fd;margin-top:5px';
+    const vpnStatus = node('div', 'vpn-status', bar, 'PC VPN not checked. Phone VPN is separate.');
+    vpnStatus.style.cssText = 'font-size:11px;color:#cbd5e1;margin-top:4px;overflow-wrap:anywhere';
+    vpnStatus.setAttribute('role','status'); vpnStatus.setAttribute('aria-live','polite');
+    const showVpn = value => {
+      session.vpn = vpnSafeStatus(value); vpnStatus.textContent = vpnMessage(session.vpn);
+      if (session.vpn.error === 'pairing_required') pairingLink.style.display = 'block';
+    };
+    const vpnButtons = [...vpnRow.querySelectorAll('button')];
+    let vpnWorking = false;
+    for (const button of vpnButtons) button.onclick = async event => {
+      event.preventDefault(); event.stopPropagation();
+      if (!(event instanceof MouseEvent) || !event.isTrusted || session.sending || vpnWorking) return;
+      const action = button.dataset.vpn;
+      if (action === 'pair') {
+        pairingLink.style.display = 'block';
+        // Native prompt, never a website-readable text field or localStorage.
+        const key = window.prompt('First open the PC pairing page below and copy its key. Then tap Pair PC again and paste the key here. Cancel to open the page.');
+        if (key === null) return;
+        if (!/^[a-f0-9]{64}$/.test(key.trim())) { vpnStatus.textContent = 'Pairing key must be the 64-character key from your PC. Never paste your NordVPN password.'; return; }
+        if (typeof GM_setValue !== 'function') { vpnStatus.textContent = 'Tampermonkey private storage is unavailable. Pairing was not saved.'; return; }
+        GM_setValue(VPN_PAIR_KEY, JSON.stringify({...vpnPairings(), [vpnEndpoint()]:key.trim()}));
+      }
+      if (action === 'disconnect' && !window.confirm('Disconnect the PC VPN? This affects other PC apps and can interrupt video playback.')) return;
+      vpnWorking = true; vpnButtons.forEach(b => b.disabled = true); send.disabled = true;
+      showVpn({phase:action === 'disconnect' ? 'disconnecting' : 'checking',busy:true});
+      try { await runVpnAction(action === 'pair' ? 'status' : action, showVpn); }
+      catch (error) { showVpn({...session.vpn,phase:'error',busy:false,error:error.code || 'vpn_unavailable'}); }
+      finally { vpnWorking = false; vpnButtons.forEach(b => b.disabled = session.sending); update(); }
+    };
     document.body.appendChild(host);
     const boxRoot = shadow.querySelector('.boxes'), status = shadow.querySelector('.status');
     const send = shadow.querySelector('[data-do=send]'), controls = new Map();
@@ -4092,7 +4236,8 @@ function primaryVideoEvidence(html, pageUrl) {
       channelButton.title = session.sending ? 'Destination is fixed while sending' : 'Tap to switch Recall destination';
       channelButton.disabled = session.sending;
       phoneInput.disabled = session.sending;
-      send.disabled = !session.selected.size || session.sending;
+      send.disabled = !session.selected.size || session.sending || vpnWorking;
+      vpnButtons.forEach(button => button.disabled = session.sending || vpnWorking);
       for (const candidate of session.candidates) {
         const box = controls.get(candidate.previewId);
         const selected = session.selected.has(candidate.previewId);
@@ -4206,7 +4351,7 @@ function primaryVideoEvidence(html, pageUrl) {
       const copied = await copyTextToClipboard(JSON.stringify(buildDetectionFeedback(session), null, 2));
       status.textContent = copied ? 'Log copied. Paste it in chat; no cookies or media URLs included.' : 'Clipboard blocked. Allow clipboard access and try again.';
     };
-    send.onclick = async () => {
+    send.onclick = async event => {
       if (session.sending || !session.selected.size) return;
       session.sending = true; session.stage = 'capture';
       session.captureTrace = null; session.captureFailure = null;
@@ -4216,6 +4361,8 @@ function primaryVideoEvidence(html, pageUrl) {
       try {
         await sendCaptureToRecall(mode, channel, ignoreUnder30, {
           targets,
+          vpnAuthorization: event instanceof MouseEvent && event.isTrusted ? VPN_USER_ACTION : null,
+          onVpnStatus: showVpn,
           phoneConnectionOnly: session.phoneConnectionOnly,
           onCaptureDiagnostics: trace => { session.captureTrace = trace; },
           onStatus: (target, text) => { target.status = text; update(); },
@@ -4245,8 +4392,39 @@ function primaryVideoEvidence(html, pageUrl) {
     open.id = 'uvs-recall-open'; open.type = 'button'; open.textContent = 'Pong';
     open.style.cssText = 'height:28px;border:1px solid #ffffff33;border-radius:999px;background:#1d4ed8de;color:white;padding:0 11px;font:700 11px system-ui;cursor:pointer';
     root.appendChild(open); document.body.appendChild(root);
+    open.style.touchAction = 'none'; open.style.userSelect = 'none';
+    open.title = 'Tap to select videos. Drag to move; position is remembered.';
+    let drag = null, suppressClickUntil = 0;
+    let savedPosition = getStoredJson(LAUNCHER_POS_KEY, null);
+    const bounds = () => ({x:Math.max(0, innerWidth-root.offsetWidth-8), y:Math.max(0, innerHeight-root.offsetHeight-8)});
+    const move = (x,y) => { const b = bounds(); root.style.left = `${Math.max(4,Math.min(b.x,x))}px`; root.style.top = `${Math.max(4,Math.min(b.y,y))}px`; root.style.bottom = 'auto'; };
+    const restore = () => { if (savedPosition && Number.isFinite(savedPosition.x) && Number.isFinite(savedPosition.y)) { const b = bounds(); move(savedPosition.x*b.x,savedPosition.y*b.y); } };
+    restore(); window.addEventListener('resize',restore);
+    open.addEventListener('pointerdown',event => {
+      if (!event.isPrimary || event.button !== 0) return;
+      const r = root.getBoundingClientRect(); drag = {id:event.pointerId,x:event.clientX,y:event.clientY,left:r.left,top:r.top,moved:false};
+      open.setPointerCapture(event.pointerId);
+    });
+    open.addEventListener('pointermove',event => {
+      if (!drag || drag.id !== event.pointerId) return;
+      const dx = event.clientX-drag.x, dy = event.clientY-drag.y;
+      if (!drag.moved && Math.hypot(dx,dy)<7) return;
+      drag.moved = true; event.preventDefault(); move(drag.left+dx,drag.top+dy);
+    });
+    const finishDrag = event => {
+      if (!drag || drag.id !== event.pointerId) return;
+      if (drag.moved) {
+        suppressClickUntil = performance.now()+500;
+        const r = root.getBoundingClientRect(), b = bounds(); savedPosition = {x:r.left/(b.x||1),y:r.top/(b.y||1)};
+        setStoredJson(LAUNCHER_POS_KEY,savedPosition);
+      }
+      drag = null;
+      if (open.hasPointerCapture(event.pointerId)) open.releasePointerCapture(event.pointerId);
+    };
+    open.addEventListener('pointerup',finishDrag); open.addEventListener('pointercancel',finishDrag);
     open.onclick = event => {
       event.preventDefault(); event.stopPropagation();
+      if (performance.now()<suppressClickUntil) return;
       if (activeTargetPreview?.isHidden()) activeTargetPreview.show();
       else if (activeTargetPreview) activeTargetPreview.dismiss();
       else openTargetPreview('all', Number(root.dataset.channel), false);
@@ -4449,7 +4627,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.26.0 loaded on', location.href);
+  log('Universal Video Scraper v7.27.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
