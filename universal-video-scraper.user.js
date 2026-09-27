@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.18.0
+// @version      7.18.1
 // @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
 // @author       regginyggaf
 // @match        *://*/*
@@ -3450,11 +3450,38 @@ function primaryVideoEvidence(html, pageUrl) {
 
   // Keep DOM references only in this short-lived selection session. Feedback is
   // constructed from an allowlist, never from outerHTML, URLs, or error text.
-  function collectSelectableTargets(mode = 'all') {
+  function selectableLinkUrl(element) {
+    const raw = element?.getAttribute('href') || element?.getAttribute('data-href') ||
+      element?.getAttribute('data-video-url') || element?.getAttribute('data-watch-url') || '';
+    if (!raw || raw.trim().startsWith('#')) return '';
+    try { const url = new URL(raw, location.href); return /^https?:$/.test(url.protocol) ? url.href : ''; }
+    catch (_) { return ''; }
+  }
+
+  function videoLinkEvidence(element, url) {
+    if (!url || element.closest('#uvs-recall-capture,#uvs-panel,#uvs-target-preview,[data-ad],.advertisement,.ad-container')) return '';
+    if (/\.(?:jpe?g|png|gif|webp|svg|avif|pdf|zip)(?:[?#]|$)/i.test(url)) return '';
+    if (VIDEO_EXT_RE.test(url)) return 'direct';
+    if (isLogicalVideoPageUrl(url, location.href, element)) return 'path';
+    // A thumbnail, play affordance or duration is evidence of a potential video
+    // even when its destination is an opaque slug, redirect, or another host.
+    // Never execute onclick handlers or navigate to establish that evidence.
+    if (element.closest('nav,header,footer,[role="navigation"]')) return '';
+    const card = element.closest('article,li,[class*="card" i],[class*="thumb" i]') || element;
+    const text = `${element.getAttribute('aria-label') || ''} ${element.getAttribute('title') || ''} ${element.textContent || ''}`;
+    if (element.hasAttribute('data-video-url') || element.hasAttribute('data-watch-url')) return 'video_attribute';
+    if (/\b(?:watch|play)\b.{0,32}\b(?:video|clip|film)\b|\b(?:video|clip)\b.{0,32}\b(?:watch|play)\b/i.test(text)) return 'text';
+    if (card.querySelector('[class*="play" i],[aria-label*="play" i],[data-duration],time') || parseDurationHintSeconds(card.textContent)) return 'play_or_duration';
+    if (element.querySelector('img,picture,video,[poster]')) return 'thumbnail';
+    if (/url\(/i.test(getComputedStyle(element).backgroundImage || '')) return 'thumbnail';
+    return '';
+  }
+
+  function collectSelectableTargets(mode = 'all', includeAllLinks = false) {
     const currentUrl = canonicalWatchPageUrl(location.href, location.href) || location.href;
     const videos = [...document.querySelectorAll('video')];
     const groups = independentVideoGroupsFromDoc(document, currentUrl);
-    const links = [...document.querySelectorAll('a[href]')];
+    const links = [...document.querySelectorAll('a[href],[role="link"][data-href],[data-video-url],[data-watch-url]')];
     const visibleArea = element => {
       const rect = element?.getBoundingClientRect();
       return rect && element.getClientRects().length ? rect.width * rect.height : 0;
@@ -3487,24 +3514,37 @@ function primaryVideoEvidence(html, pageUrl) {
     }
     const candidates = targets.map(target => {
       const index = Number(target.logicalVideoId?.match(/^inline-video-(\d+)$/)?.[1] || 0) - 1;
-      const matches = links.filter(link => canonicalWatchPageUrl(link.href, currentUrl) === target.url);
+      const matches = links.filter(link => canonicalWatchPageUrl(selectableLinkUrl(link), currentUrl) === target.url);
       const embedded = players.find(element => absUrl(element.getAttribute('src') || element.getAttribute('data'), currentUrl) === target.url);
       const element = target.url === currentUrl ? (index >= 0 ? videos[index] : mainElement || players[0])
         : embedded || matches.sort((a, b) => visibleArea(b) - visibleArea(a))[0];
       return { ...target, element, kind: ['IFRAME','EMBED','OBJECT'].includes(element?.tagName) ? 'embed' : target.url === currentUrl ? 'player' : 'link' };
     });
-    if (mode !== 'main') {
-      for (const link of links) {
-        if (!VIDEO_EXT_RE.test(link.href) || candidates.some(item => item.url === link.href)) continue;
-        candidates.push({ url: link.href, durationSeconds: logicalPageDurationHint(link), element: link, kind: 'direct', directMedia: true });
+    for (const link of links) {
+      const url = selectableLinkUrl(link);
+      const evidence = videoLinkEvidence(link, url) || (includeAllLinks && url &&
+        !link.closest('#uvs-recall-capture,#uvs-panel,#uvs-target-preview') ? 'manual_link' : '');
+      if (!evidence || canonicalWatchPageUrl(url, currentUrl) === currentUrl) continue;
+      const duplicate = candidates.find(item => canonicalWatchPageUrl(item.url, currentUrl) === canonicalWatchPageUrl(url, currentUrl));
+      if (duplicate) {
+        duplicate.linkEvidence ||= evidence;
+        // Prefer the clickable thumbnail over a duplicate short title anchor.
+        if (duplicate.kind === 'link' && visibleArea(link) > visibleArea(duplicate.element)) duplicate.element = link;
+        continue;
       }
+      candidates.push({ url, durationSeconds: logicalPageDurationHint(link), element: link,
+        kind: evidence === 'direct' ? 'direct' : 'link', directMedia: evidence === 'direct', linkEvidence: evidence });
     }
-    return candidates.slice(0, 80).map((candidate, index) => ({ ...candidate, previewId: index + 1 }));
+    // An inline autoplay preview inside a linked card represents the linked
+    // destination, not a second movie. Keep the card as the selectable target.
+    const filtered = candidates.filter(candidate => candidate.kind !== 'player' ||
+      !candidates.some(other => other.kind === 'link' && other.element?.contains(candidate.element)));
+    return filtered.slice(0, mode === 'main' ? 1 : 80).map((candidate, index) => ({ ...candidate, previewId: index + 1 }));
   }
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, version: '7.18.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, version: '7.18.1', id: session.id, createdAt: session.createdAt,
       site: location.hostname, mode: session.mode, channel: session.channel,
       ignoreUnder30: session.ignoreUnder30, stage: session.stage,
       evidence: {
@@ -3521,6 +3561,7 @@ function primaryVideoEvidence(html, pageUrl) {
         const rect = candidate.element?.getBoundingClientRect();
         return {
           index: candidate.previewId, kind: candidate.kind,
+          linkEvidence: candidate.linkEvidence || 'none',
           tag: ['VIDEO','IFRAME','A','EMBED','OBJECT'].includes(candidate.element?.tagName) ? candidate.element.tagName : 'OTHER',
           selected: session.selected.has(candidate.previewId),
           durationSeconds: Number(candidate.durationSeconds || 0),
@@ -3569,13 +3610,13 @@ function primaryVideoEvidence(html, pageUrl) {
     throw new Error('Report saved in this browser. Pong needs the updated receiver; tap Retry report later.');
   }
 
-  function openTargetPreview(mode, channel, ignoreUnder30) {
+  function openTargetPreview(mode, channel, ignoreUnder30, includeAllLinks = false) {
     if (activeTargetPreview?.sending) return;
     activeTargetPreview?.close();
     const session = {
       id: globalThis.crypto?.randomUUID?.() || `selection-${Date.now()}`,
       createdAt: new Date().toISOString(), mode, channel, ignoreUnder30,
-      candidates: collectSelectableTargets(mode), selected: new Set(), results: new Map(), stage: 'selection', sending: false
+      candidates: collectSelectableTargets(mode, includeAllLinks), selected: new Set(), results: new Map(), stage: 'selection', sending: false
     };
     const host = document.createElement('div');
     host.id = 'uvs-target-preview';
@@ -3589,7 +3630,7 @@ function primaryVideoEvidence(html, pageUrl) {
       .actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}.summary{font-weight:700}.hint,.status{font-size:11px;color:#cbd5e1;margin-top:5px}.list{display:flex;gap:4px;flex-wrap:wrap;max-height:85px;overflow:auto;margin-top:6px}.list button[aria-pressed=true]{background:#851e24}button:disabled{opacity:.5;cursor:default}
     </style><div class="boxes"></div><div class="bar" role="region" aria-label="Select video targets">
       <div class="summary"></div><div class="hint">Tap red boxes to check videos. Candidates are not yet verified.</div><div class="list"></div>
-      <div class="actions"><button data-do="all">Select all</button><button data-do="send">Send selected</button><button data-do="report">Send report only</button><button data-do="retry">Retry report</button><button data-do="close">Close</button></div>
+      <div class="actions"><button data-do="all">Select all</button><button data-do="links" ${mode === 'main' ? 'hidden' : ''}>${includeAllLinks ? 'Fewer links' : 'Show all links'}</button><button data-do="send">Send selected</button><button data-do="report">Send report only</button><button data-do="retry">Retry report</button><button data-do="close">Close</button></div>
       <div class="status" role="status" aria-live="polite"></div></div>`;
     document.body.appendChild(host);
     const boxRoot = shadow.querySelector('.boxes'), list = shadow.querySelector('.list');
@@ -3602,7 +3643,8 @@ function primaryVideoEvidence(html, pageUrl) {
         const selected = session.selected.has(candidate.previewId);
         for (const button of controls.get(candidate.previewId) || []) {
           button.setAttribute('aria-pressed', String(selected));
-          button.querySelector('span').textContent = `${selected ? '✓ ' : ''}${candidate.previewId} ${candidate.kind}${candidate.status ? ' · ' + candidate.status : ''}`;
+          const label = {player:'Player',embed:'Embedded player',direct:'Direct video',link:'Video link'}[candidate.kind];
+          button.querySelector('span').textContent = `${selected ? '✓ ' : ''}${candidate.previewId} ${label}${candidate.status ? ' · ' + candidate.status : ''}`;
           button.disabled = session.sending;
         }
       }
@@ -3658,6 +3700,15 @@ function primaryVideoEvidence(html, pageUrl) {
       session.selected = session.selected.size === session.candidates.length ? new Set() : new Set(session.candidates.map(item => item.previewId)); update();
     };
     shadow.querySelector('[data-do=close]').onclick = () => { if (!session.sending) session.close(); };
+    shadow.querySelector('[data-do=links]').onclick = () => {
+      if (session.sending) return;
+      const selectedKeys = new Set(session.candidates.filter(item => session.selected.has(item.previewId)).map(item => `${item.url}\n${item.logicalVideoId || ''}`));
+      const replacement = openTargetPreview(mode, channel, ignoreUnder30, !includeAllLinks);
+      for (const item of replacement.candidates) {
+        if (selectedKeys.has(`${item.url}\n${item.logicalVideoId || ''}`)) replacement.selected.add(item.previewId);
+      }
+      replacement.update();
+    };
     shadow.querySelector('[data-do=report]').onclick = () => { if (!session.sending) void report(); };
     shadow.querySelector('[data-do=retry]').onclick = async () => {
       if (session.sending) return;
@@ -3687,6 +3738,7 @@ function primaryVideoEvidence(html, pageUrl) {
       for (const button of shadow.querySelectorAll('.actions button')) button.disabled = false;
       update();
     };
+    session.update = update;
     activeTargetPreview = session; update(); position();
     return session;
   }
@@ -4571,7 +4623,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.18.0 loaded on', location.href);
+  log('Universal Video Scraper v7.18.1 loaded on', location.href);
 
   if (getStoredBool(AUTO_SCRAPE_KEY, false)) {
     setTimeout(() => doScrape(false), 800);
