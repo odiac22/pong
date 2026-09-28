@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.30.0
+// @version      7.31.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -3681,7 +3681,6 @@ function primaryVideoEvidence(html, pageUrl) {
       catch (error) { if (attempt || ['helper_update','server_rejected'].includes(error.code)) throw error; }
     }
     trace.jobId = id;
-    selection?.onAccepted?.();
     const updateJob = job => {
       if (!job || job.id !== id || !Array.isArray(job.targets)) throw new Error('PC job response did not match this send');
       for (const item of job.targets) {
@@ -3700,6 +3699,11 @@ function primaryVideoEvidence(html, pageUrl) {
       return !['queued','running'].includes(job.state);
     };
     let finished = updateJob(response.job), pollFailures = 0;
+    // Validate the receipt before promising browser-independent work. This is
+    // acceptance of links, not a claim that the media is already playable.
+    trace.acceptedMs = Math.round(performance.now() - trace.startedAt);
+    trace.channel = payload.channel;
+    selection?.onAccepted?.({ channel: payload.channel, total: targets.length, jobId: id });
     const deadline = performance.now() + 120000;
     while (!finished && performance.now() < deadline) {
       await sleep(1200);
@@ -4132,7 +4136,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 5, version: '7.30.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 6, version: '7.31.0', id: session.id, createdAt: session.createdAt,
       deliveryMode: 'desktop_owned',
       vpn: vpnSafeStatus(session.vpn || {}),
       phoneConnectionOnly: session.phoneConnectionOnly === true,
@@ -4152,6 +4156,8 @@ function primaryVideoEvidence(html, pageUrl) {
       },
       capture: {
         jobId: /^[a-f0-9-]{36}$/i.test(session.captureTrace?.jobId || '') ? session.captureTrace.jobId : null,
+        acceptedMs: diagnosticNumber(session.captureTrace?.acceptedMs),
+        destinationChannel: diagnosticNumber(session.captureTrace?.channel, 2),
         elapsedMs: diagnosticNumber(session.captureTrace ? session.captureTrace.elapsedMs ?? Math.round(performance.now() - session.captureTrace.startedAt) : null),
         failure: session.captureFailure ? diagnosticFailure(session.captureFailure) : 'none',
         requests: (session.captureTrace?.requests || []).map(requestDiagnosticOutput)
@@ -4468,11 +4474,11 @@ function primaryVideoEvidence(html, pageUrl) {
           onVpnStatus: showVpn,
           phoneConnectionOnly: session.phoneConnectionOnly,
           onCaptureDiagnostics: trace => { session.captureTrace = trace; },
-          onAccepted: () => { status.textContent = 'PC accepted the links. You can close Firefox; the PC continues preparing videos.'; },
+          onAccepted: receipt => { status.textContent = `PC accepted ${receipt.total} links for Recall ${receipt.channel}. You can close Firefox now. Open that Recall to see PC progress; accepted does not mean ready yet.`; },
           onStatus: (target, text) => { target.status = text; update(); },
           onResult: (target, result) => { session.results.set(target.previewId, result); update(); }
         });
-        status.textContent = receipt.pending ? 'PC accepted the links; processing continues on desktop. Open Recall in Pong. Firefox is not needed.'
+        status.textContent = receipt.pending ? `PC is still preparing videos for Recall ${channel}. Firefox is not needed; open that Recall for progress and failures.`
           : `${receipt.videos}/${targets.length} ready in Recall ${channel}. Served by PC; Firefox can close.`;
         session.stage = receipt.pending ? 'processing' : 'complete';
       } catch (error) {
@@ -4731,7 +4737,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.30.0 loaded on', location.href);
+  log('Universal Video Scraper v7.31.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
