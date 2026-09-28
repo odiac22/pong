@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.9.7
-// @description  Universal authenticated video capture with Main/All delivery through Pong Recall 1 or Recall 2.
+// @version      7.34.0
+// @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
 // @downloadURL  https://odiac22.github.io/pong/universal-video-scraper.user.js
@@ -16,6 +16,9 @@
 // @grant        GM_addStyle
 // @grant        unsafeWindow
 // @connect      *
+// @connect      localhost
+// @connect      127.0.0.1
+// @connect      192.168.1.124
 // @run-at       document-idle
 // @license      MIT
 // ==/UserScript==
@@ -25,10 +28,10 @@
 
   /* CONFIG */
 
-  const VIDEO_EXT_RE = /\.(mp4|m4v|mov|webm|mkv|m3u8)(\?|#|$)/i;
+  const VIDEO_EXT_RE = /\.(mp4|m4v|mov|webm|mkv|m3u8|mpd|ogv)(\?|#|$)/i;
 
   const RAW_VIDEO_URL_RE =
-    /(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:mp4|m4v|mov|webm|mkv|m3u8)(?:\?[^\s"'<>\\]*)?/gi;
+    /(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:mp4|m4v|mov|webm|mkv|m3u8|mpd|ogv)(?:\?[^\s"'<>\\]*)?/gi;
 
   const EROME_ALBUM_RE =
     /^https?:\/\/(?:www\.)?erome\.com\/a\/[\w-]+\/?$/i;
@@ -45,6 +48,7 @@
   // Slower = less likely to fail or trigger rate limits.
   const POST_CONCURRENCY = 4;
   const FOLLOW_CONCURRENCY = 2;
+  const RECALL_CAPTURE_CONCURRENCY = 10;
 
   const MAX_FOLLOW_PAGES = 60;
   const MAX_FOLLOW_LINKS = 250;
@@ -58,6 +62,9 @@
   const PANEL_POS_KEY = 'uvs_panel_position_v1';
   const PANEL_COLLAPSED_KEY = 'uvs_panel_collapsed_v1';
   const RECALL_CHANNEL_KEY = 'uvs_recall_channel_v1';
+  const LAUNCHER_POS_KEY = 'uvs_launcher_position_v1';
+  const VPN_PAIR_KEY = 'uvs_vpn_pair_v1';
+  const VPN_USER_ACTION = Symbol('trusted VPN action');
   const RECALL_MIN_30_KEY = 'uvs_recall_min_30_v1';
   const PONG_ENDPOINTS = Array.isArray(globalThis.PONG_LOCAL_ENDPOINTS)
     ? globalThis.PONG_LOCAL_ENDPOINTS
@@ -71,8 +78,61 @@
   let lastResult = null;
   let busy = false;
   let panelStatusEl = null;
+  let activeTargetPreview = null;
+  const DETECTION_FEEDBACK_KEY = 'uvs_detection_feedback_pending_v1';
   let browserMediaRelayGeneration = 0;
+  const browserMediaRelayRuns = new Map();
   const browserMediaRelayPreferredCandidates = new Map();
+
+  // BEGIN SHARED PRIMARY VIDEO POLICY
+function primaryVideoEvidence(html, pageUrl) {
+  const source=String(html||'');
+  const canonical=value=>{try{const u=new URL(typeof value==='object'?value?.['@id']||value?.url:value,pageUrl);u.hash='';return u.href.replace(/\/$/,'');}catch{return '';}};
+  const page=canonical(pageUrl),objects=[];
+  const walk=(v,depth=0)=>{
+    if(!v||typeof v!=='object'||depth>12)return;
+    if([v['@type']].flat().some(t=>/(?:^|\/)VideoObject$/.test(String(t))))objects.push(v);
+    for(const [k,item]of Object.entries(v))if(k==='@graph'||k==='mainEntity'||Array.isArray(v))walk(item,depth+1);
+  };
+  for(const m of source.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)){
+    if(!/\btype\s*=\s*["']application\/ld\+json["']/i.test(m[1]))continue;
+    try{walk(JSON.parse(m[2]));}catch{}
+  }
+  const matched=objects.filter(o=>[o.url,o['@id'],o.mainEntityOfPage,o.acquireLicensePage].some(v=>v&&canonical(v)===page));
+  const chosen=matched.length===1?matched[0]:objects.length===1?objects[0]:null;
+  if(!chosen)return null;
+  const content=typeof chosen.contentUrl==='string'?chosen.contentUrl:'';
+  let anchor;try{anchor=new URL(content,pageUrl);if(!/^https?:$/.test(anchor.protocol)||!content)return null;}catch{return null;}
+  const media=/\.(?:mp4|m4v|mov|webm|mkv|m3u8|ogv)(?:[?#]|$)/i;
+  if(!media.test(anchor.href))return null;
+  // Alternate encodes may share the authoritative content's asset directory.
+  // Generic /video/ or /media/ buckets are NOT an identity proof.
+  const parent=anchor.pathname.slice(0,anchor.pathname.lastIndexOf('/')+1);
+  const parts=parent.split('/').filter(Boolean);
+  const safeDirectory=parts.length>=2&&!/^(?:videos?|media|files?|assets?|uploads?|download|mp4|hd|sd|(?:19|20)\d{2})$/i.test(parts.at(-1)||'');
+  const decoded=source.replace(/\\u002f/gi,'/').replace(/\\u0026/gi,'&').replace(/\\\//g,'/').replace(/&amp;/gi,'&');
+  const urls=[anchor.href];
+  if(safeDirectory){
+    for(const m of decoded.matchAll(/https?:\/\/[^\s"'<>\\]+?\.(?:mp4|m4v|mov|webm|mkv|m3u8|ogv)(?:\?[^\s"'<>\\]*)?/gi)){
+      try{const u=new URL(m[0]);if(u.origin===anchor.origin&&u.pathname.startsWith(parent)&&u.pathname.slice(parent.length).indexOf('/')<0&&!/(?:preview|trailer|thumb|watermark)/i.test(u.pathname)&&!urls.includes(u.href))urls.push(u.href);}catch{}
+    }
+  }
+  const score=value=>{
+    const pathname=new URL(value).pathname;
+    const dimensions=pathname.match(/(?:^|[_/-])(\d{3,4})[_x](\d{3,4})(?:[_./-]|$)/i);
+    if(dimensions)return Number(dimensions[1])*Number(dimensions[2]);
+    const height=Number(pathname.match(/(?:^|[_/-])(\d{3,4})p?(?:\.[a-z0-9]+$|[_/-])/i)?.[1]||0);
+    return height>=144&&height<=4320?height*height*16/9:0;
+  };
+  // Known rendition sizes rank above unknown progressive files; the declared
+  // content remains the tie-breaker. HLS masters are kept authoritative.
+  urls.sort((a,b)=>Number(/master\.m3u8/i.test(b))-Number(/master\.m3u8/i.test(a))||score(b)-score(a));
+  const rawDuration=String(chosen.duration||'');
+  const iso=rawDuration.match(/^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/i);
+  const durationSeconds=iso&&!Number(iso[1])&&!Number(iso[2])?Number(iso[3]||0)*86400+Number(iso[4]||0)*3600+Number(iso[5]||0)*60+Number(iso[6]||0):Number(rawDuration)||0;
+  return {videoUrls:urls.slice(0,12),title:String(chosen.name||'').trim(),durationSeconds,contentUrl:anchor.href,identityEvidence:'page-video-object'};
+}
+  // END SHARED PRIMARY VIDEO POLICY
 
   /* HELPERS */
 
@@ -426,41 +486,59 @@
 
   async function fetchText(url, attempt = 1, options = {}) {
     const timeout = Math.max(3000, Number(options.timeout || 30000));
+    const trace = diagnosticRequest(options.diagnostics, 'page_fetch', timeout);
+    trace.credentialsEnabled = true; trace.refererSupplied = !!options.headers?.Referer;
     const maxRetries = Math.max(1, Number(options.maxRetries || MAX_RETRIES));
+    let requestUrl = url;
+    if (options.cacheBust) {
+      try {
+        const freshUrl = new URL(url, location.href);
+        freshUrl.searchParams.set('_pong_relay', `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+        requestUrl = freshUrl.toString();
+      } catch (_) {}
+    }
     try {
       if (typeof GM_xmlhttpRequest !== 'undefined') {
         return await new Promise((resolve, reject) => {
           GM_xmlhttpRequest({
             method: 'GET',
-            url,
+            url: requestUrl,
             timeout,
             anonymous: false,
             withCredentials: true,
             headers: {
-              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              ...(options.cacheBust ? { 'Cache-Control': 'no-cache', Pragma: 'no-cache' } : {}),
+              ...(options.headers || {})
             },
             onload: res => {
+              trace.httpStatus = res.status; trace.contentType = diagnosticMime(responseHeaderValue(res.responseHeaders, 'content-type'));
+              trace.redirected = res.finalUrl ? res.finalUrl !== requestUrl : null;
+              finishDiagnosticRequest(trace, res.status >= 200 && res.status < 400 ? 'none' : 'http_error');
               if (res.status >= 200 && res.status < 400) {
                 resolve(res.responseText || '');
               } else {
                 reject(new Error(`HTTP ${res.status}`));
               }
             },
-            onerror: () => reject(new Error('Network error')),
-            ontimeout: () => reject(new Error('Request timed out'))
+            onerror: () => { finishDiagnosticRequest(trace, 'network_error'); reject(new Error('Network error')); },
+            ontimeout: () => { finishDiagnosticRequest(trace, 'timeout'); reject(new Error('Request timed out')); }
           });
         });
       }
 
-      const res = await fetch(url, {
+      const res = await fetch(requestUrl, {
         credentials: 'include',
         cache: 'no-store'
       });
 
+      trace.httpStatus = res.status; trace.contentType = diagnosticMime(res.headers.get('content-type')); trace.redirected = res.redirected;
+      finishDiagnosticRequest(trace, res.ok ? 'none' : 'http_error');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
       return await res.text();
     } catch (e) {
+      finishDiagnosticRequest(trace, 'request_error');
       if (attempt >= maxRetries) throw e;
 
       await sleep(400 * attempt);
@@ -721,6 +799,10 @@
   }
 
   function extractPageDurationSeconds(doc = document) {
+    const youtube = youtubePlayerData(doc, doc.__uvsUrl || location.href);
+    if (youtube) return Number(youtube.videoDetails?.lengthSeconds || 0);
+    const evidence = primaryVideoEvidence(String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || ''), doc.__uvsUrl || location.href);
+    if (evidence?.durationSeconds > 0) return evidence.durationSeconds;
     const add = value => {
       const seconds = Number(value || 0);
       return Number.isFinite(seconds) && seconds > 0 && seconds < 86400 ? seconds : 0;
@@ -758,6 +840,67 @@
     return 0;
   }
 
+  function scoreMediaQuality(value, label = '') {
+    const text = `${value || ''} ${label || ''}`;
+    if (/\b(?:4k|uhd|2160p?)\b/i.test(text)) return 2160;
+    if (/\b(?:full\s*hd|fhd|1080p?)\b/i.test(text)) return 1080;
+    if (/\b(?:hd|720p?)\b/i.test(text)) return 720;
+    const dimensions = text.match(/(?:^|[_/-])(\d{3,4})[_x](\d{3,4})(?:[_./-]|$)/i);
+    if (dimensions) return Math.max(Number(dimensions[1] || 0), Number(dimensions[2] || 0));
+    const height = Number(text.match(/(?:^|[^a-z0-9])(\d{3,4})p?(?:[^a-z0-9]|$)/i)?.[1] || 0);
+    return height >= 144 && height <= 4320 ? height : 0;
+  }
+
+  function decodeLiteralMediaValue(raw) {
+    return String(raw || '')
+      .replace(/\\\//g, '/')
+      .replace(/\\u0026/gi, '&')
+      .replace(/\\u003d/gi, '=')
+      .replace(/&amp;/gi, '&')
+      .trim();
+  }
+
+  function literalSourceRecordsFromText(text, baseUrl) {
+    const source = String(text || '');
+    const records = [];
+    const seen = new Set();
+    const addRecord = (rawValue, label = '', order = records.length, declaredMedia = false) => {
+      const value = absUrl(decodeLiteralMediaValue(rawValue), baseUrl);
+      if (!value || !/^https?:\/\//i.test(value)) return;
+      if (!declaredMedia && !VIDEO_EXT_RE.test(value)) return;
+      if (/(?:^|[/_-])(?:ad|ads|advert|advertising|poster|preview|promo|sprite|thumb|thumbnail|trailer|watermark)(?:[/_.-]|$)/i.test(new URL(value).pathname)) return;
+      const key = value;
+      if (seen.has(key)) return;
+      seen.add(key);
+      records.push({ value, height: scoreMediaQuality(value, label), label: String(label || ''), order });
+    };
+    const literalValue = /(?:^|,)\s*["']?(?:file|src|url|videoUrl|video_url|contentUrl|hls|dash|mp4)["']?\s*:\s*(["'])(.*?)\1/gi;
+    for (const arrays of source.matchAll(/["']?(?:sources|mediaDefinitions|media_definitions|files|qualities|renditions)["']?\s*:\s*\[([\s\S]*?)\]/gi)) {
+      for (const object of arrays[1].matchAll(/\{([^{}]*)\}/g)) {
+        const body = object[1];
+        let value = '';
+        literalValue.lastIndex = 0;
+        const valueMatch = literalValue.exec(body);
+        if (valueMatch) value = valueMatch[2];
+        const label = [
+          body.match(/["']?(?:label|quality|res|resolution|height|format)["']?\s*:\s*(["']?)([^"',}]+)\1/i)?.[2],
+          body.match(/["']?type["']?\s*:\s*(["'])(.*?)\1/i)?.[2]
+        ].filter(Boolean).join(' ');
+        const declaredMedia = /(?:video\/|mpegurl|dash\+xml|mp4|webm|mov|hls|dash)/i.test(label) || VIDEO_EXT_RE.test(value);
+        addRecord(value, label, records.length, declaredMedia);
+      }
+    }
+    for (const match of source.matchAll(/\b(?:file|src|url|videoUrl|video_url|contentUrl|hls|dash|mp4)\b\s*:\s*(["'])(https?:\/\/.*?)\1/gi)) {
+      const windowText = source.slice(Math.max(0, match.index - 120), Math.min(source.length, match.index + match[0].length + 160));
+      if (/\b(?:advertising|adTag|poster|image|thumbnail|sprite|preview|trailer)\b/i.test(windowText)) continue;
+      const declaredMedia = VIDEO_EXT_RE.test(match[2]) || /\b(?:video\/|mpegurl|dash\+xml|mp4|webm|mov|m3u8|mpd)\b/i.test(windowText);
+      addRecord(match[2], windowText, records.length, declaredMedia);
+    }
+    return records
+      .sort((left, right) => right.height - left.height || left.order - right.order)
+      .filter((record, index, array) => array.findIndex(item => item.value === record.value) === index);
+  }
+
   function responseHeaderValue(rawHeaders, name) {
     const wanted = String(name || '').toLowerCase();
     for (const line of String(rawHeaders || '').split(/\r?\n/)) {
@@ -787,48 +930,102 @@
   async function fetchBrowserMediaRelayRange(job) {
     const preferred = browserMediaRelayPreferredCandidates.get(job.sourceId);
     const candidates = [...new Set([
-      preferred,
+      ...(job.pinCandidate ? [] : [preferred]),
       ...(Array.isArray(job.candidates) ? job.candidates : [])
     ].map(value => String(value || '').trim()).filter(value => /^https?:\/\//i.test(value)))];
     let lastError = 'No captured media candidate was available';
-    for (const candidate of candidates) {
-      try {
-        const response = await browserRelayRequest({
-          method: 'GET',
-          url: candidate,
-          headers: {
-            'Accept': 'video/*,application/octet-stream;q=0.9,*/*;q=0.5',
-            'Range': String(job.range || 'bytes=0-2097151'),
-            'Referer': String(job.pageUrl || location.href)
-          },
-          responseType: 'arraybuffer',
-          timeout: 12000,
-          anonymous: false
-        });
-        const body = response.response;
-        const byteLength = Number(body?.byteLength || 0);
-        const contentType = responseHeaderValue(response.responseHeaders, 'content-type');
-        if (![200, 206].includes(Number(response.status)) || !byteLength) {
-          throw new Error(`HTTP ${response.status || 0}`);
+    const tryCandidates = async values => {
+      for (const candidate of values) {
+        try {
+          const response = await browserRelayRequest({
+            method: 'GET',
+            url: candidate,
+            headers: {
+              'Accept': 'video/*,application/octet-stream;q=0.9,*/*;q=0.5',
+              'Range': String(job.range || 'bytes=0-2097151'),
+              'Referer': String(job.pageUrl || location.href),
+              ...(job.validator ? { 'If-Range': String(job.validator) } : {})
+            },
+            responseType: 'arraybuffer',
+            timeout: 12000,
+            anonymous: false
+          });
+          const body = response.response;
+          const byteLength = Number(body?.byteLength || 0);
+          const contentType = responseHeaderValue(response.responseHeaders, 'content-type');
+          if (![200, 206].includes(Number(response.status)) || !byteLength) {
+            throw new Error(`HTTP ${response.status || 0} from ${candidate}`);
+          }
+          if (/\b(?:text\/html|application\/json)\b/i.test(contentType)) {
+            throw new Error(`Unexpected ${contentType}`);
+          }
+          if (Number(response.status) === 200 && byteLength > 2 * 1024 * 1024 + 64 * 1024) {
+            throw new Error('The media host ignored the requested byte range');
+          }
+          browserMediaRelayPreferredCandidates.set(job.sourceId, candidate);
+          return {
+            status: Number(response.status),
+            body,
+            sourceUrl: candidate,
+            contentType: contentType || 'video/mp4',
+            contentRange: responseHeaderValue(response.responseHeaders, 'content-range'),
+            etag: responseHeaderValue(response.responseHeaders, 'etag'),
+            lastModified: responseHeaderValue(response.responseHeaders, 'last-modified'),
+            acceptRanges: responseHeaderValue(response.responseHeaders, 'accept-ranges') || 'bytes'
+          };
+        } catch (error) {
+          lastError = error?.message || String(error);
         }
-        if (/\b(?:text\/html|application\/json)\b/i.test(contentType)) {
-          throw new Error(`Unexpected ${contentType}`);
-        }
-        if (Number(response.status) === 200 && byteLength > 2 * 1024 * 1024 + 64 * 1024) {
-          throw new Error('The media host ignored the requested byte range');
-        }
-        browserMediaRelayPreferredCandidates.set(job.sourceId, candidate);
-        return {
-          status: Number(response.status),
-          body,
-          sourceUrl: candidate,
-          contentType: contentType || 'video/mp4',
-          contentRange: responseHeaderValue(response.responseHeaders, 'content-range'),
-          acceptRanges: responseHeaderValue(response.responseHeaders, 'accept-ranges') || 'bytes'
-        };
-      } catch (error) {
-        lastError = error?.message || String(error);
       }
+      return null;
+    };
+    // HQPorner's nested player URLs are intentionally short-lived. Trying all
+    // captured resolutions first adds several doomed round trips before the
+    // useful refresh, so go straight to the fresh-player path for this host.
+    const forceFreshPlayer = /(?:^|\.)hqporner\.com\b/i.test(String(job.pageUrl || ''));
+    const capturedResult = forceFreshPlayer && !job.pinCandidate ? null : await tryCandidates(job.pinCandidate ? candidates.slice(0, 1) : candidates);
+    if (capturedResult) return capturedResult;
+    // Never mix a refreshed/lower-quality rendition into an in-progress file.
+    if (job.pinCandidate) throw new Error('The selected file could not be transferred. Keep Firefox open and send again.');
+
+    // Some HQPorner CDN URLs are short-lived per-page grants: the 1 KiB proof
+    // succeeds, but the same path can become 404 before Android requests its
+    // first frame. Refresh that exact logical page inside the authenticated
+    // source browser and retry the requested range against newly minted URLs.
+    try {
+      const pageUrl = String(job.pageUrl || location.href);
+      // A normal HTTP/browser cache hit is harmful here. The nested HQPorner
+      // player intentionally mints a different short-lived CDN path on every
+      // fresh request, so force both the watch page and its player document to
+      // be fetched again for each relay recovery.
+      const pageDoc = await fetchDoc(pageUrl, {
+        timeout: 12000,
+        maxRetries: 2,
+        cacheBust: true,
+        headers: { Referer: pageUrl }
+      }) || (pageUrl === location.href ? document : null);
+      const refreshedEntries = pageDoc
+        ? await browserResolvedMediaEntries(
+            pageDoc,
+            pageUrl,
+            extractPageDurationSeconds(pageDoc),
+            0,
+            new Set(),
+            { cacheBust: true }
+          )
+        : [];
+      // Reloading an HQPorner page can refresh the browser-side grant/cookie
+      // while deliberately returning the *same* CDN URL. Do not discard that
+      // URL as a duplicate: it must be retried after the page refresh. Keep the
+      // page's freshly observed order first, then retry the captured fallbacks.
+      const refreshedCandidates = [...new Set([
+        ...refreshedEntries.flatMap(entry => [entry?.videoUrl, entry?.rawVideoUrl]),
+        ...candidates
+      ].map(value => String(value || '').trim()).filter(value => /^https?:\/\//i.test(value)))];
+      const refreshedResult = await tryCandidates(refreshedCandidates);
+      if (refreshedResult) return refreshedResult;
+    } catch (error) {
+      lastError = error?.message || String(error);
     }
     throw new Error(lastError);
   }
@@ -859,6 +1056,8 @@
         'X-Pong-Relay-Content-Range': relaySafeHeader(result.contentRange, 200),
         'X-Pong-Relay-Accept-Ranges': relaySafeHeader(result.acceptRanges, 40),
         'X-Pong-Relay-Source-Url': relaySafeHeader(result.sourceUrl),
+        'X-Pong-Relay-Etag': relaySafeHeader(result.etag, 300),
+        'X-Pong-Relay-Last-Modified': relaySafeHeader(result.lastModified, 100),
         'X-Pong-Relay-Error': relaySafeHeader(result.error, 500)
       },
       data: result.body,
@@ -869,11 +1068,13 @@
     }
   }
 
-  function startBrowserMediaRelay(rawEndpoint, clientId) {
+  function startBrowserMediaRelay(rawEndpoint, clientId, channel = 0) {
     const endpoint = String(rawEndpoint || '').replace(/\/+$/, '');
     const generation = ++browserMediaRelayGeneration;
+    const key = `${endpoint}|${channel}`;
+    browserMediaRelayRuns.set(key, generation);
     const worker = async () => {
-      while (generation === browserMediaRelayGeneration) {
+      while (generation === browserMediaRelayRuns.get(key)) {
         try {
           const response = await browserRelayRequest({
             method: 'GET',
@@ -884,62 +1085,157 @@
           if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`);
           const payload = JSON.parse(response.responseText || '{}');
           if (payload?.expired) {
-            browserMediaRelayGeneration++;
+            if (generation === browserMediaRelayRuns.get(key)) browserMediaRelayRuns.delete(key);
             if (location.pathname === '/browser-relay-keeper') setTimeout(() => window.close(), 100);
             return;
           }
           if (payload?.job) await completeBrowserMediaRelayJob(endpoint, payload.job);
         } catch (_) {
-          if (generation === browserMediaRelayGeneration) await sleep(500);
+          if (generation === browserMediaRelayRuns.get(key)) await sleep(500);
         }
       }
     };
-    for (let index = 0; index < 3; index++) worker();
+    // Two Recall channels can coexist without six idle long-polls occupying
+    // every browser connection slot needed for capture acknowledgements.
+    for (let index = 0; index < (channel ? 2 : 3); index++) worker();
   }
 
   function canonicalWatchPageUrl(rawUrl, baseUrl = location.href) {
     try {
-      const url = new URL(rawUrl, baseUrl);
+      // Firefox extension compartments do not reliably coerce a page-owned URL
+      // object when it crosses into the userscript world. Normalize explicitly.
+      const raw = typeof rawUrl === 'object' && rawUrl?.href ? rawUrl.href : String(rawUrl || '');
+      const base = typeof baseUrl === 'object' && baseUrl?.href ? baseUrl.href : String(baseUrl || location.href);
+      const url = new URL(raw, base);
       url.hash = '';
-      for (const key of [...url.searchParams.keys()]) {
+      if (/(^|\.)youtube\.com$/i.test(url.hostname) && url.pathname === '/watch' && url.searchParams.get('v')) {
+        const videoId = url.searchParams.get('v'); url.search = ''; url.searchParams.set('v', videoId);
+      }
+      const queryKeys = [];
+      url.searchParams.forEach((_value, key) => queryKeys.push(key));
+      for (const key of queryKeys) {
         if (/^(?:utm_.+|ref|src|source|track|click)$/i.test(key)) url.searchParams.delete(key);
       }
       return url.toString();
-    } catch (_) {
+    } catch (error) {
+      try { document.documentElement.dataset.uvsCanonicalError = error?.message || String(error); } catch (_) {}
       return '';
     }
   }
 
-  function collectLogicalWatchPageUrls(doc = document, rawUrl = location.href, limit = 80) {
+  function parseDurationHintSeconds(rawText) {
+    const text = String(rawText || '').replace(/\s+/g, ' ').trim();
+    if (!text) return 0;
+    const words = text.match(/(?:(\d{1,2})\s*h(?:ours?)?\s*)?(?:(\d{1,3})\s*m(?:in(?:ute)?s?)?\.?\s*)?(\d{1,2})\s*s(?:ec(?:ond)?s?)?\.?/i);
+    if (words && (words[1] || words[2])) {
+      const seconds = Number(words[1] || 0) * 3600 + Number(words[2] || 0) * 60 + Number(words[3] || 0);
+      if (seconds > 0 && seconds < 86400) return seconds;
+    }
+    const clock = text.match(/(?:^|\s)(?:(\d{1,2}):)?(\d{1,3}):(\d{2})(?:\s|$)/);
+    if (clock) {
+      const seconds = Number(clock[1] || 0) * 3600 + Number(clock[2] || 0) * 60 + Number(clock[3] || 0);
+      if (Number(clock[3]) < 60 && seconds > 0 && seconds < 86400) return seconds;
+    }
+    return 0;
+  }
+
+  function logicalPageDurationHint(anchor) {
+    if (!anchor) return 0;
+    const candidates = [
+      anchor.textContent,
+      anchor.closest('article,li,[class*="video-card" i],[class*="thumb" i]')?.textContent
+    ];
+    // HQPorner's search grid has no card wrapper: the thumbnail, title and
+    // duration are three adjacent divs. The slideshow control does carry the
+    // thumbnail's numeric id, so bind its duration to that exact watch link.
+    // This prevents the ten-image preview from being treated as the movie.
+    try {
+      const page = new URL(anchor.getAttribute?.('href') || anchor.href || '', location.href);
+      if (/(?:^|\.)hqporner\.com$/i.test(page.hostname) && /^\/hdporn\/[^/?#]+/i.test(page.pathname)) {
+        const id = page.pathname.match(/^\/hdporn\/(\d+)-/i)?.[1] || anchor.querySelector?.('img[id^="slide"]')?.id.match(/\d+/)?.[0];
+        const control = id ? anchor.ownerDocument?.getElementById(`slideShowPlayBtn${id}`) : null;
+        if (control?.parentElement) candidates.push(control.parentElement.textContent);
+        let block = anchor.closest('.img-container') || anchor.parentElement;
+        for (let index = 0; block && index < 4; index++, block = block.nextElementSibling) {
+          candidates.push(block.textContent);
+        }
+      }
+    } catch (_) {}
+    // HQPorner puts the clock in the second sibling after the image link.
+    let sibling = anchor.parentElement;
+    for (let index = 0; sibling && index < 3; index++) {
+      sibling = sibling.nextElementSibling;
+      if (sibling) candidates.push(sibling.textContent);
+    }
+    return candidates.reduce((best, value) => Math.max(best, parseDurationHintSeconds(value)), 0);
+  }
+
+  function isLogicalVideoPageUrl(rawUrl, baseUrl = location.href, anchor = null) {
+    try {
+      const url = new URL(rawUrl, baseUrl);
+      const host = url.hostname.replace(/^www\./i, '').toLowerCase();
+      const path = url.pathname + url.search;
+      if (!['http:', 'https:'].includes(url.protocol)) return false;
+      if (/(^|\.)youtube\.com$/i.test(url.hostname) || /(^|\.)youtu\.be$/i.test(url.hostname)) return !!youtubeVideoId(url.href);
+      if (host === 'pornhub.com') return /\/view_video\.php\?[^#]*\bviewkey=[^&#]+/i.test(path);
+      if (host.endsWith('hqporner.com')) return /^\/hdporn\/[^/?#]+/i.test(url.pathname);
+      if (host.endsWith('suj.mobi')) return /\/(?:[a-z]{2}\/)?scene\/[^/?#]+/i.test(url.pathname);
+      if (host === 'porneec.com') {
+        if (anchor?.closest?.('article.thumb-block,article.video-preview-item')) return true;
+        const reserved = /^(?:channels?|actors?|disclaimer|privacy-policy|dmca|2257-statement|page|c|category|tag|wp-|feed)(?:\/|$)/i;
+        const slug = url.pathname.replace(/^\/+|\/+$/g, '');
+        return !!slug && !slug.includes('/') && !reserved.test(slug);
+      }
+      if (/\/(?:free-stock-video|free-video|premium-video)\/[^/?#]*[-_]\d+\/?$/i.test(url.pathname)) return true;
+      if (/\/[^/]+\/\d+-[^/]+\/?$/.test(url.pathname)) return true;
+      if (/\/wiki\/File:[^/]+\.(?:webm|mp4|ogv)$/i.test(url.pathname)) return true;
+      if (/^(?:www\.)?vimeo\.com$/.test(url.hostname) && /^\/\d+$/.test(url.pathname)) return true;
+      if (/(?:^|\.)youtube\.com$/.test(url.hostname) && url.pathname === '/watch' && url.searchParams.get('v')) return true;
+      return /\/(?:watch|videos?|scene|post|talks|details)\/(?!search(?:[/?#]|$)|category(?:[/?#]|$)|tags?(?:[/?#]|$))[^/?#]+/i.test(url.pathname);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function collectLogicalWatchPageTargets(doc = document, rawUrl = location.href, limit = 80) {
     const currentUrl = canonicalWatchPageUrl(rawUrl, rawUrl);
     const current = new URL(currentUrl || rawUrl, rawUrl);
     const isPornhubWatch = /(^|\.)pornhub\.com$/i.test(current.hostname) &&
       /\/view_video\.php\?[^#]*\bviewkey=/i.test(current.pathname + current.search);
-    const watchPath = url => (
-      /\/view_video\.php\?[^#]*\bviewkey=[^&#]+/i.test(url.pathname + url.search) ||
-      /\/(?:watch|videos?|scene|post)\/(?!search(?:[/?#]|$)|category(?:[/?#]|$)|tags?(?:[/?#]|$))[^/?#]+/i.test(url.pathname)
-    );
-    const collect = selector => {
+    let collectError = '';
+    let collectStats = {};
+    const collect = (selector, prevalidated = false) => {
       const found = [];
-      const seen = new Set();
+      const seen = new Map();
+      const stats = { matched: 0, foreign: 0, invalid: 0, empty: 0, same: 0, added: 0 };
       for (const anchor of doc.querySelectorAll(selector)) {
+        stats.matched++;
         try {
           const url = new URL(anchor.getAttribute('href') || anchor.href, current);
-          if (!['http:', 'https:'].includes(url.protocol)) continue;
-          if (url.hostname.toLowerCase() !== current.hostname.toLowerCase() || !watchPath(url)) continue;
+          if (url.hostname.toLowerCase() !== current.hostname.toLowerCase()) { stats.foreign++; continue; }
+          if (!prevalidated && !isLogicalVideoPageUrl(url, current, anchor)) { stats.invalid++; continue; }
           const normalized = canonicalWatchPageUrl(url, current);
-          if (!normalized || normalized === currentUrl || seen.has(normalized)) continue;
-          seen.add(normalized);
-          found.push(normalized);
-        } catch (_) {}
+          if (!normalized) { stats.empty++; continue; }
+          if (normalized === currentUrl) { stats.same++; continue; }
+          const durationSeconds = logicalPageDurationHint(anchor);
+          if (seen.has(normalized)) {
+            const existing = found[seen.get(normalized)];
+            existing.durationSeconds = Math.max(existing.durationSeconds, durationSeconds);
+            continue;
+          }
+          seen.set(normalized, found.length);
+          found.push({ url: normalized, durationSeconds });
+          stats.added++;
+        } catch (error) {
+          collectError = error?.message || String(error);
+        }
       }
+      collectStats = stats;
       return found;
     };
 
     let related = [];
     if (isPornhubWatch) {
-      // Pornhub places two anchors in every card and retains additional hidden
-      // carousels. Pick one URL per card from the primary related-video group.
       const selectors = [
         '#relatedVideosCenter li.pcVideoListItem a[href*="view_video.php?viewkey="]',
         '#relatedVideosVPage li.pcVideoListItem a[href*="view_video.php?viewkey="]',
@@ -947,41 +1243,93 @@
         'li.pcVideoListItem a[href*="view_video.php?viewkey="]'
       ];
       for (const selector of selectors) {
-        const candidates = collect(selector);
+        const candidates = collect(selector, true);
         if (candidates.length >= 2) {
           related = candidates;
           break;
         }
       }
-      // The watch page's primary recommendation rail contains sixteen cards.
-      // Never turn hidden rails, duplicate anchors or preview assets into extra
-      // Pong videos.
-      related = related.slice(0, 16);
+      // Main plus the first nineteen genuine recommendation cards is the
+      // twenty-video watch-page Recall contract. Hidden carousels stay out.
+      related = related.slice(0, 19);
     } else {
-      related = collect(
-        'li.videoBox a[href],li.pcVideoListItem a[href],article a[href],' +
-        '[data-video-vkey] a[href],[class*="video-card" i] a[href]'
-      );
+      const host = current.hostname.replace(/^www\./i, '').toLowerCase();
+      const selector = host.endsWith('hqporner.com')
+        ? 'a[href*="/hdporn/"]'
+        : host.endsWith('suj.mobi')
+          ? 'a[href*="/scene/"]'
+          : host === 'porneec.com'
+            ? 'article.thumb-block a[href],article.video-preview-item a[href]'
+            : host === 'pornhub.com'
+              ? 'li.pcVideoListItem a[href*="view_video.php?viewkey="],a.latestThumb[href*="view_video.php?viewkey="],[data-video-vkey] a[href]'
+              : 'li.videoBox a[href],li.pcVideoListItem a[href],article a[href],[data-video-vkey] a[href],[class*="video-card" i] a[href]';
+      related = collect(selector, host.endsWith('hqporner.com') || host.endsWith('suj.mobi'));
       if (!related.length) related = collect('a[href]');
+      try {
+        document.documentElement.dataset.uvsTargetDiagnostics = JSON.stringify({
+          host,
+          selector,
+          matched: doc.querySelectorAll(selector).length,
+          related: related.length,
+          collectError,
+          collectStats,
+          canonicalError: document.documentElement.dataset.uvsCanonicalError || ''
+        });
+      } catch (_) {}
     }
-    // A listing/profile page is only a container. Its inline autoplay/hover
-    // preview is not an extra logical video. A genuine watch page keeps its
-    // current movie as item one, followed by its related cards.
-    return [watchPath(current) ? currentUrl : '', ...related]
-      .filter(Boolean)
+    const groups = related.length ? [] : independentVideoGroupsFromDoc(doc, currentUrl);
+    const hasPlayer = primaryMediaEntriesFromDoc(doc, currentUrl).length > 0 || embeddedPlayerPageUrls(doc, currentUrl).length > 0;
+    const currentTarget = groups.length > 1
+      ? groups.map(group => ({ url: currentUrl, durationSeconds: group.durationSeconds, logicalVideoId: group.logicalVideoId }))
+      : isLogicalVideoPageUrl(current, current) || (!related.length && hasPlayer)
+        ? [{ url: currentUrl, durationSeconds: extractPageDurationSeconds(doc) }]
+        : [];
+    return [...currentTarget, ...related]
       .slice(0, Math.max(1, Number(limit || 80)));
   }
 
+  function collectLogicalWatchPageUrls(doc = document, rawUrl = location.href, limit = 80) {
+    return collectLogicalWatchPageTargets(doc, rawUrl, limit).map(target => target.url);
+  }
+
   function primaryMediaEntriesFromDoc(doc = document, pageUrl = location.href) {
+    const evidence = primaryVideoEvidence(String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || ''), pageUrl);
+    if (evidence) return enrichRenditionQuality(doc, pageUrl, evidence.videoUrls.map(videoUrl => ({
+      videoUrl, rawVideoUrl: videoUrl, postUrl: pageUrl, pageUrl,
+      title: evidence.title, durationSeconds: evidence.durationSeconds,
+      identityEvidence: evidence.identityEvidence
+    })));
     const durationSeconds = extractPageDurationSeconds(doc);
     const prioritized = [];
-    const add = rawValue => {
+    const add = (rawValue, declaredMedia = false) => {
       const value = absUrl(rawValue, pageUrl);
-      if (!value || value.startsWith('blob:') || !VIDEO_EXT_RE.test(value)) return;
+      if (!value || !/^https?:\/\//i.test(value) || (!declaredMedia && !VIDEO_EXT_RE.test(value))) return;
       if (/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname)) return;
       if (!prioritized.includes(value)) prioritized.push(value);
     };
     try {
+      // Playerjs/KVS pages often put every rendition in one labelled `file`
+      // string while the live <video> element points at the site's low default.
+      // Preserve those labels and put the highest declared rendition first;
+      // opaque filenames such as `_7.mp4` do not otherwise reveal that they
+      // are HD while `_3.mp4` is only 360p.
+      const rawHtml = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+      const labelledSources = [];
+      for (const match of rawHtml.matchAll(/\bfile\s*:\s*["']([^"']+)["']/gi)) {
+        for (const item of match[1].split(',')) {
+          const labelled = item.match(/^\s*\[([^\]]+)]\s*(https?:\/\/.+)\s*$/i);
+          if (!labelled) continue;
+          const label = labelled[1].trim().toLowerCase();
+          const height = scoreMediaQuality(labelled[2], label);
+          labelledSources.push({ value: labelled[2], height, order: labelledSources.length });
+        }
+      }
+      labelledSources
+        .sort((left, right) => right.height - left.height || left.order - right.order)
+        .forEach(source => add(source.value));
+      literalSourceRecordsFromText(rawHtml, pageUrl)
+        .forEach(source => add(source.value, true));
+
       const media = [...doc.querySelectorAll('video')]
         .map(element => ({
           element,
@@ -990,14 +1338,14 @@
         }))
         .sort((left, right) => Number(right.visible) - Number(left.visible) || right.area - left.area);
       for (const item of media.slice(0, 2)) {
-        add(item.element.currentSrc);
-        add(item.element.src);
-        item.element.querySelectorAll('source[src]').forEach(source => add(source.src || source.getAttribute('src')));
+        add(item.element.currentSrc, true);
+        add(item.element.getAttribute('src'), true);
+        item.element.querySelectorAll('source[src]').forEach(source => add(source.getAttribute('src'), true));
       }
       if (doc === document && typeof performance?.getEntriesByType === 'function') {
         performance.getEntriesByType('resource')
           .map(entry => String(entry?.name || ''))
-          .filter(value => /\.m3u8(?:[?#]|$)/i.test(value))
+          .filter(value => /\.(?:m3u8|mpd)(?:[?#]|$)/i.test(value))
           .reverse()
           .slice(0, 4)
           .forEach(add);
@@ -1006,11 +1354,30 @@
         'meta[property="og:video"],meta[property="og:video:url"],meta[property="og:video:secure_url"],meta[itemprop="contentUrl"]'
       ).forEach(meta => add(meta.getAttribute('content')));
 
-      const rawHtml = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
       const identity = rawHtml.match(/["']?video[_-]?id["']?\s*[:=]\s*["']?(\d{5,})/i)?.[1] || '';
       const scriptCandidates = [];
       for (const script of doc.querySelectorAll('script')) {
         const text = String(script.textContent || '');
+        // Read literal source records only; never evaluate a page's player code.
+        // Restrict this to sources arrays so advertising.file and poster URLs
+        // cannot masquerade as the main JW Player/video.js source.
+        for (const sources of text.matchAll(/["']?sources["']?\s*:\s*\[([^\]]*)\]/gi)) {
+          const literalSources = [];
+          for (const object of sources[1].matchAll(/\{([^{}]*)\}/g)) {
+            const raw = object[1].match(/(?:^|,)\s*["']?(?:file|src)["']?\s*:\s*(["'])(.*?)\1\s*(?=,|$)/i)?.[2];
+            if (!raw) continue;
+            const value = raw.replace(/\\\//g, '/').replace(/\\u0026/gi, '&').replace(/&amp;/gi, '&');
+            const label = object[1].match(/["']?(?:label|res|height)["']?\s*:\s*["']?(\d{3,4})/i)?.[1];
+            literalSources.push({ value, height: Number(label || 0) });
+          }
+          literalSources.sort((a, b) => b.height - a.height).forEach(item => add(item.value, true));
+          // Explicit resolution labels outrank a live player's low default.
+          for (const item of literalSources.filter(item => item.height > 0).reverse()) {
+            const value = absUrl(item.value, pageUrl), index = prioritized.indexOf(value);
+            if (index >= 0) { prioritized.splice(index, 1); prioritized.unshift(value); }
+          }
+        }
+        literalSourceRecordsFromText(text, pageUrl).forEach(source => add(source.value, true));
         if (!/(?:mediaDefinitions|flashvars|videoUrl|video_url|contentUrl)/i.test(text)) continue;
         extractVideoUrlsFromText(text, pageUrl).forEach(value => {
           const normalized = absUrl(value, pageUrl);
@@ -1032,22 +1399,270 @@
         .sort((left, right) => right.score - left.score || left.index - right.index);
       ranked.slice(0, 4).forEach(item => add(item.value));
     } catch (_) {}
-    return prioritized.slice(0, 6).map(videoUrl => ({
+    return enrichRenditionQuality(doc, pageUrl, prioritized.slice(0, 12).map(videoUrl => ({
       videoUrl,
       rawVideoUrl: videoUrl,
       postUrl: pageUrl,
       pageUrl,
       durationSeconds
+    })));
+  }
+
+  // Enrich only identity-admitted renditions. Page-wide quality labels must
+  // never import a recommendation/ad as an alternate encode of the main video.
+  function enrichRenditionQuality(doc, pageUrl, entries) {
+    const byUrl = new Map(entries.map(entry => [entry.videoUrl, { ...entry }]));
+    const html = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+    const label = (rawUrl, value) => {
+      const entry = byUrl.get(absUrl(decodeLiteralMediaValue(rawUrl), pageUrl));
+      const height = scoreMediaQuality('', value);
+      if (entry && height && !entry.height) Object.assign(entry, { height, qualityEvidence: 'player_label' });
+    };
+    for (const item of literalSourceRecordsFromText(html, pageUrl)) label(item.value, item.label);
+    for (const match of html.matchAll(/\bfile\s*:\s*["']([^"']+)["']/gi)) {
+      for (const item of match[1].split(',')) {
+        const pair = item.match(/^\s*\[([^\]]+)]\s*(https?:\/\/.+)\s*$/i);
+        if (pair) label(pair[2], pair[1]);
+      }
+    }
+    for (const video of doc.querySelectorAll('video')) {
+      if (video.closest?.('aside,[role="complementary"],[data-ad],.advertisement,.ad-container')) continue;
+      const sources = [...video.querySelectorAll('source[src]')];
+      const urls = [video.currentSrc, video.getAttribute('src'), ...sources.map(s => s.getAttribute('src'))]
+        .filter(Boolean).map(value => absUrl(value, pageUrl)).filter(value => /^https?:\/\//i.test(value));
+      const anchor = urls.map(url => byUrl.get(url)).find(Boolean);
+      if (!anchor) continue; // A shared duration alone is not identity evidence.
+      for (const url of urls) {
+        if (/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(url).pathname)) continue;
+        if (!byUrl.has(url)) byUrl.set(url, { ...anchor, videoUrl: url, rawVideoUrl: url,
+          width: null, height: null, browserCurrent: false, qualityEvidence: 'unknown' });
+      }
+      for (const source of sources) label(source.getAttribute('src'),
+        source.getAttribute('label') || source.getAttribute('res') || source.getAttribute('data-res') || source.getAttribute('size'));
+      const current = byUrl.get(absUrl(video.currentSrc || '', pageUrl));
+      if (current && video.videoWidth > 0 && video.videoHeight > 0) {
+        Object.assign(current, { width: video.videoWidth, height: video.videoHeight,
+          qualityEvidence: 'live_decoder', browserCurrent: true });
+      }
+    }
+    return [...byUrl.values()];
+  }
+
+  function independentVideoGroupsFromDoc(doc, pageUrl) {
+    if (primaryVideoEvidence(String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || ''), pageUrl)) return [];
+    const groups = [];
+    for (const [index, video] of [...doc.querySelectorAll('video')].entries()) {
+      if (video.closest('aside,[role="complementary"],[data-ad],.advertisement,.ad-container')) continue;
+      const isolated = doc.implementation.createHTMLDocument('');
+      const base = isolated.createElement('base'); base.href = pageUrl; isolated.head.appendChild(base);
+      isolated.body.appendChild(video.cloneNode(true));
+      isolated.__uvsUrl = pageUrl;
+      const durationSeconds = Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration : Number(video.getAttribute('data-duration') || 0);
+      const entries = primaryMediaEntriesFromDoc(isolated, pageUrl).map(entry => ({
+        ...entry, durationSeconds,
+        title: video.getAttribute('title') || video.getAttribute('aria-label') || ''
+      }));
+      if (entries.length) groups.push({ logicalVideoId: `inline-video-${index + 1}`, durationSeconds, entries });
+    }
+    return groups;
+  }
+
+  function embeddedPlayerPageUrls(doc, pageUrl, limit = 4) {
+    const values = [];
+    const add = rawValue => {
+      try {
+        const url = new URL(rawValue, pageUrl);
+        if (!['http:', 'https:'].includes(url.protocol)) return;
+        if (/(?:adtng|doubleclick|googlesyndication|trafficjunky|smartpop|splash\.php)/i.test(url.href)) return;
+        url.hash = '';
+        const normalized = url.toString();
+        if (normalized !== pageUrl && !values.includes(normalized)) values.push(normalized);
+      } catch (_) {}
+    };
+    try {
+      doc.querySelectorAll(
+        '#playerWrapper iframe[src],.video-container iframe[src],[class*="player" i] iframe[src],' +
+        'iframe[src*="/video/"],iframe[src*="/embed/"],iframe[src*="player"]'
+      ).forEach(frame => add(frame.getAttribute('src') || frame.src));
+      // Public players are often declared in metadata before an iframe exists.
+      // Use only explicitly declared player links, never arbitrary script URLs.
+      doc.querySelectorAll('meta[name="twitter:player"],meta[property="og:video"],meta[property="og:video:secure_url"],link[itemprop="embedUrl"]')
+        .forEach(element => {
+          const value = element.getAttribute('content') || element.getAttribute('href');
+          if (value && !VIDEO_EXT_RE.test(value)) add(value);
+        });
+      const rawHtml = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+      const patterns = [
+        /(?:nativeplayer|altplayer)\.php\?i=([^"'&\s<>]+)/gi,
+        /<iframe[^>]+src=["']([^"']*(?:\/video\/|\/embed\/|player)[^"']*)["']/gi
+      ];
+      for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.exec(rawHtml))) add(match[1]);
+      }
+    } catch (_) {}
+    // HQPorner watch pages contain several advertising iframes and a single
+    // real nested player. Keep only its /video/ document so a pre-roll or
+    // splash iframe can never become the Recall source.
+    try {
+      const host = new URL(pageUrl).hostname;
+      if (/(?:^|\.)hqporner\.com$/i.test(host)) {
+        const players = values.filter(value => {
+          try { return /\/video\/[^/?#]+\/?/i.test(new URL(value).pathname); }
+          catch (_) { return false; }
+        });
+        if (players.length) return players.slice(0, Math.max(1, Number(limit || 4)));
+      }
+    } catch (_) {}
+    return values.slice(0, Math.max(1, Number(limit || 4)));
+  }
+
+  function youtubeVideoId(rawUrl) {
+    try {
+      const url = new URL(rawUrl, location.href);
+      if (!/(^|\.)youtube\.com$/i.test(url.hostname) && url.hostname !== 'youtu.be') return '';
+      const id = url.hostname === 'youtu.be' ? url.pathname.slice(1) : url.searchParams.get('v') || url.pathname.match(/^\/(?:embed|shorts)\/([^/]+)/)?.[1];
+      return /^[\w-]{11}$/.test(id || '') ? id : '';
+    } catch (_) { return ''; }
+  }
+
+  function youtubePlayerData(doc, pageUrl) {
+    const id = youtubeVideoId(pageUrl);
+    if (!id) return null;
+    const matches = value => value?.videoDetails?.videoId === id;
+    if (doc === document) {
+      try {
+        const pageWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+        const live = pageWindow.document?.getElementById('movie_player')?.getPlayerResponse?.();
+        if (matches(live)) return live;
+        if (matches(pageWindow.ytInitialPlayerResponse)) return pageWindow.ytInitialPlayerResponse;
+      } catch (_) {}
+    }
+    const html = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+    for (const match of html.matchAll(/(?:ytInitialPlayerResponse\s*=|["']ytInitialPlayerResponse["']\s*\]\s*=)\s*\{/g)) {
+      const start = match.index + match[0].lastIndexOf('{');
+      let depth = 0, quoted = false, escaped = false;
+      for (let i = start; i < Math.min(html.length, start + 2000000); i++) {
+        const char = html[i];
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (char === '\\') escaped = true;
+          else if (char === '"') quoted = false;
+        } else if (char === '"') quoted = true;
+        else if (char === '{') depth++;
+        else if (char === '}' && --depth === 0) {
+          try { const value = JSON.parse(html.slice(start, i + 1)); if (matches(value)) return value; } catch (_) {}
+          break;
+        }
+      }
+    }
+    return null;
+  }
+
+  async function youtubeMediaEntries(doc, pageUrl, options = {}) {
+    const player = youtubePlayerData(doc, pageUrl);
+    const status = player?.playabilityStatus?.status;
+    if (status && status !== 'OK') throw Object.assign(new Error('YouTube requires access in the browser'), { code: 'youtube_access' });
+    const durationSeconds = Number(player?.videoDetails?.lengthSeconds || 0);
+    const entry = url => ({ videoUrl: url, postUrl: pageUrl, pageUrl, contextUrl: pageUrl,
+      durationSeconds, title: String(player?.videoDetails?.title || ''), identityEvidence: 'youtube-video-id' });
+    if (player?.streamingData?.hlsManifestUrl) return [entry(player.streamingData.hlsManifestUrl)];
+    // Public YouTube commonly exposes SABR rather than reusable URLs. Resolve
+    // its public HLS master on the Pong PC, preserving video AND audio tracks.
+    const receivers = PONG_ENDPOINTS.map(endpoint => { const url = new URL(endpoint); url.port = '8797'; return url.origin; });
+    let helperNeedsUpdate = false;
+    for (const receiver of receivers) {
+      if (options.signal?.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
+      const trace = diagnosticRequest(options.diagnostics, 'platform_resolve', 25000);
+      try {
+        const payload = await new Promise((resolve, reject) => {
+          let request, settled = false;
+          const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); options.signal?.removeEventListener('abort', abort); finishDiagnosticRequest(trace, error ? error.code || 'request_error' : 'none'); error ? reject(error) : resolve(value); };
+          const abort = () => { finish(Object.assign(new Error('Timed out'), { code: 'timeout' })); try { request?.abort(); } catch (_) {} };
+          const timer = setTimeout(abort, 26000);
+          options.signal?.addEventListener('abort', abort, { once: true });
+          try { request = GM_xmlhttpRequest({ method: 'POST', url: `${receiver}/media-page/youtube-resolve`,
+            headers: { 'Content-Type': 'application/json' }, data: JSON.stringify({ videoId: youtubeVideoId(pageUrl) }), timeout: 25000,
+            onload: response => { try {
+              trace.httpStatus = response.status;
+              if (response.status === 404) throw Object.assign(new Error('Pong capture helper needs restart'), { code: 'youtube_helper_update' });
+              const data = JSON.parse(response.responseText || '{}');
+              trace.parsedResponse = true; trace.helperVersion = data.helperVersion;
+              if (response.status !== 200 || data.videoId !== youtubeVideoId(pageUrl) || !data.videoUrl) throw new Error('No YouTube stream');
+              finish(null, data);
+            } catch (error) { finish(error); } },
+            onerror: () => finish(Object.assign(new Error('YouTube resolver unavailable'), { code: 'network_error' })), ontimeout: abort, onabort: abort
+          }); } catch (error) { finish(error); }
+        });
+        return [{ ...entry(payload.videoUrl), durationSeconds: Number(payload.durationSeconds || durationSeconds), height: diagnosticNumber(payload.height, 32768), qualityEvidence: 'resolver', title: payload.title || entry('').title }];
+      } catch (error) { if (options.signal?.aborted) throw error; if (error?.code === 'youtube_helper_update') helperNeedsUpdate = true; }
+    }
+    const formats = (player?.streamingData?.formats || []).filter(format => format.url && /^video\//.test(format.mimeType || '')).sort((a,b) => (b.height || 0) - (a.height || 0));
+    if (formats.length) return formats.map(format => ({ ...entry(format.url), width: format.width, height: format.height,
+      fps: format.fps, bitrate: format.bitrate, qualityEvidence: 'resolver' }));
+    throw Object.assign(new Error(helperNeedsUpdate ? 'Restart the updated Pong capture helper; Copy log for details' : 'YouTube stream unavailable; Copy log for details'), { code: helperNeedsUpdate ? 'youtube_helper_update' : 'youtube_stream' });
+  }
+
+  async function browserResolvedMediaEntries(doc, pageUrl, durationHint = 0, depth = 0, seen = new Set(), options = {}) {
+    if (options.signal?.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
+    if (youtubeVideoId(pageUrl)) return youtubeMediaEntries(doc, pageUrl, options);
+    const durationSeconds = Math.max(Number(durationHint || 0), extractPageDurationSeconds(doc));
+    const direct = primaryMediaEntriesFromDoc(doc, pageUrl).map(entry => ({
+      ...entry,
+      durationSeconds: Math.max(Number(entry.durationSeconds || 0), durationSeconds),
+      contextUrl: pageUrl
     }));
+    if (direct.length) return direct;
+    if (depth >= 2) {
+      return extractVideoUrls(doc, pageUrl)
+        .filter(value => !/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname))
+        .slice(0, 8)
+        .map(videoUrl => ({
+          videoUrl,
+          rawVideoUrl: videoUrl,
+          postUrl: pageUrl,
+          pageUrl,
+          contextUrl: pageUrl,
+          durationSeconds
+        }));
+    }
+    for (const playerUrl of embeddedPlayerPageUrls(doc, pageUrl)) {
+      if (options.signal?.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
+      if (seen.has(playerUrl)) continue;
+      seen.add(playerUrl);
+      const playerDoc = await fetchDoc(playerUrl, {
+        timeout: 12000,
+        maxRetries: Math.max(1, Number(options.maxRetries || 2)),
+        cacheBust: options.cacheBust === true,
+        diagnostics: options.diagnostics,
+        headers: { Referer: pageUrl }
+      });
+      if (!playerDoc) continue;
+      const broad = extractVideoUrls(playerDoc, playerUrl)
+        .filter(value => !/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname))
+        .slice(0, 8)
+        .map(videoUrl => ({
+          videoUrl,
+          rawVideoUrl: videoUrl,
+          postUrl: pageUrl,
+          pageUrl,
+          contextUrl: playerUrl,
+          durationSeconds
+        }));
+      if (broad.length) return broad;
+      const nested = await browserResolvedMediaEntries(playerDoc, playerUrl, durationSeconds, depth + 1, seen, options);
+      if (nested.length) return nested.map(entry => ({ ...entry, postUrl: pageUrl, pageUrl }));
+    }
+    return [];
   }
 
   function isLikelyWatchPage(rawUrl = location.href) {
     try {
       const url = new URL(rawUrl, location.href);
-      const path = url.pathname + url.search;
-      return /\/view_video\.php\?[^#]*\bviewkey=/i.test(path) ||
-        /\/(?:watch|videos?|scene|post)\/(?!search(?:[/?#]|$)|category(?:[/?#]|$)|tags?(?:[/?#]|$))[^/?#]+/i.test(url.pathname) ||
-        Boolean(document.querySelector('meta[property="og:type"][content*="video" i],meta[property="og:video"],video'));
+      return isLogicalVideoPageUrl(url, location.href) || Boolean(document.querySelector(
+        'meta[property="og:type"][content^="video" i],meta[property="og:video"],meta[itemprop="contentUrl"]'
+      ));
     } catch (_) {
       return false;
     }
@@ -2631,69 +3246,568 @@
     }
   }
 
-  async function sendCaptureToRecall(mode, channel, ignoreUnder30 = false) {
-    if (busy) throw new Error('A capture is already running');
-    const watchPage = isLikelyWatchPage();
-    const watchPageUrls = watchPage
-      ? (mode === 'main' ? [location.href] : collectLogicalWatchPageUrls(document, location.href, 80))
-      : [];
-    let entries = [];
-    if (watchPage) {
-      const tasks = watchPageUrls.map((pageUrl, index) => async () => {
-        const doc = pageUrl === canonicalWatchPageUrl(location.href)
-          ? document
-          : await fetchDoc(pageUrl, { timeout: 12000, maxRetries: 1 });
-        if (!doc) return [];
-        if (doc === document) {
-          doc.__uvsRawHtml = document.documentElement?.innerHTML || '';
-          doc.__uvsUrl = location.href;
-        }
-        return primaryMediaEntriesFromDoc(doc, pageUrl);
-      });
-      entries = (await pool(tasks, Math.min(12, tasks.length))).flat();
-    } else if (mode !== 'main') {
-      entries = await doScrape(false);
-    } else {
-      entries = primaryMediaEntriesFromDoc(document, location.href);
+  // Diagnostic output is an allowlist: never copy URLs, headers, response
+  // bodies, page text, cookie values, or exception messages into a shared log.
+  function diagnosticNumber(value, max = 86400000) {
+    return value !== null && value !== undefined && Number.isFinite(Number(value)) ? Math.min(max, Math.max(0, Number(value))) : null;
+  }
+
+  function diagnosticFailure(value) {
+    const aliases = { youtube_access: 'platform_access', youtube_stream: 'platform_stream', youtube_helper_update: 'helper_update' };
+    const code = aliases[value] || value;
+    return ['none','pending','timeout','aborted','network_error','request_error','http_error','server_rejected','invalid_response','not_accepted',
+      'platform_access','platform_stream','helper_update','extraction_error','no_media','duration_filter','media_unverified','page_fetch',
+      'non_media_response','invalid_url','delivery_failed','identity_unverified','superseded','vpn_required','desktop_timeout',
+      'no_video','source_unavailable','duration_unverified','vpn_unavailable','resolution_failed','quality_unverified'].includes(code) ? code : 'request_error';
+  }
+
+  function diagnosticMime(value) {
+    const type = String(value || '').split(';')[0].trim().toLowerCase();
+    if (type === 'unknown' || type === 'other') return type;
+    return ['video/mp4','video/webm','video/quicktime','video/ogg','video/x-matroska','application/vnd.apple.mpegurl','application/x-mpegurl',
+      'audio/mpegurl','audio/x-mpegurl','application/dash+xml','application/octet-stream','text/html','text/plain','application/json','application/xml'].includes(type) ? type : type ? 'other' : 'unknown';
+  }
+
+  function diagnosticStreamType(value) {
+    const url = String(value || '');
+    if (/\.m3u8(?:[?#]|$)|\/manifest\/hls|\/api\/manifest\/hls/i.test(url)) return 'hls';
+    if (/\.mpd(?:[?#]|$)|\/manifest\/dash/i.test(url)) return 'dash';
+    if (/\.mp4(?:[?#]|$)/i.test(url)) return 'mp4';
+    if (/\.webm(?:[?#]|$)/i.test(url)) return 'webm';
+    return /^blob:/i.test(url) ? 'blob' : 'unknown';
+  }
+
+  function diagnosticRequest(list, phase, timeoutMs) {
+    const record = { phase, timeoutMs, startedAt: performance.now(), state: 'pending', httpStatus: null, failure: 'pending' };
+    if (Array.isArray(list) && list.length < 40) list.push(record);
+    return record;
+  }
+
+  function finishDiagnosticRequest(record, failure = 'none') {
+    if (record.state !== 'pending') return;
+    record.elapsedMs = Math.round(performance.now() - record.startedAt);
+    record.state = failure === 'none' ? 'complete' : 'failed'; record.failure = diagnosticFailure(failure);
+  }
+
+  function requestDiagnosticOutput(record) {
+    return {
+      phase: ['start','append','complete','page_fetch','platform_resolve','media_probe','duration_probe','quality_probe','desktop_submit','desktop_status','desktop_capabilities'].includes(record.phase) ? record.phase : 'unknown',
+      state: ['pending','complete','failed'].includes(record.state) ? record.state : 'unknown',
+      elapsedMs: diagnosticNumber(record.state === 'pending' ? Math.round(performance.now() - record.startedAt) : record.elapsedMs),
+      timeoutMs: diagnosticNumber(record.timeoutMs), httpStatus: diagnosticNumber(record.httpStatus, 599), failure: diagnosticFailure(record.failure),
+      credentialsEnabled: typeof record.credentialsEnabled === 'boolean' ? record.credentialsEnabled : null,
+      refererSupplied: typeof record.refererSupplied === 'boolean' ? record.refererSupplied : null,
+      rangeRequested: record.rangeRequested === true, partialResponse: record.httpStatus === 206,
+      redirected: typeof record.redirected === 'boolean' ? record.redirected : null,
+      contentType: diagnosticMime(record.contentType), contentLength: diagnosticNumber(record.contentLength, 1e13),
+      responseBytes: diagnosticNumber(record.responseBytes, 1e13), loadedBytes: diagnosticNumber(record.loadedBytes, 1e13),
+      totalBytes: diagnosticNumber(record.totalBytes, 1e13),
+      headersOnly: record.headersOnly === true,
+      streamType: ['hls','dash','mp4','webm','blob','unknown'].includes(record.streamType) ? record.streamType : 'unknown',
+      serverAccepted: diagnosticNumber(record.serverAccepted, 500), serverVideoCount: diagnosticNumber(record.serverVideoCount, 10000),
+      parsedResponse: typeof record.parsedResponse === 'boolean' ? record.parsedResponse : null,
+      helperVersion: /^\d+\.\d+\.\d+$/.test(record.helperVersion || '') ? record.helperVersion : null,
+      mediaErrorCode: diagnosticNumber(record.mediaErrorCode, 4), mediaReadyState: diagnosticNumber(record.mediaReadyState, 4),
+      videoWidth: diagnosticNumber(record.videoWidth, 32768), videoHeight: diagnosticNumber(record.videoHeight, 32768), durationSeconds: diagnosticNumber(record.durationSeconds),
+      contentRange: record.contentRange ? { start: diagnosticNumber(record.contentRange.start, 1e13), end: diagnosticNumber(record.contentRange.end, 1e13), total: diagnosticNumber(record.contentRange.total, 1e13) } : null
+    };
+  }
+
+  function videoDiagnosticSnapshot(element) {
+    const video = element?.tagName === 'VIDEO' ? element : element?.querySelector?.('video');
+    if (!video) return null;
+    const ranges = value => {
+      const out = []; for (let i = 0; value && i < Math.min(value.length, 12); i++) out.push([diagnosticNumber(value.start(i)), diagnosticNumber(value.end(i))]); return out;
+    };
+    let quality; try { quality = video.getVideoPlaybackQuality?.(); } catch (_) {}
+    return { readyState: video.readyState, networkState: video.networkState, paused: video.paused, ended: video.ended,
+      seeking: video.seeking, muted: video.muted, autoplay: video.autoplay, loop: video.loop,
+      currentTime: diagnosticNumber(video.currentTime), durationSeconds: diagnosticNumber(video.duration),
+      playbackRate: diagnosticNumber(video.playbackRate, 100), videoWidth: video.videoWidth, videoHeight: video.videoHeight,
+      buffered: ranges(video.buffered), seekable: ranges(video.seekable), mediaErrorCode: video.error?.code || 0,
+      sourceKind: /^blob:/i.test(video.currentSrc) ? 'blob' : /^https?:/i.test(video.currentSrc) ? 'network' : video.currentSrc ? 'other' : 'none',
+      totalVideoFrames: diagnosticNumber(quality?.totalVideoFrames, 1e12), droppedVideoFrames: diagnosticNumber(quality?.droppedVideoFrames, 1e12),
+      decodedVideoFrames: diagnosticNumber(video.webkitDecodedFrameCount, 1e12), encryptedMediaAttached: !!video.mediaKeys };
+  }
+
+  function postRecallCapturePayload(endpoint, payload, timeout = 45000, diagnostics = null) {
+    const trace = diagnosticRequest(diagnostics, payload.capturePhase, timeout);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let request;
+      const finish = (error, data) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        finishDiagnosticRequest(trace, error ? (error.code || 'request_error') : 'none');
+        if (error) reject(error); else resolve(data);
+      };
+      // A manager permission dialog can pause GM's own network timeout.
+      const deadline = setTimeout(() => {
+        finish(Object.assign(new Error('Pong capture timed out. Check Tampermonkey permission to access the Pong server.'), { code: 'timeout' }));
+        try { request?.abort(); } catch (_) {}
+      }, timeout + 1000);
+      try { request = GM_xmlhttpRequest({
+        method: 'POST',
+        url: `${String(endpoint).replace(/\/+$/, '')}/media-page/recall`,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Pong-SimpCity-Controller': '1'
+        },
+        data: JSON.stringify(payload),
+        timeout,
+        onload: response => {
+          trace.httpStatus = response.status;
+          let data = {};
+          try { data = JSON.parse(response.responseText || '{}'); trace.parsedResponse = true; } catch (_) { trace.parsedResponse = false; }
+          trace.serverAccepted = data.accepted; trace.serverVideoCount = data.videos;
+          if (response.status >= 200 && response.status < 300 && data.ok !== false) finish(null, data);
+          else finish(Object.assign(new Error(data.error || `HTTP ${response.status}`), { code: data.ok === false ? 'server_rejected' : 'http_error' }));
+        },
+        onerror: response => finish(Object.assign(new Error(
+          `Pong server connection failed${response?.error ? `: ${response.error}` : ''}`
+        ), { code: 'network_error' })),
+        ontimeout: () => finish(Object.assign(new Error('Pong capture timed out'), { code: 'timeout' })),
+        onabort: () => finish(Object.assign(new Error('Pong capture aborted'), { code: 'aborted' }))
+      }); } catch (error) { finish(error); }
+    });
+  }
+
+  async function postRecallCapturePayloadWithRetry(endpoint, payload, timeout = 45000, attempts = 3, diagnostics = null) {
+    let lastError = null;
+    const maximumAttempts = Math.max(1, Number(attempts || 1));
+    for (let attempt = 1; attempt <= maximumAttempts; attempt++) {
+      try {
+        return await postRecallCapturePayload(endpoint, payload, timeout, diagnostics);
+      } catch (error) {
+        lastError = error;
+        if (attempt < maximumAttempts) await sleep(250 * attempt);
+      }
     }
-    const cleanEntries = (entries || []).map(entry => ({
-      videoUrl: String(entry?.videoUrl || ''),
-      rawVideoUrl: String(entry?.rawVideoUrl || ''),
-      postUrl: String(entry?.postUrl || location.href),
-      pageUrl: String(entry?.postUrl || location.href),
-      durationSeconds: Math.max(0, Number(entry?.durationSeconds || entry?.duration || 0))
-    })).filter(entry => entry.videoUrl || entry.rawVideoUrl || entry.postUrl);
-    const pageUrls = watchPage
-      ? watchPageUrls
-      : mode === 'main'
-        ? [location.href]
-        : [...new Set(cleanEntries.map(entry => entry.postUrl).filter(Boolean))];
-    if (!pageUrls.length) pageUrls.push(location.href);
-    const browserRelayClientId = /(?:^|\.)pornhub\.com$/i.test(location.hostname)
+    throw lastError || new Error('Pong capture failed');
+  }
+
+  function probeCapturedMediaUrl(rawUrl, pageUrl, diagnostics = null) {
+    const url = String(rawUrl || '').trim();
+    const trace = diagnosticRequest(diagnostics, 'media_probe', 8000);
+    Object.assign(trace, { credentialsEnabled: true, refererSupplied: !!pageUrl, rangeRequested: true, streamType: diagnosticStreamType(url) });
+    if (!/^https?:\/\//i.test(url)) { finishDiagnosticRequest(trace, 'invalid_url'); return Promise.resolve(false); }
+    return new Promise(resolve => {
+      let settled = false, request = null;
+      const finish = (value, failure = 'none') => {
+        if (settled) return; settled = true; clearTimeout(deadline);
+        finishDiagnosticRequest(trace, failure); resolve(value === true);
+      };
+      const deadline = setTimeout(() => { finish(false, 'timeout'); try { request?.abort?.(); } catch (_) {} }, 9000);
+      const recordResponse = response => {
+        trace.httpStatus = Number(response?.status || 0);
+        trace.contentType = diagnosticMime(responseHeaderValue(response?.responseHeaders, 'content-type'));
+        const length = responseHeaderValue(response?.responseHeaders, 'content-length');
+        trace.contentLength = length ? diagnosticNumber(length, 1e13) : null;
+        const range = responseHeaderValue(response?.responseHeaders, 'content-range').match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+        if (range) trace.contentRange = { start: Number(range[1]), end: Number(range[2]), total: range[3] === '*' ? null : Number(range[3]) };
+        trace.redirected = response?.finalUrl ? response.finalUrl !== url : null;
+        trace.responseBytes = response?.response?.byteLength ?? null;
+      };
+      const check = response => {
+        recordResponse(response);
+        if (![200,206].includes(trace.httpStatus)) { finish(false, 'http_error'); return; }
+        // Redaction must not change which valid media MIME types we accept.
+        const rawType = responseHeaderValue(response?.responseHeaders, 'content-type');
+        const accepted = !/(?:text\/html|application\/(?:json|xml))/i.test(rawType) &&
+          (/^video\//i.test(rawType) || /mpegurl|dash\+xml|octet-stream/i.test(rawType) || VIDEO_EXT_RE.test(url));
+        finish(accepted, accepted ? 'none' : 'non_media_response');
+      };
+      try { request = GM_xmlhttpRequest({
+        method: 'GET', url, anonymous: false, withCredentials: true, responseType: 'arraybuffer', timeout: 8000,
+        headers: { Accept: 'video/*,application/vnd.apple.mpegurl,application/x-mpegURL,application/octet-stream;q=0.8,*/*;q=0.2',
+          Referer: String(pageUrl || location.href), Range: 'bytes=0-1023' },
+        onreadystatechange: response => {
+          if (settled || Number(response?.readyState || 0) !== 2) return;
+          recordResponse(response);
+          if (trace.httpStatus === 200 && trace.contentLength > 131072) {
+            trace.headersOnly = true; check(response); try { request?.abort?.(); } catch (_) {}
+          }
+        },
+        onprogress: event => { if (!settled) { trace.loadedBytes = diagnosticNumber(event.loaded, 1e13); trace.totalBytes = event.lengthComputable ? diagnosticNumber(event.total, 1e13) : null; } },
+        onload: response => { if (!settled) check(response); },
+        onerror: () => finish(false, 'network_error'), ontimeout: () => finish(false, 'timeout'), onabort: () => finish(false, 'aborted')
+      }); } catch (_) { finish(false, 'request_error'); }
+    });
+  }
+
+  function probeCapturedMetadata(url, diagnostics = null, phase = 'quality_probe', signal = null) {
+    const trace = diagnosticRequest(diagnostics, phase, 3500);
+    // Unknown metadata is not proof that a video is missing. Ask the actual
+    // media decoder, without playing or enabling sound, with a strict deadline.
+    return new Promise(resolve => {
+      const video = document.createElement('video');
+      video.muted = true; video.defaultMuted = true; video.volume = 0;
+      video.preload = 'metadata';
+      let settled = false;
+      const done = (value, failure = 'none') => {
+        if (settled) return; settled = true; clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        Object.assign(trace, { durationSeconds: diagnosticNumber(value), mediaReadyState: video.readyState, mediaErrorCode: video.error?.code || 0, videoWidth: video.videoWidth, videoHeight: video.videoHeight });
+        const metadata = { durationSeconds: Number.isFinite(value) && value > 0 ? value : 0,
+          width: video.videoWidth || 0, height: video.videoHeight || 0, failure };
+        finishDiagnosticRequest(trace, failure);
+        video.onloadedmetadata = null; video.onerror = null;
+        video.removeAttribute('src'); try { video.load(); } catch (_) {}
+        resolve(metadata);
+      };
+      const timer = setTimeout(() => done(0, 'timeout'), 3500);
+      const abort = () => done(0, 'aborted');
+      if (signal?.aborted) { abort(); return; }
+      signal?.addEventListener('abort', abort, { once: true });
+      video.onloadedmetadata = () => done(video.duration);
+      video.onerror = () => done(0, 'media_unverified');
+      video.src = url;
+    });
+  }
+
+  async function probeCapturedDuration(url, diagnostics = null) {
+    return (await probeCapturedMetadata(url, diagnostics, 'duration_probe')).durationSeconds;
+  }
+
+  function renditionQualitySummary(entry) {
+    return { width: diagnosticNumber(entry?.width, 32768), height: diagnosticNumber(entry?.height, 32768),
+      fps: diagnosticNumber(entry?.fps, 1000), bitrate: diagnosticNumber(entry?.bitrate, 1e12),
+      evidence: ['live_decoder','metadata_decoder','player_label','resolver'].includes(entry?.qualityEvidence) ? entry.qualityEvidence : 'unknown' };
+  }
+
+  function compareRenditionQuality(a, b) {
+    // Leave adaptive manifest handling to Pong's existing highest-rendition
+    // policy. Never pretend a manifest URL is a measured progressive encode.
+    const adaptive = entry => /\.(?:m3u8|mpd)(?:[?#]|$)/i.test(entry.videoUrl);
+    const pixels = entry => adaptive(entry) && !entry.height ? Infinity :
+      Number(entry.width || 0) * Number(entry.height || 0) || Number(entry.height || 0) ** 2 * 16 / 9;
+    return pixels(b) - pixels(a) ||
+      Number(b.fps || 0) - Number(a.fps || 0) || Number(b.bitrate || 0) - Number(a.bitrate || 0) ||
+      Number(adaptive(b)) - Number(adaptive(a)) ||
+      Number(b.browserCurrent === true) - Number(a.browserCurrent === true);
+  }
+
+  async function firstVerifiedRecallEntry(entries, pageUrl, durationHint = 0, minimumDurationSeconds = 30, diagnostics = null, signal = null) {
+    let durationSeconds = Math.max(
+      0,
+      Number(durationHint || 0),
+      ...(entries || []).map(entry => Number(entry?.durationSeconds || entry?.duration || 0))
+    );
+    // Unknown duration is rejected too: otherwise an autoplay preview can
+    // masquerade as a full movie merely because its URL ends in .mp4.
+    if (!durationSeconds && entries?.[0]?.videoUrl) durationSeconds = await probeCapturedDuration(entries[0].videoUrl, diagnostics);
+    if (durationSeconds < Math.max(1, Number(minimumDurationSeconds || 0))) return null;
+    // URLs often have opaque names (_3.mp4, _7.mp4); a response-range check
+    // cannot measure quality. Read metadata, never play, and rank BEFORE send.
+    const renditions = (entries || []).map(entry => ({ ...entry }));
+    const pending = renditions.length > 1 ? renditions.filter(entry =>
+      !/\.(?:m3u8|mpd)(?:[?#]|$)/i.test(entry.videoUrl) && entry.qualityEvidence !== 'live_decoder') : [];
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(3, pending.length) }, async () => {
+      while (next < pending.length) {
+        if (signal?.aborted) return;
+        const entry = pending[next++];
+        const metadata = await probeCapturedMetadata(entry.videoUrl, diagnostics, 'quality_probe', signal);
+        if (metadata.durationSeconds && Math.abs(metadata.durationSeconds - durationSeconds) > Math.max(2, durationSeconds * 0.02)) {
+          entry.qualityRejected = true; continue; // Preview/wrong-duration asset.
+        }
+        if (metadata.width > 0 && metadata.height > 0) Object.assign(entry, {
+          width: metadata.width, height: metadata.height, qualityEvidence: 'metadata_decoder' });
+      }
+    }));
+    if (signal?.aborted) return null;
+    const ranked = renditions.filter(entry => !entry.qualityRejected).sort(compareRenditionQuality);
+    const verifiedUrls = [];
+    let verifiedContextUrl = '';
+    let selected = null, failedHigher = 0;
+    for (const entry of ranked) {
+      const mediaUrl = String(entry?.videoUrl || entry?.rawVideoUrl || '').trim();
+      const contextUrl = String(entry?.contextUrl || pageUrl || location.href);
+      if (!mediaUrl || !await probeCapturedMediaUrl(mediaUrl, contextUrl, diagnostics)) { failedHigher++; continue; }
+      if (!verifiedUrls.includes(mediaUrl)) verifiedUrls.push(mediaUrl);
+      if (!verifiedContextUrl) verifiedContextUrl = contextUrl;
+      selected = entry;
+      // Quality ordered: deliver the best verified source without waiting for
+      // lower-quality alternates or promoting unrelated recommendation clips.
+      break;
+    }
+    if (!verifiedUrls.length) return null;
+    const qualitySelection = {
+      policy: 'highest_known_accessible', selected: renditionQualitySummary(selected),
+      candidateCount: renditions.length, rejectedDurationCount: renditions.filter(entry => entry.qualityRejected).length,
+      unresolvedQualityCount: ranked.filter(entry => !entry.height).length,
+      unmeasuredQualityCount: ranked.filter(entry => !['live_decoder','metadata_decoder'].includes(entry.qualityEvidence)).length,
+      failedHigherRankedCount: failedHigher, fallback: failedHigher > 0,
+      adaptiveManifest: /\.(?:m3u8|mpd)(?:[?#]|$)/i.test(selected.videoUrl),
+      browser: renditionQualitySummary(renditions.find(entry => entry.browserCurrent)),
+      candidates: renditions.map(entry => ({ ...renditionQualitySummary(entry), selected: entry === selected, rejectedDuration: !!entry.qualityRejected }))
+    };
+    return {
+      width: selected.width || null, height: selected.height || null,
+      qualitySelection,
+      videoUrl: verifiedUrls[0],
+      rawVideoUrl: verifiedUrls[0],
+      videoUrls: verifiedUrls,
+      postUrl: String(pageUrl || entries?.[0]?.postUrl || location.href),
+      pageUrl: String(pageUrl || entries?.[0]?.postUrl || location.href),
+      contextUrl: verifiedContextUrl || String(pageUrl || location.href),
+      title: String(selected.title || entries?.[0]?.title || ''),
+      identityEvidence: String(selected.identityEvidence || entries?.[0]?.identityEvidence || ''),
+      durationSeconds
+    };
+  }
+
+  function requiresCaliforniaVpn(value) {
+    try { const host = new URL(value).hostname; return ['pornhub.com','phncdn.com'].some(d => host === d || host.endsWith('.' + d)); } catch (_) { return false; }
+  }
+
+  function vpnEndpoint() {
+    // Never send a pairing secret to a page-provided public endpoint.
+    return PONG_ENDPOINTS.map(value => { try {
+      const u = new URL(value), h = u.hostname;
+      const octets = h.split('.').map(Number);
+      const ipv4 = /^\d+\.\d+\.\d+\.\d+$/.test(h) && octets.every(n => n >= 0 && n <= 255);
+      const local = h === 'localhost' || h === '[::1]' || (ipv4 && (octets[0] === 127 || octets[0] === 10 || (octets[0] === 192 && octets[1] === 168) || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)));
+      return local && ['http:','https:'].includes(u.protocol) && !u.username && !u.password ? u.origin : '';
+    } catch (_) { return ''; } }).find(Boolean) || '';
+  }
+
+  function vpnPairings() {
+    // Credentials must NEVER fall back to website-readable localStorage.
+    try { const value = GM_getValue(VPN_PAIR_KEY, '{}'); const parsed = JSON.parse(value); return parsed && typeof parsed === 'object' ? parsed : {}; } catch (_) { return {}; }
+  }
+
+  function vpnSafeStatus(value = {}) {
+    const phases = ['unknown','checking','finding_servers','connecting','connected','disconnecting','disconnected','error'];
+    const safeCode = v => /^[a-z_]{1,48}$/.test(String(v || '')) ? v : null;
+    return {
+      phase: phases.includes(value.phase) ? value.phase : 'unknown', verified: value.verified === true,
+      protected: typeof value.protected === 'boolean' ? value.protected : null,
+      city: ['San Francisco','San Jose','Los Angeles'].includes(value.city) ? value.city : null,
+      helperVersion: /^\d+\.\d+(?:\.\d+)?$/.test(value.helperVersion || '') ? value.helperVersion : null,
+      attempt: Math.max(0, Math.min(3, Number(value.attempt) || 0)), maxAttempts: Math.max(0, Math.min(3, Number(value.maxAttempts) || 0)),
+      server: /^United States #\d+$/.test(value.server || '') ? value.server : null,
+      elapsedMs: Math.max(0, Number(value.elapsedMs) || 0), checkedAt: Number(value.checkedAt) || null,
+      busy: value.busy === true, error: safeCode(value.error),
+      events: (Array.isArray(value.events) ? value.events : []).slice(-16).map(e => ({ phase: phases.includes(e.phase) ? e.phase : 'unknown', elapsedMs: Math.max(0, Number(e.elapsedMs) || 0), attempt: Math.max(0, Math.min(3, Number(e.attempt) || 0)) }))
+    };
+  }
+
+  function vpnMessage(status) {
+    const errors = {
+      pairing_required: 'Copy pairing link, open it in your browser, copy the key, then tap Paste key & connect.',
+      helper_update: 'PC helper needs version 30.14 and a restart. The userscript update alone is not enough.',
+      pc_unreachable: 'PC helper unreachable. Keep PC awake, use the same Wi-Fi, and allow local-network access in NordVPN. A VPN switch may briefly interrupt the connection.',
+      nord_not_installed: 'NordVPN is not installed at its standard Windows location. Install it and sign in on the PC.',
+      launch_failed: 'Cannot launch NordVPN. Check the PC for login or Windows approval.',
+      catalog_unavailable: 'California server list unavailable. Check PC internet and try again.',
+      verification_unavailable: 'Cannot verify the PC VPN location. Source requests are blocked.',
+      connection_timeout: 'California connection not confirmed. NordVPN may need login or approval on the PC. No video was sent.',
+      disconnect_timeout: 'Disconnect not confirmed. Check NordVPN on the PC.',
+      local_network_required: 'VPN control needs a direct home-network connection to the PC.',
+      vpn_required: 'PC VPN is not verified in California. Connect California before sending.',
+      user_action_required: 'Tap Send or Connect California yourself to authorize PC VPN connection.',
+      vpn_unavailable: 'VPN control failed. Copy log and check NordVPN on the PC.'
+    };
+    if (status.error) return errors[status.error] || errors.vpn_unavailable;
+    if (status.busy) return `${status.phase.replaceAll('_',' ')} · ${Math.round(status.elapsedMs / 1000)}s${status.attempt ? ` · attempt ${status.attempt}/${status.maxAttempts}` : ''}${status.server ? ` · ${status.server}` : ''}`;
+    if (status.verified) return `PC protected · ${status.city}, California · helper ${status.helperVersion || '?'}${status.checkedAt ? ' · checked ' + new Date(status.checkedAt).toLocaleTimeString() : ''}`;
+    return status.phase === 'disconnected' ? 'PC VPN not connected in California. VPN-dependent videos may stop.' : 'PC VPN not checked. Phone VPN is separate.';
+  }
+
+  async function vpnRequest(action, endpoint = vpnEndpoint()) {
+    const fail = code => Object.assign(new Error(vpnMessage({error:code})), {code});
+    const key = vpnPairings()[endpoint];
+    if (!endpoint) throw fail('local_network_required');
+    if (!/^[a-f0-9]{64}$/.test(key || '')) throw fail('pairing_required');
+    let response;
+    try { response = await browserRelayRequest({method:action === 'status' ? 'GET' : 'POST',url:`${endpoint}/vpn/${action}`,headers:{'X-Pong-Vpn-Key':key},timeout:12000}); }
+    catch (_) { throw fail('pc_unreachable'); }
+    let body; try { body = JSON.parse(response.responseText || '{}'); } catch (_) { body = {}; }
+    if (response.status === 404) throw fail('helper_update');
+    if (response.status === 401) throw fail('pairing_required');
+    if (response.status < 200 || response.status >= 300) throw fail(/^[a-z_]+$/.test(body.error || '') ? body.error : 'vpn_unavailable');
+    return vpnSafeStatus(body.status);
+  }
+
+  async function runVpnAction(action, onStatus, endpoint = vpnEndpoint()) {
+    let state = await vpnRequest(action, endpoint); onStatus?.(state);
+    const deadline = Date.now() + 120000;
+    let networkRetries = 0;
+    while (state.busy && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      try { state = await vpnRequest('status', endpoint); networkRetries = 0; }
+      catch (error) {
+        if (error.code !== 'pc_unreachable' || ++networkRetries > 3) throw error;
+        onStatus?.({...state,error:'pc_unreachable',busy:true}); continue;
+      }
+      onStatus?.(state);
+    }
+    if (state.busy) state = {...state, error:action === 'disconnect' ? 'disconnect_timeout' : 'connection_timeout'};
+    if (state.error) { onStatus?.(state); throw Object.assign(new Error(vpnMessage(state)), {code:state.error}); }
+    if (action === 'connect' || action === 'verify') {
+      state = await vpnRequest('verify', endpoint); onStatus?.(state);
+      if (!state.verified || state.busy) throw Object.assign(new Error(vpnMessage({error:'vpn_required'})), {code:'vpn_required'});
+    }
+    return state;
+  }
+
+  async function sendCaptureToRecall(mode, channel, ignoreUnder30 = true, selection = null) {
+    if (busy) throw new Error('A capture is already running');
+    const targets = selection?.targets || collectSelectableTargets(mode === 'main' ? 'main' : 'all');
+    if (!targets.length) throw new Error('Select at least one video or video link');
+    const trace = { startedAt: performance.now(), requests: [], desktopOwned: true };
+    selection?.onCaptureDiagnostics?.(trace);
+    const request = async (endpoint, method, suffix = '', body = null) => {
+      const record = diagnosticRequest(trace.requests, method === 'POST' ? 'desktop_submit' : suffix ? 'desktop_status' : 'desktop_capabilities', 8000);
+      try {
+        const response = await browserRelayRequest({ method, url: endpoint + '/media-page/desktop-capture' + suffix,
+          headers: { 'Content-Type': 'application/json', 'X-Pong-SimpCity-Controller': '1' },
+          ...(body ? { data: JSON.stringify(body) } : {}), timeout: 8000 });
+        record.httpStatus = response.status;
+        let result; try { result = JSON.parse(response.responseText); } catch { throw Object.assign(new Error('PC returned an invalid response'), { code: 'invalid_response' }); }
+        record.parsedResponse = true;
+        if (response.status === 404) throw Object.assign(new Error('Restart the updated Pong PC helper (30.15 or newer). No phone fallback will be used.'), { code: 'helper_update' });
+        if (![200,202].includes(response.status) || !result.ok || result.desktopOwned !== true) {
+          throw Object.assign(new Error('PC could not accept this job. Check PC status and Copy log.'), { code: 'server_rejected' });
+        }
+        finishDiagnosticRequest(record); return result;
+      } catch (error) { finishDiagnosticRequest(record, error.code || 'network_error'); throw error; }
+    };
+    let requiredEndpoint = '';
+    if (requiresCaliforniaVpn(location.href) || targets.some(target => requiresCaliforniaVpn(target.url))) {
+      requiredEndpoint = vpnEndpoint();
+      // This returns the PC's queued-operation ACK, not its eventual connection
+      // result. The accepted desktop job owns the wait before source access.
+      if (selection?.vpnAuthorization === VPN_USER_ACTION) {
+        const vpn = await vpnRequest('connect', requiredEndpoint);
+        selection?.onVpnStatus?.(vpn);
+      }
+    }
+    // One batch POST is both delivery and health check. Never race POSTs to
+    // different PCs or spend serial timeouts probing before the actual send.
+    const endpoint = requiredEndpoint || String(PONG_ENDPOINTS[0] || '').replace(/\/+$/, '');
+    if (!endpoint) throw new Error('Pong PC address is not configured');
+    const id = globalThis.crypto?.randomUUID?.() || 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const n = crypto.getRandomValues(new Uint8Array(1))[0] & 15; return (c === 'x' ? n : (n & 3) | 8).toString(16);
+    });
+    const payload = { id, channel: Number(channel) === 2 ? 2 : 1, mode: mode === 'main' ? 'main' : 'all',
+      sourceUrl: targets[0].url, ignoreUnder30: ignoreUnder30 !== false,
+      // Only selected links and identity hints leave the phone. Never media,
+      // cookies, HTML, browser sessions, or relay-worker registrations.
+      targets: targets.map(target => ({ url: target.url,
+        ...(target.logicalVideoId ? { logicalVideoId: target.logicalVideoId } : {}),
+        durationSeconds: Math.max(0, Number(target.durationSeconds) || 0) })) };
+    const diagnostics = targets.map(target => {
+      const result = { startedAt: performance.now(), done: false, delivered: false, desktopOwned: true,
+        attempts: [], deliveryRequests: [], failure: 'pending' };
+      selection?.onResult?.(target, result); selection?.onStatus?.(target, 'Sending link'); return result;
+    });
+    let response;
+    // Retry only against the same PC and with the same id: an uncertain reply
+    // must not create a second job or replace Recall on a different PC.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { response = await request(endpoint, 'POST', '', payload); break; }
+      catch (error) { if (attempt || ['helper_update','server_rejected'].includes(error.code)) throw error; }
+    }
+    trace.jobId = id;
+    if (requiredEndpoint && response.backgroundNetworkPreparation !== true) {
+      throw Object.assign(new Error('Update/restart the PC helper before using background VPN handoff. Acceptance is not confirmed.'), {code:'helper_update'});
+    }
+    const updateJob = job => {
+      if (!job || job.id !== id || !Array.isArray(job.targets) || job.targets.length !== targets.length ||
+          new Set(job.targets.map(item=>item.index)).size !== targets.length ||
+          job.targets.some(item=>!Number.isInteger(item.index)||item.index<0||item.index>=targets.length)) {
+        throw new Error('PC did not acknowledge every selected link. Keep Firefox open and retry.');
+      }
+      for (const item of job.targets) {
+        const index = Number(item.index), target = targets[index], result = diagnostics[index];
+        if (!target || !result) continue;
+        result.desktopState = ['queued','resolving','verifying','ready','failed'].includes(item.state) ? item.state : 'queued';
+        result.done = ['ready','failed'].includes(item.state);
+        result.delivered = item.state === 'ready'; result.verified = result.delivered;
+        result.failure = result.delivered ? 'none' : result.done ? diagnosticFailure(item.error) : 'pending';
+        result.resolutionMs = diagnosticNumber(item.resolutionMs); result.verificationMs = diagnosticNumber(item.verificationMs);
+        result.width = diagnosticNumber(item.width, 32768); result.height = diagnosticNumber(item.height, 32768);
+        result.elapsedMs = Math.round(performance.now() - result.startedAt);
+        selection?.onResult?.(target, result);
+        selection?.onStatus?.(target, ({ queued: 'PC queued', resolving: 'PC resolving', verifying: 'PC verifying', ready: 'Ready in Pong', failed: 'PC failed · ' + result.failure })[result.desktopState]);
+      }
+      return !['queued','running'].includes(job.state);
+    };
+    let finished = updateJob(response.job), pollFailures = 0;
+    // Validate the receipt before promising browser-independent work. This is
+    // acceptance of links, not a claim that the media is already playable.
+    trace.acceptedMs = Math.round(performance.now() - trace.startedAt);
+    trace.channel = payload.channel;
+    selection?.onAccepted?.({ channel: payload.channel, total: targets.length, jobId: id, acceptedMs: trace.acceptedMs });
+    const deadline = performance.now() + 120000;
+    while (!finished && performance.now() < deadline) {
+      await sleep(1200);
+      try { response = await request(endpoint, 'GET', '?id=' + encodeURIComponent(id)); finished = updateJob(response.job); pollFailures = 0; }
+      catch { if (++pollFailures >= 3) break; }
+    }
+    trace.elapsedMs = Math.round(performance.now() - trace.startedAt);
+    if (!finished) return { desktopOwned: true, pending: true, videos: diagnostics.filter(r => r.delivered).length };
+    if (!diagnostics.some(result => result.delivered)) throw new Error('PC could not prepare the selected videos. Copy log shows the desktop failure; no phone relay was used.');
+    return { desktopOwned: true, videos: diagnostics.filter(r => r.delivered).length };
+  }
+
+  // Historical capture implementation retained for extraction regression tools;
+  // no panel or exported Send path calls it. Desktop captures never use it.
+  async function sendLegacyCaptureToRecall(mode, channel, _ignoreUnder30 = true, selection = null) {
+    if (busy) throw new Error('A capture is already running');
+    const captureTrace = { startedAt: performance.now(), requests: [] };
+    selection?.onCaptureDiagnostics?.(captureTrace);
+    const captureMode = mode === 'main' ? 'main' : 'all';
+    // A complete, authoritative VideoObject does not need the 600 ms lazy-load
+    // delay. Dynamic players and All listings still get their settling pass.
+    const declaredMain = captureMode === 'main' && document.readyState !== 'loading' &&
+      primaryVideoEvidence(document.documentElement?.innerHTML || '', location.href);
+    if (!declaredMain) await waitForPageSettled();
+    const ignoreUnder30 = _ignoreUnder30 !== false;
+    const minimumDurationSeconds = ignoreUnder30 ? 30 : 1;
+    const currentUrl = canonicalWatchPageUrl(location.href, location.href) || location.href;
+    const targets = selection?.targets || (captureMode === 'main'
+      ? [{ url: currentUrl, durationSeconds: extractPageDurationSeconds(document) }]
+      : collectLogicalWatchPageTargets(document, location.href, 80));
+    if (!targets.length) throw new Error('No logical video pages were found');
+    const captureId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const bundleId = globalThis.crypto?.randomUUID?.() || `bundle-${Date.now()}`;
+    const captureChannel = Number(channel) === 2 ? 2 : 1;
+    const phoneConnectionOnly = selection?.phoneConnectionOnly === true;
+    let requiredVpnEndpoint = '';
+    if (!phoneConnectionOnly && (requiresCaliforniaVpn(currentUrl) || targets.some(t => requiresCaliforniaVpn(t.url)))) {
+      requiredVpnEndpoint = vpnEndpoint();
+      // Custom DOM events cannot authorize launching a system VPN. They may
+      // proceed only if the paired PC is already verified.
+      try { await runVpnAction(selection?.vpnAuthorization === VPN_USER_ACTION ? 'connect' : 'verify', selection?.onVpnStatus, requiredVpnEndpoint); }
+      catch (error) { selection?.onVpnStatus?.({phase:'error',error:error.code || 'vpn_unavailable'}); throw error; }
+    }
+    if (phoneConnectionOnly && targets.some(target => youtubeVideoId(target.url))) {
+      throw new Error('Phone connection currently supports direct MP4/WebM files, not YouTube or playlists. Uncheck it to use normal routing.');
+    }
+    // Keep authenticated relay workers for sites whose media commonly depends
+    // on browser cookies. Public CDNs play faster through Pong's range proxy
+    // and should not spend Firefox's per-host sockets on idle relay polls.
+    const browserRelayClientId = (phoneConnectionOnly || /(?:^|\.)(?:pornhub\.com|hqporner\.com|erome\.com|simpcity\.[a-z]+)$/i.test(location.hostname))
       ? (globalThis.crypto?.randomUUID?.() || `relay-${Date.now()}-${Math.random().toString(16).slice(2)}`)
       : '';
-    const payload = {
-      id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      bundleId: globalThis.crypto?.randomUUID?.() || `bundle-${Date.now()}`,
-      channel: Number(channel) === 2 ? 2 : 1,
-      mode: mode === 'main' ? 'main' : 'all',
+    const basePayload = {
+      id: captureId,
+      captureId,
+      bundleId,
+      channel: captureChannel,
+      mode: captureMode,
       sourceUrl: location.href,
       title: cleanTitle(document.title || location.hostname),
-      pageUrls,
-      // A browser listing can expose several renditions/previews for each
-      // watch page. Send page identities, not every asset, so Recall resolves
-      // one logical primary video per watch page.
-      entries: cleanEntries.map(entry => ({
-        videoUrl: entry.videoUrl,
-        rawVideoUrl: entry.rawVideoUrl,
-        postUrl: entry.postUrl,
-        pageUrl: entry.pageUrl,
-        durationSeconds: entry.durationSeconds
-      })),
-      reportedDurationSeconds: extractPageDurationSeconds(document),
-      ignoreUnder30: ignoreUnder30 === true,
-      sourceIsWatchPage: watchPage,
+      ignoreUnder30,
+      sourceIsWatchPage: isLikelyWatchPage(),
       browserRelayClientId,
+      phoneConnectionOnly,
+      // Phone routing is streaming again; never start a full-file download.
+      phoneTransferBeforeReady: false,
       browserRelayBrowser: /firefox/i.test(navigator.userAgent)
         ? 'firefox'
         : /edg\//i.test(navigator.userAgent)
@@ -2701,704 +3815,863 @@
           : 'chrome'
     };
     const endpointErrors = [];
-    for (const endpoint of PONG_ENDPOINTS) {
+    let endpoint = '';
+    let started = null;
+    for (const candidate of PONG_ENDPOINTS) {
+      if (requiredVpnEndpoint && String(candidate).replace(/\/+$/, '') !== requiredVpnEndpoint) continue;
       try {
-        const result = await new Promise((resolve, reject) => {
-          GM_xmlhttpRequest({
-            method: 'POST',
-            url: `${String(endpoint).replace(/\/+$/, '')}/media-page/recall`,
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Pong-SimpCity-Controller': '1'
-            },
-            data: JSON.stringify(payload),
-            timeout: 180000,
-            onload: response => {
-              let data = {};
-              try { data = JSON.parse(response.responseText || '{}'); } catch (_) {}
-              if (response.status >= 200 && response.status < 300 && data.ok !== false) resolve(data);
-              else reject(new Error(data.error || `HTTP ${response.status}`));
-            },
-            onerror: () => reject(new Error('Pong server connection failed')),
-            ontimeout: () => reject(new Error('Pong capture timed out'))
-          });
-        });
-        if (result?.browserRelay?.enabled && browserRelayClientId) {
-          startBrowserMediaRelay(String(endpoint).replace(/\/+$/, ''), browserRelayClientId);
-          notify(`Recall ${payload.channel} ready: ${Number(result?.videos || 0)} playable video${Number(result?.videos || 0) === 1 ? '' : 's'}. Keep this source tab open while watching.`);
-        } else {
-          notify(`Recall ${payload.channel} ready: ${Number(result?.videos || 0)} video${Number(result?.videos || 0) === 1 ? '' : 's'}`);
+        if (phoneConnectionOnly) {
+          const preflight = await browserRelayRequest({ method: 'GET', url: `${String(candidate).replace(/\/+$/, '')}/media-browser-relay/capabilities`, headers: { 'X-Pong-SimpCity-Controller': '1' }, timeout: 5000 });
+          if (preflight.status !== 200 || JSON.parse(preflight.responseText || '{}').phoneConnectionFiles !== true) {
+            throw new Error('Restart the updated Pong server to enable phone connection. Recall was not changed.');
+          }
         }
-        return result;
+        started = await postRecallCapturePayload(candidate, {
+          ...basePayload,
+          capturePhase: 'start',
+          totalPages: targets.length,
+          pageUrls: [],
+          entries: []
+        }, 8000, captureTrace.requests);
+        endpoint = String(candidate).replace(/\/+$/, '');
+        break;
       } catch (error) {
         endpointErrors.push(error?.message || String(error));
       }
     }
-    const usefulError = endpointErrors.find(message => !/connection failed/i.test(message));
-    throw new Error(usefulError || endpointErrors.at(-1) || 'Pong PC server is unreachable');
+    if (!endpoint) {
+      const usefulError = endpointErrors.find(message => !/connection failed/i.test(message));
+      throw new Error(usefulError || endpointErrors.at(-1) || 'Pong PC server is unreachable');
+    }
+    if (phoneConnectionOnly && !started?.capabilities?.phoneConnectionFiles) {
+      await postRecallCapturePayload(endpoint, { ...basePayload, capturePhase: 'complete', completedPages: 0, pageUrls: [], entries: [] }, 8000);
+      throw new Error('Restart the updated Pong server before using the phone connection. Nothing was sent.');
+    }
+    if (targets.some(target => target.logicalVideoId) && !started?.capabilities?.independentVideoIdentity) {
+      await postRecallCapturePayload(endpoint, { ...basePayload, capturePhase: 'complete', completedPages: 0, pageUrls: [], entries: [] }, 8000);
+      throw new Error('This page has multiple videos. Restart the updated Pong 30.07 server to capture them separately.');
+    }
+
+    let completedPages = 0;
+    let deliveredVideos = Number(started?.videos || 0);
+    let verifiedSentThisRun = 0;
+    let relayStarted = false;
+    const phoneRouteErrors = [];
+    let appendChain = Promise.resolve();
+    const captureDiagnostics = [];
+    const publishCaptureDiagnostics = () => {
+      try { document.documentElement.dataset.uvsCaptureDiagnostics = JSON.stringify(captureDiagnostics); } catch (_) {}
+    };
+    const queueAppend = (target, entry, diagnostic) => {
+      if (phoneConnectionOnly && entry) {
+        // Do not replace a selected high-quality playlist with a lower MP4.
+        if (!/\.(?:mp4|webm|mov|m4v)(?:[?#]|$)/i.test(String(entry.videoUrl || ''))) {
+          throw new Error('Phone connection supports direct video files only; this source needs normal routing.');
+        }
+        entry = { ...entry, rawVideoUrl: entry.videoUrl, videoUrls: [entry.videoUrl] };
+      }
+      const completedAtQueue = ++completedPages;
+      const queuedAt = performance.now();
+      appendChain = appendChain.catch(error => {
+        endpointErrors.push(error?.message || String(error));
+        return null;
+      }).then(async () => {
+        diagnostic.queueWaitMs = Math.round(performance.now() - queuedAt);
+        const deliveryStart = performance.now();
+        try {
+        const result = await postRecallCapturePayloadWithRetry(endpoint, {
+          ...basePayload,
+          capturePhase: 'append',
+          completedPages: completedAtQueue,
+          pageUrls: [target.url],
+          entries: entry ? [entry] : []
+        }, 12000, 2, diagnostic.deliveryRequests);
+        if (entry && Number(result?.accepted || 0) < 1) throw Object.assign(new Error('Pong could not verify this video; Copy log for details'), { code: 'not_accepted' });
+        if (entry && phoneConnectionOnly && result?.browserRelay?.phoneConnectionOnly !== true) {
+          throw new Error('Pong did not confirm phone-only routing');
+        }
+        deliveredVideos = Math.max(deliveredVideos, Number(result?.videos || 0));
+        if (!relayStarted && result?.browserRelay?.enabled) {
+          relayStarted = true;
+          startBrowserMediaRelay(endpoint, browserRelayClientId, captureChannel);
+        }
+        if (entry) verifiedSentThisRun++;
+        setPanelStatus(`${verifiedSentThisRun}/${targets.length} sent · ${completedAtQueue}/${targets.length} checked`);
+        return result;
+        } finally { diagnostic.deliveryMs = Math.round(performance.now() - deliveryStart); }
+      });
+      return appendChain;
+    };
+
+    const tasks = targets.map((target, index) => async () => {
+      selection?.onStatus?.(target, 'Checking');
+      const targetStarted = performance.now();
+      const targetUrl = target.url;
+      let verified = null;
+      const diagnostic = {
+        index,
+        startedAt: targetStarted,
+        targetDuration: Number(target.durationSeconds || 0),
+        attempts: [], deliveryRequests: [], mediaBefore: videoDiagnosticSnapshot(target.element),
+        queueWaitMs: 0, deliveryMs: 0, resolutionTimeoutMs: 35000, done: false
+      };
+      selection?.onResult?.(target, diagnostic);
+      const controller = new AbortController();
+      let deadline;
+      const timedOut = new Promise((_, reject) => {
+        deadline = setTimeout(() => {
+          controller.abort();
+          reject(Object.assign(new Error('Target resolution timed out'), { code: 'timeout' }));
+        }, 35000);
+      });
+      const resolveAttempt = async cacheBust => {
+        const attemptStarted = performance.now();
+        const attempt = { cacheBust: cacheBust === true, fetched: false, verified: false, requests: [], startedAt: attemptStarted, stage: 'page_fetch' };
+        diagnostic.attempts.push(attempt);
+        if (controller.signal.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
+        if (target.element && (!target.element.isConnected || (target.logicalVideoId &&
+          [...document.querySelectorAll('video')][Number(target.logicalVideoId.match(/(\d+)$/)?.[1]) - 1] !== target.element))) {
+          throw new Error('The selected target changed; reopen selection');
+        }
+        const doc = target.directMedia ? document : targetUrl === currentUrl
+          ? document
+          : youtubeVideoId(targetUrl) ? document.implementation.createHTMLDocument('YouTube selection')
+          : await fetchDoc(targetUrl, { timeout: 12000, maxRetries: cacheBust ? 1 : 2, cacheBust, diagnostics: attempt.requests });
+        attempt.fetched = !!doc;
+        attempt.fetchMs = Math.round(performance.now() - attemptStarted);
+        attempt.pageFetchMode = target.directMedia || targetUrl === currentUrl ? 'current_document' : youtubeVideoId(targetUrl) ? 'resolver_only' : 'network';
+        if (!doc) { attempt.failure = 'page_fetch'; attempt.stage = 'complete'; return null; }
+        if (doc === document) {
+          doc.__uvsRawHtml = document.documentElement?.innerHTML || '';
+          doc.__uvsUrl = location.href;
+        }
+        const inlineGroup = target.logicalVideoId
+          ? independentVideoGroupsFromDoc(doc, targetUrl).find(group => group.logicalVideoId === target.logicalVideoId)
+          : null;
+        if (target.logicalVideoId && !inlineGroup) throw new Error('The selected video element changed; capture this page again');
+        attempt.stage = 'extract'; const extractionStarted = performance.now();
+        const extracted = target.directMedia ? [{ videoUrl: target.url, durationSeconds: target.durationSeconds }] : inlineGroup ? inlineGroup.entries : await browserResolvedMediaEntries(
+          doc,
+          targetUrl,
+          Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
+          0,
+          new Set(),
+          { cacheBust, maxRetries: 1, signal: controller.signal, diagnostics: attempt.requests }
+        );
+        attempt.extractionMs = Math.round(performance.now() - extractionStarted);
+        attempt.extracted = extracted.length;
+        attempt.streams = extracted.slice(0, 12).map(entry => ({ type: diagnosticStreamType(entry.videoUrl), signedQueryPresent: hasSignedLikeQuery(entry.videoUrl), durationSeconds: diagnosticNumber(entry.durationSeconds),
+          width: diagnosticNumber(entry.width, 32768), height: diagnosticNumber(entry.height, 32768), fps: diagnosticNumber(entry.fps, 1000), bitrate: diagnosticNumber(entry.bitrate, 1e12) }));
+        if (controller.signal.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
+        attempt.stage = 'verify'; const verificationStarted = performance.now();
+        const resolved = await firstVerifiedRecallEntry(
+          extracted,
+          targetUrl,
+          youtubeVideoId(targetUrl) ? Number(extracted[0]?.durationSeconds || 0) : target.directMedia ? Number(target.durationSeconds || 0) : inlineGroup ? inlineGroup.durationSeconds : Math.max(Number(target.durationSeconds || 0), extractPageDurationSeconds(doc)),
+          minimumDurationSeconds, attempt.requests, controller.signal
+        );
+        attempt.qualitySelection = resolved?.qualitySelection || null;
+        attempt.verificationMs = Math.round(performance.now() - verificationStarted);
+        attempt.elapsedMs = Math.round(performance.now() - attemptStarted); attempt.stage = 'complete';
+        if (resolved && target.logicalVideoId) resolved.logicalVideoId = target.logicalVideoId;
+        if (resolved && !resolved.title) resolved.title = cleanTitle(
+          doc.querySelector('meta[property="og:title"]')?.getAttribute('content') || doc.title || ''
+        );
+        attempt.pageDuration = extractPageDurationSeconds(doc);
+        attempt.embeddedPlayers = embeddedPlayerPageUrls(doc, targetUrl).length;
+        attempt.extracted = extracted.length;
+        attempt.verified = !!resolved;
+        attempt.failure = resolved ? 'none' : !extracted.length ? 'no_media'
+          : Math.max(Number(target.durationSeconds || 0), inlineGroup?.durationSeconds || 0, extractPageDurationSeconds(doc)) > 0 &&
+            Math.max(Number(target.durationSeconds || 0), inlineGroup?.durationSeconds || 0, extractPageDurationSeconds(doc)) < minimumDurationSeconds
+            ? 'duration_filter' : 'media_unverified';
+        return resolved;
+      };
+      try {
+        verified = await Promise.race([timedOut, (async () => {
+          const first = await resolveAttempt(false);
+          if (first || targetUrl === currentUrl || youtubeVideoId(targetUrl)) return first;
+          await sleep(250 + index * 20);
+          return resolveAttempt(true);
+        })()]);
+      } catch (error) {
+        diagnostic.error = true;
+        diagnostic.failure = ['timeout','youtube_access','youtube_stream','youtube_helper_update'].includes(error?.code) ? error.code : 'extraction_error';
+      } finally { clearTimeout(deadline); controller.abort(); }
+      diagnostic.verified = !!verified;
+      diagnostic.resolutionMs = Math.round(performance.now() - targetStarted);
+      diagnostic.verificationFailure = verified ? 'none' : diagnostic.failure || diagnostic.attempts.at(-1)?.failure || 'media_unverified';
+      diagnostic.failure ||= diagnostic.verificationFailure;
+      diagnostic.fetchFailed = diagnostic.attempts.every(attempt => !attempt.fetched);
+      captureDiagnostics[index] = diagnostic;
+      publishCaptureDiagnostics();
+      const failureLabel = diagnostic.failure === 'timeout' ? 'Timed out' : diagnostic.failure === 'youtube_access' ? 'Browser access required' : diagnostic.failure === 'youtube_helper_update' ? 'Pong helper needs restart' : 'Not verified';
+      selection?.onStatus?.(target, verified ? 'Sending' : failureLabel);
+      try {
+        await queueAppend(target, verified, diagnostic);
+        diagnostic.delivered = !!verified;
+        selection?.onStatus?.(target, verified ? 'Sent' : failureLabel);
+      } catch (error) {
+        diagnostic.appendError = true;
+        if (phoneConnectionOnly) phoneRouteErrors.push(error?.message || 'Phone routing failed');
+        diagnostic.deliveryFailure = diagnosticFailure(error?.code || 'delivery_failed');
+        diagnostic.failure = diagnostic.deliveryFailure;
+        selection?.onStatus?.(target, 'Delivery failed');
+        publishCaptureDiagnostics();
+      }
+      diagnostic.elapsedMs = Math.round(performance.now() - targetStarted);
+      diagnostic.mediaAfter = videoDiagnosticSnapshot(target.element); diagnostic.done = true;
+      selection?.onResult?.(target, diagnostic);
+      return verified;
+    });
+    // Porneec's player host can strand Firefox requests once a large burst
+    // fills its per-origin socket pool. Four concurrent page/probe pipelines
+    // keep results streaming without the last ten cards sitting indefinitely
+    // behind stale sockets; other sources retain the faster ten-way capture.
+    const captureConcurrency = targets.some(target => youtubeVideoId(target.url)) ? 2 : /(?:^|\.)porneec\.com$/i.test(location.hostname)
+      ? Math.min(4, RECALL_CAPTURE_CONCURRENCY)
+      : RECALL_CAPTURE_CONCURRENCY;
+    await pool(tasks, Math.min(captureConcurrency, tasks.length));
+    await appendChain.catch(error => { endpointErrors.push(error?.message || String(error)); });
+    const result = await postRecallCapturePayloadWithRetry(endpoint, {
+      ...basePayload,
+      capturePhase: 'complete',
+      completedPages: targets.length,
+      pageUrls: [],
+      entries: []
+    }, 12000, 2, captureTrace.requests);
+    captureTrace.elapsedMs = Math.round(performance.now() - captureTrace.startedAt);
+    deliveredVideos = Number(result?.videos || deliveredVideos || 0);
+    try {
+      document.documentElement.dataset.uvsCaptureSummary = JSON.stringify({
+        checkedTargets: targets.length,
+        sentThisRun: verifiedSentThisRun,
+        recallVideosAfterRun: deliveredVideos,
+        skippedTargets: Math.max(0, targets.length - verifiedSentThisRun),
+        ignoreUnder30
+      });
+    } catch (_) {}
+    if (!verifiedSentThisRun && phoneRouteErrors.length) throw new Error(phoneRouteErrors[0]);
+    if (!verifiedSentThisRun) throw new Error(ignoreUnder30
+      ? 'No verified playable video of at least 30 seconds was found; uncheck Skip <30s for short clips'
+      : 'No verified playable video was found');
+    notify(
+      `Recall ${captureChannel} ready: ${verifiedSentThisRun}/${targets.length} sent this run` +
+      (deliveredVideos !== verifiedSentThisRun ? ` (${deliveredVideos} total in Recall)` : '') +
+      (phoneConnectionOnly ? '. Link received, not playback-tested. Firefox must remain active for phone streaming.' : relayStarted ? '. Keep this source tab open for authenticated fallback playback.' : '')
+    );
+    return result;
+  }
+
+  // Keep DOM references only in this short-lived selection session. Feedback is
+  // constructed from an allowlist, never from outerHTML, URLs, or error text.
+  function selectableLinkUrl(element) {
+    const raw = element?.getAttribute('href') || element?.getAttribute('data-href') ||
+      element?.getAttribute('data-video-url') || element?.getAttribute('data-watch-url') || '';
+    if (!raw || raw.trim().startsWith('#')) return '';
+    try { const url = new URL(raw, location.href); return /^https?:$/.test(url.protocol) ? url.href : ''; }
+    catch (_) { return ''; }
+  }
+
+  function videoLinkEvidence(element, url) {
+    if (!url || element.closest('#uvs-recall-capture,#uvs-panel,#uvs-target-preview,[data-ad],.advertisement,.ad-container')) return '';
+    try { if (/(^|\.)(youtube\.com|youtu\.be)$/i.test(new URL(url).hostname) && !youtubeVideoId(url)) return ''; } catch (_) { return ''; }
+    if (/\.(?:jpe?g|png|gif|webp|svg|avif|pdf|zip)(?:[?#]|$)/i.test(url)) return '';
+    if (VIDEO_EXT_RE.test(url)) return 'direct';
+    if (isLogicalVideoPageUrl(url, location.href, element)) return 'path';
+    // A thumbnail, play affordance or duration is evidence of a potential video
+    // even when its destination is an opaque slug, redirect, or another host.
+    // Never execute onclick handlers or navigate to establish that evidence.
+    if (element.closest('nav,header,footer,[role="navigation"]')) return '';
+    const card = element.closest('ytm-video-with-context-renderer,ytd-compact-video-renderer,ytd-rich-item-renderer,ytm-compact-video-renderer,article,li,[class*="card" i],[class*="thumb" i]') || element;
+    const text = `${element.getAttribute('aria-label') || ''} ${element.getAttribute('title') || ''} ${element.textContent || ''}`;
+    if (element.hasAttribute('data-video-url') || element.hasAttribute('data-watch-url')) return 'video_attribute';
+    if (/\b(?:watch|play)\b.{0,32}\b(?:video|clip|film)\b|\b(?:video|clip)\b.{0,32}\b(?:watch|play)\b/i.test(text)) return 'text';
+    if (card.querySelector('[class*="play" i],[aria-label*="play" i],[data-duration],time') || parseDurationHintSeconds(card.textContent)) return 'play_or_duration';
+    if (card.querySelector('img,picture,video,[poster]')) return 'thumbnail';
+    if (/url\(/i.test(getComputedStyle(element).backgroundImage || '')) return 'thumbnail';
+    return '';
+  }
+
+  function collectSelectableTargets(mode = 'all', includeAllLinks = false) {
+    const currentUrl = canonicalWatchPageUrl(location.href, location.href) || location.href;
+    const videos = [...document.querySelectorAll('video')];
+    const groups = independentVideoGroupsFromDoc(document, currentUrl);
+    const links = [...document.querySelectorAll('a[href],[role="link"][data-href],[data-video-url],[data-watch-url]')];
+    const visibleArea = element => {
+      const rect = element?.getBoundingClientRect();
+      return rect && targetElementVisible(element) ? rect.width * rect.height : 0;
+    };
+    // YouTube parks its <video> above the poster before playback. Highlight
+    // the visible player surface, not that offscreen decoder element.
+    const youtubeSurface = youtubeVideoId(currentUrl) ? ['#movie_player','#player-container-id','#player-container','ytd-player','ytm-player']
+      .map(selector => document.querySelector(selector)).find(item => visibleArea(item) > 0) : null;
+    const mainElement = youtubeSurface || videos.slice().filter(item => visibleArea(item) > 0).sort((a, b) => visibleArea(b) - visibleArea(a))[0];
+    const embeddedUrls = embeddedPlayerPageUrls(document, currentUrl, 80);
+    const players = [...document.querySelectorAll('iframe[src],embed[src],object[data]')].filter(element => {
+      const value = element.getAttribute('src') || element.getAttribute('data');
+      return embeddedUrls.includes(absUrl(value, currentUrl));
+    });
+    let targets = collectLogicalWatchPageTargets(document, currentUrl, 80);
+    if (groups.length > 1) {
+      targets = targets.filter(target => target.url !== currentUrl);
+      targets.unshift(...groups.map(group => ({ url: currentUrl, logicalVideoId: group.logicalVideoId, durationSeconds: group.durationSeconds })));
+    }
+    if (mainElement && !targets.some(target => target.url === currentUrl)) {
+      targets.unshift({ url: currentUrl, durationSeconds: extractPageDurationSeconds(document) });
+    }
+    if (mode !== 'main' && !mainElement && players.length > 1) {
+      targets = targets.filter(target => target.url !== currentUrl);
+      targets.unshift(...players.map(element => ({ url: absUrl(element.getAttribute('src') || element.getAttribute('data'), currentUrl), durationSeconds: logicalPageDurationHint(element) })));
+    }
+    if (mode === 'main') {
+      const index = videos.indexOf(mainElement);
+      const group = groups.find(item => item.logicalVideoId === `inline-video-${index + 1}`);
+      targets = mainElement || players.length || primaryMediaEntriesFromDoc(document, currentUrl).length
+        ? [{ url: currentUrl, durationSeconds: group?.durationSeconds || extractPageDurationSeconds(document),
+          ...(groups.length > 1 && group ? { logicalVideoId: group.logicalVideoId } : {}) }]
+        : targets.slice(0, 1);
+    }
+    const candidates = targets.map(target => {
+      const index = Number(target.logicalVideoId?.match(/^inline-video-(\d+)$/)?.[1] || 0) - 1;
+      const matches = links.filter(link => canonicalWatchPageUrl(selectableLinkUrl(link), currentUrl) === target.url);
+      const embedded = players.find(element => absUrl(element.getAttribute('src') || element.getAttribute('data'), currentUrl) === target.url);
+      const element = target.url === currentUrl ? (index >= 0 ? videos[index] : mainElement || players[0])
+        : embedded || matches.sort((a, b) => visibleArea(b) - visibleArea(a))[0];
+      return { ...target, element, kind: ['IFRAME','EMBED','OBJECT'].includes(element?.tagName) ? 'embed' : target.url === currentUrl ? 'player' : 'link' };
+    });
+    for (const link of links) {
+      const url = selectableLinkUrl(link);
+      const evidence = videoLinkEvidence(link, url) || (includeAllLinks && url &&
+        !link.closest('#uvs-recall-capture,#uvs-panel,#uvs-target-preview') ? 'manual_link' : '');
+      if (!evidence || canonicalWatchPageUrl(url, currentUrl) === currentUrl) continue;
+      const duplicate = candidates.find(item => canonicalWatchPageUrl(item.url, currentUrl) === canonicalWatchPageUrl(url, currentUrl));
+      if (duplicate) {
+        duplicate.linkEvidence ||= evidence;
+        // Prefer the clickable thumbnail over a duplicate short title anchor.
+        if (duplicate.kind === 'link' && visibleArea(link) > visibleArea(duplicate.element)) duplicate.element = link;
+        continue;
+      }
+      candidates.push({ url, durationSeconds: logicalPageDurationHint(link), element: link,
+        kind: evidence === 'direct' ? 'direct' : 'link', directMedia: evidence === 'direct', linkEvidence: evidence });
+    }
+    // An inline autoplay preview inside a linked card represents the linked
+    // destination, not a second movie. Keep the card as the selectable target.
+    const filtered = candidates.filter(candidate => candidate.kind !== 'player' ||
+      !candidates.some(other => other.kind === 'link' && other.element?.contains(candidate.element)));
+    return filtered.slice(0, mode === 'main' ? 1 : 80).map((candidate, index) => ({ ...candidate,
+      ...(candidate.url === currentUrl && youtubeVideoId(currentUrl) ? { durationSeconds: extractPageDurationSeconds(document) } : {}), previewId: index + 1 }));
+  }
+
+  function targetElementVisible(element) {
+    if (!element?.isConnected || !element.getClientRects().length) return false;
+    for (let node = element; node && node !== document.body; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0) return false;
+    }
+    return true;
+  }
+
+  function buildDetectionFeedback(session) {
+    return {
+      schema: 1, diagnosticsVersion: 6, version: '7.34.0', id: session.id, createdAt: session.createdAt,
+      deliveryMode: 'desktop_owned',
+      vpn: vpnSafeStatus(session.vpn || {}),
+      phoneConnectionOnly: session.phoneConnectionOnly === true,
+      verificationScope: 'metadata_and_bounded_response_probe_not_playback',
+      mode: session.mode, channel: session.channel,
+      ignoreUnder30: session.ignoreUnder30, stage: session.stage,
+      environment: {
+        browser: /firefox/i.test(navigator.userAgent) ? 'firefox' : /edg\//i.test(navigator.userAgent) ? 'edge' : /chrome/i.test(navigator.userAgent) ? 'chrome' : 'other',
+        browserMajor: diagnosticNumber(navigator.userAgent.match(/(?:Firefox|Edg|Chrome)\/(\d+)/i)?.[1], 1000),
+        mobile: /android|iphone|ipad/i.test(navigator.userAgent), online: navigator.onLine,
+        cookiesEnabled: navigator.cookieEnabled, secureContext: window.isSecureContext,
+        visibility: ['visible','hidden'].includes(document.visibilityState) ? document.visibilityState : 'unknown',
+        viewportWidth: innerWidth, viewportHeight: innerHeight, pixelRatio: devicePixelRatio,
+        connectionType: ['slow-2g','2g','3g','4g'].includes(navigator.connection?.effectiveType) ? navigator.connection.effectiveType : null,
+        saveData: typeof navigator.connection?.saveData === 'boolean' ? navigator.connection.saveData : null,
+        downlinkMbps: diagnosticNumber(navigator.connection?.downlink, 100000), rttMs: diagnosticNumber(navigator.connection?.rtt)
+      },
+      capture: {
+        jobId: /^[a-f0-9-]{36}$/i.test(session.captureTrace?.jobId || '') ? session.captureTrace.jobId : null,
+        acceptedMs: diagnosticNumber(session.captureTrace?.acceptedMs),
+        destinationChannel: diagnosticNumber(session.captureTrace?.channel, 2),
+        elapsedMs: diagnosticNumber(session.captureTrace ? session.captureTrace.elapsedMs ?? Math.round(performance.now() - session.captureTrace.startedAt) : null),
+        failure: session.captureFailure ? diagnosticFailure(session.captureFailure) : 'none',
+        requests: (session.captureTrace?.requests || []).map(requestDiagnosticOutput)
+      },
+      evidence: {
+        videoElements: document.querySelectorAll('video').length,
+        iframeElements: document.querySelectorAll('iframe').length,
+        structuredDataBlocks: document.querySelectorAll('script[type="application/ld+json"]').length,
+        players: [
+          ['videojs', '.video-js'], ['plyr', '.plyr'], ['jwplayer', '.jwplayer'],
+          ['platform-player', '#movie_player,ytm-player,ytd-player'],
+          ['flowplayer', '.flowplayer'], ['mediaelement', '.mejs-container']
+        ].filter(([, selector]) => document.querySelector(selector)).map(([name]) => name)
+      },
+      candidates: session.candidates.map(candidate => {
+        const result = session.results.get(candidate.previewId);
+        const rect = candidate.element?.getBoundingClientRect();
+        return {
+          index: candidate.previewId, kind: candidate.kind,
+          linkEvidence: candidate.linkEvidence || 'none',
+          tag: ['VIDEO','IFRAME','A','EMBED','OBJECT'].includes(candidate.element?.tagName) ? candidate.element.tagName : 'OTHER',
+          selected: session.selected.has(candidate.previewId),
+          durationSeconds: Number(candidate.durationSeconds || 0),
+          width: Math.round(rect?.width || 0), height: Math.round(rect?.height || 0),
+          mapped: !!candidate.element, independent: !!candidate.logicalVideoId,
+          outcome: result ? (!result.done ? 'in_progress' : result.appendError ? 'delivery_failed' : result.delivered ? 'sent' : result.fetchFailed ? 'fetch_failed' : 'not_verified') : 'not_checked',
+          elapsedMs: result ? diagnosticNumber(result.elapsedMs ?? Math.round(performance.now() - result.startedAt)) : 0,
+          failure: diagnosticFailure(result?.failure || (result && !result.done ? 'pending' : 'none')),
+          verificationFailure: diagnosticFailure(result?.verificationFailure || 'none'),
+          deliveryFailure: diagnosticFailure(result?.deliveryFailure || 'none'),
+          desktop: result?.desktopOwned ? { state: result.desktopState || 'queued', width: result.width ?? null, height: result.height ?? null,
+            verificationMs: result.verificationMs ?? null, phoneRelayUsed: false } : null,
+          timing: { resolutionMs: diagnosticNumber(result?.resolutionMs), resolutionTimeoutMs: diagnosticNumber(result?.resolutionTimeoutMs),
+            queueWaitMs: diagnosticNumber(result?.queueWaitMs), deliveryMs: diagnosticNumber(result?.deliveryMs) },
+          mediaBefore: result?.mediaBefore || null, mediaNow: videoDiagnosticSnapshot(candidate.element), mediaAfter: result?.mediaAfter || null,
+          deliveryRequests: (result?.deliveryRequests || []).map(requestDiagnosticOutput),
+          attempts: (result?.attempts || []).map(attempt => ({
+            fetched: !!attempt.fetched, verified: !!attempt.verified,
+            extracted: Number(attempt.extracted || 0), embeddedPlayers: Number(attempt.embeddedPlayers || 0),
+            pageDuration: Number(attempt.pageDuration || 0), retry: !!attempt.cacheBust,
+            failure: diagnosticFailure(attempt.failure || (attempt.stage === 'complete' ? 'none' : result?.done ? result.verificationFailure : 'pending')),
+            stage: ['page_fetch','extract','verify','complete'].includes(attempt.stage) ? attempt.stage : 'unknown',
+            pageFetchMode: ['current_document','resolver_only','network'].includes(attempt.pageFetchMode) ? attempt.pageFetchMode : 'unknown',
+            qualitySelection: attempt.qualitySelection || null,
+            timing: { fetchMs: diagnosticNumber(attempt.fetchMs), extractionMs: diagnosticNumber(attempt.extractionMs), verificationMs: diagnosticNumber(attempt.verificationMs),
+              elapsedMs: diagnosticNumber(attempt.elapsedMs ?? (result.done ? result.resolutionMs : Math.round(performance.now() - attempt.startedAt))) },
+            streams: (attempt.streams || []).map(stream => ({ type: ['hls','dash','mp4','webm','blob','unknown'].includes(stream.type) ? stream.type : 'unknown', signedQueryPresent: stream.signedQueryPresent === true,
+              durationSeconds: diagnosticNumber(stream.durationSeconds), width: diagnosticNumber(stream.width, 32768), height: diagnosticNumber(stream.height, 32768),
+              fps: diagnosticNumber(stream.fps, 1000), bitrate: diagnosticNumber(stream.bitrate, 1e12) })),
+            requests: (attempt.requests || []).map(requestDiagnosticOutput)
+          }))
+        };
+      })
+    };
+  }
+
+  async function sendDetectionFeedback(report) {
+    // Preserve an unsent report across refreshes; no browsing history is stored.
+    setStoredJson(DETECTION_FEEDBACK_KEY, report);
+    const receivers = [...PONG_ENDPOINTS];
+    // The small feedback receiver can run alongside an older Pong process so
+    // collecting reports never requires discarding its in-memory Recall queue.
+    for (const endpoint of PONG_ENDPOINTS) {
+      try { const url = new URL(endpoint); url.port = '8797'; receivers.push(url.origin); } catch (_) {}
+    }
+    for (const endpoint of [...new Set(receivers)]) {
+      try {
+        const result = await new Promise((resolve, reject) => GM_xmlhttpRequest({
+          method: 'POST', url: `${String(endpoint).replace(/\/+$/, '')}/media-page/detection-feedback`,
+          headers: { 'Content-Type': 'application/json' }, data: JSON.stringify(report), timeout: 5000,
+          onload: response => {
+            try {
+              const body = JSON.parse(response.responseText);
+              if (response.status !== 200 || body.saved !== true) throw new Error('Report not saved');
+              resolve(body);
+            } catch (error) { reject(error); }
+          },
+          onerror: () => reject(new Error('Pong unavailable')), ontimeout: () => reject(new Error('Pong unavailable'))
+        }));
+        setStoredJson(DETECTION_FEEDBACK_KEY, null);
+        return result;
+      } catch (_) {}
+    }
+    throw new Error('Report saved in this browser. Pong needs the updated receiver; tap Retry report later.');
+  }
+
+  function makeTargetPreviewMovable(bar, handle) {
+    const storageKey = 'uvs_target_preview_position_v1';
+    let saved = getStoredJson(storageKey, null), drag = null;
+    const place = (left, top) => {
+      const rect = bar.getBoundingClientRect();
+      const maxX = Math.max(0, innerWidth - rect.width - 8);
+      const maxY = Math.max(0, innerHeight - rect.height - 8);
+      const x = Math.max(Math.min(8, maxX), Math.min(maxX, left));
+      const y = Math.max(Math.min(8, maxY), Math.min(maxY, top));
+      Object.assign(bar.style, { left: `${x}px`, top: `${y}px`, right: 'auto', bottom: 'auto', margin: '0' });
+      return { x: maxX ? x / maxX : 0, y: maxY ? y / maxY : 0 };
+    };
+    const restore = () => {
+      if (!saved || !Number.isFinite(saved.x) || !Number.isFinite(saved.y) || drag) return;
+      const rect = bar.getBoundingClientRect();
+      place(saved.x * Math.max(0, innerWidth - rect.width - 8), saved.y * Math.max(0, innerHeight - rect.height - 8));
+    };
+    const move = event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      saved = place(drag.left + event.clientX - drag.x, drag.top + event.clientY - drag.y);
+    };
+    const finish = event => {
+      if (!drag || (event && event.pointerId !== drag.id)) return;
+      if (event) { event.preventDefault(); event.stopImmediatePropagation(); }
+      const id = drag.id; drag = null;
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('pointerup', finish, true);
+      window.removeEventListener('pointercancel', finish, true);
+      try { handle.releasePointerCapture(id); } catch (_) {}
+      handle.classList.remove('dragging');
+      if (saved) setStoredJson(storageKey, saved);
+    };
+    handle.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || drag) return;
+      event.preventDefault(); event.stopPropagation();
+      const rect = bar.getBoundingClientRect();
+      drag = { id: event.pointerId, x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+      saved = place(rect.left, rect.top);
+      handle.classList.add('dragging');
+      try { handle.setPointerCapture(event.pointerId); } catch (_) {}
+      window.addEventListener('pointermove', move, { capture: true, passive: false });
+      window.addEventListener('pointerup', finish, true);
+      window.addEventListener('pointercancel', finish, true);
+    });
+    handle.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); });
+    handle.addEventListener('keydown', event => {
+      const offset = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[event.key];
+      if (!offset) return;
+      event.preventDefault(); event.stopPropagation();
+      const rect = bar.getBoundingClientRect(), step = event.shiftKey ? 32 : 8;
+      saved = place(rect.left + offset[0] * step, rect.top + offset[1] * step);
+      setStoredJson(storageKey, saved);
+    });
+    const resize = new ResizeObserver(restore);
+    resize.observe(bar);
+    window.addEventListener('resize', restore);
+    restore();
+    return () => { finish(); resize.disconnect(); window.removeEventListener('resize', restore); };
+  }
+
+  function openTargetPreview(mode = 'all', channel = 1, ignoreUnder30 = false) {
+    if (activeTargetPreview?.sending) return activeTargetPreview;
+    activeTargetPreview?.close();
+    channel = Number(channel) === 2 ? 2 : 1;
+    const session = {
+      id: globalThis.crypto?.randomUUID?.() || `selection-${Date.now()}`,
+      createdAt: new Date().toISOString(), mode, channel, ignoreUnder30,
+      // The phone-only option was removed. Ignore its old saved preference.
+      phoneConnectionOnly: false,
+      candidates: [], selected: new Set(), results: new Map(), stage: 'selection', sending: false
+    };
+    const host = document.createElement('div');
+    host.id = 'uvs-target-preview';
+    host.style.cssText = 'position:fixed;inset:0;z-index:2147483646;pointer-events:none';
+    const shadow = host.attachShadow({ mode: 'open' });
+    // Use DOM nodes, not HTML sinks: YouTube enforces Trusted Types.
+    const previewStyle = document.createElement('style');
+    previewStyle.textContent = `
+      :host{font:10.5px system-ui;color:white}button{font:inherit;cursor:pointer;color:white;border:1px solid #ffffff44;border-radius:6px;background:#263244;padding:4px 7px}
+      .box{position:fixed;z-index:1;background:#ff22222b;border:2px solid #ff5757;border-radius:6px;pointer-events:auto;padding:0;text-align:left;touch-action:manipulation}
+      .box[aria-pressed=true]{background:#ff22224a;border-color:#fff}.box span{position:absolute;left:0;top:0;background:#851e24;padding:3px 5px;border-radius:3px;font-size:11px}
+      .box[data-ready=true]{background:#22c55e30;border-color:#4ade80}.box[data-ready=true] span{background:#166534}
+      .bar{position:fixed;z-index:2;box-sizing:border-box;width:calc(100% - 16px);left:8px;right:8px;bottom:54px;margin:auto;max-width:380px;max-height:calc(100% - 16px);overflow:auto;overscroll-behavior:contain;background:#101723f5;border:1px solid #ffffff33;border-radius:10px;padding:6px;pointer-events:auto;box-shadow:0 3px 16px #0008}
+      .drag-handle{cursor:grab;touch-action:none;user-select:none;padding:5px 3px;color:#cbd5e1}.drag-handle.dragging{cursor:grabbing}.drag-handle:focus-visible{outline:2px solid #93c5fd;border-radius:3px}
+      .row{display:flex;flex-wrap:wrap;align-items:center;gap:4px}.row button{padding:4px 7px;min-height:25px}.summary{flex:1;font-size:10px}.status{font-size:10px;line-height:1.3;color:#cbd5e1;margin-top:3px}button:disabled{opacity:.5;cursor:default}
+      .bar{background:linear-gradient(145deg,#17243bf5,#18182cf5);border-color:#818cf85c}
+      .bar button{transition:filter .12s ease,border-color .12s ease}.bar button:hover:not(:disabled){filter:brightness(1.18)}
+      [data-do=channel]{background:#334155}[data-do=send]{background:#2563eb;border-color:#93c5fd88}
+      [data-do=copy],[data-do=close],[data-vpn=status],[data-vpn=pair],[data-do=pair-copy]{background:#263244}
+      [data-vpn=connect]{background:#0f766e;border-color:#5eead488}[data-vpn=disconnect]{background:#78362b;border-color:#fb923c88}
+      .section-label{font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8;margin:6px 0 4px}.pairing{margin-top:5px;border-top:1px solid #ffffff18;padding-top:4px}.pairing summary{cursor:pointer;color:#94a3b8}.pairing .row{margin-top:4px}
+    `;
+    const node = (tag, className, parent, text = '') => {
+      const element = document.createElement(tag); element.className = className; element.textContent = text; parent.appendChild(element); return element;
+    };
+    shadow.appendChild(previewStyle);
+    // Keep pointer/touch/click events within our UI, including panel gaps,
+    // disabled controls, and Copy log. Do not cancel native form/scroll behavior.
+    for (const type of ['pointerdown','pointerup','pointermove','pointercancel','mousedown','mouseup','mousemove','click','dblclick','auxclick','contextmenu','touchstart','touchmove','touchend','touchcancel','wheel','keydown','keyup']) {
+      shadow.addEventListener(type, event => event.stopPropagation());
+    }
+    node('div', 'boxes', shadow);
+    const bar = node('div', 'bar', shadow); bar.setAttribute('role', 'region'); bar.setAttribute('aria-label', 'Select video targets');
+    const row = node('div', 'row', bar);
+    const dragHandle = node('div', 'drag-handle', row, '⠿ Move');
+    dragHandle.tabIndex = 0; dragHandle.setAttribute('role', 'button'); dragHandle.setAttribute('aria-label', 'Move panel');
+    dragHandle.title = 'Drag to move; use arrow keys when focused';
+    node('div', 'summary', row);
+    const channelButton = node('button', '', row); channelButton.type = 'button'; channelButton.dataset.do = 'channel';
+    node('button', '', row, 'Send').dataset.do = 'send';
+    node('button', '', row, 'Copy log').dataset.do = 'copy';
+    const close = node('button', '', row, '×'); close.type = 'button'; close.dataset.do = 'close';
+    close.setAttribute('aria-label', 'Close video selection');
+    close.title = 'Close panel; an active send continues in the background';
+    const statusNode = node('div', 'status', bar, 'Select links → PC prepares videos → Pong plays.');
+    statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite');
+    node('div', 'section-label', bar, 'Desktop connection');
+    const vpnRow = node('div', 'row vpn-row', bar);
+    for (const [action,label] of [['connect','Connect California'],['disconnect','Disconnect'],['status','VPN status']]) {
+      const button = node('button', '', vpnRow, label); button.type = 'button'; button.dataset.vpn = action;
+    }
+    const pairing = node('details', 'pairing', bar); node('summary', '', pairing, 'Pair PC · one-time setup');
+    const pairingRow = node('div', 'row', pairing);
+    const pairButton = node('button', '', pairingRow, 'Paste key & connect'); pairButton.type = 'button'; pairButton.dataset.vpn = 'pair';
+    const pairingLink = node('button', '', pairingRow, 'Copy pairing link');
+    pairingLink.type = 'button'; pairingLink.dataset.do = 'pair-copy';
+    pairingLink.title = 'Copy the PC pairing page address to open in your browser';
+    const vpnStatus = node('div', 'vpn-status', bar, 'PC VPN not checked. Phone VPN is separate.');
+    vpnStatus.style.cssText = 'font-size:10px;line-height:1.3;color:#cbd5e1;margin-top:3px;overflow-wrap:anywhere';
+    vpnStatus.setAttribute('role','status'); vpnStatus.setAttribute('aria-live','polite');
+    const showVpn = value => {
+      session.vpn = vpnSafeStatus(value); vpnStatus.textContent = vpnMessage(session.vpn);
+    };
+    pairingLink.onclick = async event => {
+      event.preventDefault(); event.stopPropagation();
+      const endpoint = vpnEndpoint();
+      if (!endpoint) { showVpn({phase:'error',error:'local_network_required'}); return; }
+      const copied = await copyTextToClipboard(`${endpoint}/vpn/setup`);
+      vpnStatus.textContent = copied ? 'Pairing link copied. Paste it into your browser, copy the key there, then use Paste key & connect.' : 'Could not copy the pairing link. Allow clipboard access and try again.';
+    };
+    const vpnButtons = [...bar.querySelectorAll('[data-vpn]')];
+    let vpnWorking = false;
+    for (const button of vpnButtons) button.onclick = async event => {
+      event.preventDefault(); event.stopPropagation();
+      if (!(event instanceof MouseEvent) || !event.isTrusted || session.sending || vpnWorking) return;
+      const action = button.dataset.vpn;
+      if (action === 'pair') {
+        // Read only on this explicit click. Browsers that block clipboard reads
+        // use a native paste prompt, never a website-readable input field.
+        let key = '';
+        try {
+          if (navigator.clipboard?.readText) key = await Promise.race([
+            navigator.clipboard.readText(), sleep(1000).then(() => '')
+          ]);
+        } catch (_) {}
+        if (!/^[a-f0-9]{64}$/.test(key.trim())) key = window.prompt('Paste the key from the PC pairing page. Press OK to save it and automatically connect the PC VPN to California.');
+        if (key === null) return;
+        if (!/^[a-f0-9]{64}$/.test(key.trim())) { vpnStatus.textContent = 'Pairing key must be the 64-character key from your PC. Never paste your NordVPN password.'; return; }
+        if (typeof GM_setValue !== 'function') { vpnStatus.textContent = 'Tampermonkey private storage is unavailable. Pairing was not saved.'; return; }
+        GM_setValue(VPN_PAIR_KEY, JSON.stringify({...vpnPairings(), [vpnEndpoint()]:key.trim()}));
+      }
+      if (action === 'disconnect' && !window.confirm('Disconnect the PC VPN? This affects other PC apps and can interrupt video playback.')) return;
+      vpnWorking = true; vpnButtons.forEach(b => b.disabled = true); send.disabled = true;
+      showVpn({phase:action === 'disconnect' ? 'disconnecting' : 'checking',busy:true});
+      try { await runVpnAction(action === 'pair' ? 'connect' : action, showVpn); }
+      catch (error) { showVpn({...session.vpn,phase:'error',busy:false,error:error.code || 'vpn_unavailable'}); }
+      finally { vpnWorking = false; vpnButtons.forEach(b => b.disabled = session.sending); update(); }
+    };
+    document.body.appendChild(host);
+    const stopMoving = makeTargetPreviewMovable(bar, dragHandle);
+    const boxRoot = shadow.querySelector('.boxes'), status = shadow.querySelector('.status');
+    const send = shadow.querySelector('[data-do=send]'), controls = new Map();
+    let animation = 0, rescanTimer = 0, closed = false, pageUrl = canonicalWatchPageUrl(location.href, location.href);
+    const key = candidate => canonicalWatchPageUrl(candidate.url, location.href) + '\n' + (candidate.logicalVideoId || '');
+    const update = () => {
+      const ready = [...session.selected].filter(id => session.results.get(id)?.delivered === true).length;
+      shadow.querySelector('.summary').textContent = `${session.selected.size} selected · ${ready} ready in Pong`;
+      send.textContent = session.sending ? (session.accepted ? 'Sent to PC' : 'Sending…') : 'Send';
+      channelButton.textContent = `Recall ${channel}`;
+      channelButton.setAttribute('aria-label', `Destination: Recall ${channel}. Switch to Recall ${channel === 1 ? 2 : 1}`);
+      channelButton.title = session.sending ? 'Destination is fixed while sending' : 'Tap to switch Recall destination';
+      channelButton.disabled = session.sending;
+      send.disabled = !session.selected.size || session.sending || vpnWorking;
+      vpnButtons.forEach(button => button.disabled = session.sending || vpnWorking);
+      for (const candidate of session.candidates) {
+        const box = controls.get(candidate.previewId);
+        const selected = session.selected.has(candidate.previewId);
+        box.setAttribute('aria-pressed', String(selected));
+        box.dataset.ready = String(session.results.get(candidate.previewId)?.delivered === true);
+        const label = candidate.kind === 'player' ? 'Video' : 'Video link';
+        const seconds = Math.round(candidate.durationSeconds || 0);
+        const duration = seconds ? ` · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : '';
+        box.firstChild.textContent = `${selected ? '✓ ' : ''}${label}${duration}${candidate.status ? ' · ' + candidate.status : ''}`;
+        box.disabled = session.sending;
+      }
+    };
+    const position = () => {
+      animation = 0;
+      if (closed) return;
+      for (const candidate of session.candidates) {
+        const box = controls.get(candidate.previewId);
+        const rect = candidate.element?.isConnected ? candidate.element.getBoundingClientRect() : null;
+        const visible = rect && targetElementVisible(candidate.element) && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+        box.hidden = !visible;
+        if (visible) Object.assign(box.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+      }
+    };
+    const schedulePosition = () => { if (!animation && !closed) animation = requestAnimationFrame(position); };
+    const resize = new ResizeObserver(schedulePosition);
+    const rescan = () => {
+      if (closed || session.sending) return;
+      if (pageUrl !== canonicalWatchPageUrl(location.href, location.href)) { session.close(); return; }
+      document.__uvsRawHtml = document.documentElement?.innerHTML || '';
+      document.__uvsUrl = location.href;
+      const found = collectSelectableTargets(mode);
+      for (const candidate of found) {
+        const existing = session.candidates.find(item => key(item) === key(candidate));
+        if (existing) {
+          if (existing.element !== candidate.element) { if (existing.element) resize.unobserve(existing.element); existing.element = candidate.element; if (existing.element) resize.observe(existing.element); }
+          existing.durationSeconds = candidate.durationSeconds || existing.durationSeconds;
+          continue;
+        }
+        candidate.previewId = (session.candidates.at(-1)?.previewId || 0) + 1;
+        session.candidates.push(candidate);
+        const box = document.createElement('button');
+        box.type = 'button'; box.className = 'box'; box.dataset.target = String(candidate.previewId);
+        box.appendChild(document.createElement('span'));
+        box.onclick = event => {
+          event.preventDefault(); event.stopPropagation();
+          if (session.sending) return;
+          if (session.selected.has(candidate.previewId)) session.selected.delete(candidate.previewId);
+          else session.selected.add(candidate.previewId);
+          update();
+        };
+        boxRoot.appendChild(box); controls.set(candidate.previewId, box);
+        if (candidate.element) resize.observe(candidate.element);
+      }
+      // Keep a selected, disappeared target so it can fail explicitly at Send.
+      for (const candidate of [...session.candidates]) {
+        if (!session.selected.has(candidate.previewId) && !found.some(item => key(item) === key(candidate))) {
+          controls.get(candidate.previewId).remove(); controls.delete(candidate.previewId);
+          if (candidate.element) resize.unobserve(candidate.element);
+          session.candidates = session.candidates.filter(item => item !== candidate);
+        }
+      }
+      update(); schedulePosition();
+    };
+    const mutation = new MutationObserver(records => {
+      schedulePosition();
+      if (records.some(record => !host.contains(record.target) && record.type === 'childList')) {
+        clearTimeout(rescanTimer); rescanTimer = setTimeout(rescan, 350);
+      }
+    });
+    mutation.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class','style','hidden'] });
+    window.addEventListener('scroll', schedulePosition, true); window.addEventListener('resize', schedulePosition);
+    const onKey = event => { if (event.key === 'Escape') session.dismiss(); };
+    shadow.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey);
+    session.close = () => {
+      closed = true; resize.disconnect(); mutation.disconnect(); cancelAnimationFrame(animation); clearTimeout(rescanTimer);
+      stopMoving();
+      window.removeEventListener('scroll', schedulePosition, true); window.removeEventListener('resize', schedulePosition); window.removeEventListener('keydown', onKey);
+      host.remove(); if (activeTargetPreview === session) activeTargetPreview = null;
+    };
+    session.dismiss = () => {
+      if (session.sending) host.hidden = true;
+      else session.close();
+    };
+    session.isHidden = () => host.hidden;
+    session.show = () => { host.hidden = false; position(); };
+    close.onclick = event => { event.preventDefault(); event.stopPropagation(); session.dismiss(); };
+    channelButton.onclick = event => {
+      event.preventDefault(); event.stopPropagation();
+      if (session.sending) return;
+      channel = channel === 1 ? 2 : 1;
+      session.channel = channel;
+      setStoredJson(RECALL_CHANNEL_KEY, channel);
+      const launcher = document.getElementById('uvs-recall-capture');
+      if (launcher) launcher.dataset.channel = String(channel);
+      // Keep checkmarks, but never relabel an earlier destination's receipt.
+      session.id = globalThis.crypto?.randomUUID?.() || `selection-${Date.now()}`;
+      session.createdAt = new Date().toISOString(); session.stage = 'selection';
+      session.results.clear(); session.captureTrace = null; session.captureFailure = null;
+      for (const candidate of session.candidates) candidate.status = '';
+      status.textContent = `Selected videos will go to Recall ${channel}.`;
+      update();
+    };
+    shadow.querySelector('[data-do=copy]').onclick = async () => {
+      const copied = await copyTextToClipboard(JSON.stringify(buildDetectionFeedback(session), null, 2));
+      status.textContent = copied ? 'Log copied. Paste it in chat; no cookies or media URLs included.' : 'Clipboard blocked. Allow clipboard access and try again.';
+    };
+    send.onclick = async event => {
+      if (session.sending || !session.selected.size) return;
+      session.sending = true; session.stage = 'capture';
+      session.accepted = false;
+      session.captureTrace = null; session.captureFailure = null;
+      const targets = session.candidates.filter(candidate => session.selected.has(candidate.previewId));
+      for (const target of targets) { target.status = 'Queued'; session.results.delete(target.previewId); }
+      status.textContent = 'Sending selected links to your PC…'; update();
+      try {
+        const receipt = await sendCaptureToRecall(mode, channel, ignoreUnder30, {
+          targets,
+          vpnAuthorization: event instanceof MouseEvent && event.isTrusted ? VPN_USER_ACTION : null,
+          onVpnStatus: showVpn,
+          phoneConnectionOnly: session.phoneConnectionOnly,
+          onCaptureDiagnostics: trace => { session.captureTrace = trace; },
+          onAccepted: receipt => {
+            session.accepted = true; session.stage = 'processing';
+            status.textContent = `PC accepted all ${receipt.total} links in ${(receipt.acceptedMs/1000).toFixed(1)}s → Recall ${receipt.channel}. You can close Firefox now; the PC prepares them. Accepted does not mean ready yet.`;
+            update();
+          },
+          onStatus: (target, text) => { target.status = text; update(); },
+          onResult: (target, result) => { session.results.set(target.previewId, result); update(); }
+        });
+        status.textContent = receipt.pending ? `PC is still preparing videos for Recall ${channel}. Firefox is not needed; open that Recall for progress and failures.`
+          : `${receipt.videos}/${targets.length} ready in Recall ${channel}. Served by PC; Firefox can close.`;
+        session.stage = receipt.pending ? 'processing' : 'complete';
+      } catch (error) {
+        status.textContent = error.message; session.stage = 'failed';
+        session.captureFailure = error?.code || 'request_error';
+        for (const target of targets) if (['Queued','Checking','Sending'].includes(target.status)) target.status = 'Not sent';
+      } finally { if (session.captureTrace) session.captureTrace.elapsedMs = Math.round(performance.now() - session.captureTrace.startedAt); session.sending = false; update(); }
+    };
+    session.update = update;
+    activeTargetPreview = session; rescan(); position();
+    return session;
   }
 
   function addRecallCaptureButton() {
     if (document.getElementById('uvs-recall-capture')) return;
-    const style = document.createElement('style');
-    style.textContent = `
-      #uvs-recall-capture{position:fixed;left:34%;bottom:10px;z-index:2147483647;font:700 10px ui-sans-serif,system-ui,-apple-system,sans-serif;color:#fff}
-      #uvs-recall-open{min-width:42px;height:26px;border:1px solid rgba(255,255,255,.2);border-radius:999px;background:rgba(29,78,216,.78);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px);color:rgba(255,255,255,.92);padding:0 9px;box-shadow:0 3px 12px rgba(0,0,0,.34);font:700 10px inherit;cursor:pointer}
-      #uvs-recall-menu{position:absolute;left:0;bottom:32px;width:116px;padding:5px;border:1px solid rgba(255,255,255,.12);border-radius:9px;background:rgba(10,13,20,.9);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 5px 18px rgba(0,0,0,.46)}
-      #uvs-recall-menu[hidden]{display:none}
-      #uvs-recall-menu button{width:100%;height:24px;margin:1px 0;padding:0 6px;border:1px solid rgba(255,255,255,.08);border-radius:6px;color:rgba(255,255,255,.88);background:rgba(51,65,85,.72);font:700 9px inherit;cursor:pointer}
-      #uvs-recall-menu button[data-action]{background:rgba(37,99,235,.78)}
-      #uvs-recall-channel{color:#93c5fd!important;background:rgba(30,41,59,.76)!important}
-      #uvs-recall-min30{display:flex;align-items:center;gap:5px;height:22px;margin:2px 1px;padding:0 4px;color:#cbd5e1;font-size:8px;white-space:nowrap;cursor:pointer}
-      #uvs-recall-min30 input{width:11px;height:11px;margin:0;accent-color:#22c55e}
-      #uvs-recall-status{padding:3px 1px 1px;color:#94a3b8;font-size:8px;line-height:1.15;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    `;
-    document.head.appendChild(style);
     const root = document.createElement('div');
     root.id = 'uvs-recall-capture';
-    const stored = Number(getStoredJson(RECALL_CHANNEL_KEY, 1)) === 2 ? 2 : 1;
-    const min30 = getStoredBool(RECALL_MIN_30_KEY, false);
-    root.dataset.channel = String(stored);
-    root.innerHTML = `
-      <button id="uvs-recall-open" type="button">Pong</button>
-      <div id="uvs-recall-menu" hidden>
-        <button id="uvs-recall-channel" type="button">Recall ${stored}</button>
-        <label id="uvs-recall-min30"><input type="checkbox" ${min30 ? 'checked' : ''}>Ignore &lt;30s</label>
-        <button type="button" data-action="main">Main video</button>
-        <button type="button" data-action="all">All videos</button>
-        <div id="uvs-recall-status">Ready</div>
-      </div>`;
-    document.body.appendChild(root);
-    const menu = root.querySelector('#uvs-recall-menu');
-    const open = root.querySelector('#uvs-recall-open');
-    const channelButton = root.querySelector('#uvs-recall-channel');
-    const min30Checkbox = root.querySelector('#uvs-recall-min30 input');
-    const status = root.querySelector('#uvs-recall-status');
-    open.addEventListener('click', event => {
-      event.preventDefault();
-      event.stopPropagation();
-      menu.hidden = !menu.hidden;
+    root.style.cssText = 'position:fixed;left:34%;bottom:10px;z-index:2147483647';
+    root.dataset.channel = String(Number(getStoredJson(RECALL_CHANNEL_KEY, 1)) === 2 ? 2 : 1);
+    const open = document.createElement('button');
+    open.id = 'uvs-recall-open'; open.type = 'button'; open.textContent = 'Pong';
+    open.style.cssText = 'height:36px;border:1px solid #ffffff33;border-radius:999px;background:#1d4ed8de;color:white;padding:0 14px;font:700 12px system-ui;cursor:pointer';
+    root.appendChild(open); document.body.appendChild(root);
+    open.style.touchAction = 'none'; open.style.userSelect = 'none';
+    open.title = 'Tap to select videos. Drag to move; position is remembered.';
+    let drag = null, suppressClickUntil = 0;
+    let savedPosition = getStoredJson(LAUNCHER_POS_KEY, null);
+    const bounds = () => ({x:Math.max(0, innerWidth-root.offsetWidth-8), y:Math.max(0, innerHeight-root.offsetHeight-8)});
+    const move = (x,y) => { const b = bounds(); root.style.left = `${Math.max(4,Math.min(b.x,x))}px`; root.style.top = `${Math.max(4,Math.min(b.y,y))}px`; root.style.bottom = 'auto'; };
+    const restore = () => { if (savedPosition && Number.isFinite(savedPosition.x) && Number.isFinite(savedPosition.y)) { const b = bounds(); move(savedPosition.x*b.x,savedPosition.y*b.y); } };
+    restore(); window.addEventListener('resize',restore);
+    open.addEventListener('pointerdown',event => {
+      if (!event.isPrimary || event.button !== 0) return;
+      const r = root.getBoundingClientRect(); drag = {id:event.pointerId,x:event.clientX,y:event.clientY,left:r.left,top:r.top,moved:false};
+      open.setPointerCapture(event.pointerId);
     });
-    channelButton.addEventListener('click', event => {
-      event.preventDefault();
-      const next = root.dataset.channel === '2' ? 1 : 2;
-      root.dataset.channel = String(next);
-      setStoredJson(RECALL_CHANNEL_KEY, next);
-      channelButton.textContent = `Recall ${next}`;
+    open.addEventListener('pointermove',event => {
+      if (!drag || drag.id !== event.pointerId) return;
+      const dx = event.clientX-drag.x, dy = event.clientY-drag.y;
+      if (!drag.moved && Math.hypot(dx,dy)<7) return;
+      drag.moved = true; event.preventDefault(); move(drag.left+dx,drag.top+dy);
     });
-    min30Checkbox.addEventListener('change', () => {
-      setStoredBool(RECALL_MIN_30_KEY, min30Checkbox.checked);
-    });
-    root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', async event => {
-      event.preventDefault();
-      if (root.dataset.busy === 'true') return;
-      root.dataset.busy = 'true';
-      status.textContent = button.dataset.action === 'main' ? 'Capturing main…' : 'Capturing all…';
-      try {
-        const result = await sendCaptureToRecall(
-          button.dataset.action,
-          Number(root.dataset.channel),
-          min30Checkbox.checked
-        );
-        status.textContent = `${result.videos} ready in R${root.dataset.channel}`;
-      } catch (error) {
-        status.textContent = String(error?.message || error).slice(0, 80);
-      } finally {
-        root.dataset.busy = 'false';
+    const finishDrag = event => {
+      if (!drag || drag.id !== event.pointerId) return;
+      if (drag.moved) {
+        suppressClickUntil = performance.now()+500;
+        const r = root.getBoundingClientRect(), b = bounds(); savedPosition = {x:r.left/(b.x||1),y:r.top/(b.y||1)};
+        setStoredJson(LAUNCHER_POS_KEY,savedPosition);
       }
-    }));
+      drag = null;
+      if (open.hasPointerCapture(event.pointerId)) open.releasePointerCapture(event.pointerId);
+    };
+    open.addEventListener('pointerup',finishDrag); open.addEventListener('pointercancel',finishDrag);
+    open.onclick = event => {
+      event.preventDefault(); event.stopPropagation();
+      if (performance.now()<suppressClickUntil) return;
+      if (activeTargetPreview?.isHidden()) activeTargetPreview.show();
+      else if (activeTargetPreview) activeTargetPreview.dismiss();
+      else openTargetPreview('all', Number(root.dataset.channel), false);
+    };
+    // Preserve the silent qualification hook without adding visible controls.
+    document.addEventListener('pong:universal-video-recall', async event => {
+      if (root.dataset.busy === 'true' || activeTargetPreview?.sending) return;
+      root.dataset.busy = 'true';
+      try {
+        await sendCaptureToRecall(event.detail?.mode || 'all', event.detail?.channel || Number(root.dataset.channel), event.detail?.ignoreUnder30 === true);
+      } catch (error) { root.dataset.error = String(error.message).slice(0, 120); }
+      finally { root.dataset.busy = 'false'; }
+    });
   }
 
   function addFloatingButtons() {
-    if (isPongAppPage()) {
-      addPongEromeLauncher();
-      return;
-    }
-
+    if (isPongAppPage()) { addPongEromeLauncher(); return; }
     addRecallCaptureButton();
-    const compactSite = detectSite();
-    if (compactSite !== 'erome-album' && compactSite !== 'erome-profile') return;
-    if (document.getElementById('uvs-panel')) return;
-
-    const css = `
-      #uvs-panel {
-        position: fixed;
-        z-index: 2147483647;
-        right: 12px;
-        bottom: 12px;
-        width: 206px;
-        background: rgba(17, 17, 17, 0.96);
-        color: #fff;
-        font-family: Arial, sans-serif;
-        font-size: 12px;
-        line-height: 1.25;
-        border-radius: 8px;
-        box-shadow: 0 4px 18px rgba(0,0,0,.45);
-        padding: 8px;
-        box-sizing: border-box;
-      }
-
-      #uvs-panel * {
-        box-sizing: border-box;
-      }
-
-      #uvs-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        cursor: move;
-        user-select: none;
-        margin-bottom: 6px;
-        font-weight: bold;
-        color: #fff;
-      }
-
-      #uvs-mini {
-        background: #333;
-        color: #fff;
-        border: 0;
-        border-radius: 6px;
-        width: 25px;
-        height: 22px;
-        cursor: pointer;
-        font-weight: bold;
-      }
-
-      #uvs-panel.uvs-collapsed {
-        width: 54px;
-        padding: 7px;
-      }
-
-      #uvs-panel.uvs-collapsed #uvs-body {
-        display: none;
-      }
-
-      #uvs-panel.uvs-collapsed #uvs-title {
-        display: none;
-      }
-
-      #uvs-panel button.uvs-btn {
-        width: 100%;
-        margin: 3px 0;
-        padding: 8px 6px;
-        border: 0;
-        border-radius: 7px;
-        color: #fff;
-        font-size: 12px;
-        font-weight: bold;
-        cursor: pointer;
-        background: #2d6cdf;
-      }
-
-      #uvs-panel button.uvs-btn:hover {
-        filter: brightness(1.12);
-      }
-
-      #uvs-panel button.uvs-copy {
-        background: #168a3a;
-      }
-
-      #uvs-panel button.uvs-page {
-        background: #5b47c8;
-      }
-
-      #uvs-panel button.uvs-warn {
-        background: #8a5a16;
-      }
-
-      #uvs-panel button.uvs-close {
-        background: #8a1c1c;
-      }
-
-      #uvs-status {
-        margin-top: 6px;
-        color: #ddd;
-        min-height: 16px;
-        word-break: break-word;
-      }
-
-      #uvs-count {
-        margin-top: 4px;
-        color: #9fe29f;
-        font-weight: bold;
-      }
-
-      #uvs-note {
-        margin-top: 5px;
-        color: #aaa;
-        font-size: 11px;
-      }
-
-      html.uvs-erome-player-open,
-      body.uvs-erome-player-open {
-        overflow: hidden !important;
-        touch-action: none !important;
-      }
-
-      #uvs-erome-player {
-        position: fixed;
-        inset: 0;
-        z-index: 2147483646;
-        background: #000;
-        color: #fff;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
-        overflow: hidden;
-        touch-action: none;
-      }
-
-      #uvs-erome-player * {
-        box-sizing: border-box;
-      }
-
-      #uvs-erome-player .uvs-erome-close {
-        position: absolute;
-        top: 10px;
-        left: 10px;
-        z-index: 50;
-        width: 34px;
-        height: 34px;
-        border: 1px solid rgba(255,255,255,0.12);
-        border-radius: 999px;
-        background: rgba(8,12,16,0.42);
-        color: rgba(255,255,255,0.72);
-        font-size: 18px;
-        line-height: 1;
-        font-weight: 700;
-        cursor: pointer;
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-      }
-
-      #uvs-erome-player .uvs-erome-container {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        background: #000;
-        touch-action: none;
-      }
-
-      #uvs-erome-player .video-wrapper {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        overflow: hidden;
-        opacity: 1;
-        transform: translate3d(0, 0, 0) scale(1);
-        transition: opacity 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
-        touch-action: manipulation;
-        -webkit-tap-highlight-color: transparent;
-        cursor: pointer;
-      }
-
-      #uvs-erome-player .video-wrapper.deck-enter-up {
-        animation: uvsDeckEnterUp 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
-      }
-
-      #uvs-erome-player .video-wrapper.deck-enter-down {
-        animation: uvsDeckEnterDown 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
-      }
-
-      #uvs-erome-player .video-wrapper.deck-enter-ready {
-        animation: uvsDeckEnterReady 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
-      }
-
-      @keyframes uvsDeckEnterUp {
-        from { opacity: 0; transform: translate3d(0, 34px, 0) scale(0.992); }
-        to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
-      }
-
-      @keyframes uvsDeckEnterDown {
-        from { opacity: 0; transform: translate3d(0, -34px, 0) scale(0.992); }
-        to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
-      }
-
-      @keyframes uvsDeckEnterReady {
-        from { opacity: 0; transform: translate3d(0, 12px, 0) scale(0.992); }
-        to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
-      }
-
-      #uvs-erome-player .video-wrapper.video-playing {
-        box-shadow: inset 0 0 0 2px rgba(103,232,249,0.38);
-      }
-
-      #uvs-erome-player .video-wrapper[data-ready-playable="true"] {
-        box-shadow: inset 0 0 0 2px rgba(34,197,94,0.55);
-      }
-
-      #uvs-erome-player .video-player {
-        width: 100%;
-        height: 100%;
-        object-fit: contain;
-        background: #000;
-        outline: none;
-        transform: translateZ(0);
-        backface-visibility: hidden;
-        will-change: transform;
-        pointer-events: auto !important;
-        -webkit-appearance: none;
-        appearance: none;
-        cursor: pointer !important;
-        touch-action: none !important;
-      }
-
-      #uvs-erome-player .tap-area {
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 30px;
-        z-index: 5;
-        background: transparent;
-        cursor: pointer;
-        touch-action: manipulation;
-        -webkit-tap-highlight-color: transparent;
-        pointer-events: auto;
-        user-select: none;
-        -webkit-user-select: none;
-      }
-
-      #uvs-erome-player .video-wrapper:not(.video-playing) .tap-area::before {
-        content: '';
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        border-style: solid;
-        border-width: 30px 0 30px 50px;
-        border-color: transparent transparent transparent rgba(255,255,255,0.6);
-        opacity: 0.7;
-        z-index: 3;
-      }
-
-      #uvs-erome-player .seek-flash {
-        position: absolute;
-        top: 0;
-        bottom: 30px;
-        width: 40%;
-        z-index: 8;
-        pointer-events: none;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        opacity: 0;
-        transition: opacity 0.15s;
-        background: rgba(255,255,255,0.1);
-      }
-
-      #uvs-erome-player .seek-flash.left {
-        left: 0;
-        border-radius: 0 50% 50% 0;
-      }
-
-      #uvs-erome-player .seek-flash.right {
-        right: 0;
-        border-radius: 50% 0 0 50%;
-      }
-
-      #uvs-erome-player .seek-flash.show {
-        opacity: 1;
-      }
-
-      #uvs-erome-player .seek-flash span {
-        color: #fff;
-        font-size: 20px;
-        font-weight: 700;
-        text-shadow: 0 0 8px rgba(0,0,0,0.9);
-      }
-
-      #uvs-erome-player .video-progress-container {
-        position: absolute;
-        bottom: 0;
-        left: 0;
-        right: 0;
-        height: 30px;
-        display: flex;
-        flex-direction: column;
-        justify-content: flex-end;
-        z-index: 20;
-        opacity: 1;
-        pointer-events: auto;
-        background: linear-gradient(to top, rgba(0,0,0,0.6), transparent);
-        padding: 5px 0;
-        touch-action: none;
-        user-select: none;
-        -webkit-user-select: none;
-        -webkit-touch-callout: none;
-        -webkit-tap-highlight-color: transparent;
-      }
-
-      #uvs-erome-player .video-progress-bar {
-        width: 100%;
-        height: 8px;
-        background: rgba(255,255,255,0.3);
-        border-radius: 4px;
-        overflow: visible;
-        cursor: pointer;
-        position: relative;
-        margin-bottom: 2px;
-        touch-action: none;
-        user-select: none;
-        -webkit-user-select: none;
-      }
-
-      #uvs-erome-player .video-progress-fill {
-        height: 100%;
-        width: 0;
-        background: #67e8f9;
-        border-radius: 5px;
-        transition: width 0.1s linear;
-        position: relative;
-        will-change: width;
-        z-index: 1;
-      }
-
-      #uvs-erome-player .video-progress-fill.active-scrubbing {
-        transition: none;
-        background: #a7f3d0;
-      }
-
-      #uvs-erome-player .scrubber-handle {
-        position: absolute;
-        right: -8px;
-        top: -4px;
-        width: 16px;
-        height: 16px;
-        background: #67e8f9;
-        border-radius: 50%;
-        box-shadow: 0 0 6px rgba(0,0,0,0.7);
-        display: none;
-        pointer-events: none;
-        z-index: 5;
-      }
-
-      #uvs-erome-player .preview-fill {
-        position: absolute;
-        height: 100%;
-        width: 0;
-        background: rgba(103,232,249,0.34);
-        border-radius: 5px;
-        top: 0;
-        left: 0;
-        z-index: 0;
-        pointer-events: none;
-      }
-
-      #uvs-erome-player .video-duration {
-        color: #fff;
-        font-size: 12px;
-        text-shadow: 1px 1px 1px rgba(0,0,0,0.5);
-        text-align: right;
-        padding-right: 5px;
-      }
-
-      #uvs-erome-player .artist-label {
-        position: absolute;
-        left: 50%;
-        bottom: 36px;
-        transform: translateX(-50%);
-        max-width: min(66vw, 280px);
-        padding: 2px 7px;
-        border-radius: 999px;
-        background: rgba(8,12,16,0.34);
-        color: rgba(255,255,255,0.58);
-        border: 1px solid rgba(255,255,255,0.08);
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-        font-size: 9px;
-        line-height: 1.2;
-        font-weight: 600;
-        text-align: center;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        z-index: 22;
-        pointer-events: none;
-        text-shadow: 0 1px 2px rgba(0,0,0,0.55);
-      }
-
-      #uvs-erome-player .video-ready-loader {
-        position: absolute;
-        left: 50%;
-        top: calc(50% + 42px);
-        transform: translate(-50%,-50%);
-        z-index: 24;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        pointer-events: none;
-        opacity: 0.84;
-        transition: opacity 0.18s ease, transform 0.18s ease;
-      }
-
-      #uvs-erome-player .video-ready-loader.ready {
-        opacity: 0;
-        transform: translate(-50%,-50%) scale(0.9);
-      }
-
-      #uvs-erome-player .video-ready-percent {
-        min-width: 24px;
-        text-align: center;
-        font-size: 9px;
-        line-height: 1;
-        color: rgba(255,255,255,0.66);
-        background: rgba(8,12,16,0.32);
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 999px;
-        padding: 2px 4px;
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-      }
-
-      #uvs-erome-player .video-ready-percent.not-ready {
-        color: rgba(255,255,255,0.92);
-        background: rgba(239,68,68,0.58);
-        border-color: rgba(248,113,113,0.68);
-        box-shadow: 0 0 12px rgba(239,68,68,0.28);
-      }
-
-      #uvs-erome-player .video-loading-indicator {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        width: 36px;
-        height: 36px;
-        margin: -18px 0 0 -18px;
-        border: 3px solid rgba(255,255,255,0.25);
-        border-top-color: #67e8f9;
-        border-radius: 50%;
-        animation: uvsEromeSpin 0.9s linear infinite;
-        display: none;
-        z-index: 23;
-        pointer-events: none;
-      }
-
-      @keyframes uvsEromeSpin {
-        to { transform: rotate(360deg); }
-      }
-
-      #uvs-erome-player .time-indicator,
-      #uvs-erome-player .uvs-erome-status {
-        position: absolute;
-        left: 50%;
-        top: 50%;
-        transform: translate(-50%, -50%);
-        z-index: 30;
-        min-width: 128px;
-        min-height: 42px;
-        padding: 8px 12px;
-        align-items: center;
-        justify-content: center;
-        border-radius: 999px;
-        background: rgba(8,12,16,0.64);
-        border: 1px solid rgba(255,255,255,0.1);
-        color: rgba(255,255,255,0.86);
-        font-size: 13px;
-        font-weight: 700;
-        text-align: center;
-        pointer-events: none;
-        backdrop-filter: blur(8px);
-        -webkit-backdrop-filter: blur(8px);
-        text-shadow: 0 1px 2px rgba(0,0,0,0.65);
-      }
-
-      #uvs-erome-player .time-indicator.fade-out {
-        opacity: 0 !important;
-        transition: opacity 0.35s ease;
-      }
-
-      #uvs-erome-player .uvs-erome-status {
-        display: none;
-        max-width: 80vw;
-      }
-    `;
-
-    try {
-      if (typeof GM_addStyle !== 'undefined') {
-        GM_addStyle(css);
-      } else {
-        const style = document.createElement('style');
-        style.textContent = css;
-        document.head.appendChild(style);
-      }
-    } catch (e) {}
-
-    const panel = document.createElement('div');
-    const site = detectSite();
-    const isEromePage = site === 'erome-album' || site === 'erome-profile';
-    const panelButtons = isEromePage
-      ? `
-        <button id="uvs-erome-play" class="uvs-btn uvs-copy">Player</button>
-        <button id="uvs-copy-pages" class="uvs-btn uvs-page">Copy Page Links</button>
-      `
-      : `
-        <button id="uvs-scrape-copy" class="uvs-btn uvs-copy">Scrape + Copy</button>
-        <button id="uvs-copy-pong" class="uvs-btn uvs-copy">Copy Last</button>
-      `;
-
-    panel.id = 'uvs-panel';
-
-    panel.innerHTML = `
-      <div id="uvs-header">
-        <span id="uvs-title">${isEromePage ? 'Erome' : 'Video Scraper'}</span>
-        <button id="uvs-mini" title="Minimize / Expand">+</button>
-      </div>
-
-      <div id="uvs-body">
-        ${panelButtons}
-
-        <div id="uvs-count">0 playable / 0 entries</div>
-        <div id="uvs-status">Ready</div>
-        <div id="uvs-note">${isEromePage ? 'Swipe up/down. Tap to play.' : 'For Coomer/direct links.'}</div>
-      </div>
-    `;
-
-    document.body.appendChild(panel);
-
-    panelStatusEl = panel.querySelector('#uvs-status');
-
-    const savedPos = getStoredJson(PANEL_POS_KEY, null);
-
-    if (savedPos && Number.isFinite(savedPos.left) && Number.isFinite(savedPos.top)) {
-      panel.style.left = `${savedPos.left}px`;
-      panel.style.top = `${savedPos.top}px`;
-      panel.style.right = 'auto';
-      panel.style.bottom = 'auto';
-    }
-
-    panel.querySelector('#uvs-scrape')?.addEventListener('click', () => doScrape(false));
-    panel.querySelector('#uvs-current')?.addEventListener('click', () => doScrapeCurrentOnly());
-    panel.querySelector('#uvs-erome-play')?.addEventListener('click', () => openEromePagePlayer());
-
-    panel.querySelector('#uvs-copy')?.addEventListener('click', () => doCopyStructured());
-    panel.querySelector('#uvs-copy-pong')?.addEventListener('click', () => doCopyPongPaste());
-    panel.querySelector('#uvs-copy-plain')?.addEventListener('click', () => doCopyPlain());
-    panel.querySelector('#uvs-copy-pages')?.addEventListener('click', () => doCopyPagesOnly());
-    panel.querySelector('#uvs-copy-readable')?.addEventListener('click', () => doCopyReadable());
-
-    panel.querySelector('#uvs-scrape-copy')?.addEventListener('click', () => doScrapeAndCopy());
-    panel.querySelector('#uvs-auto')?.addEventListener('click', () => toggleAuto());
-    panel.querySelector('#uvs-close')?.addEventListener('click', () => closeCurrentTab());
-
-    panel.querySelector('#uvs-mini').addEventListener('click', e => {
-      e.stopPropagation();
-
-      const collapsed = !panel.classList.contains('uvs-collapsed');
-
-      setPanelCollapsed(panel, collapsed);
-    });
-
-    makePanelDraggable(panel, panel.querySelector('#uvs-header'));
-
-    // Erome needs the Player button visible; other sites keep the remembered state.
-    setPanelCollapsed(panel, isEromePage ? false : getStoredBool(PANEL_COLLAPSED_KEY, true));
-
-    updatePanelCount();
   }
 
   function updatePanelCount() {
@@ -3502,26 +4775,13 @@
   if (/^[a-z0-9-]{8,100}$/i.test(browserRelayKeeperClientId)) {
     startBrowserMediaRelay(location.origin, browserRelayKeeperClientId);
     document.documentElement.dataset.pongBrowserRelayKeeper = 'active';
-    log('Universal Video Scraper v7.9.7 browser relay keeper active');
+    log('Universal Video Scraper v7.17.0 browser relay keeper active');
     return;
   }
 
   try {
     if (typeof GM_registerMenuCommand !== 'undefined') {
-      GM_registerMenuCommand('Scrape videos', () => doScrape(false));
-      GM_registerMenuCommand('Scrape current page only', () => doScrapeCurrentOnly());
-      GM_registerMenuCommand('Open Erome card player', () => openEromePagePlayer());
-      GM_registerMenuCommand('Open Erome from Pong', () => openEromeFromPong());
-
-      GM_registerMenuCommand('Copy Pong paste text', () => doCopyPongPaste());
-      GM_registerMenuCommand('Copy structured', () => doCopyStructured());
-      GM_registerMenuCommand('Copy external-playable URLs only', () => doCopyPlain());
-      GM_registerMenuCommand('Copy source page links', () => doCopyPagesOnly());
-      GM_registerMenuCommand('Copy diagnostic page + raw video list', () => doCopyReadable());
-
-      GM_registerMenuCommand('Scrape + copy Pong paste text', () => doScrapeAndCopy());
-      GM_registerMenuCommand('Close tab', () => closeCurrentTab());
-      GM_registerMenuCommand('Toggle auto-scrape', () => toggleAuto());
+      GM_registerMenuCommand('Select videos for Pong', () => openTargetPreview('all', Number(getStoredJson(RECALL_CHANNEL_KEY, 1)), false));
     }
   } catch (e) {
     console.error(TAG, 'Menu registration failed:', e);
@@ -3564,9 +4824,19 @@
 
     extractVideoUrls: (doc = document) => extractVideoUrls(doc, getBaseUrl()),
     extractPageDurationSeconds,
+    parseDurationHintSeconds,
+    collectLogicalWatchPageTargets,
     collectLogicalWatchPageUrls,
     primaryMediaEntriesFromDoc,
+    independentVideoGroupsFromDoc,
+    youtubeVideoId,
+    youtubePlayerData,
+    youtubeMediaEntries,
     sendCaptureToRecall,
+    collectSelectableTargets,
+    openTargetPreview,
+    buildDetectionFeedback,
+    requestDiagnosticOutput,
 
     formatPongExport,
     formatPongPasteExport,
@@ -3586,9 +4856,7 @@
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.9.7 loaded on', location.href);
+  log('Universal Video Scraper v7.34.0 loaded on', location.href);
 
-  if (getStoredBool(AUTO_SCRAPE_KEY, false)) {
-    setTimeout(() => doScrape(false), 800);
-  }
+  // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
