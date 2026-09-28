@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.31.0
+// @version      7.32.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -3649,15 +3649,17 @@ function primaryVideoEvidence(html, pageUrl) {
     let requiredEndpoint = '';
     if (requiresCaliforniaVpn(location.href) || targets.some(target => requiresCaliforniaVpn(target.url))) {
       requiredEndpoint = vpnEndpoint();
-      await runVpnAction(selection?.vpnAuthorization === VPN_USER_ACTION ? 'connect' : 'verify', selection?.onVpnStatus, requiredEndpoint);
+      // This returns the PC's queued-operation ACK, not its eventual connection
+      // result. The accepted desktop job owns the wait before source access.
+      if (selection?.vpnAuthorization === VPN_USER_ACTION) {
+        const vpn = await vpnRequest('connect', requiredEndpoint);
+        selection?.onVpnStatus?.(vpn);
+      }
     }
-    let endpoint = '', lastError;
-    for (const candidate of PONG_ENDPOINTS) {
-      const base = String(candidate).replace(/\/+$/, '');
-      if (requiredEndpoint && base !== requiredEndpoint) continue;
-      try { await request(base, 'GET'); endpoint = base; break; } catch (error) { lastError = error; }
-    }
-    if (!endpoint) throw lastError || new Error('Pong PC is unreachable');
+    // One batch POST is both delivery and health check. Never race POSTs to
+    // different PCs or spend serial timeouts probing before the actual send.
+    const endpoint = requiredEndpoint || String(PONG_ENDPOINTS[0] || '').replace(/\/+$/, '');
+    if (!endpoint) throw new Error('Pong PC address is not configured');
     const id = globalThis.crypto?.randomUUID?.() || 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
       const n = crypto.getRandomValues(new Uint8Array(1))[0] & 15; return (c === 'x' ? n : (n & 3) | 8).toString(16);
     });
@@ -3681,8 +3683,15 @@ function primaryVideoEvidence(html, pageUrl) {
       catch (error) { if (attempt || ['helper_update','server_rejected'].includes(error.code)) throw error; }
     }
     trace.jobId = id;
+    if (requiredEndpoint && response.backgroundNetworkPreparation !== true) {
+      throw Object.assign(new Error('Update/restart the PC helper before using background VPN handoff. Acceptance is not confirmed.'), {code:'helper_update'});
+    }
     const updateJob = job => {
-      if (!job || job.id !== id || !Array.isArray(job.targets)) throw new Error('PC job response did not match this send');
+      if (!job || job.id !== id || !Array.isArray(job.targets) || job.targets.length !== targets.length ||
+          new Set(job.targets.map(item=>item.index)).size !== targets.length ||
+          job.targets.some(item=>!Number.isInteger(item.index)||item.index<0||item.index>=targets.length)) {
+        throw new Error('PC did not acknowledge every selected link. Keep Firefox open and retry.');
+      }
       for (const item of job.targets) {
         const index = Number(item.index), target = targets[index], result = diagnostics[index];
         if (!target || !result) continue;
@@ -3703,7 +3712,7 @@ function primaryVideoEvidence(html, pageUrl) {
     // acceptance of links, not a claim that the media is already playable.
     trace.acceptedMs = Math.round(performance.now() - trace.startedAt);
     trace.channel = payload.channel;
-    selection?.onAccepted?.({ channel: payload.channel, total: targets.length, jobId: id });
+    selection?.onAccepted?.({ channel: payload.channel, total: targets.length, jobId: id, acceptedMs: trace.acceptedMs });
     const deadline = performance.now() + 120000;
     while (!finished && performance.now() < deadline) {
       await sleep(1200);
@@ -4136,7 +4145,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 6, version: '7.31.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 6, version: '7.32.0', id: session.id, createdAt: session.createdAt,
       deliveryMode: 'desktop_owned',
       vpn: vpnSafeStatus(session.vpn || {}),
       phoneConnectionOnly: session.phoneConnectionOnly === true,
@@ -4348,7 +4357,9 @@ function primaryVideoEvidence(html, pageUrl) {
     let animation = 0, rescanTimer = 0, closed = false, pageUrl = canonicalWatchPageUrl(location.href, location.href);
     const key = candidate => canonicalWatchPageUrl(candidate.url, location.href) + '\n' + (candidate.logicalVideoId || '');
     const update = () => {
-      shadow.querySelector('.summary').textContent = `${session.selected.size} selected`;
+      const ready = [...session.selected].filter(id => session.results.get(id)?.delivered === true).length;
+      shadow.querySelector('.summary').textContent = `${session.selected.size} selected · ${ready} ready in Pong`;
+      send.textContent = session.sending ? (session.accepted ? 'Sent to PC' : 'Sending…') : 'Send';
       channelButton.textContent = `Recall ${channel}`;
       channelButton.setAttribute('aria-label', `Destination: Recall ${channel}. Switch to Recall ${channel === 1 ? 2 : 1}`);
       channelButton.title = session.sending ? 'Destination is fixed while sending' : 'Tap to switch Recall destination';
@@ -4463,6 +4474,7 @@ function primaryVideoEvidence(html, pageUrl) {
     send.onclick = async event => {
       if (session.sending || !session.selected.size) return;
       session.sending = true; session.stage = 'capture';
+      session.accepted = false;
       session.captureTrace = null; session.captureFailure = null;
       const targets = session.candidates.filter(candidate => session.selected.has(candidate.previewId));
       for (const target of targets) { target.status = 'Queued'; session.results.delete(target.previewId); }
@@ -4474,7 +4486,11 @@ function primaryVideoEvidence(html, pageUrl) {
           onVpnStatus: showVpn,
           phoneConnectionOnly: session.phoneConnectionOnly,
           onCaptureDiagnostics: trace => { session.captureTrace = trace; },
-          onAccepted: receipt => { status.textContent = `PC accepted ${receipt.total} links for Recall ${receipt.channel}. You can close Firefox now. Open that Recall to see PC progress; accepted does not mean ready yet.`; },
+          onAccepted: receipt => {
+            session.accepted = true; session.stage = 'processing';
+            status.textContent = `PC accepted all ${receipt.total} links in ${(receipt.acceptedMs/1000).toFixed(1)}s → Recall ${receipt.channel}. You can close Firefox now; the PC prepares them. Accepted does not mean ready yet.`;
+            update();
+          },
           onStatus: (target, text) => { target.status = text; update(); },
           onResult: (target, result) => { session.results.set(target.previewId, result); update(); }
         });
@@ -4737,7 +4753,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.31.0 loaded on', location.href);
+  log('Universal Video Scraper v7.32.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
