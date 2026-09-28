@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.32.0
+// @version      7.33.0
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -4145,7 +4145,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 6, version: '7.32.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 6, version: '7.33.0', id: session.id, createdAt: session.createdAt,
       deliveryMode: 'desktop_owned',
       vpn: vpnSafeStatus(session.vpn || {}),
       phoneConnectionOnly: session.phoneConnectionOnly === true,
@@ -4253,6 +4253,67 @@ function primaryVideoEvidence(html, pageUrl) {
     throw new Error('Report saved in this browser. Pong needs the updated receiver; tap Retry report later.');
   }
 
+  function makeTargetPreviewMovable(bar, handle) {
+    const storageKey = 'uvs_target_preview_position_v1';
+    let saved = getStoredJson(storageKey, null), drag = null;
+    const place = (left, top) => {
+      const rect = bar.getBoundingClientRect();
+      const maxX = Math.max(0, innerWidth - rect.width - 8);
+      const maxY = Math.max(0, innerHeight - rect.height - 8);
+      const x = Math.max(Math.min(8, maxX), Math.min(maxX, left));
+      const y = Math.max(Math.min(8, maxY), Math.min(maxY, top));
+      Object.assign(bar.style, { left: `${x}px`, top: `${y}px`, right: 'auto', bottom: 'auto', margin: '0' });
+      return { x: maxX ? x / maxX : 0, y: maxY ? y / maxY : 0 };
+    };
+    const restore = () => {
+      if (!saved || !Number.isFinite(saved.x) || !Number.isFinite(saved.y) || drag) return;
+      const rect = bar.getBoundingClientRect();
+      place(saved.x * Math.max(0, innerWidth - rect.width - 8), saved.y * Math.max(0, innerHeight - rect.height - 8));
+    };
+    const move = event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      saved = place(drag.left + event.clientX - drag.x, drag.top + event.clientY - drag.y);
+    };
+    const finish = event => {
+      if (!drag || (event && event.pointerId !== drag.id)) return;
+      if (event) { event.preventDefault(); event.stopImmediatePropagation(); }
+      const id = drag.id; drag = null;
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('pointerup', finish, true);
+      window.removeEventListener('pointercancel', finish, true);
+      try { handle.releasePointerCapture(id); } catch (_) {}
+      handle.classList.remove('dragging');
+      if (saved) setStoredJson(storageKey, saved);
+    };
+    handle.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || drag) return;
+      event.preventDefault(); event.stopPropagation();
+      const rect = bar.getBoundingClientRect();
+      drag = { id: event.pointerId, x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+      saved = place(rect.left, rect.top);
+      handle.classList.add('dragging');
+      try { handle.setPointerCapture(event.pointerId); } catch (_) {}
+      window.addEventListener('pointermove', move, { capture: true, passive: false });
+      window.addEventListener('pointerup', finish, true);
+      window.addEventListener('pointercancel', finish, true);
+    });
+    handle.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); });
+    handle.addEventListener('keydown', event => {
+      const offset = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[event.key];
+      if (!offset) return;
+      event.preventDefault(); event.stopPropagation();
+      const rect = bar.getBoundingClientRect(), step = event.shiftKey ? 32 : 8;
+      saved = place(rect.left + offset[0] * step, rect.top + offset[1] * step);
+      setStoredJson(storageKey, saved);
+    });
+    const resize = new ResizeObserver(restore);
+    resize.observe(bar);
+    window.addEventListener('resize', restore);
+    restore();
+    return () => { finish(); resize.disconnect(); window.removeEventListener('resize', restore); };
+  }
+
   function openTargetPreview(mode = 'all', channel = 1, ignoreUnder30 = false) {
     if (activeTargetPreview?.sending) return activeTargetPreview;
     activeTargetPreview?.close();
@@ -4272,10 +4333,11 @@ function primaryVideoEvidence(html, pageUrl) {
     const previewStyle = document.createElement('style');
     previewStyle.textContent = `
       :host{font:10.5px system-ui;color:white}button{font:inherit;cursor:pointer;color:white;border:1px solid #ffffff44;border-radius:6px;background:#263244;padding:4px 7px}
-      .box{position:fixed;background:#ff22222b;border:2px solid #ff5757;border-radius:6px;pointer-events:auto;padding:0;text-align:left;touch-action:manipulation}
+      .box{position:fixed;z-index:1;background:#ff22222b;border:2px solid #ff5757;border-radius:6px;pointer-events:auto;padding:0;text-align:left;touch-action:manipulation}
       .box[aria-pressed=true]{background:#ff22224a;border-color:#fff}.box span{position:absolute;left:0;top:0;background:#851e24;padding:3px 5px;border-radius:3px;font-size:11px}
       .box[data-ready=true]{background:#22c55e30;border-color:#4ade80}.box[data-ready=true] span{background:#166534}
-      .bar{position:fixed;left:8px;right:8px;bottom:54px;margin:auto;max-width:380px;background:#101723f5;border:1px solid #ffffff33;border-radius:10px;padding:6px;pointer-events:auto;box-shadow:0 3px 16px #0008}
+      .bar{position:fixed;z-index:2;box-sizing:border-box;width:calc(100% - 16px);left:8px;right:8px;bottom:54px;margin:auto;max-width:380px;max-height:calc(100% - 16px);overflow:auto;overscroll-behavior:contain;background:#101723f5;border:1px solid #ffffff33;border-radius:10px;padding:6px;pointer-events:auto;box-shadow:0 3px 16px #0008}
+      .drag-handle{cursor:grab;touch-action:none;user-select:none;padding:5px 3px;color:#cbd5e1}.drag-handle.dragging{cursor:grabbing}.drag-handle:focus-visible{outline:2px solid #93c5fd;border-radius:3px}
       .row{display:flex;flex-wrap:wrap;align-items:center;gap:4px}.row button{padding:4px 7px;min-height:25px}.summary{flex:1;font-size:10px}.status{font-size:10px;line-height:1.3;color:#cbd5e1;margin-top:3px}button:disabled{opacity:.5;cursor:default}
       .bar{background:linear-gradient(145deg,#17243bf5,#18182cf5);border-color:#818cf85c}
       .bar button{transition:filter .12s ease,border-color .12s ease}.bar button:hover:not(:disabled){filter:brightness(1.18)}
@@ -4288,9 +4350,18 @@ function primaryVideoEvidence(html, pageUrl) {
       const element = document.createElement(tag); element.className = className; element.textContent = text; parent.appendChild(element); return element;
     };
     shadow.appendChild(previewStyle);
+    // Keep pointer/touch/click events within our UI, including panel gaps,
+    // disabled controls, and Copy log. Do not cancel native form/scroll behavior.
+    for (const type of ['pointerdown','pointerup','pointermove','pointercancel','mousedown','mouseup','mousemove','click','dblclick','auxclick','contextmenu','touchstart','touchmove','touchend','touchcancel','wheel','keydown','keyup']) {
+      shadow.addEventListener(type, event => event.stopPropagation());
+    }
     node('div', 'boxes', shadow);
     const bar = node('div', 'bar', shadow); bar.setAttribute('role', 'region'); bar.setAttribute('aria-label', 'Select video targets');
-    const row = node('div', 'row', bar); node('div', 'summary', row);
+    const row = node('div', 'row', bar);
+    const dragHandle = node('div', 'drag-handle', row, '⠿ Move');
+    dragHandle.tabIndex = 0; dragHandle.setAttribute('role', 'button'); dragHandle.setAttribute('aria-label', 'Move panel');
+    dragHandle.title = 'Drag to move; use arrow keys when focused';
+    node('div', 'summary', row);
     const channelButton = node('button', '', row); channelButton.type = 'button'; channelButton.dataset.do = 'channel';
     node('button', '', row, 'Send').dataset.do = 'send';
     node('button', '', row, 'Copy log').dataset.do = 'copy';
@@ -4352,6 +4423,7 @@ function primaryVideoEvidence(html, pageUrl) {
       finally { vpnWorking = false; vpnButtons.forEach(b => b.disabled = session.sending); update(); }
     };
     document.body.appendChild(host);
+    const stopMoving = makeTargetPreviewMovable(bar, dragHandle);
     const boxRoot = shadow.querySelector('.boxes'), status = shadow.querySelector('.status');
     const send = shadow.querySelector('[data-do=send]'), controls = new Map();
     let animation = 0, rescanTimer = 0, closed = false, pageUrl = canonicalWatchPageUrl(location.href, location.href);
@@ -4438,9 +4510,11 @@ function primaryVideoEvidence(html, pageUrl) {
     mutation.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class','style','hidden'] });
     window.addEventListener('scroll', schedulePosition, true); window.addEventListener('resize', schedulePosition);
     const onKey = event => { if (event.key === 'Escape') session.dismiss(); };
+    shadow.addEventListener('keydown', onKey);
     window.addEventListener('keydown', onKey);
     session.close = () => {
       closed = true; resize.disconnect(); mutation.disconnect(); cancelAnimationFrame(animation); clearTimeout(rescanTimer);
+      stopMoving();
       window.removeEventListener('scroll', schedulePosition, true); window.removeEventListener('resize', schedulePosition); window.removeEventListener('keydown', onKey);
       host.remove(); if (activeTargetPreview === session) activeTargetPreview = null;
     };
@@ -4753,7 +4827,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.32.0 loaded on', location.href);
+  log('Universal Video Scraper v7.33.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
