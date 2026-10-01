@@ -1,0 +1,4389 @@
+{
+  "mode": "full",
+  "profile": {
+    "rounds": 8,
+    "iterations": 128,
+    "warmup": 20,
+    "fixtureSteps": 4
+  },
+  "gates": {
+    "mae": 0.1,
+    "p99Abs": 1.0,
+    "maxAbs": 4.0,
+    "psnrDb": 50.0,
+    "ssim": 0.999,
+    "temporalMae": 0.2
+  },
+  "status": "complete",
+  "limitations": [
+    "Generated tensors cannot prove perceptual face quality.",
+    "Completed-call latency excludes preprocessing, compositing and video transport.",
+    "Provider registration does not prove node placement or realized FP16 precision.",
+    "Device memory peaks are sampled; Torch allocator excludes ORT/TRT allocations.",
+    "Per-process GPU memory is null when WDDM does not expose it."
+  ],
+  "selectedArms": [
+    "C",
+    "E"
+  ],
+  "tensorRtBuildOptIn": false,
+  "order": [
+    [
+      "C",
+      "E"
+    ],
+    [
+      "E",
+      "C"
+    ],
+    [
+      "E",
+      "C"
+    ],
+    [
+      "C",
+      "E"
+    ],
+    [
+      "C",
+      "E"
+    ],
+    [
+      "E",
+      "C"
+    ],
+    [
+      "E",
+      "C"
+    ],
+    [
+      "C",
+      "E"
+    ]
+  ],
+  "workers": [
+    {
+      "arm": "C",
+      "round": 0,
+      "exitCode": 0,
+      "elapsedSeconds": 43.358999999999924,
+      "observedPeakDeviceUsedMiB": 2468.0,
+      "observedMinimumFreeMiB": 9543.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-00-C\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 2889749574528,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          249.9414
+        ],
+        "sessionCreationTotalMs": 249.9414,
+        "constructionAndRuntimePrepareMs": 533.5021,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 73.5518,
+        "additionalWarmupMs": 4645.8914
+      },
+      "memory": {
+        "rssMiB": 1423.0703125,
+        "peakRssMiB": 1495.07421875,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 58.0360015625,
+        "p50Ms": 58.0336,
+        "p95Ms": 58.201255,
+        "p99Ms": 58.271884,
+        "sequentialCallsPerSecond": 17.230683938883733
+      }
+    },
+    {
+      "arm": "E",
+      "round": 0,
+      "exitCode": 0,
+      "elapsedSeconds": 13.0,
+      "observedPeakDeviceUsedMiB": 2504.0,
+      "observedMinimumFreeMiB": 9507.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-00-E\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 2176646419328,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": true
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          248.9422
+        ],
+        "sessionCreationTotalMs": 248.9422,
+        "constructionAndRuntimePrepareMs": 677.4577,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 60.1209,
+        "additionalWarmupMs": 1139.0157
+      },
+      "memory": {
+        "rssMiB": 1464.30859375,
+        "peakRssMiB": 1536.3125,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 56.98616171875,
+        "p50Ms": 56.981300000000005,
+        "p95Ms": 57.119785,
+        "p99Ms": 57.193718,
+        "sequentialCallsPerSecond": 17.54811992664831
+      }
+    },
+    {
+      "arm": "E",
+      "round": 1,
+      "exitCode": 0,
+      "elapsedSeconds": 13.0,
+      "observedPeakDeviceUsedMiB": 2506.0,
+      "observedMinimumFreeMiB": 9505.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-01-E\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 1364262476656,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": true
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          245.8641
+        ],
+        "sessionCreationTotalMs": 245.8641,
+        "constructionAndRuntimePrepareMs": 672.3693,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 59.3032,
+        "additionalWarmupMs": 1140.5353
+      },
+      "memory": {
+        "rssMiB": 1460.62890625,
+        "peakRssMiB": 1532.6328125,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 57.04979453125,
+        "p50Ms": 57.04315,
+        "p95Ms": 57.218565000000005,
+        "p99Ms": 57.268624,
+        "sequentialCallsPerSecond": 17.528546916189732
+      }
+    },
+    {
+      "arm": "C",
+      "round": 1,
+      "exitCode": 0,
+      "elapsedSeconds": 43.3130000000001,
+      "observedPeakDeviceUsedMiB": 2466.0,
+      "observedMinimumFreeMiB": 9545.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-01-C\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 2203684116048,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          249.6852
+        ],
+        "sessionCreationTotalMs": 249.6852,
+        "constructionAndRuntimePrepareMs": 538.3607,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 74.3133,
+        "additionalWarmupMs": 4646.2197
+      },
+      "memory": {
+        "rssMiB": 1428.5078125,
+        "peakRssMiB": 1500.51171875,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 58.05059921875,
+        "p50Ms": 58.04855,
+        "p95Ms": 58.183725,
+        "p99Ms": 58.269942,
+        "sequentialCallsPerSecond": 17.22635103613204
+      }
+    },
+    {
+      "arm": "E",
+      "round": 2,
+      "exitCode": 0,
+      "elapsedSeconds": 13.030999999999949,
+      "observedPeakDeviceUsedMiB": 2506.0,
+      "observedMinimumFreeMiB": 9505.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-02-E\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 2669717490064,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": true
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          249.1859
+        ],
+        "sessionCreationTotalMs": 249.1859,
+        "constructionAndRuntimePrepareMs": 675.1196,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 57.151,
+        "additionalWarmupMs": 1142.1378
+      },
+      "memory": {
+        "rssMiB": 1459.51953125,
+        "peakRssMiB": 1531.5234375,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 57.09000234375,
+        "p50Ms": 57.08945,
+        "p95Ms": 57.229585,
+        "p99Ms": 57.248274,
+        "sequentialCallsPerSecond": 17.516201768197618
+      }
+    },
+    {
+      "arm": "C",
+      "round": 2,
+      "exitCode": 0,
+      "elapsedSeconds": 43.28099999999995,
+      "observedPeakDeviceUsedMiB": 2468.0,
+      "observedMinimumFreeMiB": 9543.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-02-C\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 1813394712336,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          249.25
+        ],
+        "sessionCreationTotalMs": 249.25,
+        "constructionAndRuntimePrepareMs": 532.5207,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 73.7481,
+        "additionalWarmupMs": 4647.0967
+      },
+      "memory": {
+        "rssMiB": 1424.29296875,
+        "peakRssMiB": 1496.296875,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 58.09687578125,
+        "p50Ms": 58.0901,
+        "p95Ms": 58.231745,
+        "p99Ms": 58.294388000000005,
+        "sequentialCallsPerSecond": 17.21262953562706
+      }
+    },
+    {
+      "arm": "C",
+      "round": 3,
+      "exitCode": 0,
+      "elapsedSeconds": 43.375,
+      "observedPeakDeviceUsedMiB": 2468.0,
+      "observedMinimumFreeMiB": 9543.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-03-C\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 2196858515376,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          250.3545
+        ],
+        "sessionCreationTotalMs": 250.3545,
+        "constructionAndRuntimePrepareMs": 541.1878,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 76.305,
+        "additionalWarmupMs": 4648.3248
+      },
+      "memory": {
+        "rssMiB": 1428.83984375,
+        "peakRssMiB": 1500.84375,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 58.1068984375,
+        "p50Ms": 58.1026,
+        "p95Ms": 58.234625,
+        "p99Ms": 58.382818,
+        "sequentialCallsPerSecond": 17.209660589191554
+      }
+    },
+    {
+      "arm": "E",
+      "round": 3,
+      "exitCode": 0,
+      "elapsedSeconds": 13.030999999999949,
+      "observedPeakDeviceUsedMiB": 2506.0,
+      "observedMinimumFreeMiB": 9505.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-03-E\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 2245196833280,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": true
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          249.9302
+        ],
+        "sessionCreationTotalMs": 249.9302,
+        "constructionAndRuntimePrepareMs": 672.5485,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 57.2281,
+        "additionalWarmupMs": 1142.0025
+      },
+      "memory": {
+        "rssMiB": 1459.04296875,
+        "peakRssMiB": 1531.046875,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 57.1416203125,
+        "p50Ms": 57.1411,
+        "p95Ms": 57.264045,
+        "p99Ms": 57.295989999999996,
+        "sequentialCallsPerSecond": 17.500378787495553
+      }
+    },
+    {
+      "arm": "C",
+      "round": 4,
+      "exitCode": 0,
+      "elapsedSeconds": 43.36000000000013,
+      "observedPeakDeviceUsedMiB": 2468.0,
+      "observedMinimumFreeMiB": 9543.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-04-C\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 2064823997264,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          253.3188
+        ],
+        "sessionCreationTotalMs": 253.3188,
+        "constructionAndRuntimePrepareMs": 537.3825,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 74.3126,
+        "additionalWarmupMs": 4655.2433
+      },
+      "memory": {
+        "rssMiB": 1428.73828125,
+        "peakRssMiB": 1500.7421875,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 58.10150390625,
+        "p50Ms": 58.10695,
+        "p95Ms": 58.25522,
+        "p99Ms": 58.279761,
+        "sequentialCallsPerSecond": 17.21125844889584
+      }
+    },
+    {
+      "arm": "E",
+      "round": 4,
+      "exitCode": 0,
+      "elapsedSeconds": 13.030999999999949,
+      "observedPeakDeviceUsedMiB": 2506.0,
+      "observedMinimumFreeMiB": 9505.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-04-E\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 2457553391424,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": true
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          249.305
+        ],
+        "sessionCreationTotalMs": 249.305,
+        "constructionAndRuntimePrepareMs": 677.3807,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 57.0636,
+        "additionalWarmupMs": 1142.7152
+      },
+      "memory": {
+        "rssMiB": 1464.26953125,
+        "peakRssMiB": 1536.2734375,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 57.19019296875,
+        "p50Ms": 57.19985,
+        "p95Ms": 57.325889999999994,
+        "p99Ms": 57.347349,
+        "sequentialCallsPerSecond": 17.48551540202745
+      }
+    },
+    {
+      "arm": "E",
+      "round": 5,
+      "exitCode": 0,
+      "elapsedSeconds": 13.0,
+      "observedPeakDeviceUsedMiB": 2506.0,
+      "observedMinimumFreeMiB": 9505.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-05-E\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 3115249319136,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": true
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          251.054
+        ],
+        "sessionCreationTotalMs": 251.054,
+        "constructionAndRuntimePrepareMs": 700.4381,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 57.0365,
+        "additionalWarmupMs": 1142.8708
+      },
+      "memory": {
+        "rssMiB": 1459.92578125,
+        "peakRssMiB": 1531.9296875,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 57.184705468749996,
+        "p50Ms": 57.1662,
+        "p95Ms": 57.277795000000005,
+        "p99Ms": 57.340756999999996,
+        "sequentialCallsPerSecond": 17.487193329105715
+      }
+    },
+    {
+      "arm": "C",
+      "round": 5,
+      "exitCode": 0,
+      "elapsedSeconds": 43.40599999999995,
+      "observedPeakDeviceUsedMiB": 2466.0,
+      "observedMinimumFreeMiB": 9545.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-05-C\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 1772763029168,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          251.0057
+        ],
+        "sessionCreationTotalMs": 251.0057,
+        "constructionAndRuntimePrepareMs": 536.5468,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 74.2676,
+        "additionalWarmupMs": 4656.0413
+      },
+      "memory": {
+        "rssMiB": 1428.33984375,
+        "peakRssMiB": 1500.34375,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 58.13124453125,
+        "p50Ms": 58.1215,
+        "p95Ms": 58.28407,
+        "p99Ms": 58.337447000000004,
+        "sequentialCallsPerSecond": 17.202452967653624
+      }
+    },
+    {
+      "arm": "E",
+      "round": 6,
+      "exitCode": 0,
+      "elapsedSeconds": 13.047000000000025,
+      "observedPeakDeviceUsedMiB": 2506.0,
+      "observedMinimumFreeMiB": 9505.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-06-E\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 1980438972880,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": true
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          251.1454
+        ],
+        "sessionCreationTotalMs": 251.1454,
+        "constructionAndRuntimePrepareMs": 676.4024,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 57.1605,
+        "additionalWarmupMs": 1142.4017
+      },
+      "memory": {
+        "rssMiB": 1464.51171875,
+        "peakRssMiB": 1536.515625,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 57.15521171875,
+        "p50Ms": 57.15505,
+        "p95Ms": 57.29535,
+        "p99Ms": 57.309098000000006,
+        "sequentialCallsPerSecond": 17.496217228987113
+      }
+    },
+    {
+      "arm": "C",
+      "round": 6,
+      "exitCode": 0,
+      "elapsedSeconds": 43.40700000000015,
+      "observedPeakDeviceUsedMiB": 2468.0,
+      "observedMinimumFreeMiB": 9543.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-06-C\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 1691754344176,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          250.3317
+        ],
+        "sessionCreationTotalMs": 250.3317,
+        "constructionAndRuntimePrepareMs": 534.7765,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 72.9855,
+        "additionalWarmupMs": 4653.0154
+      },
+      "memory": {
+        "rssMiB": 1427.97265625,
+        "peakRssMiB": 1499.9765625,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 58.132978125,
+        "p50Ms": 58.134150000000005,
+        "p95Ms": 58.28201,
+        "p99Ms": 58.306104,
+        "sequentialCallsPerSecond": 17.201939970282574
+      }
+    },
+    {
+      "arm": "C",
+      "round": 7,
+      "exitCode": 0,
+      "elapsedSeconds": 43.38999999999987,
+      "observedPeakDeviceUsedMiB": 2468.0,
+      "observedMinimumFreeMiB": 9543.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-07-C\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 1842365778640,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          246.0267
+        ],
+        "sessionCreationTotalMs": 246.0267,
+        "constructionAndRuntimePrepareMs": 536.7429,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 74.1942,
+        "additionalWarmupMs": 4659.134
+      },
+      "memory": {
+        "rssMiB": 1428.69921875,
+        "peakRssMiB": 1500.703125,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 58.1850578125,
+        "p50Ms": 58.186,
+        "p95Ms": 58.323845,
+        "p99Ms": 58.386849999999995,
+        "sequentialCallsPerSecond": 17.18654303347909
+      }
+    },
+    {
+      "arm": "E",
+      "round": 7,
+      "exitCode": 0,
+      "elapsedSeconds": 13.0,
+      "observedPeakDeviceUsedMiB": 2504.0,
+      "observedMinimumFreeMiB": 9507.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1\\round-07-E\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 2169685067424,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": true
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          253.4429
+        ],
+        "sessionCreationTotalMs": 253.4429,
+        "constructionAndRuntimePrepareMs": 677.4437,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 57.2076,
+        "additionalWarmupMs": 1142.2207
+      },
+      "memory": {
+        "rssMiB": 1465.5390625,
+        "peakRssMiB": 1537.54296875,
+        "torchPeakAllocatedMiB": 89.25048828125,
+        "torchPeakReservedMiB": 106.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 128,
+        "meanMs": 57.14657265625,
+        "p50Ms": 57.14805,
+        "p95Ms": 57.285765000000005,
+        "p99Ms": 57.3369,
+        "sequentialCallsPerSecond": 17.49886219800501
+      }
+    }
+  ],
+  "benchmarkWorkDirectory": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen-cudagraph-full-20260918-1",
+  "command": [
+    "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\runtime\\venv\\Scripts\\python.exe",
+    "-I",
+    "-B",
+    ".\\benchmark_gpen_generated.py",
+    "--mode",
+    "full",
+    "--arms",
+    "C",
+    "E",
+    "--worker-timeout",
+    "120",
+    "--output-dir",
+    ".\\reports\\gpen-cudagraph-full-20260918-1",
+    "--work-dir",
+    ".\\work\\gpen-cudagraph-full-20260918-1"
+  ],
+  "harnessSourceSha256": "1fe63db02bdb8650f1dfcb183069c94f71704fa84d62cb582ee4e517158edeb8",
+  "preflight": [
+    {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 4070",
+      "totalMiB": 12282.0,
+      "usedMiB": 457.0,
+      "freeMiB": 11554.0,
+      "utilizationPercent": 0.0
+    },
+    {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 4070",
+      "totalMiB": 12282.0,
+      "usedMiB": 457.0,
+      "freeMiB": 11554.0,
+      "utilizationPercent": 0.0
+    },
+    {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 4070",
+      "totalMiB": 12282.0,
+      "usedMiB": 457.0,
+      "freeMiB": 11554.0,
+      "utilizationPercent": 0.0
+    }
+  ],
+  "minimumFreeMiBWhileRunning": 2456.4,
+  "runtimeSourceSha256": "b0909465cf80c71b66d49f095a8fbc5dc3cffb288a4594a5ed6262bcb9d6d26c",
+  "arms": {
+    "A": {
+      "label": "prepatch GPEN256 TRT-first direct binding",
+      "variants": {},
+      "coldPerRound": [],
+      "providerPerRound": [],
+      "memoryPerRound": [],
+      "bindingAblationsBitExact": false,
+      "bindingAblation": null
+    },
+    "B": {
+      "label": "prepatch GPEN512 CUDA direct binding",
+      "variants": {},
+      "coldPerRound": [],
+      "providerPerRound": [],
+      "memoryPerRound": [],
+      "bindingAblationsBitExact": false,
+      "bindingAblation": null
+    },
+    "C": {
+      "label": "new GPEN512 CUDA runtime",
+      "variants": {
+        "primary": {
+          "count": 1024,
+          "meanMs": 58.105144921875,
+          "p50Ms": 58.1027,
+          "p95Ms": 58.271035000000005,
+          "p99Ms": 58.341502999999996,
+          "sequentialCallsPerSecond": 17.210179947826397
+        },
+        "per_call_direct": {
+          "count": 1024,
+          "meanMs": 58.0598533203125,
+          "p50Ms": 58.06075,
+          "p95Ms": 58.22231,
+          "p99Ms": 58.291678999999995,
+          "sequentialCallsPerSecond": 17.223605345384943
+        },
+        "persistent_direct": {
+          "count": 1024,
+          "meanMs": 58.04698330078125,
+          "p50Ms": 58.04345,
+          "p95Ms": 58.218655,
+          "p99Ms": 58.304778999999996,
+          "sequentialCallsPerSecond": 17.22742411639747
+        },
+        "persistent_copy": {
+          "count": 1024,
+          "meanMs": 58.07991328125,
+          "p50Ms": 58.07995,
+          "p95Ms": 58.25011,
+          "p99Ms": 58.326488,
+          "sequentialCallsPerSecond": 17.21765656152987
+        }
+      },
+      "coldPerRound": [
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            249.9414
+          ],
+          "sessionCreationTotalMs": 249.9414,
+          "constructionAndRuntimePrepareMs": 533.5021,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 73.5518,
+          "additionalWarmupMs": 4645.8914
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            249.6852
+          ],
+          "sessionCreationTotalMs": 249.6852,
+          "constructionAndRuntimePrepareMs": 538.3607,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 74.3133,
+          "additionalWarmupMs": 4646.2197
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            249.25
+          ],
+          "sessionCreationTotalMs": 249.25,
+          "constructionAndRuntimePrepareMs": 532.5207,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 73.7481,
+          "additionalWarmupMs": 4647.0967
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            250.3545
+          ],
+          "sessionCreationTotalMs": 250.3545,
+          "constructionAndRuntimePrepareMs": 541.1878,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 76.305,
+          "additionalWarmupMs": 4648.3248
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            253.3188
+          ],
+          "sessionCreationTotalMs": 253.3188,
+          "constructionAndRuntimePrepareMs": 537.3825,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 74.3126,
+          "additionalWarmupMs": 4655.2433
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            251.0057
+          ],
+          "sessionCreationTotalMs": 251.0057,
+          "constructionAndRuntimePrepareMs": 536.5468,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 74.2676,
+          "additionalWarmupMs": 4656.0413
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            250.3317
+          ],
+          "sessionCreationTotalMs": 250.3317,
+          "constructionAndRuntimePrepareMs": 534.7765,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 72.9855,
+          "additionalWarmupMs": 4653.0154
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            246.0267
+          ],
+          "sessionCreationTotalMs": 246.0267,
+          "constructionAndRuntimePrepareMs": 536.7429,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 74.1942,
+          "additionalWarmupMs": 4659.134
+        }
+      ],
+      "providerPerRound": [
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 2889749574528,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 2203684116048,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 1813394712336,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 2196858515376,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 2064823997264,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 1772763029168,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 1691754344176,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 1842365778640,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        }
+      ],
+      "memoryPerRound": [
+        {
+          "rssMiB": 1423.0703125,
+          "peakRssMiB": 1495.07421875,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1428.5078125,
+          "peakRssMiB": 1500.51171875,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1424.29296875,
+          "peakRssMiB": 1496.296875,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1428.83984375,
+          "peakRssMiB": 1500.84375,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1428.73828125,
+          "peakRssMiB": 1500.7421875,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1428.33984375,
+          "peakRssMiB": 1500.34375,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1427.97265625,
+          "peakRssMiB": 1499.9765625,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1428.69921875,
+          "peakRssMiB": 1500.703125,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        }
+      ],
+      "bindingAblationsBitExact": true,
+      "bindingAblation": {
+        "runtimeMinusPerCallDirectMeanMs": 0.04529160156249996,
+        "measuredFaster": false,
+        "decision": "persistent runtime slower in this sample; do not retain on speed grounds",
+        "isolatedMeanDeltasMs": {
+          "twoDeviceCopiesMs": 0.03292998046874997,
+          "bindingCreationMs": 0.012870019531250054,
+          "runtimeWrapperMs": 0.025231640625000044
+        },
+        "note": "Same session and paired fixture/iteration; deltas include timing noise."
+      }
+    },
+    "D": {
+      "label": "new GPEN512 TensorRT runtime",
+      "variants": {},
+      "coldPerRound": [],
+      "providerPerRound": [],
+      "memoryPerRound": [],
+      "bindingAblationsBitExact": false,
+      "bindingAblation": null
+    },
+    "E": {
+      "label": "new GPEN512 CUDA runtime with CUDA Graph replay",
+      "variants": {
+        "primary": {
+          "count": 1024,
+          "meanMs": 57.11803271484375,
+          "p50Ms": 57.11995,
+          "p95Ms": 57.27547,
+          "p99Ms": 57.331972,
+          "sequentialCallsPerSecond": 17.507605785241296
+        }
+      },
+      "coldPerRound": [
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            248.9422
+          ],
+          "sessionCreationTotalMs": 248.9422,
+          "constructionAndRuntimePrepareMs": 677.4577,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 60.1209,
+          "additionalWarmupMs": 1139.0157
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            245.8641
+          ],
+          "sessionCreationTotalMs": 245.8641,
+          "constructionAndRuntimePrepareMs": 672.3693,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 59.3032,
+          "additionalWarmupMs": 1140.5353
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            249.1859
+          ],
+          "sessionCreationTotalMs": 249.1859,
+          "constructionAndRuntimePrepareMs": 675.1196,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 57.151,
+          "additionalWarmupMs": 1142.1378
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            249.9302
+          ],
+          "sessionCreationTotalMs": 249.9302,
+          "constructionAndRuntimePrepareMs": 672.5485,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 57.2281,
+          "additionalWarmupMs": 1142.0025
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            249.305
+          ],
+          "sessionCreationTotalMs": 249.305,
+          "constructionAndRuntimePrepareMs": 677.3807,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 57.0636,
+          "additionalWarmupMs": 1142.7152
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            251.054
+          ],
+          "sessionCreationTotalMs": 251.054,
+          "constructionAndRuntimePrepareMs": 700.4381,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 57.0365,
+          "additionalWarmupMs": 1142.8708
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            251.1454
+          ],
+          "sessionCreationTotalMs": 251.1454,
+          "constructionAndRuntimePrepareMs": 676.4024,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 57.1605,
+          "additionalWarmupMs": 1142.4017
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            253.4429
+          ],
+          "sessionCreationTotalMs": 253.4429,
+          "constructionAndRuntimePrepareMs": 677.4437,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 57.2076,
+          "additionalWarmupMs": 1142.2207
+        }
+      ],
+      "providerPerRound": [
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 2176646419328,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": true
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 1364262476656,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": true
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 2669717490064,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": true
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 2245196833280,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": true
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 2457553391424,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": true
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 3115249319136,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": true
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 1980438972880,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": true
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 2169685067424,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": true
+        }
+      ],
+      "memoryPerRound": [
+        {
+          "rssMiB": 1464.30859375,
+          "peakRssMiB": 1536.3125,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1460.62890625,
+          "peakRssMiB": 1532.6328125,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1459.51953125,
+          "peakRssMiB": 1531.5234375,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1459.04296875,
+          "peakRssMiB": 1531.046875,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1464.26953125,
+          "peakRssMiB": 1536.2734375,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1459.92578125,
+          "peakRssMiB": 1531.9296875,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1464.51171875,
+          "peakRssMiB": 1536.515625,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1465.5390625,
+          "peakRssMiB": 1537.54296875,
+          "torchPeakAllocatedMiB": 89.25048828125,
+          "torchPeakReservedMiB": 106.0,
+          "processGpuMiB": null
+        }
+      ],
+      "bindingAblationsBitExact": true,
+      "bindingAblation": null
+    }
+  },
+  "quality": {
+    "C": {
+      "reference": "B",
+      "scope": "native restored floating RGB only; no compositing",
+      "pass": false,
+      "errors": [
+        "Round 0: reference identity mismatch or missing",
+        "Round 1: reference identity mismatch or missing",
+        "Round 2: reference identity mismatch or missing",
+        "Round 3: reference identity mismatch or missing",
+        "Round 4: reference identity mismatch or missing",
+        "Round 5: reference identity mismatch or missing",
+        "Round 6: reference identity mismatch or missing",
+        "Round 7: reference identity mismatch or missing"
+      ],
+      "comparisons": []
+    },
+    "D": {
+      "reference": "B",
+      "scope": "native restored floating RGB only; no compositing",
+      "pass": false,
+      "errors": [
+        "Missing or duplicate candidate rounds"
+      ],
+      "comparisons": []
+    },
+    "E": {
+      "reference": "C",
+      "scope": "native restored floating RGB only; no compositing",
+      "pass": true,
+      "errors": [],
+      "comparisons": [
+        {
+          "round": 0,
+          "kind": "ramp",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 0,
+          "kind": "ramp",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "ramp",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "ramp",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "checker",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 0,
+          "kind": "checker",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "checker",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "checker",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "bars",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 0,
+          "kind": "bars",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "bars",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "bars",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "noise",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 0,
+          "kind": "noise",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "noise",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "noise",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "impulse",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 0,
+          "kind": "impulse",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "impulse",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "impulse",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "constant",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 0,
+          "kind": "constant",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "constant",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 0,
+          "kind": "constant",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 0.9999999999997711,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "ramp",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 1,
+          "kind": "ramp",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "ramp",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "ramp",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "checker",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 1,
+          "kind": "checker",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "checker",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "checker",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "bars",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 1,
+          "kind": "bars",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "bars",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "bars",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "noise",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 1,
+          "kind": "noise",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "noise",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "noise",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "impulse",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 1,
+          "kind": "impulse",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "impulse",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "impulse",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "constant",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 1,
+          "kind": "constant",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "constant",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 1,
+          "kind": "constant",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 0.9999999999997711,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "ramp",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 2,
+          "kind": "ramp",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "ramp",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "ramp",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "checker",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 2,
+          "kind": "checker",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "checker",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "checker",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "bars",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 2,
+          "kind": "bars",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "bars",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "bars",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "noise",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 2,
+          "kind": "noise",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "noise",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "noise",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "impulse",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 2,
+          "kind": "impulse",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "impulse",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "impulse",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "constant",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 2,
+          "kind": "constant",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "constant",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 2,
+          "kind": "constant",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 0.9999999999997711,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "ramp",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 3,
+          "kind": "ramp",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "ramp",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "ramp",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "checker",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 3,
+          "kind": "checker",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "checker",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "checker",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "bars",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 3,
+          "kind": "bars",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "bars",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "bars",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "noise",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 3,
+          "kind": "noise",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "noise",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "noise",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "impulse",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 3,
+          "kind": "impulse",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "impulse",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "impulse",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "constant",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 3,
+          "kind": "constant",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "constant",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 3,
+          "kind": "constant",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 0.9999999999997711,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "ramp",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 4,
+          "kind": "ramp",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "ramp",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "ramp",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "checker",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 4,
+          "kind": "checker",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "checker",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "checker",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "bars",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 4,
+          "kind": "bars",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "bars",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "bars",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "noise",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 4,
+          "kind": "noise",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "noise",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "noise",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "impulse",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 4,
+          "kind": "impulse",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "impulse",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "impulse",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "constant",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 4,
+          "kind": "constant",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "constant",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 4,
+          "kind": "constant",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 0.9999999999997711,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "ramp",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 5,
+          "kind": "ramp",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "ramp",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "ramp",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "checker",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 5,
+          "kind": "checker",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "checker",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "checker",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "bars",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 5,
+          "kind": "bars",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "bars",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "bars",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "noise",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 5,
+          "kind": "noise",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "noise",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "noise",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "impulse",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 5,
+          "kind": "impulse",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "impulse",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "impulse",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "constant",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 5,
+          "kind": "constant",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "constant",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 5,
+          "kind": "constant",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 0.9999999999997711,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "ramp",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 6,
+          "kind": "ramp",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "ramp",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "ramp",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "checker",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 6,
+          "kind": "checker",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "checker",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "checker",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "bars",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 6,
+          "kind": "bars",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "bars",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "bars",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "noise",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 6,
+          "kind": "noise",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "noise",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "noise",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "impulse",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 6,
+          "kind": "impulse",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "impulse",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "impulse",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "constant",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 6,
+          "kind": "constant",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "constant",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 6,
+          "kind": "constant",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 0.9999999999997711,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "ramp",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 7,
+          "kind": "ramp",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "ramp",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "ramp",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "checker",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 7,
+          "kind": "checker",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "checker",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "checker",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "bars",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 7,
+          "kind": "bars",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "bars",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "bars",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "noise",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 7,
+          "kind": "noise",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "noise",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "noise",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "impulse",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 7,
+          "kind": "impulse",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "impulse",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "impulse",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "constant",
+          "step": 0,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true
+        },
+        {
+          "round": 7,
+          "kind": "constant",
+          "step": 1,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "constant",
+          "step": 2,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 1.0,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        },
+        {
+          "round": 7,
+          "kind": "constant",
+          "step": 3,
+          "mae": 0.0,
+          "p99Abs": 0.0,
+          "maxAbs": 0.0,
+          "psnrDb": null,
+          "ssim": 0.9999999999997711,
+          "exactMatch": true,
+          "pass": true,
+          "temporalMae": 0.0
+        }
+      ]
+    }
+  },
+  "latencyGate": {
+    "C": {
+      "status": "incomplete"
+    },
+    "D": {
+      "status": "incomplete"
+    }
+  },
+  "cudaGraphGate": {
+    "status": "fail",
+    "reference": "C",
+    "candidate": "E",
+    "requiredMeanImprovement": 0.02,
+    "meanImprovement": 0.01698837871170392,
+    "pairedRoundImprovement95": {
+      "lower95": 0.01644277135675625,
+      "upper95": 0.01750706162860202
+    },
+    "noP95Regression": true,
+    "noP99Regression": true,
+    "bitExactQualityPass": true
+  },
+  "requestedTrtActivated": false,
+  "sdk": {
+    "python": "3.12.14 (main, Aug 14 2026, 15:40:22) [MSC v.1944 64 bit (AMD64)]",
+    "torch": "2.11.0+cu128",
+    "cuda": "12.8",
+    "onnxruntime": "1.26.0",
+    "numpy": "2.4.3",
+    "tensorrt": "10.16.1.11"
+  },
+  "modelSha256": {
+    "C": "0960f836488735444d508b588e44fb5dfd19c68fde9163ad7878aa24d1d5115e",
+    "E": "0960f836488735444d508b588e44fb5dfd19c68fde9163ad7878aa24d1d5115e"
+  },
+  "candidateGate": {
+    "C": "fail",
+    "D": "fail",
+    "E": "fail"
+  }
+}

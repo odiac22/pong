@@ -1,0 +1,1 @@
+(()=>{const all=[...document.querySelectorAll('button,.control-button')];return all.map(e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return {id:e.id,cls:e.className,label:(e.innerText||'').slice(0,25),x:r.x,y:r.y,w:r.width,h:r.height,display:s.display,transform:s.transform}}).filter(e=>e.w&&e.h)})()

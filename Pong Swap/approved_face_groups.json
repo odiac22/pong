@@ -1,0 +1,10 @@
+{
+  "schema": "pong-user-assigned-face-groups-v1",
+  "groups": [
+    {"id": "approved-2", "name": "Approved 2", "members": [2, 4, 5], "reference": "source.jpg"},
+    {"id": "approved-8", "name": "Approved 8", "members": [8], "reference": "source.jpg"},
+    {"id": "approved-19", "name": "Approved 19", "members": [19, 22, 21], "reference": "source-1.jpg"},
+    {"id": "approved-13", "name": "Approved 13", "members": [13, 14, 15, 16, 7, 6], "reference": "source.jpg"},
+    {"id": "approved-3", "name": "Approved 3", "members": [3, 10, 9, 11, 12], "reference": "source.jpg"}
+  ]
+}

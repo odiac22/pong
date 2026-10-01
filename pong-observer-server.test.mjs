@@ -16,7 +16,8 @@ before(async () => {
       PONG_OBSERVER_PORT: String(port),
       PONG_OBSERVER_ADMIN_TOKEN: admin,
       PONG_OBSERVER_INGEST_TOKEN: ingest,
-      PONG_OBSERVER_TEST_TOKEN: isolated
+      PONG_OBSERVER_TEST_TOKEN: isolated,
+      PONG_OBSERVER_ONLINE_MS: '200'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -60,6 +61,19 @@ test('sessions do not overwrite one another and native is preferred', async () =
   assert.equal(result.sessions.length, 2);
 });
 
+test('a stale native session never outranks a fresh browser session', async () => {
+  await new Promise(resolve => setTimeout(resolve, 260));
+  const response = await fetch(`${base}/ingest`, {
+    method: 'POST',
+    headers: auth(ingest),
+    body: JSON.stringify({ state: state('pong1', 'fresh-browser'), events: [] })
+  });
+  assert.equal(response.status, 200);
+  const result = await fetch(`${base}/instances/pong1`, { headers: auth(admin) }).then(item => item.json());
+  assert.equal(result.instance.sessionId, 'fresh-browser');
+  assert.equal(result.instance.online, true);
+});
+
 test('bridge frames are rejected', async () => {
   const response = await fetch(`${base}/ingest`, {
     method: 'POST', headers: auth(ingest),
@@ -68,7 +82,46 @@ test('bridge frames are rejected', async () => {
   assert.equal(response.status, 400);
 });
 
-test('test ingest is isolated from production', async () => {
+test('admin may queue one short-lived allowlisted QA click for one instance', async () => {
+  await fetch(`${base}/ingest`, {
+    method: 'POST', headers: auth(ingest),
+    body: JSON.stringify({ state: state('pong2', 'remote-qa'), events: [] })
+  });
+  assert.equal((await fetch(`${base}/commands/pong2`, {
+    method: 'POST', headers: auth(ingest),
+    body: JSON.stringify({ action: 'click', targetId: 'random-40-local', sessionId: 'remote-qa' })
+  })).status, 401);
+  assert.equal((await fetch(`${base}/commands/pong2`, {
+    method: 'POST', headers: auth(admin),
+    body: JSON.stringify({ action: 'click', targetId: 'not-allowed', sessionId: 'remote-qa' })
+  })).status, 400);
+  assert.equal((await fetch(`${base}/commands/pong2`, {
+    method: 'POST', headers: auth(admin),
+    body: JSON.stringify({ action: 'click', targetId: 'random-40-local' })
+  })).status, 400);
+  assert.equal((await fetch(`${base}/commands/pong2`, {
+    method: 'POST', headers: auth(admin),
+    body: JSON.stringify({ action: 'click', targetId: 'random-40-local', sessionId: 'remote-qa' })
+  })).status, 202);
+  const wrongSession = await fetch(`${base}/ingest`, {
+    method: 'POST', headers: auth(ingest),
+    body: JSON.stringify({ state: state('pong2', 'background-session'), events: [] })
+  }).then(response => response.json());
+  assert.equal(wrongSession.command, null, 'a background WebView must not consume another session command');
+  const first = await fetch(`${base}/ingest`, {
+    method: 'POST', headers: auth(ingest),
+    body: JSON.stringify({ state: state('pong2', 'remote-qa'), events: [] })
+  }).then(response => response.json());
+  assert.equal(first.command.action, 'click');
+  assert.equal(first.command.targetId, 'random-40-local');
+  const second = await fetch(`${base}/ingest`, {
+    method: 'POST', headers: auth(ingest),
+    body: JSON.stringify({ state: state('pong2', 'remote-qa'), events: [] })
+  }).then(response => response.json());
+  assert.equal(second.command, null);
+});
+
+test('test ingest is isolated and screenshot pixels are discarded', async () => {
   const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x00, 0xff, 0xd9]);
   const response = await fetch(`${base}/test/ingest`, {
     method: 'POST', headers: auth(isolated), body: JSON.stringify({
@@ -78,11 +131,32 @@ test('test ingest is isolated from production', async () => {
   });
   assert.equal(response.status, 200);
   const production = await fetch(`${base}/instances/pong2`, { headers: auth(admin) });
-  assert.equal(production.status, 404);
+  if (production.status === 200) {
+    const productionPayload = await production.json();
+    assert.notEqual(productionPayload.instance.sessionId, 'qa');
+  } else {
+    assert.equal(production.status, 404);
+  }
   const qa = await fetch(`${base}/test/instances/pong2`, { headers: auth(admin) }).then(response => response.json());
   assert.equal(qa.instance.sessionId, 'qa');
+  assert.equal(qa.instance.screenshot, null);
   assert.equal((await fetch(`${base}/test/screenshots/pong2`)).status, 401);
   const screenshot = await fetch(`${base}/test/screenshots/pong2`, { headers: auth(admin) });
-  assert.equal(screenshot.headers.get('content-type'), 'image/jpeg');
-  assert.deepEqual(Buffer.from(await screenshot.arrayBuffer()), jpeg);
+  assert.equal(screenshot.status, 410);
+  assert.match(await screenshot.text(), /screenshots disabled/i);
+
+  assert.equal((await fetch(`${base}/test/commands/pong2`, {
+    method: 'POST', headers: auth(admin),
+    body: JSON.stringify({ action: 'click', targetId: 'test-ai', sessionId: 'qa' })
+  })).status, 202);
+  const productionIngest = await fetch(`${base}/ingest`, {
+    method: 'POST', headers: auth(ingest),
+    body: JSON.stringify({ state: state('pong2', 'qa'), events: [] })
+  }).then(response => response.json());
+  assert.equal(productionIngest.command, null, 'production ingest must not consume a test command');
+  const testIngest = await fetch(`${base}/test/ingest`, {
+    method: 'POST', headers: auth(isolated),
+    body: JSON.stringify({ state: state('pong2', 'qa'), events: [] })
+  }).then(response => response.json());
+  assert.equal(testIngest.command.targetId, 'test-ai');
 });

@@ -300,9 +300,13 @@ async function handleScrape(target, options = {}) {
   let albumGroups = [];
   let failedAlbumCount = 0;
   let emptyAlbumCount = 0;
+  const isAlbumTarget = /^\/a\/[A-Za-z0-9_-]+\/?$/i.test(target.pathname);
 
-  // Profile / listing page: no direct videos, but album links. Expand them.
-  if (!videos.length && albumEntries.length) {
+  // Only profile/listing pages may expand their album links. An /a/<id> page
+  // can contain adjacent/recommended album anchors even when its own media is
+  // temporarily absent from the HTML. Expanding those anchors assigned the
+  // neighbouring albums to this Paperclip and scrambled the creator queue.
+  if (!isAlbumTarget && !videos.length && albumEntries.length) {
     const albumResults = await pool(albumEntries, ALBUM_FETCH_CONCURRENCY, async album => {
       const albumHtml = await fetchText(album.url, options);
 

@@ -1,0 +1,1 @@
+(async()=>{const r=await pongFaceSwapControlFetch('/pong-swap/faces',{cache:'no-store'}),data=await r.json();const faces=data.faces||[];if(!faces.length)throw Error('No approved faces');pongFaceSwapState.faces=faces;setPongFaceSwapSelection(faces.map(f=>f.id));window.PongTikTokLiveEnableSelectedSwap();return {enabled:pongFaceSwapState.enabled,selected:faces.length};})()

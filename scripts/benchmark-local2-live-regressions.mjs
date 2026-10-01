@@ -663,7 +663,11 @@ async function runRegressionCaseInMainWorld(fixture, timeoutMs) {
             random40State.localEndpoint,
             confirmationImages,
             {
-              visionModel: 'qwen2.5vl:latest',
+              // Exercise the exact ambiguity verifier configured by the
+              // production Pong bundle. Keeping an old model name here made a
+              // passing production path look like a regression (and hid the
+              // real latency of the currently deployed verifier).
+              visionModel: random40LocalVisionModel('local2'),
               mode: 'local2',
               preferencePolicy: 'hard-confirmation',
               stage: 'hard-confirmation',

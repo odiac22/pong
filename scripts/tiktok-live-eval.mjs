@@ -1,0 +1,10 @@
+import {readFile} from 'node:fs/promises';
+const port=Number(process.argv[2]);
+const pages=await fetch(`http://127.0.0.1:${port}/json/list`).then(r=>r.json());
+const matches=pages.filter(p=>p.type==='page'&&(process.argv[4]==='pong'?new URL(p.url).pathname==='/pong':new URL(p.url).hostname==='www.tiktok.com'));
+if(matches.length!==1)throw Error('Expected one TikTok WebView');
+const ws=new WebSocket(matches[0].webSocketDebuggerUrl);
+await new Promise((resolve,reject)=>{ws.onopen=resolve;ws.onerror=reject;});
+const expression=await readFile(process.argv[3],'utf8');
+const result=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Timed out')),12000);ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.id===1){clearTimeout(timer);resolve(m.result?.result?.value??{error:m.error||m.result?.exceptionDetails?.text});}};ws.send(JSON.stringify({id:1,method:'Runtime.evaluate',params:{expression,returnByValue:true,awaitPromise:true}}));});
+console.log(JSON.stringify(result));ws.close();

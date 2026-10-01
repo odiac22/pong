@@ -1,0 +1,9 @@
+# Offline-only capture recipe; do not start it while another trial is running.
+# Metadata only: no screenshots, video buffers, audio, logcat, or app atrace.
+# 40 x 4 s plus transitions needs an explicitly bounded recording window.
+duration_ms: 240000
+buffers { size_kb: 65536 fill_policy: DISCARD }
+data_sources { config { name: "android.surfaceflinger.frametimeline" } }
+data_sources { config { name: "linux.process_stats"
+  process_stats_config { scan_all_processes_on_start: true }
+} }

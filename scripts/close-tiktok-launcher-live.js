@@ -1,0 +1,1 @@
+(()=>{hideControls();const b=document.getElementById('tiktok-live');if(b){b.style.setProperty('background','#b38b00','important');b.style.setProperty('color','#171300','important');}return {launcherClosed:document.body.classList.contains('controls-hidden')};})()

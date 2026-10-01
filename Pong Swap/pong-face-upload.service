@@ -1,0 +1,18 @@
+[Unit]
+Description=Private Pong face image upload
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/pong-face-upload/server.mjs
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/pong-face-upload/uploads
+ProtectHome=true
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

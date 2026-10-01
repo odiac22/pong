@@ -1,0 +1,15 @@
+import {readdir,readFile,stat,writeFile} from 'node:fs/promises';
+import {resolve,join,basename,dirname} from 'node:path';
+const repo=resolve('.'),out='E:/Pong Benchmarks/user-quality-review-2026-09-30';
+const roots=[join(repo,'Pong Swap/benchmarks'),join(repo,'Pong Swap/original_models/artifacts'),'E:/Pong Benchmarks'];
+const rows=[],skipped=[];
+const prune=new Set(['node_modules','deps','server','runtime','venv','.git','__pycache__','bindings','faces','user-quality-review-2026-09-30']);
+async function walk(dir){for(const e of await readdir(dir,{withFileTypes:true})){if(prune.has(e.name)||e.isSymbolicLink())continue;const p=join(dir,e.name);if(e.isDirectory())await walk(p);else if(/\.json$/i.test(e.name)&&((p.includes('original_models')&&p.includes('artifacts'))||(/(?:report|summary|result|qualification|decision|experiment|comparison|audit|evaluation)[^/]*\.json$/i.test(e.name)&&/gpen|restor|renderer|temporal|throughput|fps|optimization|swapper|stability|smooth|tiktok|mask|identity|frame|performance|candidate|variant|paired/i.test(p))))await scan(p)}}
+async function scan(p){const s=await stat(p);if(s.size>128e6){skipped.push({path:p,reason:'over 128 MB; separate review required'});return}let j;try{j=JSON.parse(await readFile(p,'utf8'))}catch{skipped.push({path:p,reason:'invalid JSON'});return}const evidence=[],metrics=[];let visits=0;
+ function visit(x,key='',depth=0){if(++visits>15000||depth>12)return;if(Array.isArray(x)){for(let i=0;i<Math.min(x.length,30);i++)visit(x[i],key+'['+i+']',depth+1)}else if(x&&typeof x==='object'){for(const[k,v]of Object.entries(x))visit(v,key?key+'.'+k:k,depth+1)}else if(typeof x==='string'&&x.length<1000&&/reject|not.promot|regress|failed.*qual|qual.*failed|nonfinite|not.qualified/i.test(x)){if(evidence.length<20)evidence.push({key,value:x})}else if(typeof x==='boolean'&&x===false&&/pass|qualif|adopt|promot|accepted/i.test(key)){if(evidence.length<20)evidence.push({key,value:x})}else if(typeof x==='number'&&/fps|speedup|median.*ms|mean.*ms|p95.*ms/i.test(key)&&metrics.length<20)metrics.push({key,value:x})}
+ visit(j);rows.push({path:p,directory:dirname(p),name:basename(dirname(p)),bytes:s.size,modified:s.mtime.toISOString(),schema:j.schema??null,stage:j.stage??null,evidence,metrics,review:'not yet classified; false fields may describe a baseline or expected test assertion, not rejection'});}
+for(const r of roots)await walk(r);
+rows.sort((a,b)=>a.modified.localeCompare(b.modified));
+await writeFile(join(out,'historical-inventory.json'),JSON.stringify({scope:roots,createdAt:new Date().toISOString(),rows,skipped,completeClaim:false,note:'Discovery inventory only. Every rejection requires attribution; duplicates and already-promoted optimizations are not new candidates.'},null,2));
+const flagged=rows.filter(r=>r.evidence.length);
+console.log(JSON.stringify({reports:rows.length,flaggedReports:flagged.length,skipped:skipped.length,firstDate:rows[0]?.modified,lastDate:rows.at(-1)?.modified,flaggedDirectories:[...new Set(flagged.map(r=>r.name))]},null,2));

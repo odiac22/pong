@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Pong · TikTok</title>
+<style>
+*{box-sizing:border-box}html,body,main{margin:0;width:100%;height:100%;overflow:hidden;background:#080a0d;color:#eef0f7;font:14px system-ui}video{display:block;width:100%;height:100%;object-fit:contain;touch-action:none;background:#080a0d}#notice{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:14px;padding:28px;text-align:center;background:#080a0ddd}#notice[hidden]{display:none}button{font:inherit;border:1px solid #465166;border-radius:20px;padding:9px 18px;background:#202936;color:inherit}button:disabled{opacity:.45}#stats{display:none}
+</style>
+<main><video id="screen" autoplay muted playsinline></video>
+<div id="notice" role="status"><span id="message">Connecting to TikTok…</span><button id="connect" hidden>Retry</button></div>
+<div id="stats" aria-hidden="true"></div>
+<script>
+'use strict';
+const video=document.querySelector('#screen'), stats=document.querySelector('#stats');
+video.style.visibility='hidden';
+let pc,dc,seq=0,active=null,pendingMove=null,moveRaf=0,timer,lastServer={},frameCount=0,stopping=false;
+const measurements={inputAckMs:[],networkRoundTripMs:[],presentedFrameIntervalMs:[]},pending=new Map();
+let lastPresentation=null;
+let statsTimer=0;
+// Keep measurements available to QA, but do not sort/update an invisible table
+// on the phone's render thread for every burst of input/video acknowledgements.
+const showDiagnostics=location.search==='?diagnostics=1';
+const gateway=location.pathname==='/pong-tiktok-remote.html';
+let ownsController=false,statusPending=false,connectionEpoch=0,pendingOffer=null;
+let faceId='',swapPending=null,swapRequested=false,initialized=false,presentedTimer=0;
+let pairingToken='',stopTask=null,lastNotice='',userClosed=false,reconnectTimer=0,reconnectAttempt=0;
+try{pairingToken=localStorage.getItem('pong_remote_pairing')||sessionStorage.getItem('pong_remote_pairing')||'';if(pairingToken)localStorage.setItem('pong_remote_pairing',pairingToken);}catch{}
+const inform=(message,blocking=false,retry=false)=>{document.querySelector('#message').textContent=message;document.querySelector('#notice').hidden=!blocking;document.querySelector('#connect').hidden=!retry;window.parent.postMessage({type:'pong-remote-status',message},location.origin);};
+function reconnect(){
+ if(userClosed||document.hidden||!initialized||!pairingToken||reconnectTimer)return;
+ reconnectTimer=setTimeout(async()=>{reconnectTimer=0;if(userClosed||document.hidden)return;if(stopTask)await stopTask;if(pc)return;swapRequested=Boolean(faceId);void document.querySelector('#connect').onclick();},Math.min(30000,1000*2**Math.min(reconnectAttempt++,5)));
+}
+const q=(list,p)=>list.length?[...list].sort((a,b)=>a-b)[Math.ceil(list.length*p)-1].toFixed(1):'—';
+function render(){if(!showDiagnostics)return;stats.textContent=Object.entries(measurements).map(([k,v])=>`${k}: median ${q(v,.5)} ms · p95 ${q(v,.95)} ms · n=${v.length}`).join('\n')+`\nVisible input response: not yet correlated\nFirst swapped frame (PC): ${lastServer.swap?.firstSwappedFrameMs?.toFixed(1)??'—'} ms\nRender: ${lastServer.swap?.renderMs??'—'} ms · transformed ${lastServer.swap?.transformedFrames??0}/${lastServer.swap?.processedFrames??0}\nDisplayed frames: ${frameCount}\n${lastServer.swap?.error||lastServer.error||''}`;}
+function sample(name,value){if(Number.isFinite(value)&&value>=0){measurements[name].push(value);if(measurements[name].length>1000)measurements[name].shift();}}
+// Computing/sorting percentile tables on every input ACK competes with touch
+// handling and video compositing. The controls stay immediate; text is 4 Hz.
+function scheduleStats(){if(showDiagnostics&&!statsTimer)statsTimer=setTimeout(()=>{statsTimer=0;render();},250);}
+const headers=()=>({'Authorization':'Bearer '+pairingToken,'Content-Type':'application/json'});
+async function api(path,body){const r=await fetch((gateway?'/pong-swap/remote':'')+path,{method:body===undefined?'GET':'POST',headers:headers(),body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(20000)});if(!r.ok){let detail='';try{const error=await r.json();detail=typeof error.error==='string'?error.error:typeof error.detail==='string'?error.detail:'';}catch{}throw Error(r.status===401?'This device needs to be paired with the PC again.':r.status===503?'Start TikTok Remote on the PC first.':detail||`Request failed (${r.status})`);}return r.json();}
+function send(message){if(dc?.readyState!=='open'||stopping)return false;if(dc.bufferedAmount>65536){void stop();return false;}message.seq=++seq;pending.set(message.seq,performance.now());dc.send(JSON.stringify(message));return true;}
+function point(event){const r=video.getBoundingClientRect();const a=video.videoWidth/video.videoHeight;let w=r.width,h=r.height;if(w/h>a)w=h*a;else h=w/a;return {x:Math.max(0,Math.min(1,(event.clientX-r.left-(r.width-w)/2)/w)),y:Math.max(0,Math.min(1,(event.clientY-r.top-(r.height-h)/2)/h))};}
+function flushMove(){cancelAnimationFrame(moveRaf);moveRaf=0;if(pendingMove){send({type:'touch',action:'move',...pendingMove});pendingMove=null;}}
+video.onpointerdown=e=>{if(active!==null||dc?.readyState!=='open'||!video.videoWidth)return;e.preventDefault();active=e.pointerId;video.setPointerCapture(active);send({type:'touch',action:'down',...point(e)});};
+video.onpointermove=e=>{if(e.pointerId!==active)return;pendingMove=point(e);if(!moveRaf)moveRaf=requestAnimationFrame(flushMove);};
+function release(e){if(e.pointerId!==active)return;flushMove();send({type:'touch',action:e.type==='pointercancel'?'cancel':'up',...point(e)});active=null;}
+video.onpointerup=release;video.onpointercancel=release;
+async function applyFace(){
+ if(!ownsController||!video.videoWidth||swapPending||!swapRequested)return;
+ const operation={face:faceId,epoch:connectionEpoch};swapPending=operation;swapRequested=false;
+ const current=()=>swapPending===operation&&operation.epoch===connectionEpoch;
+ try{await api('/swap',{enabled:Boolean(operation.face),faceId:operation.face,automaticRegion:true});if(current()&&!swapRequested)inform(operation.face?'Waiting for a matching face':'Original');}
+ catch(e){if(current()&&!swapRequested)inform(e.message);}
+ finally{if(current()){swapPending=null;if(swapRequested)void applyFace();}}
+}
+function stop(){if(!stopTask)stopTask=Promise.resolve().then(finishStop).finally(()=>{stopTask=null;});return stopTask;}
+async function finishStop(){
+ if(stopping)return;
+ stopping=true;++connectionEpoch;swapPending=null;document.querySelector('#connect').disabled=true;
+ clearInterval(timer);cancelAnimationFrame(moveRaf);moveRaf=0;pendingMove=null;
+ clearTimeout(statsTimer);statsTimer=0;
+ clearTimeout(presentedTimer);
+ if(dc?.readyState==='open'&&active!==null&&dc.bufferedAmount<=65536){try{dc.send(JSON.stringify({type:'touch',seq:++seq,action:'cancel',x:.5,y:.5}));}catch{}}
+ active=null;
+ pc?.close();pc=null;dc=null;video.srcObject=null;video.style.visibility='hidden';pending.clear();lastPresentation=null;
+ const offer=pendingOffer;let releaseController=ownsController;ownsController=false;
+ // A successful late offer belongs to this cancelled attempt. Wait for its
+ // bounded request and release it before permitting another connection.
+ if(offer){try{await offer;releaseController=true;}catch{}}
+ if(pendingOffer===offer)pendingOffer=null;
+ if(releaseController){try{await api('/disconnect',{});}catch{}}
+ stopping=false;document.querySelector('#connect').disabled=false;render();
+}
+document.querySelector('#connect').onclick=async()=>{
+ if(stopping||document.querySelector('#connect').disabled)return;
+ const epoch=++connectionEpoch;let peer;
+ const current=()=>epoch===connectionEpoch&&pc===peer&&!stopping;
+ try{
+ if(!pairingToken)throw Error('This Pong device needs PC setup once. No TikTok login or token paste is needed here.');
+ document.querySelector('#connect').disabled=true;inform('Connecting to TikTok…',true);
+ const capabilities=await api('/status');
+ if(epoch!==connectionEpoch||stopping)return;
+ if(capabilities.automaticVideoRegion!==true)throw Error('The PC TikTok service needs its one-time update restart.');
+ peer=new RTCPeerConnection({iceServers:[]});pc=peer;pc.addTransceiver('video',{direction:'recvonly'});
+ for(const values of Object.values(measurements))values.length=0;frameCount=0;lastServer={};
+ dc=pc.createDataChannel('pong-input',{ordered:true});
+ pc.onconnectionstatechange=()=>{if(current()&&['failed','closed','disconnected'].includes(peer.connectionState)){inform('Reconnecting to TikTok…',true);void stop().then(reconnect);}};
+ dc.onopen=()=>{if(current())inform('Opening TikTok…',true);};
+ dc.onmessage=e=>{if(!current())return;let m;try{m=JSON.parse(e.data);}catch{return;}if(m.type==='inputAck'&&pending.has(m.seq)){sample('inputAckMs',performance.now()-pending.get(m.seq));pending.delete(m.seq);}if(m.type==='inputCoalesced')pending.delete(m.seq);if(m.type==='pong'&&pending.has(m.id)){sample('networkRoundTripMs',performance.now()-pending.get(m.id));pending.delete(m.id);}if(m.type==='error')lastServer.error=m.message;scheduleStats();};
+ pc.ontrack=e=>{if(!current())return;video.srcObject=new MediaStream([e.track]);video.muted=true;video.play().catch(()=>{});};
+ await peer.setLocalDescription(await peer.createOffer());if(!current())return;
+ if(peer.iceGatheringState!=='complete')await new Promise((resolve,reject)=>{const t=setTimeout(()=>reject(Error('ICE gathering timed out')),10000);peer.addEventListener('icegatheringstatechange',()=>{if(peer.iceGatheringState==='complete'){clearTimeout(t);resolve();}});});
+ if(!current())return;
+ pendingOffer=api('/offer',{type:peer.localDescription.type,sdp:peer.localDescription.sdp});
+ const answer=await pendingOffer;if(!current())return;
+ pendingOffer=null;ownsController=true;await peer.setRemoteDescription(answer);if(!current())return;
+ presentedTimer=setTimeout(()=>{if(current()&&!video.videoWidth)inform('TikTok is not sending a screen. Check the PC source app.',true,true);},12000);
+ timer=setInterval(async()=>{if(dc?.readyState==='open'){const id='p'+(++seq);pending.set(id,performance.now());dc.send(JSON.stringify({type:'ping',id}));}for(const [k,t]of pending)if(performance.now()-t>10000)pending.delete(k);if(statusPending)return;statusPending=true;const owner=pc;try{const result=await api('/status');if(owner===pc){lastServer=result.sessions.at(-1)||{};const message=remoteStatusMessage(lastServer);if(message!==lastNotice){lastNotice=message;inform(message,Boolean(lastServer.error),Boolean(lastServer.error));}}}catch{}finally{statusPending=false;}render();},1000);
+ }catch(e){if(epoch===connectionEpoch){await stop();if(!pc){stats.textContent=e.message;inform(e.message,true,true);if(!/paired|setup once/.test(e.message))reconnect();}}}};
+function presented(now,meta){if(lastPresentation!==null)sample('presentedFrameIntervalMs',now-lastPresentation);lastPresentation=now;frameCount++;if(frameCount===1){reconnectAttempt=0;video.style.visibility='visible';clearTimeout(presentedTimer);inform('Live');void applyFace();}video.requestVideoFrameCallback(presented);}
+function remoteStatusMessage(server){return server.error||server.swap?.error||(server.swap?.enabled?(Number.isFinite(server.swap.firstSwappedFrameMs)?'Face swap on':'Waiting for a matching face'):'Live');}
+video.onloadeddata=()=>{if(ownsController){video.style.visibility='visible';inform('Live');void applyFace();}};
+if(video.requestVideoFrameCallback)video.requestVideoFrameCallback(presented);
+document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(reconnectTimer);reconnectTimer=0;void stop();}else{reconnectAttempt=0;reconnect();}});
+window.addEventListener('online',()=>{reconnectAttempt=0;reconnect();});
+window.addEventListener('storage',event=>{if(event.key==='pong_remote_pairing'&&event.newValue){pairingToken=event.newValue;reconnectAttempt=0;reconnect();}});
+window.addEventListener('pagehide',()=>{userClosed=true;clearTimeout(reconnectTimer);pc?.close();});
+window.addEventListener('message',async event=>{
+ if(event.origin!==location.origin||event.source!==window.parent||event.data?.type!=='pong-remote-command')return;
+ const message=event.data;
+ if(message.action==='initialize'&&!initialized){initialized=true;faceId=typeof message.faceId==='string'?message.faceId:'';swapRequested=Boolean(faceId);void document.querySelector('#connect').onclick();}
+ if(message.action==='close'){userClosed=true;clearTimeout(reconnectTimer);reconnectTimer=0;await stop();window.parent.postMessage({type:'pong-remote-closed'},location.origin);}
+ if(message.action==='back')send({type:'key',key:'GoBack'});
+ if(message.action==='face'&&typeof message.faceId==='string'&&message.faceId.length<=200){faceId=message.faceId;swapRequested=true;void applyFace();}
+ if(message.action==='original'){faceId='';swapRequested=true;void applyFace();}
+});
+window.parent.postMessage({type:'pong-remote-ready'},location.origin);
+</script></main></html>

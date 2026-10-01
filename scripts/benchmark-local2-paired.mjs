@@ -21,6 +21,7 @@ const FIXED_PAGES = String(process.env.PONG_PAIR_PAGES || '')
   .split(',')
   .map(Number)
   .filter(page => Number.isInteger(page) && page >= 1 && page <= 3500);
+const CONTINUOUS_RANDOM = /^(?:1|true|yes)$/i.test(String(process.env.PONG_PAIR_CONTINUOUS_RANDOM || ''));
 const REPORT_PATH = process.env.PONG_PAIR_REPORT ||
   path.join(ROOT, '.pong-local-ai', 'local2-paired-benchmark-latest.json');
 
@@ -146,6 +147,7 @@ async function startChrome() {
   const child = spawn(CHROME, [
     '--headless=new',
     '--mute-audio',
+    '--disable-audio-output',
     '--remote-debugging-port=0',
     '--remote-allow-origins=*',
     `--user-data-dir=${profile}`,
@@ -268,8 +270,28 @@ async function resetWorkload() {
 }
 
 async function benchmarkState(cdp) {
-  const raw = await cdp.eval(`document.querySelector('#random40-benchmark-state')?.textContent || ''`, false);
-  return raw ? JSON.parse(raw) : null;
+  return cdp.eval(`(() => {
+    const raw = document.querySelector('#random40-benchmark-state')?.textContent || '';
+    if (raw) {
+      try { return JSON.parse(raw); } catch (_) {}
+    }
+    const state = typeof random40State !== 'undefined' ? random40State : null;
+    if (!state) return null;
+    return {
+      mode: String(state.mode || ''),
+      startedAt: Number(state.startedAt || 0),
+      elapsedMs: state.startedAt ? Date.now() - Number(state.startedAt) : 0,
+      accepted: Number(state.accepted || 0),
+      videos: Number(state.videos || 0),
+      pages: Number(state.pages || 0),
+      api: Number(state.api || 0),
+      stop: state.stop === true,
+      done: state.done === true,
+      detail: '',
+      verdictAudit: Array.isArray(state.verdictAudit) ? [...state.verdictAudit] : [],
+      stageTimings: state.stageTimings || {}
+    };
+  })()`, false);
 }
 
 async function proveActiveVideo(cdp, timeoutMs = PLAY_TIMEOUT_MS, targetSeconds = PLAY_PROOF_SECONDS) {
@@ -464,14 +486,16 @@ async function runMode(page, mode, trialIndex) {
   const loadedAt = Date.now();
   let startedAt = 0;
   const query = new URLSearchParams({
-    pongLiveScan: '1',
-    pongPairBench: '1',
-    pongPages: String(page),
     pongPlaybackProfile: mode === 'local2' ? 'local2fast' : 'local22',
     pongPlaybackFresh: '1',
     trial: String(trialIndex),
     t: String(loadedAt)
   });
+  if (!CONTINUOUS_RANDOM) {
+    query.set('pongLiveScan', '1');
+    query.set('pongPairBench', '1');
+    query.set('pongPages', String(page));
+  }
   const session = await openSession(chrome, `${APP}?${query}`);
   console.log(JSON.stringify({ status: 'setup', trial: trialIndex, page, mode, stage: 'pong-loaded' }));
   const { cdp, target } = session;
@@ -568,6 +592,11 @@ async function runMode(page, mode, trialIndex) {
       .filter(item => item?.decision === 'accept')
       .map(item => String(item.artistUrl || ''))
       .filter(Boolean);
+    const modeHealth = await fetch(
+      `${API}/${mode === 'local2' ? 'local2-fast' : 'local22-turbo'}/health?t=${Date.now()}`
+    ).then(response => response.json()).catch(() => ({}));
+    const globalHealth = await fetch(`${API}/health?t=${Date.now()}`)
+      .then(response => response.json()).catch(() => ({}));
     await cdp.eval(`if (random40State) { random40State.stop = true; random40State.abortController?.abort(); } true`);
     return {
       trial: trialIndex,
@@ -586,6 +615,30 @@ async function runMode(page, mode, trialIndex) {
           item?.hardVerified === true &&
           acceptedUrlPassesDeterministicHardText(item.artistUrl)
         ),
+      // Ordering-hint A/B evidence is captured with each live run. Set
+      // PONG_LOCAL2_SOURCE_HINTS=0 before starting the server for the control;
+      // clone-side accepted/rejected verdicts and 15-video proof stay identical.
+      sourceHints: modeHealth?.sourceHints || null,
+      engineHealth: {
+        active: modeHealth?.active === true,
+        pages: Number(modeHealth?.pages || 0),
+        discovered: Number(modeHealth?.discovered || 0),
+        submitted: Number(modeHealth?.submitted || 0),
+        completed: Number(modeHealth?.completed || 0),
+        acceptedTotal: Number(modeHealth?.acceptedTotal || 0),
+        rejected: Number(modeHealth?.rejected || 0),
+        policyRejected: Number(modeHealth?.policyRejected || 0),
+        evidenceDisqualified: Number(modeHealth?.evidenceDisqualified || 0),
+        failed: Number(modeHealth?.failed || 0),
+        transientRetries: Number(modeHealth?.transientRetries || 0),
+        rejectionReasons: modeHealth?.rejectionReasons || {},
+        timings: modeHealth?.timings || {},
+        scheduling: modeHealth?.scheduling || {},
+        recentOutcomes: Array.isArray(modeHealth?.recentOutcomes)
+          ? modeHealth.recentOutcomes.slice(-64)
+          : []
+      },
+      videoVerifier: globalHealth?.video_verifier || null,
       firstProof,
       detail: finalState.detail || ''
     };
@@ -690,6 +743,8 @@ async function main() {
   };
   buffering.passed = completedBufferPairs.length === 0 || buffering.local22 <= buffering.local2;
   const passed = comparisons.every(comparison =>
+    comparison.local2?.hardSafe &&
+    comparison.local2?.playbackMatrix?.ok &&
     comparison.local22?.hardSafe &&
     comparison.local22?.playbackMatrix?.ok
   ) && repeatableTimingWins && significantTimingMargin && buffering.passed;

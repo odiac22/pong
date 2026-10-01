@@ -1,0 +1,10 @@
+[
+  {"site":"mdn","url":"https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/video","kind":"watch"},
+  {"site":"wikimedia","url":"https://commons.wikimedia.org/wiki/File:Example.webm","kind":"watch"},
+  {"site":"nasa-jpl","url":"https://www.jpl.nasa.gov/videos/","kind":"listing"},
+  {"site":"nasa-gov","url":"https://www.nasa.gov/video/","kind":"listing"},
+  {"site":"archive","url":"https://archive.org/details/BigBuckBunny_124","kind":"watch"},
+  {"site":"blender","url":"https://studio.blender.org/films/spring/","kind":"watch"},
+  {"site":"nps","url":"https://www.nps.gov/media/video/view.htm?id=20EA43B5-155D-451F-679FDC6EACFFB36C","kind":"watch"},
+  {"site":"noaa","url":"https://www.noaa.gov/multimedia/video","kind":"listing"}
+]

@@ -1,0 +1,1 @@
+(()=>{const old=window.__pongTikTokStep;window.__pongTikTokStep=d=>{const b=document.querySelector(d>0?'[data-e2e="feed-navigation-next"]':'[data-e2e="feed-navigation-prev"],[data-e2e="feed-navigation-previous"]');if(b&&!b.disabled){b.click();return true}return old(d)};return {nativeNext:!!document.querySelector('[data-e2e="feed-navigation-next"]')}})()

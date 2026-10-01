@@ -1,0 +1,371 @@
+{
+  "generatedAt": "2026-09-26T12:58:36Z",
+  "serviceInstanceId": "9a37fe25f62a43549949ea3a662bc809",
+  "audioEnabled": false,
+  "fixtureAudioStreams": 0,
+  "originalStrictness": 45,
+  "cases": [
+    {
+      "ok": true,
+      "sessionId": "c64ba06fe0614ed08fe7f8dd64b69597",
+      "elapsedSeconds": 0.467,
+      "candidateFaceIds": [
+        "approved-2-6661c9deb08e"
+      ],
+      "final": {
+        "frames": 26,
+        "inferenceFrames": 0,
+        "compatibilityStatus": "no-compatible-face",
+        "selectedFaceId": "",
+        "selectedFaceSimilarity": 0.0,
+        "selectedTargetPresentation": "",
+        "compatibilityChecks": 6,
+        "compatibilityRejections": 6
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 3,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "no-compatible-face",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 1,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 26,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "no-compatible-face",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 6,
+          "compatibilityRejections": 6,
+          "error": ""
+        }
+      ],
+      "name": "male-rejected-even-permissive",
+      "strictness": 0,
+      "video": "adult-male-silent.mp4",
+      "expectedStatus": "no-compatible-face"
+    },
+    {
+      "ok": true,
+      "sessionId": "0464814b4bc140b48cdf83544bf4665e",
+      "elapsedSeconds": 0.435,
+      "candidateFaceIds": [
+        "approved-2-6661c9deb08e"
+      ],
+      "final": {
+        "frames": 8,
+        "inferenceFrames": 4,
+        "compatibilityStatus": "locked",
+        "selectedFaceId": "approved-2-6661c9deb08e",
+        "selectedFaceSimilarity": 13.76844183770341,
+        "selectedTargetPresentation": "female",
+        "compatibilityChecks": 1,
+        "compatibilityRejections": 0
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 1,
+          "inferenceFrames": 1,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-2-6661c9deb08e",
+          "selectedFaceSimilarity": 13.76844183770341,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 8,
+          "inferenceFrames": 4,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-2-6661c9deb08e",
+          "selectedFaceSimilarity": 13.76844183770341,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        }
+      ],
+      "name": "different-woman-accepted-permissive",
+      "strictness": 0,
+      "video": "approved-3-silent.mp4",
+      "expectedStatus": "locked"
+    },
+    {
+      "ok": true,
+      "sessionId": "7b13804466674bfdaeaddcf1f1a944ee",
+      "elapsedSeconds": 0.467,
+      "candidateFaceIds": [
+        "approved-2-6661c9deb08e"
+      ],
+      "final": {
+        "frames": 9,
+        "inferenceFrames": 5,
+        "compatibilityStatus": "locked",
+        "selectedFaceId": "approved-2-6661c9deb08e",
+        "selectedFaceSimilarity": 99.83114800673042,
+        "selectedTargetPresentation": "female",
+        "compatibilityChecks": 1,
+        "compatibilityRejections": 0
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 3,
+          "inferenceFrames": 1,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-2-6661c9deb08e",
+          "selectedFaceSimilarity": 99.83114800673042,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 9,
+          "inferenceFrames": 5,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-2-6661c9deb08e",
+          "selectedFaceSimilarity": 99.83114800673042,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        }
+      ],
+      "name": "same-face-accepted-normal",
+      "strictness": 45,
+      "video": "approved-2-silent.mp4",
+      "expectedStatus": "locked"
+    },
+    {
+      "ok": true,
+      "sessionId": "5a02c54029e043219b960e47392f1d70",
+      "elapsedSeconds": 0.421,
+      "candidateFaceIds": [
+        "approved-2-6661c9deb08e"
+      ],
+      "final": {
+        "frames": 25,
+        "inferenceFrames": 0,
+        "compatibilityStatus": "no-compatible-face",
+        "selectedFaceId": "",
+        "selectedFaceSimilarity": 0.0,
+        "selectedTargetPresentation": "",
+        "compatibilityChecks": 6,
+        "compatibilityRejections": 5
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 3,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "no-compatible-face",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 1,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 25,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "no-compatible-face",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 6,
+          "compatibilityRejections": 5,
+          "error": ""
+        }
+      ],
+      "name": "different-woman-rejected-normal",
+      "strictness": 45,
+      "video": "approved-3-silent.mp4",
+      "expectedStatus": "no-compatible-face"
+    },
+    {
+      "ok": true,
+      "sessionId": "bcf8fb3f1cbd451c88d8eb30ae95cac2",
+      "elapsedSeconds": 0.453,
+      "candidateFaceIds": [
+        "approved-2-6661c9deb08e"
+      ],
+      "final": {
+        "frames": 9,
+        "inferenceFrames": 5,
+        "compatibilityStatus": "locked",
+        "selectedFaceId": "approved-2-6661c9deb08e",
+        "selectedFaceSimilarity": 99.83114800673042,
+        "selectedTargetPresentation": "female",
+        "compatibilityChecks": 1,
+        "compatibilityRejections": 0
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 3,
+          "inferenceFrames": 1,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-2-6661c9deb08e",
+          "selectedFaceSimilarity": 99.83114800673042,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 9,
+          "inferenceFrames": 5,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-2-6661c9deb08e",
+          "selectedFaceSimilarity": 99.83114800673042,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        }
+      ],
+      "name": "same-face-accepted-high",
+      "strictness": 90,
+      "video": "approved-2-silent.mp4",
+      "expectedStatus": "locked"
+    },
+    {
+      "ok": true,
+      "sessionId": "054f6648e6a745638f71d354b111a0ad",
+      "elapsedSeconds": 0.464,
+      "candidateFaceIds": [
+        "approved-2-6661c9deb08e"
+      ],
+      "final": {
+        "frames": 30,
+        "inferenceFrames": 0,
+        "compatibilityStatus": "no-compatible-face",
+        "selectedFaceId": "",
+        "selectedFaceSimilarity": 0.0,
+        "selectedTargetPresentation": "",
+        "compatibilityChecks": 7,
+        "compatibilityRejections": 6
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 3,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "no-compatible-face",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 1,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 30,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "no-compatible-face",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 7,
+          "compatibilityRejections": 6,
+          "error": ""
+        }
+      ],
+      "name": "different-woman-rejected-high",
+      "strictness": 90,
+      "video": "approved-3-silent.mp4",
+      "expectedStatus": "no-compatible-face"
+    }
+  ],
+  "restoredStrictness": 45,
+  "passed": true
+}

@@ -1,0 +1,7 @@
+# Five-second idle schema/coverage probe only; no media or screenshots.
+duration_ms: 5000
+buffers { size_kb: 8192 fill_policy: DISCARD }
+data_sources { config { name: "android.surfaceflinger.frametimeline" } }
+data_sources { config { name: "linux.process_stats"
+  process_stats_config { scan_all_processes_on_start: true }
+} }

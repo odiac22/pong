@@ -40,7 +40,7 @@ from local2_vision_adapter import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = ROOT / ".pong-local-ai"
+DATA_DIR = Path(os.environ.get("PONG_PREFERENCE_DATA_DIR", ROOT / ".pong-local-ai")).resolve()
 STORE_PATH = DATA_DIR / "preference-examples-v2.json"
 STORE_DB_PATH = DATA_DIR / "preference-examples-v3.sqlite3"
 LOCAL2_STORE_DB_PATH = DATA_DIR / "local2-clean-v2.sqlite3"
@@ -59,6 +59,8 @@ MAX_RECORDS = int(os.environ.get("PONG_PREFERENCE_MAX_RECORDS", "2000"))
 MAX_LEARN_IMAGES = int(os.environ.get("PONG_PREFERENCE_LEARN_IMAGES", "6"))
 LOCAL_DECISION_IMAGES = 4
 LOCAL_REQUIRED_CLEAR_BODY_IMAGES = 3
+LOCAL2_THUMBNAIL_RANK_LIMIT = 16
+LOCAL2_THUMBNAIL_RANK_SCHEMA = "pong.local2.thumbnail-ranks.v1"
 FEATURE_SCHEMA_VERSION = 3
 STORE_VERSION = 3
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -1155,6 +1157,7 @@ def local2_known_feedback(artist_url: str) -> dict[str, str] | None:
 INFERENCE_LIMIT = max(1, min(6, int(os.environ.get("PONG_PREFERENCE_AI_CONCURRENCY", "4"))))
 INFERENCE_SEMAPHORE = threading.BoundedSemaphore(INFERENCE_LIMIT)
 CLASSIFY_ADMISSION_SEMAPHORE = threading.BoundedSemaphore(CLASSIFY_ADMISSION_LIMIT)
+LOCAL2_THUMBNAIL_RANK_SEMAPHORE = threading.BoundedSemaphore(1)
 ACTIVE_CLASSIFY_LOCK = threading.Lock()
 ACTIVE_CLASSIFY = 0
 MODEL_CACHE_LOCK = threading.RLock()
@@ -1262,6 +1265,106 @@ def load_candidate_images(urls: list[str], max_images: int = LOCAL_DECISION_IMAG
     images = [image for image, _ in loaded if image is not None]
     accepted_urls = [url for image, url in loaded if image is not None]
     return deduplicate_candidate_images(images, accepted_urls)
+
+
+class ThumbnailRankRequestError(ValueError):
+    """Client-side validation error for the anonymous thumbnail rank API."""
+
+
+def local2_clean_rank_thumbnails(payload: Any) -> dict[str, Any]:
+    """Rank listing thumbnails without making or persisting any verdict."""
+
+    if not isinstance(payload, dict):
+        raise ThumbnailRankRequestError("request body must be an object")
+    raw_urls = payload.get("thumbnailUrls")
+    if not isinstance(raw_urls, list):
+        raise ThumbnailRankRequestError("thumbnailUrls must be an array")
+    if not raw_urls:
+        raise ThumbnailRankRequestError("thumbnailUrls must contain at least one URL")
+    if len(raw_urls) > LOCAL2_THUMBNAIL_RANK_LIMIT:
+        raise ThumbnailRankRequestError(
+            f"thumbnailUrls is limited to {LOCAL2_THUMBNAIL_RANK_LIMIT} entries"
+        )
+    if any(not isinstance(value, str) for value in raw_urls):
+        raise ThumbnailRankRequestError("every thumbnail URL must be a string")
+    if any(len(value) > 2048 for value in raw_urls):
+        raise ThumbnailRankRequestError("thumbnail URLs are limited to 2048 characters")
+
+    started = time.perf_counter()
+    # Invalid entries retain their response slot but never reach the network.
+    # The length guard also bounds parser and request-header work independently
+    # of the already-bounded list size.
+    normalized = [normalize_url(value) for value in raw_urls]
+    loaded_by_url: dict[str, Image.Image | None] = {}
+    valid_urls = list(dict.fromkeys(value for value in normalized if value))
+
+    def load(url: str) -> tuple[str, Image.Image | None]:
+        try:
+            return url, fetch_image(url)
+        except Exception:
+            return url, None
+
+    try:
+        # Serialize only this opportunistic ranker so repeated listing requests
+        # cannot crowd out canonical Local2 classification. Network fetches do
+        # not consume a classification-admission slot.
+        with LOCAL2_THUMBNAIL_RANK_SEMAPHORE:
+            futures = [IMAGE_DOWNLOAD_EXECUTOR.submit(load, url) for url in valid_urls]
+            for future in futures:
+                url, image = future.result()
+                loaded_by_url[url] = image
+
+            successful_urls = [
+                url for url in valid_urls if loaded_by_url.get(url) is not None
+            ]
+            successful_images = [loaded_by_url[url] for url in successful_urls]
+            successful_ranks: list[float | None] = []
+            if successful_images:
+                with CLASSIFY_ADMISSION_SEMAPHORE, INFERENCE_SEMAPHORE:
+                    successful_ranks = local2_clean_adapter().rank_independent_taste_images(
+                        successful_images,
+                        image_urls=successful_urls,
+                    )
+            if len(successful_ranks) != len(successful_images):
+                raise ValueError("Local2 thumbnail ranker returned a mismatched result count")
+
+        rank_by_url = dict(zip(successful_urls, successful_ranks))
+        items = [
+            {
+                "index": index,
+                "available": bool(url and loaded_by_url.get(url) is not None),
+                "rank": (
+                    None
+                    if rank_by_url.get(url) is None
+                    else round(float(rank_by_url[url]), 6)
+                ),
+            }
+            for index, url in enumerate(normalized)
+        ]
+    finally:
+        # PIL objects reference only the process-memory byte cache. Close
+        # decoded copies on success and failure; input media is never persisted.
+        for image in {
+            id(value): value
+            for value in loaded_by_url.values()
+            if value is not None
+        }.values():
+            try:
+                image.close()
+            except Exception:
+                pass
+    return {
+        "ok": True,
+        "schema": LOCAL2_THUMBNAIL_RANK_SCHEMA,
+        "ranking_only": True,
+        "input_storage": "memory-only",
+        "count": len(items),
+        "ranked": sum(item["rank"] is not None for item in items),
+        "head_available": any(item["rank"] is not None for item in items),
+        "items": items,
+        "model_revision": local2_clean_revision(),
+        "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
+    }
 
 
 def body_triage(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1431,6 +1534,28 @@ def cached_head(variant: str, view: str = "all", pattern: str = "") -> dict[str,
 
 def cached_probability(vector: np.ndarray, variant: str, view: str = "all", pattern: str = "") -> float | None:
     head = cached_head(variant, view, pattern)
+    return score_trained_head(vector, head) if head is not None else None
+
+
+def cached_history_only_head(variant: str) -> dict[str, Any] | None:
+    """Train Local2.2's one decision head from every direct historical label.
+
+    Unlike the older taste head, this deliberately keeps categorical Red-X
+    examples. Local2.2 has no independent visual policy rules: all visual
+    behavior must come from the user's complete accepted/rejected history.
+    """
+    cache_key = ("history-only-head", store_revision(), variant)
+    with MODEL_CACHE_LOCK:
+        if cache_key in MODEL_CACHE:
+            return MODEL_CACHE[cache_key]
+        features, labels, _ = feature_records(variant)
+        head = build_trained_head(features, labels) if features else None
+        MODEL_CACHE[cache_key] = head
+        return head
+
+
+def history_only_probability(vector: np.ndarray, variant: str = "local2") -> float | None:
+    head = cached_history_only_head(variant)
     return score_trained_head(vector, head) if head is not None else None
 
 
@@ -2466,6 +2591,58 @@ def local2_clean_review_metadata(review_codes: Sequence[str]) -> tuple[list[str]
     return list(dict.fromkeys(normalized_codes)), list(dict.fromkeys(reasons))
 
 
+def local22_two_rule_projection(result: dict[str, Any]) -> dict[str, Any]:
+    """Project shared visual evidence onto Local2.2's only two policy rules."""
+    projected = dict(result)
+    checks = dict(result.get("checks") or {})
+    evidence = dict(result.get("evidence") or {})
+    male_conflict = bool(
+        checks.get("male_present") is True or checks.get("male_only") is True
+    )
+    body_conflict = checks.get("body_preference_conflict") is True
+    female_safe = bool(
+        checks.get("female_presenting_adult") is True
+        and checks.get("male_present") is False
+        and checks.get("male_only") is False
+    )
+    clear_body = int(evidence.get("clear_body_images") or 0)
+    usable = int(evidence.get("usable_images") or 0)
+    evidence_ready = female_safe and clear_body >= 2 and usable >= 2
+    if male_conflict:
+        decision, confidence, code, reason = (
+            "reject", 0.98, "male_presenting_content",
+            "male-presenting evidence confirmed across the candidate views",
+        )
+    elif body_conflict:
+        decision, confidence, code, reason = (
+            "reject", 0.96, "body_shape_mismatch",
+            "two clear body views agree on a body-shape mismatch",
+        )
+    elif evidence_ready:
+        decision, confidence, code, reason = (
+            "accept", 0.96, "local22_two_rule_pass",
+            "Local2.2 two-rule visual check passed",
+        )
+    else:
+        decision, confidence, code, reason = (
+            "review", 0.5, "insufficient_two_rule_evidence",
+            "not enough independent evidence to resolve both Local2.2 rules",
+        )
+    projected.update({
+        "decision": decision,
+        "confidence": confidence,
+        "reason_code": code,
+        "reason": reason,
+        "hard_verified": decision == "accept",
+        "requires_second_stage": False,
+        "requires_qwen_review": False,
+        "review_codes": [],
+        "terminal_personal_reject": False,
+        "two_rule_only": True,
+    })
+    return projected
+
+
 def local2_clean_classify(payload: dict[str, Any]) -> dict[str, Any]:
     """Run only the clean Local2 path; images remain in memory and are never saved."""
     # Share the same admission guard as Local1 so starting the clean pipeline
@@ -2478,12 +2655,18 @@ def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
     stage = str(payload.get("stage", "full")).strip().lower()
     preference_policy = str(payload.get("preferencePolicy", "")).strip().lower()
     broad_hard_safe = preference_policy == "broad-hard-safe"
+    two_rule_only = preference_policy == "local22-two-rule"
+    history_only = preference_policy == "local22-history-only"
     hard_confirmation = (
         preference_policy == "hard-confirmation" or stage == "hard-confirmation"
     )
     artist = payload.get("artist") or {}
-    known_feedback = local2_known_feedback(normalize_url(artist.get("artistUrl", "")))
-    if known_feedback and known_feedback["label"] == "reject":
+    # Local2.2 is an intentionally blank-slate lane. Exact Save/Red-X memory is
+    # useful for Local/Local2 training, but must not influence its two rules.
+    known_feedback = None if two_rule_only else local2_known_feedback(
+        normalize_url(artist.get("artistUrl", ""))
+    )
+    if known_feedback and known_feedback["label"] == "reject" and not history_only:
         return {
             "decision": "reject",
             "confidence": 0.999,
@@ -2507,7 +2690,7 @@ def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
             "known_feedback": known_feedback,
             "local2_revision": local2_clean_revision(),
         }
-    maximum = 6 if stage == "triage" else MAX_LOCAL2_IMAGES
+    maximum = 4 if (two_rule_only or history_only) else (6 if stage == "triage" else MAX_LOCAL2_IMAGES)
     urls = list(dict.fromkeys(
         normalize_url(value)
         for value in payload.get("candidateImageUrls", [])
@@ -2516,9 +2699,81 @@ def local2_clean_classify_admitted(payload: dict[str, Any]) -> dict[str, Any]:
     images, used_urls = load_candidate_images(urls, max_images=maximum)
     if not images:
         raise ValueError("No usable Local2 candidate images")
+    if history_only:
+        # Blank-slate Local2.2 skips SigLIP policy prompts and every legacy
+        # hard-filter projection. One batched pose + DINO-small pass produces
+        # the same 1,154-value historical feature schema; one head trained from
+        # all Save/Red-X labels then makes the only visual verdict.
+        with INFERENCE_SEMAPHORE:
+            analysis = VISION.analyze(
+                images,
+                "local2",
+                include_semantics=False,
+                image_urls=tuple(used_urls),
+            )
+        probability = history_only_probability(analysis["feature"], "local2")
+        if probability is None:
+            raise RuntimeError("Local2.2 historical preference head is unavailable")
+        threshold = 0.5
+        model_decision = "accept" if probability >= threshold else "reject"
+        exact_label = str((known_feedback or {}).get("label") or "").lower()
+        exact_applied = exact_label in {"accept", "reject"}
+        decision = exact_label if exact_applied else model_decision
+        confidence = 0.999 if exact_applied else max(
+            0.5,
+            min(0.99, 0.5 + abs(float(probability) - threshold)),
+        )
+        reason = (
+            f"historical direct feedback: {decision}"
+            if exact_applied
+            else f"history-only preference {float(probability):.1%}"
+        )
+        return {
+            "decision": decision,
+            "confidence": confidence,
+            "reason_code": "exact_history_feedback" if exact_applied else "history_only_preference",
+            "reason": reason,
+            "source": LOCAL2_CLEAN_SCHEMA,
+            "vision_source": LOCAL2_CLEAN_SCHEMA,
+            "variant": "local2",
+            "model": "facebook/dinov2-small complete-history binary head",
+            "preference_probability": float(probability),
+            "preference_threshold": threshold,
+            "history_only": True,
+            "exact_feedback_applied": exact_applied,
+            "known_feedback": known_feedback,
+            "hard_verified": decision == "accept",
+            "requires_second_stage": False,
+            "requires_qwen_review": False,
+            "terminal_personal_reject": decision == "reject",
+            "review_codes": [],
+            "qwen_review_codes": [],
+            "qwen_review_reasons": [],
+            "checks": {},
+            "evidence": {
+                "images": len(images),
+                "usable_images": len(images),
+                "clear_body_images": int(analysis.get("clearBodyImages") or 0),
+            },
+            "image_grades": [],
+            "candidateImageUrls": used_urls,
+            "local2_revision": local2_clean_revision(),
+        }
     adapter = local2_clean_adapter()
     with INFERENCE_SEMAPHORE:
-        if stage == "triage":
+        if two_rule_only:
+            analysis = adapter.analyze(
+                images,
+                image_urls=used_urls,
+                include_taste=False,
+            )
+            result = adapter.classify_analysis(
+                analysis,
+                hard_only=True,
+                conservative_ambiguity=False,
+            )
+            result = local22_two_rule_projection(result)
+        elif stage == "triage":
             analysis = adapter.analyze(
                 images,
                 image_urls=used_urls,
@@ -3263,6 +3518,17 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     with ACTIVE_CLASSIFY_LOCK:
                         ACTIVE_CLASSIFY = max(0, ACTIVE_CLASSIFY - 1)
+                self.send_json(200, result)
+                return
+            if path == "/local2-clean/rank-thumbnails":
+                if not SERVICE_STATE["ready"]:
+                    self.send_json(503, {"ok": False, "error": "personal preference models are still warming"})
+                    return
+                try:
+                    result = local2_clean_rank_thumbnails(payload)
+                except ThumbnailRankRequestError as exc:
+                    self.send_json(400, {"ok": False, "error": str(exc)})
+                    return
                 self.send_json(200, result)
                 return
             if path == "/learn":

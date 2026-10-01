@@ -90,19 +90,43 @@ export function simpCityThreadPageCount(html, maximum = 250) {
   return Math.max(1, Math.min(Math.max(1, Number(maximum || 250)), pageCount));
 }
 
-const SIMPCITY_DIRECT_VIDEO_RE = /\.(?:mp4|m4v|mov|webm)(?:$|[?#])/i;
+const SIMPCITY_DIRECT_VIDEO_RE = /\.(?:mp4|m4v|mkv|mov|webm)(?:$|[?#])/i;
+
+export function extractSimpCityPostPassword(rawPost) {
+  const source = decodeSimpCityHtmlText([
+    rawPost?.text || '',
+    ...(Array.isArray(rawPost?.links) ? rawPost.links.map(link => link?.text || '') : []),
+    ...(Array.isArray(rawPost?.attachments) ? rawPost.attachments : [])
+  ].join(' ')).replace(/https?:\/\/\S+/gi, ' ');
+  const match = source.match(
+    /\b(?:password|passwd|passcode|pass|pwd|pw)\b\s*(?:is\s*)?(?:[:=：-]\s*)?["'`]?([^\s"'`<>{}\[\],;]{2,80})/i
+  );
+  const password = String(match?.[1] || '').trim();
+  if (!password || /^(?:for|protected|required|needed|above|below|none|n\/a)$/i.test(password)) return '';
+  return password;
+}
 
 function simpCityUrlCandidates(rawValue) {
   const pending = [decodeSimpCityHtmlText(rawValue)];
   const results = [];
   const seen = new Set();
-  while (pending.length && results.length < 20) {
+  // One reaction-sorted post can legitimately contain dozens of mirrors.
+  // The old 20-candidate ceiling silently discarded later URLs and even
+  // deferred redirect targets from the same post.
+  while (pending.length && results.length < 500 && seen.size < 2000) {
     const value = String(pending.shift() || '').trim();
     if (!value || seen.has(value)) continue;
     seen.add(value);
     let decoded = value;
     try { decoded = decodeURIComponent(value.replace(/\+/g, '%20')); } catch (_) {}
     if (decoded !== value) pending.push(decoded);
+    // Forum prose and copied exports sometimes place URLs back-to-back with no
+    // whitespace. Preserve each candidate instead of letting URL() interpret
+    // the whole chain as one malformed destination.
+    const chained = value.split(/(?=https?(?::|%3a)(?:\/\/|%2f%2f))/i)
+      .map(part => part.trim())
+      .filter(part => /^https?(?::|%3a)(?:\/\/|%2f%2f)/i.test(part));
+    if (chained.length > 1) pending.push(...chained);
     if (/^[a-z0-9_-]{12,}={0,2}$/i.test(value)) {
       try {
         const base64 = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
@@ -130,10 +154,16 @@ export function classifySimpCityMediaUrl(rawValue) {
     if (url.protocol !== 'https:' || url.username || url.password) return null;
     const host = url.hostname.replace(/^www\./, '').toLowerCase();
     const path = url.pathname.replace(/\/+$/, '');
+    // Forum link labels sometimes contain a visually shortened Bunkr URL with
+    // a literal `...`.  It is not the anchor destination and can never be
+    // resolved to media.  Counting it let Recall publish five-link bundles
+    // that contained only one or two playable videos.
+    if (path.includes('...')) return null;
     let kind = '';
     if (host === 'gofile.io' && /^\/d\/[a-z0-9_-]+$/i.test(path)) kind = 'gofile';
+    else if (/^(?:www\.)?anonfiles\.com$/i.test(host) && path !== '/') kind = 'anonfiles';
     else if (host === 'pixeldrain.com' && /^\/(?:u|l|d)\/[a-z0-9_-]+$/i.test(path)) kind = 'pixeldrain';
-    else if (/^(?:bunkr\.(?:cr|ph|si|ru|su|la|fi|site|black|media)|bunkrrr\.org|xbunkr\.com)$/i.test(host) && /^\/(?:a|f|v)\/[a-z0-9_.-]+$/i.test(path)) kind = 'bunkr';
+    else if (/^(?:bunkr\.(?:cr|ph|pk|si|ru|su|la|fi|site|black|media)|bunkrrr\.org|xbunkr\.com)$/i.test(host) && /^\/(?:a|f|v)\/[a-z0-9_.-]+$/i.test(path)) kind = 'bunkr';
     else if (/^cyberdrop\.(?:cr|me|to)$/i.test(host) && /^\/(?:a|f)\/[a-z0-9_-]+$/i.test(path)) kind = 'cyberdrop';
     else if (/^(?:[^.]+\.)?cyberfile\.me$/i.test(host) && path !== '/') kind = 'cyberfile';
     else if (/^(?:saint\.to|saint2\.(?:su|cr)|turbo\.cr)$/i.test(host) && /^\/(?:embed|v)\/[a-z0-9_-]+$/i.test(path)) kind = 'saint';
@@ -149,9 +179,10 @@ export function classifySimpCityMediaUrl(rawValue) {
 
 export function extractSimpCityMediaLinks(rawPosts) {
   const results = [];
-  const seen = new Set();
+  const byUrl = new Map();
   for (const [index, rawPost] of (Array.isArray(rawPosts) ? rawPosts : []).entries()) {
     const postId = String(rawPost?.postId || `post-${index + 1}`).slice(0, 120);
+    const password = extractSimpCityPostPassword(rawPost);
     const candidates = [
       ...(Array.isArray(rawPost?.links) ? rawPost.links.flatMap(link => [link?.url, link?.text]) : []),
       rawPost?.text || '',
@@ -160,9 +191,16 @@ export function extractSimpCityMediaLinks(rawPosts) {
     for (const candidate of candidates) {
       for (const rawUrl of simpCityUrlCandidates(candidate)) {
         const classified = classifySimpCityMediaUrl(rawUrl);
-        if (!classified || seen.has(classified.url)) continue;
-        seen.add(classified.url);
-        results.push({ ...classified, postId });
+        if (!classified) continue;
+        const existing = byUrl.get(classified.url);
+        if (existing) {
+          if (classified.kind === 'gofile' && password && !existing.password) existing.password = password;
+          continue;
+        }
+        const result = { ...classified, postId };
+        if (classified.kind === 'gofile' && password) result.password = password;
+        byUrl.set(classified.url, result);
+        results.push(result);
       }
     }
   }

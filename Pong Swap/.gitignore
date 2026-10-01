@@ -1,0 +1,21 @@
+# Private approved identities and generated derivatives.
+approved-faces/*
+!approved-faces/README.txt
+approved-face-archives/
+approved-face-consolidation.json
+approved-faces-inbox/
+approved-upload-references/
+face_upload_config.json
+
+# Large third-party runtime, models, caches and logs.
+engine/
+runtime/
+cache/
+logs/
+
+# The active preset is machine-local. Share named presets explicitly.
+presets/current.json
+presets/imports/
+
+__pycache__/
+*.pyc

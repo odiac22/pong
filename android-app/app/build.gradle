@@ -13,8 +13,8 @@ android {
     defaultConfig {
         minSdk 24
         targetSdk 35
-        versionCode 2801
-        versionName '28.01'
+        versionCode 2944
+        versionName '29.44'
         buildConfigField 'String', 'OBSERVER_PAIR', "\"${escapedObserverPair}\""
         buildConfigField 'String', 'PONG_GATEWAY_URL', "\"${escapedGatewayUrl}\""
         buildConfigField 'String', 'PONG_GATEWAY_TOKEN', "\"${escapedGatewayToken}\""
@@ -33,6 +33,10 @@ android {
         }
     }
     buildFeatures { buildConfig true }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
     signingConfigs {
         release {
             storeFile file(System.getenv('PONG_KEYSTORE_PATH') ?: 'missing.jks')
@@ -44,6 +48,14 @@ android {
     buildTypes {
         release { minifyEnabled false; signingConfig signingConfigs.release }
     }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+    // 1.9.2 is the newest Media3 line compatible with this app's API 35 toolchain.
+    def media3Version = '1.9.2'
+    implementation "androidx.media3:media3-exoplayer:$media3Version"
+    implementation "androidx.media3:media3-ui:$media3Version"
 }
 
 gradle.taskGraph.whenReady { graph ->

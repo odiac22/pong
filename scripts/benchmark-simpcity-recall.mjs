@@ -7,6 +7,8 @@ const chromePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const port = 9347;
 const recallChannel = Number(process.env.PONG_SC_RECALL_CHANNEL) === 2 ? 2 : 1;
 const doublePress = process.env.PONG_SC_RECALL_DOUBLE === '1';
+const minimumPasteEvents = Math.max(1, Number(process.env.PONG_SC_MIN_EVENTS || 1));
+const maximumWaitMs = Math.max(30_000, Number(process.env.PONG_SC_MAX_WAIT_MS || 30_000));
 const profile = await mkdtemp(path.join(os.tmpdir(), 'pong-sc-recall-'));
 const chrome = spawn(chromePath, [
   '--headless=new', '--mute-audio', '--autoplay-policy=user-gesture-required',
@@ -70,7 +72,7 @@ try {
   });
   const started = Date.now();
   let state;
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < Math.ceil(maximumWaitMs / 500); i++) {
     await sleep(500);
     const result = await send('Runtime.evaluate', {
       expression: `JSON.stringify({
@@ -90,10 +92,10 @@ try {
     });
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || 'State evaluation failed');
     state = JSON.parse(result.result?.value || '{}');
-    if (state.allVideoUrls > 0 && state.wrappers > 0) break;
+    if (state.allVideoUrls > 0 && state.wrappers > 0 && state.pasteEvents >= minimumPasteEvents) break;
   }
   console.log(JSON.stringify(state, null, 2));
-  if (!state?.allVideoUrls || !state?.wrappers) process.exitCode = 1;
+  if (!state?.allVideoUrls || !state?.wrappers || state?.pasteEvents < minimumPasteEvents) process.exitCode = 1;
 } finally {
   try { socket?.close(); } catch {}
   chrome.kill();

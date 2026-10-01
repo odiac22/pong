@@ -6,10 +6,17 @@ const INGEST_TOKEN = String(process.env.PONG_OBSERVER_INGEST_TOKEN || '');
 const ADMIN_TOKEN = String(process.env.PONG_OBSERVER_ADMIN_TOKEN || '');
 const TEST_TOKEN = String(process.env.PONG_OBSERVER_TEST_TOKEN || '');
 const TTL_MS = Math.max(60_000, Number(process.env.PONG_OBSERVER_TTL_MS || 30 * 60_000));
+const ONLINE_MS = Math.max(100, Number(process.env.PONG_OBSERVER_ONLINE_MS || 10_000));
 const MAX_BODY_BYTES = 256 * 1024;
 const MAX_EVENTS = 240;
 const instances = new Map();
 const testInstances = new Map();
+const pendingCommands = {
+  production: new Map(),
+  test: new Map()
+};
+const COMMAND_TARGETS = new Set(['random-40-local', 'random-40-local2', 'test-ai']);
+let commandSequence = 0;
 
 if (!INGEST_TOKEN || !ADMIN_TOKEN) throw new Error('Pong observer tokens are required');
 
@@ -76,6 +83,11 @@ function prune() {
       if (now - record.lastSeenAt > TTL_MS) store.delete(id);
     }
   }
+  for (const commandStore of Object.values(pendingCommands)) {
+    for (const [instanceId, command] of commandStore) {
+      if (command.expiresAt <= now) commandStore.delete(instanceId);
+    }
+  }
 }
 
 function publicRecord(record) {
@@ -83,15 +95,10 @@ function publicRecord(record) {
     instanceId: record.instanceId,
     sessionId: record.state.sessionId,
     appName: record.appName,
-    online: Date.now() - record.lastSeenAt < 10_000,
+    online: Date.now() - record.lastSeenAt < ONLINE_MS,
     lastSeenAt: new Date(record.lastSeenAt).toISOString(),
     state: record.state,
-    screenshot: record.screenshot ? {
-      capturedAt: record.screenshot.capturedAt,
-      width: record.screenshot.width,
-      height: record.screenshot.height,
-      bytes: record.screenshot.data.length
-    } : null,
+    screenshot: null,
     events: record.events
   };
 }
@@ -102,6 +109,7 @@ const server = http.createServer(async (req, res) => {
   const testing = url.pathname.startsWith('/test/');
   const path = testing ? url.pathname.slice(5) : url.pathname;
   const store = testing ? testInstances : instances;
+  const commandStore = testing ? pendingCommands.test : pendingCommands.production;
   if (req.method === 'OPTIONS') {
     res.writeHead(204, corsHeaders(origin));
     res.end();
@@ -120,19 +128,9 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const incoming = await readJson(req);
-      const rawFrame = incoming?.frame;
-      let frame = null;
-      if (rawFrame?.jpegBase64 && String(rawFrame.jpegBase64).length <= 190_000) {
-        const data = Buffer.from(String(rawFrame.jpegBase64), 'base64');
-        if (data.length >= 4 && data.length <= 145_000 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
-          frame = {
-            capturedAt: String(rawFrame.capturedAt || new Date().toISOString()).slice(0, 80),
-            width: Math.max(1, Math.min(2000, Number(rawFrame.width || 0))),
-            height: Math.max(1, Math.min(3000, Number(rawFrame.height || 0))),
-            data
-          };
-        }
-      }
+      // Screenshot transport was retired in favor of the user's private
+      // wireless ADB connection. Drop any frame sent by an older client before
+      // sanitizing or retaining the payload.
       if (incoming && typeof incoming === 'object') delete incoming.frame;
       const payload = clean(incoming);
       const instanceId = String(payload?.state?.instanceId || '').toLowerCase();
@@ -159,10 +157,59 @@ const server = http.createServer(async (req, res) => {
         appName: instanceId === 'pong2' ? 'Pong 2' : 'Pong 1',
         lastSeenAt: Date.now(),
         state: payload.state,
-        screenshot: frame || previous?.screenshot || null,
         events
       });
-      json(res, 200, { ok: true, instanceId, receivedAt: new Date().toISOString() }, origin);
+      const command = commandStore.get(instanceId);
+      const activityInstanceId = String(payload?.state?.client?.activityInstanceId || '').slice(0, 100);
+      const commandMatches = Boolean(
+        command &&
+        command.expiresAt > Date.now() &&
+        command.sessionId === sessionId &&
+        (!command.activityInstanceId || command.activityInstanceId === activityInstanceId)
+      );
+      if (commandMatches) commandStore.delete(instanceId);
+      json(res, 200, {
+        ok: true,
+        instanceId,
+        receivedAt: new Date().toISOString(),
+        command: commandMatches
+          ? { id: command.id, action: command.action, targetId: command.targetId }
+          : null
+      }, origin);
+    } catch (error) {
+      json(res, 400, { ok: false, error: String(error?.message || error).slice(0, 160) }, origin);
+    }
+    return;
+  }
+  if (req.method === 'POST' && /^\/commands\/pong[12]$/.test(path)) {
+    if (bearer(req) !== ADMIN_TOKEN) {
+      json(res, 401, { ok: false, error: 'unauthorized' }, origin);
+      return;
+    }
+    try {
+      const instanceId = path.split('/')[2];
+      const payload = clean(await readJson(req));
+      const targetId = String(payload?.targetId || '');
+      const sessionId = String(payload?.sessionId || '').slice(0, 160);
+      const activityInstanceId = String(payload?.activityInstanceId || '').slice(0, 100);
+      if (payload?.action !== 'click' || !COMMAND_TARGETS.has(targetId)) {
+        json(res, 400, { ok: false, error: 'unsupported command' }, origin);
+        return;
+      }
+      if (!sessionId) {
+        json(res, 400, { ok: false, error: 'target session required' }, origin);
+        return;
+      }
+      const command = {
+        id: `${Date.now()}-${++commandSequence}`,
+        action: 'click',
+        targetId,
+        sessionId,
+        activityInstanceId,
+        expiresAt: Date.now() + 15_000
+      };
+      commandStore.set(instanceId, command);
+      json(res, 202, { ok: true, instanceId, sessionId, commandId: command.id }, origin);
     } catch (error) {
       json(res, 400, { ok: false, error: String(error?.message || error).slice(0, 160) }, origin);
     }
@@ -173,22 +220,7 @@ const server = http.createServer(async (req, res) => {
       json(res, 401, { ok: false, error: 'unauthorized' }, origin);
       return;
     }
-    prune();
-    const id = path.split('/')[2];
-    const records = [...store.values()].filter(record => record.instanceId === id && record.screenshot);
-    records.sort((a, b) => Number(Boolean(b.state.client?.native)) - Number(Boolean(a.state.client?.native)) || b.lastSeenAt - a.lastSeenAt);
-    const record = records[0];
-    if (!record) {
-      json(res, 404, { ok: false, error: 'not found' }, origin);
-      return;
-    }
-    res.writeHead(200, {
-      'Content-Type': 'image/jpeg',
-      'Content-Length': record.screenshot.data.length,
-      'Cache-Control': 'no-store',
-      'X-Content-Type-Options': 'nosniff'
-    });
-    res.end(record.screenshot.data);
+    json(res, 410, { ok: false, error: 'screenshots disabled; use private wireless ADB' }, origin);
     return;
   }
   if (req.method === 'GET' && (path === '/instances' || /^\/instances\/pong[12]$/.test(path))) {
@@ -200,8 +232,17 @@ const server = http.createServer(async (req, res) => {
     prune();
     const id = path.split('/')[2] || '';
     const records = [...store.values()].filter(record => !id || record.instanceId === id);
-    // Retain all sessions, and prefer the actual native app over a desktop preview.
-    records.sort((a, b) => Number(Boolean(b.state.client?.native)) - Number(Boolean(a.state.client?.native)) || b.lastSeenAt - a.lastSeenAt);
+    // Freshness is authoritative. A native session that stopped heartbeating
+    // must never hide a live browser/emulator session. Among equally fresh
+    // records, prefer the foreground native activity and then native clients.
+    const now = Date.now();
+    records.sort((a, b) => (
+      Number(now - b.lastSeenAt < ONLINE_MS) - Number(now - a.lastSeenAt < ONLINE_MS)
+      || Number(Boolean(b.state.client?.native && b.state.client?.foreground))
+        - Number(Boolean(a.state.client?.native && a.state.client?.foreground))
+      || Number(Boolean(b.state.client?.native)) - Number(Boolean(a.state.client?.native))
+      || b.lastSeenAt - a.lastSeenAt
+    ));
     if (id) {
       const record = records[0];
       json(res, record ? 200 : 404, record ? { ok: true, instance: publicRecord(record), sessions: records.map(publicRecord) } : { ok: false, error: 'not found' }, origin);

@@ -46,6 +46,33 @@ function uniqueHttpUrls(values, maximum) {
     .filter(Boolean))].slice(0, maximum);
 }
 
+/**
+ * Apply anonymous thumbnail taste scores to their exact input slots.
+ * Missing/nonfinite scores stay absent so ranking can never turn media
+ * availability into an implicit preference signal.
+ */
+export function applyLocal2ListingRanks(batch, response) {
+  const candidates = Array.isArray(batch) ? batch : [];
+  if (response?.ranking_only !== true || !Array.isArray(response?.items)) return candidates;
+  for (const item of response.items) {
+    if (item?.rank == null) continue;
+    const index = item?.index;
+    const rank = item?.rank;
+    if (
+      typeof index !== 'number' ||
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= candidates.length ||
+      !candidates[index] ||
+      typeof candidates[index] !== 'object' ||
+      typeof rank !== 'number' ||
+      !Number.isFinite(rank)
+    ) continue;
+    candidates[index].preferenceRank = Math.max(0, Math.min(1, rank));
+  }
+  return candidates;
+}
+
 function sanitizeLearningPayload(payload = {}) {
   const label = text(payload.label, 16).toLowerCase();
   if (!['accept', 'reject'].includes(label)) throw new Error('Local2 learning label must be accept or reject');

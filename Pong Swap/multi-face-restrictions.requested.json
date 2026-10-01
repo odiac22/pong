@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "status": "hair_rules_active_other_traits_pending",
+  "enabled": false,
+  "hairRulesEnabled": true,
+  "otherTraitRulesEnabled": false,
+  "scope": "multi_face_only",
+  "unknownEvidence": "ineligible",
+  "rules": {
+    "approved-2": {"all": [{"hair": "dark"}, {"visibleSkinTone": "tan"}]},
+    "approved-3": {"all": [{"hair": "dark"}, {"visibleSkinTone": "tan"}]},
+    "approved-8": {"hair": "light"},
+    "approved-13": {"all": [{"hair": "dark"}, {"any": [{"faceShape": "slim"}, {"bodyBuild": "slim"}]}]},
+    "approved-19": {"hair": "light"},
+    "approved-23": {"all": [{"visibleSkinTone": "dark"}, {"hair": "dark"}]}
+  }
+}

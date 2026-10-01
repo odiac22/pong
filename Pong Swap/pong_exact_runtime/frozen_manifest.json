@@ -1,0 +1,91 @@
+[
+  {
+    "module": "rope.VideoManager",
+    "owner": "VideoManager",
+    "method": "swap_core",
+    "captured": true,
+    "sha256": "471ed157c37808694e9c99996a41ffb7920b72686072a4f3a3285632c7e68cb5"
+  },
+  {
+    "module": "rope.VideoManager",
+    "owner": "VideoManager",
+    "method": "_temporal_mask_result",
+    "captured": false
+  },
+  {
+    "module": "rope.VideoManager",
+    "owner": "VideoManager",
+    "method": "_temporal_identity_residual",
+    "captured": true,
+    "sha256": "b4e94539b52a8284e5b5ca7fc64a4b9d8fabc0911370db4ef353d49795222505"
+  },
+  {
+    "module": "rope.VideoManager",
+    "owner": "VideoManager",
+    "method": "_warp_grid_sample",
+    "captured": false
+  },
+  {
+    "module": "rope.VideoManager",
+    "owner": "VideoManager",
+    "method": "_apply_restorer_inner",
+    "captured": true,
+    "sha256": "f2815dcf7bc7f9ed0d015dc40db3caf67adcdf61ada74d96e2782cd0b2def102"
+  },
+  {
+    "module": "rope.VideoManager",
+    "owner": "VideoManager",
+    "method": "_match_color",
+    "captured": true,
+    "sha256": "e60a4b0666803f91c81b7d002a2b17159ff305a145901e0809a60fcdf208fd50"
+  },
+  {
+    "module": "rope.Models",
+    "owner": "Models",
+    "method": "_detect_retinaface_inner",
+    "captured": true,
+    "sha256": "ac932a6e9736a5e113c7c87513f83d4df53642a2718745bda6522a0c5cddd8f8"
+  },
+  {
+    "module": "rope.gpen_runtime",
+    "owner": "GPENRuntime",
+    "method": "prepare",
+    "captured": true,
+    "sha256": "5e93a8f8cdbf9f04985085aeaa07e0592bae87f1045e6e38ece27cb521386332"
+  },
+  {
+    "module": "pong_swap_engine",
+    "owner": "PongSwapEngine",
+    "method": "process_frame",
+    "captured": true,
+    "sha256": "0f9291d71d457f0aad9307b2b5f066172a3a1b92de6c0fef98e212c95532096b"
+  },
+  {
+    "module": "pong_swap_engine",
+    "owner": "PongSwapEngine",
+    "method": "_produce_session",
+    "captured": true,
+    "sha256": "8a9220299b452b384142874325b0f4c4041b43533dd9728227982c73fd78f075"
+  },
+  {
+    "module": "rope.VideoManager",
+    "owner": null,
+    "method": "_match_lab_color",
+    "captured": true,
+    "sha256": "3b1420fa6085c32372f31d2d459df979e6e4d2769a98fa4f27bc2ce60601afce"
+  },
+  {
+    "module": "rope.VideoManager",
+    "owner": "VideoManager",
+    "method": "_temporal_mask_result_core",
+    "captured": true,
+    "sha256": "57aafcc51922b5f156473126c7e393989b9cd12e0ebc1122fe7cbe32819b6751"
+  },
+  {
+    "module": "rope.VideoManager",
+    "owner": "VideoManager",
+    "method": "_warp_grid_sample_core",
+    "captured": true,
+    "sha256": "52ae17728d3e810a0356973878c0e985817f2d1ae086d10e3d6ac94e03a2b4e2"
+  }
+]

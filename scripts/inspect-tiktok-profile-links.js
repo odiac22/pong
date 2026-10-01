@@ -1,0 +1,1 @@
+(() => ({path:location.pathname,challenge:!!document.querySelector('[class*="captcha-drag-icon"]'),links:[...document.querySelectorAll('a[href]')].filter(a=>/\/video\/|\/@/.test(a.getAttribute('href'))).map(a=>({path:new URL(a.href).pathname,e2e:a.getAttribute('data-e2e'),visible:!!a.getClientRects().length})).slice(0,30)}))()

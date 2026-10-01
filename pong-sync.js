@@ -862,9 +862,10 @@
     const endpoint = pcSavedLinksEndpoint();
     if (!endpoint) return null;
     try {
-      const response = await fetch(`${endpoint}/saved-links/state?t=${Date.now()}`, { cache: 'no-store' });
-      if (!response.ok) return null;
-      const payload = await response.json();
+      const payload = typeof window.PongFetchPcSavedLinksState === 'function'
+        ? await window.PongFetchPcSavedLinksState(endpoint)
+        : await fetch(`${endpoint}/saved-links/state?t=${Date.now()}`, { cache: 'no-store' })
+            .then(response => response.ok ? response.json() : null);
       return normalizeSharedData(payload?.data);
     } catch (_) {
       return null;
@@ -875,6 +876,7 @@
     const endpoint = pcSavedLinksEndpoint();
     if (!endpoint) return null;
     try {
+      window.PongInvalidatePcSavedLinksState?.();
       const response = await fetch(`${endpoint}/saved-links/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -883,6 +885,7 @@
       });
       if (!response.ok) return null;
       const payload = await response.json();
+      window.PongRememberPcSavedLinksState?.(payload, endpoint);
       return normalizeSharedData(payload?.data);
     } catch (_) {
       return null;
@@ -5636,16 +5639,17 @@
     skipVideoBtn.id = 'skip-current-video-button';
     skipVideoBtn.className = 'side-save-button video-skip-button';
     skipVideoBtn.type = 'button';
-    skipVideoBtn.title = 'Skip this video and prevent it from returning to this session';
+    skipVideoBtn.title = 'Skip the current three videos and prevent them from returning to this session';
     skipVideoBtn.innerHTML = `
       <span class="side-save-icon">⏭</span>
       <span class="side-save-label">Skip</span>
-      <span class="side-save-count">Video</span>
+      <span class="side-save-count">3 vids</span>
     `;
     skipVideoBtn.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
-      window.PongSkipCurrentVideo?.();
+      if (typeof window.PongSkipCurrentVideos === 'function') window.PongSkipCurrentVideos(3);
+      else window.PongSkipCurrentVideo?.();
     });
 
     const autoSkipVideoBtn = document.createElement('button');
@@ -6154,13 +6158,26 @@
       state.lastTapTime = now;
       state.lastTapX = tapX;
 
+      // This capture listener replaces the player's ordinary touch handler.
+      // Use that same intent transition: calling playVideoCleanly directly
+      // leaves userPaused set after a scrub or the face/settings editor.
+      if (typeof window.toggleVideoPlaybackFromIntent === 'function') {
+        window.toggleVideoPlaybackFromIntent(wrapper, video);
+        return;
+      }
+
+      // Compatibility with older pages that predate the shared handler.
       if (video.paused) {
+        delete wrapper.dataset.userPaused;
+        wrapper.dataset.playIntent = 'true';
         if (typeof window.playVideoCleanly === 'function') {
           window.playVideoCleanly(video);
         } else {
           video.play().catch(() => {});
         }
       } else {
+        wrapper.dataset.userPaused = 'true';
+        wrapper.dataset.playIntent = 'false';
         video.pause();
       }
     }, { capture: true, passive: false });
@@ -6712,6 +6729,7 @@
     const endpoint = pcEndpoint();
     if (!endpoint || !record) return null;
     try {
+      window.PongInvalidatePcSavedLinksState?.();
       const response = await fetch(`${endpoint}/saved-links/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -6726,6 +6744,7 @@
       });
       if (!response.ok) return null;
       const payload = await response.json();
+      window.PongRememberPcSavedLinksState?.(payload, endpoint);
       if (!payload?.data || !Object.prototype.hasOwnProperty.call(payload.data, 'savedCollections')) return null;
       const serverCollections = normalizeCollections(payload?.data?.savedCollections);
       return writeCollections(mergeCollections(readCollections(), serverCollections));
@@ -6741,9 +6760,11 @@
       const localAtRequestStart = readCollections();
       const endpoint = pcEndpoint();
       if (!endpoint) return localAtRequestStart;
-      const response = await fetch(`${endpoint}/saved-links/state?t=${Date.now()}`, { cache: 'no-store' });
-      if (!response.ok) return readCollections();
-      const payload = await response.json();
+      const payload = typeof window.PongFetchPcSavedLinksState === 'function'
+        ? await window.PongFetchPcSavedLinksState(endpoint)
+        : await fetch(`${endpoint}/saved-links/state?t=${Date.now()}`, { cache: 'no-store' })
+            .then(response => response.ok ? response.json() : null);
+      if (!payload) return readCollections();
       const server = normalizeCollections(payload?.data?.savedCollections);
       // Include edits committed while the request was in flight. Publish every
       // changed existing record and tombstone, not only IDs absent on server.

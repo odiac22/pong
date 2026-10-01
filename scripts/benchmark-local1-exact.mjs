@@ -13,6 +13,8 @@ const PLAYBACK_PROOFS_PER_ARTIST = Math.max(1, Number(process.env.PONG_BENCH_PLA
 const DEADLINE_MS = Math.max(10_000, Number(process.env.PONG_BENCH_DEADLINE_MS || 100_000));
 const TRIALS = Math.max(1, Number(process.env.PONG_BENCH_TRIALS || 2));
 const CHROME = process.env.PONG_BENCH_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const FIXED_ARTIST_URL = String(process.env.PONG_BENCH_ARTIST_URL || '').trim();
+const FIXED_ARTIST_IMAGE = String(process.env.PONG_BENCH_ARTIST_IMAGE || '').trim();
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -597,6 +599,21 @@ async function runTrial(chromePort, appUrl, trialNumber) {
       return { passed: failures.length === 0, failures };
     })()`);
     if (!contractSmoke?.passed) throw new Error(`browser filter contract failed: ${(contractSmoke?.failures || []).join('; ')}`);
+    if (FIXED_ARTIST_URL) {
+      // Deterministic latency lane: keep the production Local1 pipeline and
+      // criteria, but replace random listing selection with one historical
+      // regression artist. No verdict or media result is precomputed.
+      await session.evaluate(`
+        random40FindArtistsOnListing = () => [{
+          artistUrl: ${JSON.stringify(FIXED_ARTIST_URL)},
+          artistName: random40ArtistNameFromUrl(${JSON.stringify(FIXED_ARTIST_URL)}),
+          imageUrl: ${JSON.stringify(FIXED_ARTIST_IMAGE)},
+          sourcePage: 1,
+          pageText: ''
+        }];
+        true
+      `);
+    }
     started = Date.now();
     await session.evaluate(`startRandom40('local'); true`);
 
@@ -624,6 +641,7 @@ async function runTrial(chromePort, appUrl, trialNumber) {
       // an impossible serial 80-clip tail after every artist reaches ten.
       if (acceptedAt) await session.evaluate(playbackProbeExpression);
       const distinctPages = new Set(measuredGroups.map(group => group.sourcePage).filter(Boolean));
+      const requiredDistinctPages = Math.min(2, TARGET_ARTISTS);
       const evidenceContractPasses = measuredGroups.every(group => {
         const evidence = group.evidence || {};
         const checks = evidence.checks || {};
@@ -648,7 +666,7 @@ async function runTrial(chromePort, appUrl, trialNumber) {
         acceptedAt &&
         measuredGroups.length >= TARGET_ARTISTS &&
         measuredIdentities.size >= TARGET_ARTISTS &&
-        distinctPages.size >= 2 &&
+        distinctPages.size >= requiredDistinctPages &&
         evidenceContractPasses &&
         measuredGroups.every(group =>
           group.urls.length >= 15 &&
@@ -803,7 +821,7 @@ async function main() {
   const passed = results.every(result => result.passed);
   const summary = {
     target: `${TARGET_ARTISTS} distinct artists with 15 byte-verified media and ${PLAYBACK_PROOFS_PER_ARTIST} distinct advancing playback proofs each, ${DEADLINE_MS} ms`,
-    reservoirRequirement: 'production-ready, current-revision Local1 accepted minimum',
+    discoveryMode: FIXED_ARTIST_URL ? 'fixed historical regression artist; fresh decision and media proof' : 'fresh random listing scan',
     passed,
     trials: results.map(result => ({
       trial: result.trial,

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   normalizeSimpCityThreadUrl,
   simpCityThreadPageUrl,
@@ -11,11 +12,39 @@ import {
   bunkrAlbumsMatchingCreator,
   classifySimpCityMediaUrl,
   extractSimpCityMediaLinks,
+  extractSimpCityPostPassword,
   distinctSimpCityProfileCreators,
   extractSimpCityMediaLinksForCreator
 } from './simpcity-import.mjs';
 
 const THREAD = 'https://simpcity.cr/threads/lightskin-light-skin-mixed-black-white-girl-thread.210197/?order=reaction_score';
+
+test('first Recall render preserves its incremental importer generation', () => {
+  const source = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /function renderFirstIncrementalImporterBatch\(\)[\s\S]*?PongPreserveActiveImporterForNextLoad = true;[\s\S]*?loadVideosButton\.click\(\);/
+  );
+  assert.match(
+    source,
+    /const preserveActiveImporter = window\.PongPreserveActiveImporterForNextLoad === true;[\s\S]*?window\.PongPreserveActiveImporterForNextLoad = false;/
+  );
+  assert.match(
+    source,
+    /if \(options\?\.preserveActiveImporter !== true\) bunkrLoadGeneration\+\+;/
+  );
+
+  const recallLoader = source.slice(
+    source.indexOf('async function loadSimpCityAsCards'),
+    source.indexOf('async function loadLeakedZoneAsCards')
+  );
+  assert.match(recallLoader, /renderFirstIncrementalImporterBatch\(\);/);
+  const firstBatchRenderer = source.slice(
+    source.indexOf('function renderFirstIncrementalImporterBatch'),
+    source.indexOf('const simpCityActiveJobIds')
+  );
+  assert.doesNotMatch(firstBatchRenderer, /await/);
+});
 
 test('normalizes SimpCity threads and preserves only ordering', () => {
   assert.equal(
@@ -129,7 +158,9 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
       { url: 'https://saint.to/embed/P9kEUyTHgJd' },
       { url: 'https://bunkrrr.org/f/WIS7IyS4kQ80U' },
       { url: 'https://bunkr.cr/v/3uAUOmsOW1nvi' },
+      { url: 'https://bunkr.pk/f/3b7Zmbkx9Ilwf' },
       { url: 'https://simpcity.cr/redirect/?to=aHR0cHM6Ly9waXhlbGRyYWluLmNvbS9sL1JWQkJ4eGNF&e=1&m=b64' },
+      { url: 'https://simpcity.cr/redirect/?to=aHR0cHM6Ly9waXhlbGRyYWluLmNvbS91L2ltOFBQOFBS&e=1&m=b64' },
       { url: 'https://turbo.cr/v/bH_17k91Ltzu2' },
       { url: 'https://www.tiktok.com/@heymissteacher' },
       { url: 'https://www.tiktok.com/@heymissteacher/video/7533519786490000000' },
@@ -152,7 +183,9 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
       ['saint', 'https://saint.to/embed/P9kEUyTHgJd', 'post-77'],
       ['bunkr', 'https://bunkrrr.org/f/WIS7IyS4kQ80U', 'post-77'],
       ['bunkr', 'https://bunkr.cr/v/3uAUOmsOW1nvi', 'post-77'],
+      ['bunkr', 'https://bunkr.pk/f/3b7Zmbkx9Ilwf', 'post-77'],
       ['pixeldrain', 'https://pixeldrain.com/l/RVBBxxcE', 'post-77'],
+      ['pixeldrain', 'https://pixeldrain.com/u/im8PP8PR', 'post-77'],
       ['saint', 'https://turbo.cr/v/bH_17k91Ltzu2', 'post-77'],
       ['tiktok', 'https://www.tiktok.com/@heymissteacher', 'post-77'],
       ['tiktok', 'https://www.tiktok.com/@heymissteacher/video/7533519786490000000', 'post-77'],
@@ -163,6 +196,73 @@ test('extracts supported file-host and direct video links from SimpCity posts', 
     ]
   );
   assert.equal(classifySimpCityMediaUrl('http://pixeldrain.com/u/nope'), null);
+  assert.equal(
+    classifySimpCityMediaUrl('https://bunkr.cr/v/20211022-2247494...LIL_FUCK_SLUT.mp4'),
+    null,
+    'visually truncated forum labels must not count as playable media'
+  );
+});
+
+test('splits back-to-back host links instead of losing the later videos', () => {
+  const posts = [{
+    postId: 'post-chained',
+    text: 'https://turbo.cr/v/Q9ea-gX2ZQDK0https://turbo.cr/v/UoBPHMrW2CA3L',
+    links: [],
+    attachments: []
+  }];
+  assert.deepEqual(
+    extractSimpCityMediaLinks(posts).map(item => item.url),
+    [
+      'https://turbo.cr/v/Q9ea-gX2ZQDK0',
+      'https://turbo.cr/v/UoBPHMrW2CA3L'
+    ]
+  );
+});
+
+test('extracts the complete Sophmore thread URL chain and carries its Gofile password', () => {
+  const gofileRedirect = 'https://simpcity.cr/redirect/?to=aHR0cHM6Ly9nb2ZpbGUuaW8vZC9FTm1xTnQ&e=1&m=b64';
+  const anonfilesRedirect = 'https://simpcity.cr/redirect/?to=aHR0cHM6Ly9hbm9uZmlsZXMuY29tL3Q5bjJJNW0zeTAvU29waG1vcmVzMXV0X2Z1bGxfbnVkZV9zdHJpcF90b19wdXNzeV9wbGF5X21wNA&e=1&m=b64';
+  const pixeldrainRedirect = 'https://simpcity.cr/redirect/?to=aHR0cHM6Ly9waXhlbGRyYWluLmNvbS91L2pZR2lDZUNV&e=1&m=b64';
+  const chain = [
+    gofileRedirect,
+    'https://bunkr.cr/v/DYpth8yAKUPZi',
+    'https://bunkr.cr/v/9bnkKQj7bMKPw',
+    'https://bunkr.cr/a/4aURbCJN',
+    'https://bunkr.cr/v/new-plug-tape-KVhdK1dR.mkv',
+    'https://bunkr.cr/a/6ZVBXYlp',
+    'https://bunkr.ph/f/K3iXm45DFk4qs',
+    'https://bunkr.cr/a/CjsYshyz',
+    'https://turbo.cr/v/ORcxWTllkWS',
+    'https://turbo.cr/v/xjWj4T5kulC',
+    'https://turbo.cr/v/QEQWE_YaVg9',
+    'https://turbo.cr/v/3k-xjY6VKMg',
+    'https://turbo.cr/v/HnsYa1WEgv-',
+    'https://cdn9.bunkr.ru/0gpfqfyg04rfd5smgbpaa_source-nXAA34RG.mp4',
+    anonfilesRedirect,
+    'https://turbo.cr/v/wKUke7y7lCZ',
+    'https://turbo.cr/v/kMEDl_jOiPg',
+    'https://bunkr.cr/v/2tlekAIYG1GH2',
+    'https://bunkr.cr/v/bpk9fjHKYYLWn',
+    pixeldrainRedirect,
+    'https://turbo.cr/v/UWKaVpbgnkv',
+    'https://turbo.cr/v/MPovn0wXcG-',
+    'https://turbo.cr/v/Rxl_ofE2SY-',
+    'https://turbo.cr/v/ZO8lpzTQWlj'
+  ].join('');
+  const post = {
+    postId: 'sophmore-pages-1-2',
+    text: `Password: emendado ${chain}`,
+    links: [],
+    attachments: []
+  };
+  assert.equal(extractSimpCityPostPassword(post), 'emendado');
+  const links = extractSimpCityMediaLinks([post]);
+  assert.equal(links.length, 24);
+  const gofile = links.find(link => link.url === 'https://gofile.io/d/ENmqNt');
+  assert.deepEqual([gofile?.kind, gofile?.password], ['gofile', 'emendado']);
+  assert.ok(links.some(link => link.kind === 'anonfiles' && /anonfiles\.com/.test(link.url)));
+  assert.ok(links.some(link => link.kind === 'pixeldrain' && link.url === 'https://pixeldrain.com/u/jYGiCeCU'));
+  assert.ok(links.some(link => link.url === 'https://bunkr.cr/v/new-plug-tape-KVhdK1dR.mkv'));
 });
 
 test('keeps every linked creator profile as a separate bundle candidate', () => {

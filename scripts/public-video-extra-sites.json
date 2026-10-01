@@ -1,0 +1,22 @@
+[
+  {"site":"videojs","url":"https://videojs.com/","kind":"demo"},
+  {"site":"mediaelementjs","url":"https://www.mediaelementjs.com/examples.html","kind":"demo"},
+  {"site":"plyr","url":"https://plyr.io/","kind":"demo"},
+  {"site":"shaka","url":"https://shaka-player-demo.appspot.com/demo/","kind":"demo"},
+  {"site":"dashif","url":"https://reference.dashif.org/dash.js/v5.0.3/samples/dash-if-reference-player/index.html","kind":"demo"},
+  {"site":"bitmovin","url":"https://bitmovin.com/demos/stream-test","kind":"demo"},
+  {"site":"radiant","url":"https://www.radiantmediaplayer.com/","kind":"demo"},
+  {"site":"flowplayer","url":"https://flowplayer.com/","kind":"demo"},
+  {"site":"w3schools","url":"https://www.w3schools.com/html/html5_video.asp","kind":"demo"},
+  {"site":"mdn","url":"https://developer.mozilla.org/en-US/docs/Web/HTML/Element/video","kind":"demo"},
+  {"site":"w3c","url":"https://www.w3.org/2010/05/video/mediaevents.html","kind":"demo"},
+  {"site":"samplelib","url":"https://samplelib.com/sample-mp4.html","kind":"demo"},
+  {"site":"test-videos","url":"https://test-videos.co.uk/bigbuckbunny/mp4-h264","kind":"demo"},
+  {"site":"hlsjs","url":"https://hlsjs.video-dev.org/demo/","kind":"demo"},
+  {"site":"clappr","url":"https://clappr.io/demo/","kind":"demo"},
+  {"site":"vidstack","url":"https://www.vidstack.io/","kind":"demo"},
+  {"site":"mux","url":"https://www.mux.com/","kind":"demo"},
+  {"site":"blender","url":"https://peach.blender.org/","kind":"demo"},
+  {"site":"jwplayer","url":"https://www.jwplayer.com/","kind":"demo"},
+  {"site":"opencast","url":"https://opencast.org/","kind":"demo"}
+]

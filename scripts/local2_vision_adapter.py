@@ -427,6 +427,109 @@ class Local2VisionAdapter:
             feature_schema=self.feature_schema,
         )
 
+    def rank_independent_taste_images(
+        self,
+        images: Sequence[Any],
+        *,
+        image_urls: Sequence[str] | None = None,
+    ) -> list[float | None]:
+        """Return ranking-only taste scores for independent listing images.
+
+        Every input image represents a different artist. View detection and
+        DINO-small encoding are batched for latency, but each Ridge feature is
+        assembled independently so one thumbnail can never influence another
+        artist's rank. This method deliberately does not invoke grouped
+        SigLIP, Local2Policy, a threshold, or any accept/reject path.
+        """
+
+        selected = list(images)
+        if not selected:
+            return []
+        selected_urls = list(image_urls[:len(selected)]) if image_urls else []
+        if len(selected_urls) != len(selected):
+            selected_urls = []
+        views = list(
+            self.view_detector(selected)
+            if self.view_detector is not None
+            else self._runtime_views(selected, selected_urls)
+        )
+        if len(views) != len(selected):
+            raise ValueError("Local2 ranking view detector returned a mismatched result count")
+
+        full_images: list[Any] = []
+        body_images: list[Any] = []
+        body_owners: list[int] = []
+        face_images: list[Any] = []
+        face_owners: list[int] = []
+        for index, (image, view) in enumerate(zip(selected, views)):
+            full = _view_value(view, "full")
+            if full is None:
+                full = image
+            full_images.append(full)
+            body = _view_value(view, "body")
+            if body is not None:
+                body_owners.append(index)
+                body_images.append(body)
+            face = _view_value(view, "face")
+            if face is not None:
+                face_owners.append(index)
+                face_images.append(face)
+
+        encoded = [
+            np.asarray(value, dtype=np.float32).reshape(-1)
+            for value in self.feature_encoder(full_images + body_images + face_images)
+        ]
+        expected = len(full_images) + len(body_images) + len(face_images)
+        if len(encoded) != expected or not encoded:
+            raise ValueError("Local2 ranking DINO encoder returned a mismatched result count")
+        dimension = len(encoded[0])
+        if any(len(vector) != dimension for vector in encoded):
+            raise ValueError("Local2 ranking DINO vectors have mismatched dimensions")
+        if any(not np.all(np.isfinite(vector)) for vector in encoded):
+            raise ValueError("Local2 ranking DINO vectors contain nonfinite values")
+
+        cursor = len(full_images)
+        body_vectors = {
+            owner: encoded[cursor + offset]
+            for offset, owner in enumerate(body_owners)
+        }
+        cursor += len(body_images)
+        face_vectors = {
+            owner: encoded[cursor + offset]
+            for offset, owner in enumerate(face_owners)
+        }
+        head = self._taste_head(dimension * 3 + 2)
+        if head is None:
+            return [None] * len(selected)
+
+        ranks: list[float | None] = []
+        for index, full_vector in enumerate(encoded[:len(full_images)]):
+            body_vector = body_vectors.get(index)
+            face_vector = face_vectors.get(index)
+            # SigLIP may later decide that a pose-derived crop is not clear
+            # enough. Ranking takes the maximum over every plausible crop
+            # inclusion, matching the conservative taste-prefilter strategy.
+            # This only changes queue order; it cannot become a verdict.
+            probabilities: list[float] = []
+            for include_body in (False, True) if body_vector is not None else (False,):
+                for include_face in (False, True) if face_vector is not None else (False,):
+                    feature = np.concatenate([
+                        _unit(full_vector),
+                        _unit(body_vector) if include_body else np.zeros(dimension, dtype=np.float32),
+                        _unit(face_vector) if include_face else np.zeros(dimension, dtype=np.float32),
+                        np.asarray([float(include_face), float(include_body)], dtype=np.float32),
+                    ]).astype(np.float32)
+                    probability = float(head.predict_probability(feature))
+                    if np.isfinite(probability):
+                        probabilities.append(probability)
+            rank = max(probabilities) if probabilities else None
+            ranks.append(
+                None
+                if rank is None or not np.isfinite(rank)
+                else float(max(0.0, min(1.0, rank)))
+            )
+        return ranks
+
     def analyze_prepared(
         self,
         prepared: Local2PreparedViews,

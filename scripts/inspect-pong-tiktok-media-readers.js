@@ -1,0 +1,9 @@
+(()=>[...document.querySelectorAll('video')].map(v=>({
+  external:v.closest('.video-wrapper')?.dataset.pongExternalPlaybackAuthority,
+  index:v.closest('.video-wrapper')?.dataset.index,
+  transition:!!v.closest('.pong-face-swap-transition-overlay'),held:v.dataset.pongFaceSwapHeld,
+  sourceKind:!v.getAttribute('src')?'none':v.getAttribute('src').includes('/pong-swap/')?'swap':'original',
+  ready:v.readyState,network:v.networkState,paused:v.paused,time:v.currentTime,
+  width:v.videoWidth,height:v.videoHeight,decoded:v.getVideoPlaybackQuality?.().totalVideoFrames,
+  visible:getComputedStyle(v).visibility,display:getComputedStyle(v).display
+})))()

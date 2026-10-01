@@ -1,0 +1,1 @@
+(()=>[...document.querySelectorAll('button,[role="button"]')].map(e=>({tag:e.tagName,aria:e.getAttribute('aria-label'),e2e:e.getAttribute('data-e2e'),title:e.getAttribute('title'),cls:String(e.className).slice(0,120)})).filter(e=>/arrow|next|previous|down|up|switch|navigate/i.test(JSON.stringify(e))).slice(0,45))()

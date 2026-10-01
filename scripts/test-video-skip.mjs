@@ -42,6 +42,9 @@ function makeContext(extra = {}) {
     ...extra
   });
   for (const name of [
+    'pongCanonicalRawMediaUrl',
+    'random40ForgetPlaybackOverride',
+    'random40ForgetServerVideoCacheRecord',
     'eromeMediaDescriptor',
     'eromeMediaKey',
     'pongCanonicalPlayedValue',
@@ -83,10 +86,42 @@ test('removing one video keeps bundle counts and following starts aligned', () =
   assert.deepEqual({ ...context.activePlaybackRange }, { start: 0, end: 2 });
 });
 
-test('the Sync panel exposes the video skip control immediately after Sync', () => {
-  const syncIndex = sync.indexOf("panel.appendChild(tokenBtn);");
-  const skipIndex = sync.indexOf("panel.appendChild(skipVideoBtn);");
-  assert.ok(syncIndex >= 0 && skipIndex > syncIndex);
+test('played-video filtering and current-video skipping retain original control locations', () => {
+  assert.match(sync, /playedSkipBtn\.className = 'control-button played-skip-control-button'/);
+  assert.match(sync, /document\.body\.appendChild\(playedSkipBtn\)/);
+  assert.doesNotMatch(sync, /panel\.appendChild\(playedSkipBtn\)/);
+  assert.match(html, /'played-skip-control-button':'Skip played'/);
+  assert.match(html, /'clear-played-history-button':'Played history'/);
+  assert.doesNotMatch(html, /move\(el,grid\)/);
+  assert.match(sync, /skipVideoBtn\.className = 'side-save-button video-skip-button'/);
+  assert.match(sync, /panel\.appendChild\(skipVideoBtn\)/);
   assert.match(sync, /id = 'skip-current-video-button'/);
+  assert.match(sync, /id = 'auto-skip-video-button'/);
+  assert.doesNotMatch(sync, /accuracyText\.id = 'random40-accuracy-mini'/);
+  assert.doesNotMatch(sync, /panel\.appendChild\(accuracyText\)/);
   assert.match(html, /window\.PongSkipCurrentVideo = skipCurrentPongVideo/);
+  assert.match(html, /window\.PongSkipCurrentVideos = skipCurrentPongVideos/);
+  assert.match(html, /function skipCurrentPongVideos\(requestedCount = 3\)/);
+  assert.match(sync, /PongSkipCurrentVideos\(3\)/);
+  assert.match(html, /PONG_AUTO_SKIP_VIDEO_DELAY_MS = 3000/);
+  assert.match(html, /skipCurrentPongVideo\(\{ automatic: true \}\)/);
+  assert.match(html, /pongWrapperHasVisibleFrame\(wrapper, video\)/);
+});
+
+test('a decoded face-swap transition frame satisfies auto skip while replacement prepares', () => {
+  const reveal = extractFunction('createPongFaceSwapTransitionOverlay');
+  const visible = extractFunction('pongWrapperHasVisibleFrame');
+  const schedule = extractFunction('schedulePongAutoSkipVideo');
+
+  assert.match(reveal, /overlay\.dataset\.pongVisibleFrame\s*=\s*['"]true['"]/);
+  assert.match(reveal, /clearPongAutoSkipVideoTimer\(wrapper\)/);
+  assert.match(visible, /pong-face-swap-transition-video/);
+  assert.match(visible, /readyState/);
+  assert.match(schedule, /pongWrapperHasVisibleFrame\(wrapper,\s*video\)/);
+});
+
+test('collection navigation remains in the original layout', () => {
+  assert.doesNotMatch(html, /function move\(el, host\)/);
+  assert.match(html, /Previous collection/);
+  assert.match(html, /Next collection/);
 });

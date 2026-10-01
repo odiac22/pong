@@ -1,0 +1,7 @@
+[
+  {"site":"smithsonian","url":"https://library.si.edu/about/video","kind":"watch"},
+  {"site":"nsf","url":"https://www.nsf.gov/news/news_videos.jsp?cntn_id=123633&media_id=72514&org=NSF","kind":"watch"},
+  {"site":"library-of-congress","url":"https://www.loc.gov/item/00694262/","kind":"watch"},
+  {"site":"clappr","url":"https://clappr.io/demo/","kind":"demo"},
+  {"site":"nps","url":"https://www.nps.gov/media/video/view.htm?id=E7AF1674-DF24-EBB1-52078B94B97A625D","kind":"watch"}
+]

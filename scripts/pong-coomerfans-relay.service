@@ -1,0 +1,22 @@
+[Unit]
+Description=Pong private Worker proof relay
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/pong-coomerfans-relay.env
+ExecStart=/usr/bin/node /usr/local/lib/vps-coomerfans-relay.mjs
+Restart=always
+RestartSec=2
+User=nobody
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

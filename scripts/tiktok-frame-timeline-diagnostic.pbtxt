@@ -1,0 +1,7 @@
+# Bounded metadata-only emulator diagnostic. No pixels, audio, URLs or logs.
+duration_ms: 60000
+buffers { size_kb: 16384 fill_policy: DISCARD }
+data_sources { config { name: "android.surfaceflinger.frametimeline" } }
+data_sources { config { name: "linux.process_stats"
+  process_stats_config { scan_all_processes_on_start: true }
+} }

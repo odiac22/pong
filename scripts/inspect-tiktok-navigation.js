@@ -1,0 +1,1 @@
+(() => ({path:location.pathname,buttons:[...document.querySelectorAll('button,[role="button"]')].map(e=>({tag:e.tagName,e2e:e.getAttribute('data-e2e'),label:e.getAttribute('aria-label'),text:(e.innerText||'').slice(0,70),className:String(e.className),visible:!!e.getClientRects().length})).filter(e=>e.visible)}))()

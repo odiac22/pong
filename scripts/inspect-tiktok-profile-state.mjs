@@ -1,0 +1,10 @@
+// Read-only state inspection; do not print user identities, cookies or signed URLs.
+const port=Number(process.argv[2]);
+const pages=await fetch(`http://127.0.0.1:${port}/json/list`).then(r=>r.json());
+const target=pages.find(p=>p.type==='page'&&new URL(p.url).hostname==='www.tiktok.com');
+if(!target)throw Error('TikTok page not found');
+const ws=new WebSocket(target.webSocketDebuggerUrl);
+await new Promise((resolve,reject)=>{ws.onopen=resolve;ws.onerror=reject;});
+const expression=`(()=>{const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'};const text=document.body.innerText;return {pathType:/\\/video\\/\\d+/.test(location.pathname)?'video':location.pathname.startsWith('/@')?'profile':'other',videoLinks:[...document.querySelectorAll('a[href*="/video/"]')].slice(0,30).map(a=>{const u=new URL(a.href);return {scheme:u.protocol,sameOrigin:u.origin===location.origin,canonical:/^\\/@[^/]+\\/video\\/\\d+\\/?$/.test(u.pathname),visible:visible(a),target:a.target}}),prompts:['Get the full app experience','Enjoy more videos and great features on the app','Open TikTok','Not now','Log in to TikTok','Download TikTok','Something went wrong','No videos yet'].filter(s=>text.includes(s)),dismissControls:[...document.querySelectorAll('button,[role=button]')].filter(e=>/^(not now|close|×)$/i.test((e.innerText||e.getAttribute('aria-label')||'').trim())).map(e=>({tag:e.tagName,visible:visible(e),label:(e.innerText||e.getAttribute('aria-label')||'').trim()})),loadingIndicators:document.querySelectorAll('[aria-busy=true],[role=progressbar]').length}})()`;
+const result=await new Promise((resolve,reject)=>{const t=setTimeout(()=>reject(Error('Timed out')),8000);ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.id===1){clearTimeout(t);resolve(m.result?.result?.value||{error:m.error||m.result?.exceptionDetails?.text});}};ws.send(JSON.stringify({id:1,method:'Runtime.evaluate',params:{expression,returnByValue:true}}));});
+console.log(JSON.stringify(result));ws.close();

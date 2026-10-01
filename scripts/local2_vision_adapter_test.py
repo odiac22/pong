@@ -93,6 +93,16 @@ class FaceMaskSensitiveHead:
         return 0.10 if float(np.asarray(feature)[-2]) > 0.5 else 0.80
 
 
+class FullVectorRankHead:
+    def predict_probability(self, feature: np.ndarray) -> float:
+        return float(np.asarray(feature)[0])
+
+
+class NonfiniteRankHead:
+    def predict_probability(self, _feature: np.ndarray) -> float:
+        return float("nan")
+
+
 def legacy_records() -> list[dict[str, object]]:
     accepted = [1.0, 0.0] * 3 + [1.0, 1.0]
     rejected = [0.0, 1.0] * 3 + [1.0, 1.0]
@@ -146,6 +156,56 @@ class Local2VisionAdapterTests(unittest.TestCase):
         self.assertFalse(result["taste_prefilter"]["siglip_ran"])
         self.assertTrue(result["terminal_personal_reject"])
         self.assertEqual(0.50, result["preference_threshold"])
+
+    def test_independent_thumbnail_ranks_are_batched_ordered_and_verdict_free(self) -> None:
+        grouped = FakeGroupedScorer()
+        runtime = FakeRuntime()
+        adapter = self.make_adapter(group_scorer=grouped, runtime=runtime)
+        head = FullVectorRankHead()
+        adapter._taste_head = lambda _dimension: head  # type: ignore[method-assign]
+
+        ranks = adapter.rank_independent_taste_images([
+            np.asarray([1.0, 0.0]),
+            np.asarray([-1.0, 0.0]),
+            np.asarray([2.0, 0.0]),
+        ])
+
+        self.assertEqual([1.0, 0.0, 1.0], ranks)
+        self.assertEqual((1, 1), (runtime.view_calls, runtime.dino_calls))
+        self.assertEqual(0, grouped.calls)
+
+    def test_independent_thumbnail_ranking_does_not_persist_numeric_examples(self) -> None:
+        store = Local2NumericStore(":memory:")
+        try:
+            adapter = self.make_adapter(store)
+            head = FullVectorRankHead()
+            adapter._taste_head = lambda _dimension: head  # type: ignore[method-assign]
+            before = store.record_count()
+            ranks = adapter.rank_independent_taste_images([
+                np.asarray([1.0, 0.0]), np.asarray([-1.0, 0.0])
+            ])
+            self.assertEqual(before, store.record_count())
+            self.assertEqual(2, len(ranks))
+        finally:
+            store.close()
+
+    def test_independent_thumbnail_ranking_returns_nulls_without_taste_head(self) -> None:
+        adapter = self.make_adapter()
+        adapter._taste_head = lambda _dimension: None  # type: ignore[method-assign]
+        self.assertEqual(
+            [None, None],
+            adapter.rank_independent_taste_images([
+                np.asarray([1.0, 0.0]), np.asarray([2.0, 0.0])
+            ]),
+        )
+
+    def test_independent_thumbnail_ranking_never_manufactures_nonfinite_scores(self) -> None:
+        adapter = self.make_adapter()
+        adapter._taste_head = lambda _dimension: NonfiniteRankHead()  # type: ignore[method-assign]
+        self.assertEqual(
+            [None],
+            adapter.rank_independent_taste_images([np.asarray([1.0, 0.0])]),
+        )
 
     def test_borderline_taste_runs_grouped_siglip_then_final_threshold_rejects(self) -> None:
         grouped = FakeGroupedScorer()

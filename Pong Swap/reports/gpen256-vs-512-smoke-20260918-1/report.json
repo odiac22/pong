@@ -1,0 +1,730 @@
+{
+  "mode": "smoke",
+  "profile": {
+    "rounds": 2,
+    "iterations": 8,
+    "warmup": 2,
+    "fixtureSteps": 2
+  },
+  "gates": {
+    "mae": 0.1,
+    "p99Abs": 1.0,
+    "maxAbs": 4.0,
+    "psnrDb": 50.0,
+    "ssim": 0.999,
+    "temporalMae": 0.2
+  },
+  "status": "complete",
+  "limitations": [
+    "Generated tensors cannot prove perceptual face quality.",
+    "Completed-call latency excludes preprocessing, compositing and video transport.",
+    "Provider registration does not prove node placement or realized FP16 precision.",
+    "Device memory peaks are sampled; Torch allocator excludes ORT/TRT allocations.",
+    "Per-process GPU memory is null when WDDM does not expose it."
+  ],
+  "selectedArms": [
+    "F",
+    "C"
+  ],
+  "tensorRtBuildOptIn": false,
+  "order": [
+    [
+      "F",
+      "C"
+    ],
+    [
+      "C",
+      "F"
+    ]
+  ],
+  "workers": [
+    {
+      "arm": "F",
+      "round": 0,
+      "exitCode": 0,
+      "elapsedSeconds": 4.375,
+      "observedPeakDeviceUsedMiB": 1018.0,
+      "observedMinimumFreeMiB": 10993.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen256-vs-512-smoke-20260918-1\\round-00-F\\worker.log",
+      "provider": {
+        "model": "GPEN256",
+        "generation": 1,
+        "requestedBackend": "legacy",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": true,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          256,
+          256
+        ],
+        "streamId": 2608379421376,
+        "persistentIO": true,
+        "fallbackReason": "TensorRT initialization failed: Fail: [ONNXRuntimeError] : 1 : FAIL : TensorRT EP failed to create engine from network for fused node: TensorrtExecutionProvider_TRTKernel_graph_torch_jit_84458051840194885_0_0",
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          530.741,
+          210.6756
+        ],
+        "sessionCreationTotalMs": 741.4166,
+        "constructionAndRuntimePrepareMs": 1141.3127,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 10.5781,
+        "additionalWarmupMs": 65.0883
+      },
+      "memory": {
+        "rssMiB": 1621.25390625,
+        "peakRssMiB": 1621.2578125,
+        "torchPeakAllocatedMiB": 13.31298828125,
+        "torchPeakReservedMiB": 20.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 8,
+        "meanMs": 9.040637499999999,
+        "p50Ms": 8.747399999999999,
+        "p95Ms": 10.460465,
+        "p99Ms": 10.513693,
+        "sequentialCallsPerSecond": 110.6116687014605
+      }
+    },
+    {
+      "arm": "C",
+      "round": 0,
+      "exitCode": 0,
+      "elapsedSeconds": 8.764999999999418,
+      "observedPeakDeviceUsedMiB": 2534.0,
+      "observedMinimumFreeMiB": 9477.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen256-vs-512-smoke-20260918-1\\round-00-C\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 2031678701072,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          269.092
+        ],
+        "sessionCreationTotalMs": 269.092,
+        "constructionAndRuntimePrepareMs": 560.7296,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 76.8783,
+        "additionalWarmupMs": 520.0012
+      },
+      "memory": {
+        "rssMiB": 1392.3359375,
+        "peakRssMiB": 1428.33984375,
+        "torchPeakAllocatedMiB": 53.25048828125,
+        "torchPeakReservedMiB": 66.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 8,
+        "meanMs": 64.9691375,
+        "p50Ms": 65.0181,
+        "p95Ms": 65.11063499999999,
+        "p99Ms": 65.11172699999999,
+        "sequentialCallsPerSecond": 15.391923588334537
+      }
+    },
+    {
+      "arm": "C",
+      "round": 1,
+      "exitCode": 0,
+      "elapsedSeconds": 8.219000000000051,
+      "observedPeakDeviceUsedMiB": 2428.0,
+      "observedMinimumFreeMiB": 9583.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen256-vs-512-smoke-20260918-1\\round-01-C\\worker.log",
+      "provider": {
+        "model": "GPEN512",
+        "generation": 1,
+        "requestedBackend": "cuda",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": false,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "streamId": 1692493147760,
+        "persistentIO": true,
+        "fallbackReason": null,
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          248.0636
+        ],
+        "sessionCreationTotalMs": 248.0636,
+        "constructionAndRuntimePrepareMs": 528.9702,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 70.0779,
+        "additionalWarmupMs": 465.5238
+      },
+      "memory": {
+        "rssMiB": 1393.14453125,
+        "peakRssMiB": 1429.15234375,
+        "torchPeakAllocatedMiB": 53.25048828125,
+        "torchPeakReservedMiB": 66.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 8,
+        "meanMs": 58.3287,
+        "p50Ms": 58.308800000000005,
+        "p95Ms": 58.468095,
+        "p99Ms": 58.482179,
+        "sequentialCallsPerSecond": 17.144218883671332
+      }
+    },
+    {
+      "arm": "F",
+      "round": 1,
+      "exitCode": 0,
+      "elapsedSeconds": 3.8280000000004293,
+      "observedPeakDeviceUsedMiB": 966.0,
+      "observedMinimumFreeMiB": 11045.0,
+      "log": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen256-vs-512-smoke-20260918-1\\round-01-F\\worker.log",
+      "provider": {
+        "model": "GPEN256",
+        "generation": 1,
+        "requestedBackend": "legacy",
+        "effectiveBackend": "cuda",
+        "sessionProviders": [
+          "CUDAExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "partitionPlacementVerified": false,
+        "trtFp16Requested": true,
+        "ioDtype": "float32",
+        "shape": [
+          1,
+          3,
+          256,
+          256
+        ],
+        "streamId": 1898528302800,
+        "persistentIO": true,
+        "fallbackReason": "TensorRT initialization failed: Fail: [ONNXRuntimeError] : 1 : FAIL : TensorRT EP failed to create engine from network for fused node: TensorrtExecutionProvider_TRTKernel_graph_torch_jit_84458051840194885_0_0",
+        "ready": true,
+        "error": null,
+        "cudaGraphRequested": false
+      },
+      "cold": {
+        "cacheFilesBefore": 0,
+        "sessionCreationAttemptsMs": [
+          497.8454,
+          121.6406
+        ],
+        "sessionCreationTotalMs": 619.486,
+        "constructionAndRuntimePrepareMs": 902.3171,
+        "runtimeIncludesGeneratedWarmup": true,
+        "firstCallerInvocationMs": 11.2065,
+        "additionalWarmupMs": 69.2952
+      },
+      "memory": {
+        "rssMiB": 1618.65234375,
+        "peakRssMiB": 1618.65625,
+        "torchPeakAllocatedMiB": 13.31298828125,
+        "torchPeakReservedMiB": 20.0,
+        "processGpuMiB": null
+      },
+      "primary": {
+        "count": 8,
+        "meanMs": 8.2848875,
+        "p50Ms": 8.187249999999999,
+        "p95Ms": 8.69074,
+        "p99Ms": 8.705188,
+        "sequentialCallsPerSecond": 120.70169932904943
+      }
+    }
+  ],
+  "benchmarkWorkDirectory": "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\work\\gpen256-vs-512-smoke-20260918-1",
+  "command": [
+    "C:\\Users\\arian\\Documents\\Codex\\2026-07-15\\files-mentioned-by-the-user-chatgpt\\work\\pong\\Pong Swap\\runtime\\venv\\Scripts\\python.exe",
+    "-I",
+    "-B",
+    ".\\benchmark_gpen_generated.py",
+    "--mode",
+    "smoke",
+    "--arms",
+    "F",
+    "C",
+    "--worker-timeout",
+    "120",
+    "--output-dir",
+    ".\\reports\\gpen256-vs-512-smoke-20260918-1",
+    "--work-dir",
+    ".\\work\\gpen256-vs-512-smoke-20260918-1"
+  ],
+  "harnessSourceSha256": "90dd624080f7921e6fa5240079020f0aa315ea5edfc83cd336e3e6369df70ffd",
+  "preflight": [
+    {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 4070",
+      "totalMiB": 12282.0,
+      "usedMiB": 457.0,
+      "freeMiB": 11554.0,
+      "utilizationPercent": 0.0
+    },
+    {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 4070",
+      "totalMiB": 12282.0,
+      "usedMiB": 457.0,
+      "freeMiB": 11554.0,
+      "utilizationPercent": 0.0
+    },
+    {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 4070",
+      "totalMiB": 12282.0,
+      "usedMiB": 457.0,
+      "freeMiB": 11554.0,
+      "utilizationPercent": 0.0
+    }
+  ],
+  "minimumFreeMiBWhileRunning": 2456.4,
+  "runtimeSourceSha256": "b0909465cf80c71b66d49f095a8fbc5dc3cffb288a4594a5ed6262bcb9d6d26c",
+  "arms": {
+    "A": {
+      "label": "prepatch GPEN256 TRT-first direct binding",
+      "variants": {},
+      "coldPerRound": [],
+      "providerPerRound": [],
+      "memoryPerRound": [],
+      "bindingAblationsBitExact": false,
+      "bindingAblation": null
+    },
+    "B": {
+      "label": "prepatch GPEN512 CUDA direct binding",
+      "variants": {},
+      "coldPerRound": [],
+      "providerPerRound": [],
+      "memoryPerRound": [],
+      "bindingAblationsBitExact": false,
+      "bindingAblation": null
+    },
+    "C": {
+      "label": "new GPEN512 CUDA runtime",
+      "variants": {
+        "primary": {
+          "count": 16,
+          "meanMs": 61.64891875,
+          "p50Ms": 61.618399999999994,
+          "p95Ms": 65.10907499999999,
+          "p99Ms": 65.111415,
+          "sequentialCallsPerSecond": 16.22088465257957
+        },
+        "per_call_direct": {
+          "count": 16,
+          "meanMs": 61.6021875,
+          "p50Ms": 61.4006,
+          "p95Ms": 65.3841,
+          "p99Ms": 65.42418,
+          "sequentialCallsPerSecond": 16.233189771061294
+        },
+        "persistent_direct": {
+          "count": 16,
+          "meanMs": 61.64475,
+          "p50Ms": 61.447500000000005,
+          "p95Ms": 65.416825,
+          "p99Ms": 65.445445,
+          "sequentialCallsPerSecond": 16.22198159616188
+        },
+        "persistent_copy": {
+          "count": 16,
+          "meanMs": 61.7056375,
+          "p50Ms": 61.5369,
+          "p95Ms": 65.3065,
+          "p99Ms": 65.37082,
+          "sequentialCallsPerSecond": 16.205974697206557
+        }
+      },
+      "coldPerRound": [
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            269.092
+          ],
+          "sessionCreationTotalMs": 269.092,
+          "constructionAndRuntimePrepareMs": 560.7296,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 76.8783,
+          "additionalWarmupMs": 520.0012
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            248.0636
+          ],
+          "sessionCreationTotalMs": 248.0636,
+          "constructionAndRuntimePrepareMs": 528.9702,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 70.0779,
+          "additionalWarmupMs": 465.5238
+        }
+      ],
+      "providerPerRound": [
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 2031678701072,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        },
+        {
+          "model": "GPEN512",
+          "generation": 1,
+          "requestedBackend": "cuda",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": false,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            512,
+            512
+          ],
+          "streamId": 1692493147760,
+          "persistentIO": true,
+          "fallbackReason": null,
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        }
+      ],
+      "memoryPerRound": [
+        {
+          "rssMiB": 1392.3359375,
+          "peakRssMiB": 1428.33984375,
+          "torchPeakAllocatedMiB": 53.25048828125,
+          "torchPeakReservedMiB": 66.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1393.14453125,
+          "peakRssMiB": 1429.15234375,
+          "torchPeakAllocatedMiB": 53.25048828125,
+          "torchPeakReservedMiB": 66.0,
+          "processGpuMiB": null
+        }
+      ],
+      "bindingAblationsBitExact": true,
+      "bindingAblation": {
+        "runtimeMinusPerCallDirectMeanMs": 0.04673124999999789,
+        "measuredFaster": false,
+        "decision": "persistent runtime slower in this sample; do not retain on speed grounds",
+        "isolatedMeanDeltasMs": {
+          "twoDeviceCopiesMs": 0.060887500000000205,
+          "bindingCreationMs": -0.04256249999999939,
+          "runtimeWrapperMs": -0.056718750000001705
+        },
+        "note": "Same session and paired fixture/iteration; deltas include timing noise."
+      }
+    },
+    "D": {
+      "label": "new GPEN512 TensorRT runtime",
+      "variants": {},
+      "coldPerRound": [],
+      "providerPerRound": [],
+      "memoryPerRound": [],
+      "bindingAblationsBitExact": false,
+      "bindingAblation": null
+    },
+    "E": {
+      "label": "new GPEN512 CUDA runtime with CUDA Graph replay",
+      "variants": {},
+      "coldPerRound": [],
+      "providerPerRound": [],
+      "memoryPerRound": [],
+      "bindingAblationsBitExact": false,
+      "bindingAblation": null
+    },
+    "F": {
+      "label": "new GPEN256 CUDA runtime diagnostic",
+      "variants": {
+        "primary": {
+          "count": 16,
+          "meanMs": 8.6627625,
+          "p50Ms": 8.2488,
+          "p95Ms": 10.384425,
+          "p99Ms": 10.498484999999999,
+          "sequentialCallsPerSecond": 115.43661736080148
+        },
+        "per_call_direct": {
+          "count": 16,
+          "meanMs": 8.7872125,
+          "p50Ms": 8.4027,
+          "p95Ms": 10.671125,
+          "p99Ms": 10.713185,
+          "sequentialCallsPerSecond": 113.80173177785332
+        },
+        "persistent_direct": {
+          "count": 16,
+          "meanMs": 8.59975625,
+          "p50Ms": 8.32515,
+          "p95Ms": 10.096625,
+          "p99Ms": 10.184285000000001,
+          "sequentialCallsPerSecond": 116.28236556123319
+        },
+        "persistent_copy": {
+          "count": 16,
+          "meanMs": 9.20733125,
+          "p50Ms": 8.2812,
+          "p95Ms": 13.851825,
+          "p99Ms": 13.962765000000001,
+          "sequentialCallsPerSecond": 108.60910429392882
+        }
+      },
+      "coldPerRound": [
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            530.741,
+            210.6756
+          ],
+          "sessionCreationTotalMs": 741.4166,
+          "constructionAndRuntimePrepareMs": 1141.3127,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 10.5781,
+          "additionalWarmupMs": 65.0883
+        },
+        {
+          "cacheFilesBefore": 0,
+          "sessionCreationAttemptsMs": [
+            497.8454,
+            121.6406
+          ],
+          "sessionCreationTotalMs": 619.486,
+          "constructionAndRuntimePrepareMs": 902.3171,
+          "runtimeIncludesGeneratedWarmup": true,
+          "firstCallerInvocationMs": 11.2065,
+          "additionalWarmupMs": 69.2952
+        }
+      ],
+      "providerPerRound": [
+        {
+          "model": "GPEN256",
+          "generation": 1,
+          "requestedBackend": "legacy",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": true,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            256,
+            256
+          ],
+          "streamId": 2608379421376,
+          "persistentIO": true,
+          "fallbackReason": "TensorRT initialization failed: Fail: [ONNXRuntimeError] : 1 : FAIL : TensorRT EP failed to create engine from network for fused node: TensorrtExecutionProvider_TRTKernel_graph_torch_jit_84458051840194885_0_0",
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        },
+        {
+          "model": "GPEN256",
+          "generation": 1,
+          "requestedBackend": "legacy",
+          "effectiveBackend": "cuda",
+          "sessionProviders": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+          ],
+          "partitionPlacementVerified": false,
+          "trtFp16Requested": true,
+          "ioDtype": "float32",
+          "shape": [
+            1,
+            3,
+            256,
+            256
+          ],
+          "streamId": 1898528302800,
+          "persistentIO": true,
+          "fallbackReason": "TensorRT initialization failed: Fail: [ONNXRuntimeError] : 1 : FAIL : TensorRT EP failed to create engine from network for fused node: TensorrtExecutionProvider_TRTKernel_graph_torch_jit_84458051840194885_0_0",
+          "ready": true,
+          "error": null,
+          "cudaGraphRequested": false
+        }
+      ],
+      "memoryPerRound": [
+        {
+          "rssMiB": 1621.25390625,
+          "peakRssMiB": 1621.2578125,
+          "torchPeakAllocatedMiB": 13.31298828125,
+          "torchPeakReservedMiB": 20.0,
+          "processGpuMiB": null
+        },
+        {
+          "rssMiB": 1618.65234375,
+          "peakRssMiB": 1618.65625,
+          "torchPeakAllocatedMiB": 13.31298828125,
+          "torchPeakReservedMiB": 20.0,
+          "processGpuMiB": null
+        }
+      ],
+      "bindingAblationsBitExact": true,
+      "bindingAblation": null
+    }
+  },
+  "quality": {
+    "C": {
+      "reference": "B",
+      "scope": "native restored floating RGB only; no compositing",
+      "pass": false,
+      "errors": [
+        "Round 0: reference identity mismatch or missing",
+        "Round 1: reference identity mismatch or missing"
+      ],
+      "comparisons": []
+    },
+    "D": {
+      "reference": "B",
+      "scope": "native restored floating RGB only; no compositing",
+      "pass": false,
+      "errors": [
+        "Missing or duplicate candidate rounds"
+      ],
+      "comparisons": []
+    },
+    "E": {
+      "reference": "C",
+      "scope": "native restored floating RGB only; no compositing",
+      "pass": false,
+      "errors": [
+        "Missing or duplicate candidate rounds"
+      ],
+      "comparisons": []
+    }
+  },
+  "latencyGate": {
+    "C": {
+      "status": "incomplete"
+    },
+    "D": {
+      "status": "incomplete"
+    }
+  },
+  "cudaGraphGate": {
+    "status": "incomplete"
+  },
+  "gpenSizeComparison": {
+    "status": "smoke only",
+    "scope": "model-and-native-resolution comparison; not resolution alone",
+    "gpen256Arm": "F",
+    "gpen512Arm": "C",
+    "meanAbsoluteDifferenceMs": 52.98615625,
+    "meanLatencyRatio512To256": 7.11654264445089,
+    "pairedRoundMeanRatio95": {
+      "lower95": 7.040373209654325,
+      "upper95": 7.186344712969634
+    },
+    "gpen256": {
+      "count": 16,
+      "meanMs": 8.6627625,
+      "p50Ms": 8.2488,
+      "p95Ms": 10.384425,
+      "p99Ms": 10.498484999999999,
+      "sequentialCallsPerSecond": 115.43661736080148
+    },
+    "gpen512": {
+      "count": 16,
+      "meanMs": 61.64891875,
+      "p50Ms": 61.618399999999994,
+      "p95Ms": 65.10907499999999,
+      "p99Ms": 65.111415,
+      "sequentialCallsPerSecond": 16.22088465257957
+    }
+  },
+  "requestedTrtActivated": false,
+  "sdk": {
+    "python": "3.12.14 (main, Aug 14 2026, 15:40:22) [MSC v.1944 64 bit (AMD64)]",
+    "torch": "2.11.0+cu128",
+    "cuda": "12.8",
+    "onnxruntime": "1.26.0",
+    "numpy": "2.4.3",
+    "tensorrt": "10.16.1.11"
+  },
+  "modelSha256": {
+    "F": "aa5bd3ab238640a378c59e4a560f7a7150627944cf2129e6311ae4720e833271",
+    "C": "0960f836488735444d508b588e44fb5dfd19c68fde9163ad7878aa24d1d5115e"
+  },
+  "candidateGate": {
+    "C": "not established",
+    "D": "not established",
+    "E": "incomplete"
+  }
+}

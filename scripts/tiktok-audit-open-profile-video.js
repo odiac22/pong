@@ -1,0 +1,1 @@
+(() => {const a=[...document.querySelectorAll('[data-e2e="user-post-item"] a[href*="/video/"]')].find(a=>a.getClientRects().length);if(!a)return {opened:false};a.click();return {opened:true,path:new URL(a.href).pathname};})()

@@ -1,0 +1,1 @@
+(()=>{const old=window.__pongTikTokStep;window.__pongStepPositions=[];window.__pongTikTokStep=d=>{const list=document.getElementById('column-list-container');const before=list?.scrollTop;const result=old(d);for(const ms of [0,20,80,200,500,1000])setTimeout(()=>window.__pongStepPositions.push({ms,before,after:list?.scrollTop,result}),ms);return result};return {installed:true}})()

@@ -1,0 +1,1 @@
+(()=>({stats:window.PongTikTokOverlayStats,wrappers:document.querySelectorAll('.video-wrapper').length,controls:document.querySelectorAll('button,a[href],input,textarea,select,[role="button"],[role="slider"]').length}))()

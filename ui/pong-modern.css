@@ -1,0 +1,36 @@
+/* Compact chrome: native Pong styles own all existing control coordinates. */
+body.pong-compact { --ui-accent: #c0f49c; background: #080a0d; }
+/* Do not resample the moving video behind every translucent control. Android
+   receiver A/B/A runs reproduced excessive dropped frames with those blur
+   layers enabled. Retain the existing tints, borders, coordinates and motion;
+   this changes control chrome only, never source/swap pixels or resolution. */
+body.pong-compact * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+.pong-compact button, .pong-compact [role=button] {
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.pong-compact :focus-visible { outline: 2px solid #c0f49c; outline-offset: 2px; }
+.pong-compact .url-input { gap: 5px; }
+.pong-compact .url-input button { padding: 5px 7px; font-size: 10px; border-radius: 7px; }
+.pong-compact .url-input textarea { font-size: 11px; }
+.pong-compact .video-player { will-change: auto; }
+/* Keep only the elapsed / total clock in the original progress strip. */
+.pong-compact .video-progress-container { box-sizing: border-box; padding: 0 5px; height: 30px; bottom: 8px; }
+.pong-compact .video-progress-bar { position: absolute; bottom: 2px; left: 5px; width: calc(100% - 10px); height: 6px; margin: 0; }
+
+.pm-clock { position: absolute; right: 6px; top: 4px; display: flex; align-items: center; gap: 5px; white-space: nowrap; pointer-events: none; }
+.pong-compact .pm-clock .pm-elapsed, .pong-compact .pm-clock .video-duration {
+  position: static; margin: 0; padding: 0; font: 600 9px/1 system-ui;
+  font-variant-numeric: tabular-nums; color: #f0f3f7;
+}
+.pm-clock .video-duration::before { content: '/'; margin-right: 5px; color: #a0a8b5; }
+.pm-video-poster { position: absolute; inset: 0; z-index: 3; background: #000; pointer-events: none; display: grid; place-items: center; }
+.pm-video-poster[hidden] { display: none; }
+.pm-video-poster canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.pm-video-poster span { font: 11px/1.4 system-ui; color: #a0a8b5; }
+@media (prefers-reduced-motion: reduce) {
+  .pong-compact *, .pong-compact *::before, .pong-compact *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+}

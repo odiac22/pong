@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
 import test from 'node:test';
-import { createLocal2NodeAdapter } from './local2-node-adapter.mjs';
+import {
+  applyLocal2ListingRanks,
+  createLocal2NodeAdapter
+} from './local2-node-adapter.mjs';
 
 function decision() {
   return {
@@ -40,6 +43,30 @@ function syntheticWorkers() {
     classify: async () => decision()
   };
 }
+
+test('anonymous listing ranks preserve slots and ignore null or malformed scores', () => {
+  const candidates = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
+  const returned = applyLocal2ListingRanks(candidates, {
+    ranking_only: true,
+    items: [
+      { index: 2, rank: 0.82 },
+      { index: 0, rank: null },
+      { index: 1, rank: 'not-a-number' },
+      { index: '1', rank: 0.9 },
+      { index: 0, rank: '0.9' },
+      { index: 99, rank: 1.0 },
+      { index: 3, rank: 4.2 }
+    ]
+  });
+  assert.equal(returned, candidates);
+  assert.equal('preferenceRank' in candidates[0], false);
+  assert.equal('preferenceRank' in candidates[1], false);
+  assert.equal(candidates[2].preferenceRank, 0.82);
+  assert.equal(candidates[3].preferenceRank, 1);
+
+  applyLocal2ListingRanks(candidates, { ranking_only: false, items: [{ index: 0, rank: 1 }] });
+  assert.equal('preferenceRank' in candidates[0], false);
+});
 
 async function waitFor(predicate, timeoutMs = 1000) {
   const started = Date.now();

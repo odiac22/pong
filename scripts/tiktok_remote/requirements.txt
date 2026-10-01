@@ -1,0 +1,8 @@
+# Isolated prototype only. Do not install these into the production swap venv.
+# The prepared dependency directory is E:\Pong Benchmarks\tiktok-remote\deps.
+aiortc==1.15.0
+aiohttp==3.14.3
+av==17.1.0
+grpcio==1.84.0
+grpcio-tools==1.80.0
+protobuf==6.33.6

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.34.0
+// @version      7.35.3
 // @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -1211,6 +1211,7 @@ function primaryVideoEvidence(html, pageUrl) {
       for (const anchor of doc.querySelectorAll(selector)) {
         stats.matched++;
         try {
+          if (anchor.closest('nav,header,footer,[role="navigation"]')) { stats.invalid++; continue; }
           const url = new URL(anchor.getAttribute('href') || anchor.href, current);
           if (url.hostname.toLowerCase() !== current.hostname.toLowerCase()) { stats.foreign++; continue; }
           if (!prevalidated && !isLogicalVideoPageUrl(url, current, anchor)) { stats.invalid++; continue; }
@@ -1301,10 +1302,12 @@ function primaryVideoEvidence(html, pageUrl) {
     })));
     const durationSeconds = extractPageDurationSeconds(doc);
     const prioritized = [];
-    const add = (rawValue, declaredMedia = false) => {
+    const add = (rawValue, declaredMedia = false, selectedNative = false) => {
       const value = absUrl(rawValue, pageUrl);
       if (!value || !/^https?:\/\//i.test(value) || (!declaredMedia && !VIDEO_EXT_RE.test(value))) return;
-      if (/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname)) return;
+      // A user's actual native player may be a trailer. Exclude such names
+      // from page-wide discovery, but not from its explicit <video> sources.
+      if (!selectedNative && /(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname)) return;
       if (!prioritized.includes(value)) prioritized.push(value);
     };
     try {
@@ -1338,9 +1341,10 @@ function primaryVideoEvidence(html, pageUrl) {
         }))
         .sort((left, right) => Number(right.visible) - Number(left.visible) || right.area - left.area);
       for (const item of media.slice(0, 2)) {
-        add(item.element.currentSrc, true);
-        add(item.element.getAttribute('src'), true);
-        item.element.querySelectorAll('source[src]').forEach(source => add(source.getAttribute('src'), true));
+        const selectedNative = media.length === 1;
+        add(item.element.currentSrc, true, selectedNative);
+        add(item.element.getAttribute('src'), true, selectedNative);
+        item.element.querySelectorAll('source[src]').forEach(source => add(source.getAttribute('src'), true, selectedNative));
       }
       if (doc === document && typeof performance?.getEntriesByType === 'function') {
         performance.getEntriesByType('resource')
@@ -3258,7 +3262,7 @@ function primaryVideoEvidence(html, pageUrl) {
     return ['none','pending','timeout','aborted','network_error','request_error','http_error','server_rejected','invalid_response','not_accepted',
       'platform_access','platform_stream','helper_update','extraction_error','no_media','duration_filter','media_unverified','page_fetch',
       'non_media_response','invalid_url','delivery_failed','identity_unverified','superseded','vpn_required','desktop_timeout',
-      'no_video','source_unavailable','duration_unverified','vpn_unavailable','resolution_failed','quality_unverified'].includes(code) ? code : 'request_error';
+      'no_video','source_unavailable','duration_unverified','vpn_unavailable','resolution_failed','quality_unverified','page_challenge'].includes(code) ? code : 'request_error';
   }
 
   function diagnosticMime(value) {
@@ -3692,12 +3696,27 @@ function primaryVideoEvidence(html, pageUrl) {
     const id = globalThis.crypto?.randomUUID?.() || 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
       const n = crypto.getRandomValues(new Uint8Array(1))[0] & 15; return (c === 'x' ? n : (n & 3) | 8).toString(16);
     });
+    const mediaIdentityHashes = await Promise.all(targets.map(async target => {
+      if (!/^inline-video-[1-9]\d{0,3}$/.test(target.logicalVideoId || '') || target.element?.tagName !== 'VIDEO') return '';
+      const video = target.element;
+      const raw = video.getAttribute('src') || video.querySelector('source[src]')?.getAttribute('src') || video.currentSrc || '';
+      let source;
+      try { source = new URL(raw, location.href); } catch { return ''; }
+      if (!/^https?:$/.test(source.protocol) || !VIDEO_EXT_RE.test(source.href) || !globalThis.crypto?.subtle) return '';
+      source.hash = '';
+      try {
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source.href));
+        return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+      } catch { return ''; }
+    }));
     const payload = { id, channel: Number(channel) === 2 ? 2 : 1, mode: mode === 'main' ? 'main' : 'all',
       sourceUrl: targets[0].url, ignoreUnder30: ignoreUnder30 !== false,
-      // Only selected links and identity hints leave the phone. Never media,
+      // Only selected links and bounded selected-player hints leave the phone. Never media bytes,
       // cookies, HTML, browser sessions, or relay-worker registrations.
-      targets: targets.map(target => ({ url: target.url,
+      targets: targets.map((target, index) => ({ url: target.url,
         ...(target.logicalVideoId ? { logicalVideoId: target.logicalVideoId } : {}),
+        ...(mediaIdentityHashes[index] ? { mediaIdentityHash: mediaIdentityHashes[index] } : {}),
+        ...(target.kind === 'player' ? { sourceMediaHints: selectedPlayerMediaHints(target) } : {}),
         durationSeconds: Math.max(0, Number(target.durationSeconds) || 0) })) };
     const diagnostics = targets.map(target => {
       const result = { startedAt: performance.now(), done: false, delivered: false, desktopOwned: true,
@@ -4075,6 +4094,9 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function videoLinkEvidence(element, url) {
     if (!url || element.closest('#uvs-recall-capture,#uvs-panel,#uvs-target-preview,[data-ad],.advertisement,.ad-container')) return '';
+    // A route such as /details/texts can look like a watch-page URL, but a
+    // site-wide navigation link is not evidence of a selectable video.
+    if (element.closest('nav,header,footer,[role="navigation"]')) return '';
     try { if (/(^|\.)(youtube\.com|youtu\.be)$/i.test(new URL(url).hostname) && !youtubeVideoId(url)) return ''; } catch (_) { return ''; }
     if (/\.(?:jpe?g|png|gif|webp|svg|avif|pdf|zip)(?:[?#]|$)/i.test(url)) return '';
     if (VIDEO_EXT_RE.test(url)) return 'direct';
@@ -4082,7 +4104,6 @@ function primaryVideoEvidence(html, pageUrl) {
     // A thumbnail, play affordance or duration is evidence of a potential video
     // even when its destination is an opaque slug, redirect, or another host.
     // Never execute onclick handlers or navigate to establish that evidence.
-    if (element.closest('nav,header,footer,[role="navigation"]')) return '';
     const card = element.closest('ytm-video-with-context-renderer,ytd-compact-video-renderer,ytd-rich-item-renderer,ytm-compact-video-renderer,article,li,[class*="card" i],[class*="thumb" i]') || element;
     const text = `${element.getAttribute('aria-label') || ''} ${element.getAttribute('title') || ''} ${element.textContent || ''}`;
     if (element.hasAttribute('data-video-url') || element.hasAttribute('data-watch-url')) return 'video_attribute';
@@ -4091,6 +4112,42 @@ function primaryVideoEvidence(html, pageUrl) {
     if (card.querySelector('img,picture,video,[poster]')) return 'thumbnail';
     if (/url\(/i.test(getComputedStyle(element).backgroundImage || '')) return 'thumbnail';
     return '';
+  }
+
+  // DOM-only hints for the explicitly selected current-page player. These are
+  // not verification, and never cause a phone fetch or carry cookies/HTML.
+  // The desktop independently validates identity, address, duration and quality.
+  function selectedPlayerMediaHints(target, doc = document, pageUrl = location.href) {
+    const current = canonicalWatchPageUrl(pageUrl, pageUrl) || pageUrl;
+    if (target?.kind !== 'player' || target.logicalVideoId || target.url !== current || !target.element?.isConnected) return [];
+    const element = target.element;
+    const native = element.tagName === 'VIDEO' ? element :
+      element.querySelector?.('video') || element.shadowRoot?.querySelector?.('video') ||
+      (['MUX-PLAYER','VIDEO-JS','MEDIA-PLAYER'].includes(element.tagName) ? element : null);
+    if (!native || native.ownerDocument !== doc) return [];
+    const safe = raw => {
+      if (!raw || String(raw).length > 8192) return '';
+      try { const u = new URL(raw, pageUrl);
+        if (u.protocol !== 'https:' || u.username || u.password || !/\.(?:mp4|webm|m4v|mov)$/i.test(u.pathname)) return '';
+        u.hash = ''; return u.href;
+      } catch { return ''; }
+    };
+    const own = [...new Set([native.currentSrc, native.getAttribute('src'),
+      ...[...native.querySelectorAll('source[src]')].map(s => s.getAttribute('src'))].map(safe).filter(Boolean))];
+    if (!own.length) return [];
+    const evidence = primaryVideoEvidence(String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || ''), current);
+    // Never attach a different page-wide VideoObject to a selected inline video.
+    const related = evidence?.videoUrls?.some(url => own.includes(safe(url))) ? evidence.videoUrls : [];
+    const durationSeconds = Number.isFinite(native.duration) && native.duration > 0 ? native.duration :
+      Math.max(0, Number(target.durationSeconds) || 0);
+    if (!durationSeconds) return [];
+    const liveUrl = safe(native.currentSrc);
+    return [...new Set([...own, ...related.map(safe).filter(Boolean)])].map(url => {
+      const dimensions = new URL(url).pathname.match(/(?:^|[_/-])(\d{3,4})[_x](\d{3,4})(?:[_./-]|$)/i);
+      const width = url === liveUrl && native.videoWidth > 0 ? native.videoWidth : Number(dimensions?.[1] || 0);
+      const height = url === liveUrl && native.videoHeight > 0 ? native.videoHeight : Number(dimensions?.[2] || 0);
+      return {url, sourcePageUrl: current, durationSeconds, width, height};
+    }).sort((a,b) => b.width*b.height-a.width*a.height).slice(0,8);
   }
 
   function collectSelectableTargets(mode = 'all', includeAllLinks = false) {
@@ -4106,14 +4163,29 @@ function primaryVideoEvidence(html, pageUrl) {
     // the visible player surface, not that offscreen decoder element.
     const youtubeSurface = youtubeVideoId(currentUrl) ? ['#movie_player','#player-container-id','#player-container','ytd-player','ytm-player']
       .map(selector => document.querySelector(selector)).find(item => visibleArea(item) > 0) : null;
-    const mainElement = youtubeSurface || videos.slice().filter(item => visibleArea(item) > 0).sort((a, b) => visibleArea(b) - visibleArea(a))[0];
+    // Several stock-video sites put the actual player in a custom element
+    // (notably <mux-player>) while native <video> nodes are only related-card
+    // previews. Compare their visible surfaces before choosing the main box.
+    // Video.js commonly renders a visible .video-js DIV while its native
+    // <video> child stays visibility:hidden until playback starts.
+    const customPlayers = [...document.querySelectorAll('mux-player,video-js,.video-js,media-player')];
+    const mainElement = youtubeSurface || [...videos, ...customPlayers].filter(item => visibleArea(item) > 0)
+      .sort((a, b) => visibleArea(b) - visibleArea(a))[0];
+    const selectedNativeGroup = videos.includes(mainElement)
+      ? groups.find(group => group.logicalVideoId === `inline-video-${videos.indexOf(mainElement) + 1}`) : null;
+    // A selected trailer-named native source needs exact same-element identity;
+    // the generic page resolver intentionally filters page-wide trailers.
+    const selectedNativeNeedsIdentity = groups.length === 1 && !!selectedNativeGroup?.entries.some(entry => {
+      try { return /(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(entry.videoUrl).pathname); }
+      catch { return false; }
+    });
     const embeddedUrls = embeddedPlayerPageUrls(document, currentUrl, 80);
     const players = [...document.querySelectorAll('iframe[src],embed[src],object[data]')].filter(element => {
       const value = element.getAttribute('src') || element.getAttribute('data');
       return embeddedUrls.includes(absUrl(value, currentUrl));
     });
     let targets = collectLogicalWatchPageTargets(document, currentUrl, 80);
-    if (groups.length > 1) {
+    if (groups.length > 1 || selectedNativeNeedsIdentity) {
       targets = targets.filter(target => target.url !== currentUrl);
       targets.unshift(...groups.map(group => ({ url: currentUrl, logicalVideoId: group.logicalVideoId, durationSeconds: group.durationSeconds })));
     }
@@ -4129,7 +4201,7 @@ function primaryVideoEvidence(html, pageUrl) {
       const group = groups.find(item => item.logicalVideoId === `inline-video-${index + 1}`);
       targets = mainElement || players.length || primaryMediaEntriesFromDoc(document, currentUrl).length
         ? [{ url: currentUrl, durationSeconds: group?.durationSeconds || extractPageDurationSeconds(document),
-          ...(groups.length > 1 && group ? { logicalVideoId: group.logicalVideoId } : {}) }]
+          ...((groups.length > 1 || selectedNativeNeedsIdentity) && group ? { logicalVideoId: group.logicalVideoId } : {}) }]
         : targets.slice(0, 1);
     }
     const candidates = targets.map(target => {
@@ -4163,6 +4235,22 @@ function primaryVideoEvidence(html, pageUrl) {
       ...(candidate.url === currentUrl && youtubeVideoId(currentUrl) ? { durationSeconds: extractPageDurationSeconds(document) } : {}), previewId: index + 1 }));
   }
 
+  function startTargetRebindRetries(needsRebind, rebind, schedule = setTimeout, cancel = clearTimeout) {
+    const delays = [250, 500, 1000, 2000, 4000, 4000];
+    let timer = null, attempt = 0, stopped = false;
+    const next = () => {
+      if (stopped || !needsRebind() || attempt >= delays.length) return;
+      timer = schedule(() => {
+        timer = null;
+        if (stopped || !needsRebind()) return;
+        rebind();
+        next();
+      }, delays[attempt++]);
+    };
+    next();
+    return () => { stopped = true; if (timer !== null) cancel(timer); timer = null; };
+  }
+
   function targetElementVisible(element) {
     if (!element?.isConnected || !element.getClientRects().length) return false;
     for (let node = element; node && node !== document.body; node = node.parentElement) {
@@ -4174,7 +4262,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 6, version: '7.34.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 6, version: '7.35.3', id: session.id, createdAt: session.createdAt,
       deliveryMode: 'desktop_owned',
       vpn: vpnSafeStatus(session.vpn || {}),
       phoneConnectionOnly: session.phoneConnectionOnly === true,
@@ -4492,11 +4580,13 @@ function primaryVideoEvidence(html, pageUrl) {
     };
     const schedulePosition = () => { if (!animation && !closed) animation = requestAnimationFrame(position); };
     const resize = new ResizeObserver(schedulePosition);
-    const rescan = () => {
+    const rescan = (refreshDocument = true) => {
       if (closed || session.sending) return;
       if (pageUrl !== canonicalWatchPageUrl(location.href, location.href)) { session.close(); return; }
-      document.__uvsRawHtml = document.documentElement?.innerHTML || '';
-      document.__uvsUrl = location.href;
+      if (refreshDocument) {
+        document.__uvsRawHtml = document.documentElement?.innerHTML || '';
+        document.__uvsUrl = location.href;
+      }
       const found = collectSelectableTargets(mode);
       for (const candidate of found) {
         const existing = session.candidates.find(item => key(item) === key(candidate));
@@ -4509,6 +4599,7 @@ function primaryVideoEvidence(html, pageUrl) {
         session.candidates.push(candidate);
         const box = document.createElement('button');
         box.type = 'button'; box.className = 'box'; box.dataset.target = String(candidate.previewId);
+        box.style.zIndex = candidate.kind === 'player' ? '2' : '1';
         box.appendChild(document.createElement('span'));
         box.onclick = event => {
           event.preventDefault(); event.stopPropagation();
@@ -4530,19 +4621,34 @@ function primaryVideoEvidence(html, pageUrl) {
       }
       update(); schedulePosition();
     };
+    const needsRebind = () => !closed && !session.sending && session.candidates.some(candidate =>
+      candidate.kind === 'player' && !candidate.element?.isConnected);
+    const scheduleRebind = () => {
+      if (!needsRebind() || rescanTimer) return;
+      rescanTimer = setTimeout(() => { rescanTimer = 0; rescan(false); }, 350);
+    };
+    const onVisibilityEnd = event => { if (!host.contains(event.target)) { scheduleRebind(); schedulePosition(); } };
+    let stopRebindRetries = () => {};
     const mutation = new MutationObserver(records => {
       schedulePosition();
       if (records.some(record => !host.contains(record.target) && record.type === 'childList')) {
-        clearTimeout(rescanTimer); rescanTimer = setTimeout(rescan, 350);
+        clearTimeout(rescanTimer); rescanTimer = setTimeout(() => { rescanTimer = 0; rescan(); }, 350);
+      } else if (records.some(record => !host.contains(record.target) && record.type === 'attributes')) {
+        scheduleRebind();
       }
     });
     mutation.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class','style','hidden'] });
+    document.addEventListener('transitionend', onVisibilityEnd, true);
+    document.addEventListener('animationend', onVisibilityEnd, true);
     window.addEventListener('scroll', schedulePosition, true); window.addEventListener('resize', schedulePosition);
     const onKey = event => { if (event.key === 'Escape') session.dismiss(); };
     shadow.addEventListener('keydown', onKey);
     window.addEventListener('keydown', onKey);
     session.close = () => {
       closed = true; resize.disconnect(); mutation.disconnect(); cancelAnimationFrame(animation); clearTimeout(rescanTimer);
+      stopRebindRetries();
+      document.removeEventListener('transitionend', onVisibilityEnd, true);
+      document.removeEventListener('animationend', onVisibilityEnd, true);
       stopMoving();
       window.removeEventListener('scroll', schedulePosition, true); window.removeEventListener('resize', schedulePosition); window.removeEventListener('keydown', onKey);
       host.remove(); if (activeTargetPreview === session) activeTargetPreview = null;
@@ -4608,6 +4714,9 @@ function primaryVideoEvidence(html, pageUrl) {
     };
     session.update = update;
     activeTargetPreview = session; rescan(); position();
+    // Lazy players may reveal an existing node without adding DOM children.
+    // Retry missing mappings briefly, without repeatedly copying the page HTML.
+    stopRebindRetries = startTargetRebindRetries(needsRebind, () => rescan(false));
     return session;
   }
 
@@ -4856,7 +4965,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.34.0 loaded on', location.href);
+  log('Universal Video Scraper v7.35.3 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();

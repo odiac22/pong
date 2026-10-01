@@ -1,0 +1,400 @@
+{
+  "generatedAt": "2026-09-26T12:57:05Z",
+  "serviceInstanceId": "9a37fe25f62a43549949ea3a662bc809",
+  "audioEnabled": false,
+  "adultMaleNegative": [
+    {
+      "ok": true,
+      "sessionId": "93dae3793156487d86ca57de09150571",
+      "elapsedSeconds": 0.438,
+      "candidateFaceIds": [
+        "benchmark-adult-male-ee2247a22fc4"
+      ],
+      "final": {
+        "frames": 5,
+        "inferenceFrames": 0,
+        "compatibilityStatus": "no-compatible-face",
+        "selectedFaceId": "",
+        "selectedFaceSimilarity": 0.0,
+        "selectedTargetPresentation": "",
+        "compatibilityChecks": 2,
+        "compatibilityRejections": 1
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 5,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "no-compatible-face",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 2,
+          "compatibilityRejections": 1,
+          "error": ""
+        }
+      ],
+      "video": "women-holding-hands-while-sitting-on-sofa-4796469.mp4"
+    },
+    {
+      "ok": true,
+      "sessionId": "02c9063ec0e545609afce6e1659b4ad7",
+      "elapsedSeconds": 0.483,
+      "candidateFaceIds": [
+        "benchmark-adult-male-ee2247a22fc4"
+      ],
+      "final": {
+        "frames": 10,
+        "inferenceFrames": 0,
+        "compatibilityStatus": "no-compatible-face",
+        "selectedFaceId": "",
+        "selectedFaceSimilarity": 0.0,
+        "selectedTargetPresentation": "",
+        "compatibilityChecks": 3,
+        "compatibilityRejections": 2
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 3,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "no-compatible-face",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 1,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 10,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "no-compatible-face",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 3,
+          "compatibilityRejections": 2,
+          "error": ""
+        }
+      ],
+      "video": "women-wearing-coat-staring-8477530.mp4"
+    },
+    {
+      "ok": true,
+      "sessionId": "de9ec18ea6d74cfdb363406a6123149a",
+      "elapsedSeconds": 0.432,
+      "candidateFaceIds": [
+        "benchmark-adult-male-ee2247a22fc4"
+      ],
+      "final": {
+        "frames": 10,
+        "inferenceFrames": 0,
+        "compatibilityStatus": "no-compatible-face",
+        "selectedFaceId": "",
+        "selectedFaceSimilarity": 0.0,
+        "selectedTargetPresentation": "",
+        "compatibilityChecks": 3,
+        "compatibilityRejections": 2
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 3,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "no-compatible-face",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 1,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 10,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "no-compatible-face",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 3,
+          "compatibilityRejections": 2,
+          "error": ""
+        }
+      ],
+      "video": "women-posing-at-the-camera-6466912.mp4"
+    }
+  ],
+  "fiveCandidateSelection": [
+    {
+      "ok": true,
+      "sessionId": "41d1a821171e406ea718456776800b47",
+      "elapsedSeconds": 0.877,
+      "candidateFaceIds": [
+        "approved-4-c9bd3bcecb97",
+        "approved-8-985b620918b4",
+        "approved-21-c0a16f31c065",
+        "approved-2-6661c9deb08e",
+        "approved-3-68be8b94c28e"
+      ],
+      "final": {
+        "frames": 10,
+        "inferenceFrames": 6,
+        "compatibilityStatus": "locked",
+        "selectedFaceId": "approved-4-c9bd3bcecb97",
+        "selectedFaceSimilarity": 0.0,
+        "selectedTargetPresentation": "female",
+        "compatibilityChecks": 1,
+        "compatibilityRejections": 0
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 3,
+          "inferenceFrames": 2,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-4-c9bd3bcecb97",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 7,
+          "inferenceFrames": 4,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-4-c9bd3bcecb97",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 10,
+          "inferenceFrames": 6,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-4-c9bd3bcecb97",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        }
+      ],
+      "video": "women-holding-hands-while-sitting-on-sofa-4796469.mp4"
+    },
+    {
+      "ok": true,
+      "sessionId": "fc5f6f69099c492fa8d23a6f382f7960",
+      "elapsedSeconds": 0.677,
+      "candidateFaceIds": [
+        "approved-4-c9bd3bcecb97",
+        "approved-8-985b620918b4",
+        "approved-21-c0a16f31c065",
+        "approved-2-6661c9deb08e",
+        "approved-3-68be8b94c28e"
+      ],
+      "final": {
+        "frames": 12,
+        "inferenceFrames": 4,
+        "compatibilityStatus": "locked",
+        "selectedFaceId": "approved-8-985b620918b4",
+        "selectedFaceSimilarity": 8.479657769203184,
+        "selectedTargetPresentation": "female",
+        "compatibilityChecks": 1,
+        "compatibilityRejections": 0
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 6,
+          "inferenceFrames": 2,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-8-985b620918b4",
+          "selectedFaceSimilarity": 8.479657769203184,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 12,
+          "inferenceFrames": 4,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-8-985b620918b4",
+          "selectedFaceSimilarity": 8.479657769203184,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        }
+      ],
+      "video": "women-wearing-coat-staring-8477530.mp4"
+    },
+    {
+      "ok": true,
+      "sessionId": "b81d804aff164c4fa6d83e47576069e3",
+      "elapsedSeconds": 0.458,
+      "candidateFaceIds": [
+        "approved-4-c9bd3bcecb97",
+        "approved-8-985b620918b4",
+        "approved-21-c0a16f31c065",
+        "approved-2-6661c9deb08e",
+        "approved-3-68be8b94c28e"
+      ],
+      "final": {
+        "frames": 6,
+        "inferenceFrames": 2,
+        "compatibilityStatus": "locked",
+        "selectedFaceId": "approved-8-985b620918b4",
+        "selectedFaceSimilarity": 0.0,
+        "selectedTargetPresentation": "female",
+        "compatibilityChecks": 1,
+        "compatibilityRejections": 0
+      },
+      "observations": [
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "pending",
+          "selectedFaceId": "",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "",
+          "compatibilityChecks": 0,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "starting",
+          "frames": 0,
+          "inferenceFrames": 0,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-8-985b620918b4",
+          "selectedFaceSimilarity": 12.848710101930306,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        },
+        {
+          "state": "streaming",
+          "frames": 6,
+          "inferenceFrames": 2,
+          "compatibilityStatus": "locked",
+          "selectedFaceId": "approved-8-985b620918b4",
+          "selectedFaceSimilarity": 0.0,
+          "selectedTargetPresentation": "female",
+          "compatibilityChecks": 1,
+          "compatibilityRejections": 0,
+          "error": ""
+        }
+      ],
+      "video": "women-posing-at-the-camera-6466912.mp4"
+    }
+  ],
+  "passed": true
+}

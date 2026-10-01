@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "threshold": 0.45,
+  "confirmed": 4,
+  "sources": [
+    "5e33916f93ee0c8dd4d4ac9e481306537fb6fa41c235d7c71e931f012202cf36",
+    "abe4caa38ea6977011356349421a391fc6b87d39b272a3199560184947ddaa6e",
+    "b0ab8455811ffe2d20660589090958f2c700538bef55ddb84506a6f87f7f5903",
+    "29fb03f91d227c014f26fa557e160c3178199601e5e65df7e2af07cbb75926ea"
+  ],
+  "pendingRecovery": 0
+}

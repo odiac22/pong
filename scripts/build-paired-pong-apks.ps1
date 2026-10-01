@@ -97,7 +97,7 @@ try {
 
   Push-Location (Join-Path $repoRoot 'android-app')
   try {
-    & $gradleCommand clean assemblePong1Release assemblePong2Release
+    & $gradleCommand --no-daemon --max-workers=2 assemblePong1Release assemblePong2Release
     if ($LASTEXITCODE -ne 0) { throw 'Android release build failed.' }
   } finally {
     Pop-Location

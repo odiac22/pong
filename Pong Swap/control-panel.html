@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pong Swap</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; background:#090b10; color:#e5e7eb; }
+    body { margin:0; padding:24px; max-width:1100px; margin-inline:auto; }
+    header { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:18px; }
+    h1 { margin:0; font-size:24px; }
+    .status { color:#93c5fd; font-size:13px; }
+    .bar { display:flex; flex-wrap:wrap; gap:9px; margin-bottom:18px; }
+    button { border:1px solid #334155; border-radius:9px; background:#172033; color:#eef2ff; padding:9px 14px; font-weight:700; cursor:pointer; }
+    button.primary { background:#155e75; }
+    .runtime,.settings { display:grid; grid-template-columns:repeat(auto-fit,minmax(245px,1fr)); gap:10px; }
+    .card { border:1px solid #252d3d; background:#10141e; border-radius:10px; padding:11px; min-height:70px; }
+    label { display:flex; justify-content:space-between; align-items:center; gap:8px; font-weight:700; font-size:13px; }
+    .description { color:#8c96a8; font-size:11px; line-height:1.35; margin-top:7px; white-space:pre-line; }
+    input[type=range] { width:100%; margin-top:9px; }
+    select,input[type=number] { color:#e5e7eb; background:#0b1020; border:1px solid #334155; border-radius:6px; padding:6px; }
+    .value { color:#67e8f9; min-width:40px; text-align:right; }
+    .faces { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 20px; }
+    .face { display:flex; align-items:center; gap:8px; border:1px solid #293246; border-radius:9px; padding:6px 9px; background:#10141e; }
+    .face img { width:38px; height:38px; object-fit:cover; border-radius:50%; }
+    h2 { font-size:16px; margin:22px 0 10px; }
+  </style>
+</head>
+<body>
+  <header><div><h1>Pong Swap</h1><div class="status" id="status">Loading…</div></div></header>
+  <div class="bar">
+    <button class="primary" id="save">Save settings</button>
+    <button id="warm">Warm GPU</button>
+    <button id="unload">Unload GPU</button>
+    <button id="refresh">Refresh approved faces</button>
+  </div>
+  <h2>Approved identities</h2><div class="faces" id="faces"></div>
+  <h2>Playback runtime</h2><div class="runtime" id="runtime"></div>
+  <h2>Rope-style processing controls</h2><div class="settings" id="settings"></div>
+<script>
+let config, schema;
+const $ = s => document.querySelector(s);
+const escapeHtml = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path, options={}) { const r=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}}); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+function fieldCard(target, name, label, value, spec={}) {
+  const card=document.createElement('div'); card.className='card';
+  const head=document.createElement('label'); head.textContent=label;
+  let input;
+  if(spec.kind==='switch') { input=document.createElement('input'); input.type='checkbox'; input.checked=!!value; }
+  else if(spec.kind==='select') { input=document.createElement('select'); const labels=name==='SwapperTypeTextSel'?{'128':'InSwapper 128 FP16'}:name==='RestorerTypeTextSel'?{'GPEN512':'GPEN 512','GPEN256':'GPEN 256'}:{}; (spec.options||[]).forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=labels[v]||v;o.selected=String(v)===String(value);input.append(o);}); }
+  else { input=document.createElement('input'); input.type='range'; input.min=spec.min??0; input.max=spec.max??100; input.step=spec.step??1; input.value=value; const out=document.createElement('span'); out.className='value'; out.textContent=value; input.addEventListener('input',()=>out.textContent=input.value); head.append(out); }
+  input.dataset.name=name; input.dataset.kind=spec.kind||'number'; head.append(input); card.append(head);
+  if(spec.description){const d=document.createElement('div');d.className='description';d.textContent=spec.description;card.append(d)}
+  target.append(card);
+}
+async function load() {
+  const [settings,faces,health]=await Promise.all([api('/settings'),api('/faces'),api('/health')]); config=settings.config; schema=settings.schema;
+  $('#status').textContent=`${health.ready?'GPU ready':'GPU sleeping'} · ${health.gpu?.name||'GPU unavailable'} · ${faces.faces.length} approved`;
+  $('#faces').innerHTML=faces.faces.length?'':'No approved images yet. Add them to approved-faces on the PC.';
+  faces.faces.forEach(f=>{const el=document.createElement('div');el.className='face';el.innerHTML=`<img src="/faces/${encodeURIComponent(f.id)}/thumbnail"><span>${escapeHtml(f.name)} · ${f.imageCount}</span>`;$('#faces').append(el)});
+  $('#runtime').innerHTML=''; Object.entries(config.runtime).forEach(([k,v])=>fieldCard($('#runtime'),k,k,v,{kind:typeof v==='boolean'?'switch':(['backend','encoderPreset','fallback'].includes(k)?'select':'number'),options:k==='backend'?['cuda','trt']:k==='encoderPreset'?['p1','p2','p3','p4','p5']:k==='fallback'?['original','swap-only']:undefined,min:0,max:k.includes('Ms')?20000:k.includes('Seconds')?1800:100,step:k==='minimumHeadroom'?0.05:1}));
+  $('#settings').innerHTML=''; schema.forEach(s=>fieldCard($('#settings'),s.name,s.label,config.parameters[s.name],s));
+}
+function collect(selector) { const out={}; document.querySelectorAll(`${selector} [data-name]`).forEach(i=>{let v=i.type==='checkbox'?i.checked:i.value;if(i.type==='range'||i.type==='number')v=Number(v);out[i.dataset.name]=v}); return out; }
+$('#save').onclick=async()=>{config.runtime=collect('#runtime');config.parameters=collect('#settings');try{await api('/settings',{method:'PUT',body:JSON.stringify(config)});$('#status').textContent='Settings saved';setTimeout(load,500)}catch(e){$('#status').textContent=e.message}};
+$('#warm').onclick=async()=>{$('#status').textContent='Warming GPU…';try{const h=await api('/warm',{method:'POST'});$('#status').textContent=`GPU ready · ${h.gpu?.name||''} · ${h.warmupMs||0} ms`}catch(e){$('#status').textContent=e.message}};
+$('#unload').onclick=async()=>{await api('/unload',{method:'POST'});load()};
+$('#refresh').onclick=load;
+load().catch(e=>$('#status').textContent=e.message);
+</script>
+</body>
+</html>

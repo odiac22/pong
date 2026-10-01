@@ -1,0 +1,13 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {createTikTokProgressTracker,TIKTOK_PROGRESS_TEMPLATE} from '../video-cache-tiktok-progress.mjs';
+const box=(name,data)=>{const b=Buffer.alloc(data.length+8);b.writeUInt32BE(b.length);b.write(name,4);data.copy(b,8);return b};
+const metadata=(handler='vide',codec='avc1')=>{const h=Buffer.alloc(24);h.write('hdlr');h.write(handler,12);h.write(codec,20);return Buffer.concat([box('ftyp',Buffer.from('isom')),box('moov',h)])};
+const progress=n=>`__PONG_TIKTOK_PROGRESS__${n}\n`;
+function fixture(){const record={},errors=[];return {record,errors,tracker:createTikTokProgressTracker(record,{maxFileBytes:10_000_000,now:()=>42,onInvalid:e=>errors.push(e.message)})}}
+test('exact total and complete AVC metadata publish before the full download',()=>{const {tracker,record}=fixture();tracker.stderr(progress(900000));tracker.bytes(metadata());assert.equal(record.totalBytes,900000);assert.equal(record.headersReadyAt,42);assert.equal(record.progressiveMetadataValidated,true)});
+test('partial metadata and split progress lines never publish early',()=>{const {tracker,record}=fixture(),data=metadata();tracker.stderr('__PONG_TIKTOK_');tracker.bytes(data.subarray(0,20));tracker.stderr('PROGRESS__900000\n');assert.equal(record.totalBytes,undefined);tracker.bytes(data.subarray(20));assert.equal(record.totalBytes,900000)});
+test('unknown or estimated sizes stay on complete-file validation',()=>{const {tracker,record}=fixture();tracker.bytes(metadata());for(const n of ['NA','"NA"','null','9.5',0,10000001])tracker.stderr(progress(n));assert.equal(record.totalBytes,undefined);assert.ok(!TIKTOK_PROGRESS_TEMPLATE.includes('estimate'))});
+test('audio-only, HEVC and tail metadata never activate progressive playback',()=>{for(const data of [metadata('soun'),metadata('vide','hvc1'),Buffer.concat([box('ftyp',Buffer.from('isom')),Buffer.from([0,255,255,255,109,100,97,116]),metadata()])]){const {tracker,record}=fixture();tracker.stderr(progress(900000));tracker.bytes(data);assert.equal(record.totalBytes,undefined)}});
+test('metadata arriving before the exact size is held until size is known',()=>{const {tracker,record}=fixture();tracker.bytes(metadata());assert.equal(record.totalBytes,undefined);tracker.stderr(progress(900000));assert.equal(record.totalBytes,900000)});
+test('an entity-size change invalidates an already published prefix',()=>{const {tracker,record,errors}=fixture();tracker.stderr(progress(900000));tracker.bytes(metadata());tracker.stderr(progress(800000));assert.equal(errors.length,1);assert.equal(record.totalBytes,900000)});

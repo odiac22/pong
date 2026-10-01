@@ -1,16 +1,63 @@
 import http from 'node:http';
 import https from 'node:https';
 import http2 from 'node:http2';
+import tls from 'node:tls';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
-import { createReadStream, createWriteStream, existsSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
+import { createMediaBrowserLimiter } from './media-browser-limiter.mjs';
+import { highestQualityHlsMaster } from './hls-quality-policy.mjs';
+import { genericHlsProxyPath, isGenericHlsProxyPath } from './hls-proxy-path.mjs';
+import { hlsRangeEligibleRequest, tryStreamHlsRanges } from './hls-range-stream.mjs';
+import { createTikTokProgressTracker, TIKTOK_PROGRESS_TEMPLATE } from './video-cache-tiktok-progress.mjs';
+import { startupPreparationUrl, startupPrefixRange, genericCacheRequestMayRetry, GENERIC_FAILURE_COOLDOWN_MS, STARTUP_PREFIX_BYTES } from './video-cache-startup-policy.mjs';
+import {normalizeTikTokMediaHint,streamTikTokMediaHint} from './tiktok-media-hints.mjs';
+import { normalizeRecallVideoId, recallMediaIdentity, mergeRecallCapturedVideos } from './recall-media-identity.mjs';
+import { createDesktopCaptureJobs, desktopCaptureFingerprint, preferredDesktopCaptureMediaUrls } from './desktop-capture-jobs.mjs';
+import { normalizeSourceMediaHints, planSourceMediaHints, verifySourceMediaHint } from './desktop-capture-source-hints.mjs';
+import { resolveInlineVideoIdentityFromHtml } from './inline-video-identity.mjs';
+import { resolveYouTubeCapture, youtubeVideoIdFromPage } from './youtube-capture-resolver.mjs';
+import { saveDetectionFeedback } from './detection-feedback.mjs';
+import { PhoneTransferStore } from './phone-transfer-store.mjs';
+import { createVpnRouter, requiresCaliforniaVpn } from './pong-vpn-control.mjs';
 import { spawn } from 'node:child_process';
 import { pipeline, RawImage, env } from '@xenova/transformers';
-import { createLocal2NodeAdapter } from './local2-node-adapter.mjs';
+import {
+  applyLocal2ListingRanks,
+  createLocal2NodeAdapter
+} from './local2-node-adapter.mjs';
 import { Local2FlashEngine } from './local2-flash-engine.mjs';
+import {
+  LOCAL2_CANDIDATES_PER_WAVE,
+  LOCAL2_CANDIDATE_CONCURRENCY,
+  LOCAL2_MAX_PENDING_CANDIDATES,
+  LOCAL2_SHALLOW_PROFILE_CONCURRENCY,
+  LOCAL2_VERIFIER_CONCURRENCY,
+  local2CandidatePreferenceRank,
+  local2DeepHtmlPriority,
+  local2HighestPriorityWaiterIndex,
+  local2NeedsDeeperProfilePages,
+  local2PageBalancedAdmission,
+  local2SampleSupportsForegroundProof,
+  local2ShouldPrefetchProfileDepth,
+  local2SourceHintSchedulingBoost,
+  local2VerifierPriorityAfterSample
+} from './local2-scheduling.mjs';
+import {
+  Local2SourceHintClient,
+  local2ApiPostVideoCount,
+  orderLocal2ClonePostsWithSourceHints
+} from './local2-source-hints.mjs';
+import { local2MediaCdnMirrorUrl, selectLocal2PlaybackMediaMirrors } from './local2-media-mirrors.mjs';
+import {
+  extractGenericEmbedUrlsFromHtml,
+  extractGenericMediaPageMetadata,
+  extractGenericWatchPageUrlsFromHtml,
+  extractGenericVideoUrlsFromHtml
+} from './media-page-resolver.mjs';
 import {
   local2CleanResultIsExplicitlyHardSafe,
   local2ImageGradeSummary
@@ -37,12 +84,18 @@ import {
   extractLeakedZonePlaylistUrl
 } from './leakedzone-import.mjs';
 
+import { phoneConnectionCaptureRequested, phoneConnectionFileCandidates, phoneConnectionVideoRecord } from './phone-connection-policy.mjs';
+
 const PORT = Number(process.env.PONG_LOCAL_AI_PORT || 8787);
 const HOST = process.env.PONG_LOCAL_AI_HOST || '0.0.0.0';
+const PONG_SWAP_CONTROL_PORT = Number(process.env.PONG_SWAP_CONTROL_PORT || 8793);
+const PONG_SWAP_BACKGROUND_CONTROL_PORT = Number(
+  process.env.PONG_SWAP_BACKGROUND_CONTROL_PORT || 8795
+);
 const MODEL = process.env.PONG_LOCAL_IMAGE_MODEL || 'Xenova/siglip-base-patch16-224';
 const OLLAMA_URL = (process.env.PONG_OLLAMA_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
 const OLLAMA_VISION_MODEL = process.env.PONG_OLLAMA_VISION_MODEL || 'qwen3-vl:4b';
-const LOCAL2_QWEN_MODEL = process.env.PONG_LOCAL2_QWEN_MODEL || 'qwen2.5vl:latest';
+const LOCAL2_QWEN_MODEL = process.env.PONG_LOCAL2_QWEN_MODEL || 'qwen3-vl:4b';
 const OLLAMA_KEEP_ALIVE = process.env.PONG_OLLAMA_KEEP_ALIVE || -1;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const TOP_K = 10;
@@ -51,9 +104,16 @@ const QWEN_REJECT_EXAMPLES = Number(process.env.PONG_QWEN_REJECT_EXAMPLE_IMAGES 
 const QWEN_CANDIDATE_IMAGES = Number(process.env.PONG_QWEN_CANDIDATE_IMAGES || 2);
 const LOCAL2_CLEAN_MAX_IMAGES = Math.max(4, Math.min(12, Number(process.env.PONG_LOCAL2_CLEAN_MAX_IMAGES || 8)));
 const LOCAL2_FLASH_DECISION_IMAGES = 4;
+const LOCAL2_MEDIA_PROOF_POST_QUANTUM = 8;
+const LOCAL22_BLANK_MIN_VIDEOS = 10;
+const LOCAL22_BLANK_DECISION_IMAGES = 4;
+const LOCAL22_BLANK_CANDIDATE_CONCURRENCY = Math.max(
+  2,
+  Math.min(8, Number(process.env.PONG_LOCAL22_BLANK_CANDIDATE_CONCURRENCY || 6))
+);
 const LOCAL22_TURBO_DECISION_IMAGES = Math.max(
-  6,
-  Math.min(10, Number(process.env.PONG_LOCAL22_TURBO_DECISION_IMAGES || 8))
+  4,
+  Math.min(6, Number(process.env.PONG_LOCAL22_TURBO_DECISION_IMAGES || 4))
 );
 const LOCAL2_FLASH_CONFIRMATION_IMAGES = Math.max(
   6,
@@ -66,10 +126,32 @@ const LOCAL2_FLASH_CONFIRMATION_TRIAGE_IMAGES = Math.max(
 const LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES = 3;
 const LEARN_IMAGES_PER_RECORD = Number(process.env.PONG_LEARN_IMAGES_PER_RECORD || 40);
 const LOCAL_AI_DIR = path.join(process.cwd(), '.pong-local-ai');
+const vpnControl = await createVpnRouter({ directory: LOCAL_AI_DIR });
+async function requireMediaVpn(rawUrl, fresh=false) {
+  if (requiresCaliforniaVpn(String(rawUrl))) await vpnControl.controller.requireCalifornia(fresh);
+}
+const VPS_SCRAPER_CONFIG = (() => {
+  try {
+    const value = JSON.parse(readFileSync(path.join(LOCAL_AI_DIR, 'vps-scraper-config.json'), 'utf8'));
+    return { url: String(value?.url || '').replace(/\/+$/, ''), secret: String(value?.secret || '') };
+  } catch (_) { return { url: '', secret: '' }; }
+})();
+const TEST_AI_FIREFOX_SCRAPER_URL = String(
+  process.env.PONG_TEST_AI_FIREFOX_SCRAPER_URL || 'http://127.0.0.1:18801'
+).replace(/\/+$/, '');
+const TEST_AI_FIREFOX_PYTHON = path.join(LOCAL_AI_DIR, 'firefox-venv', 'Scripts', 'python.exe');
+const TEST_AI_FIREFOX_SCRIPT = path.join(process.cwd(), 'scripts', 'firefox_scraper_service.py');
+let testAiFirefoxScraperStartPromise = null;
+let testAiFirefoxScraperProcess = null;
+let testAiFirefoxScraperSpawnNotBefore = 0;
+let testAiSourceNextStartAt = 0;
 const PONG_INDEX_PATH = path.join(process.cwd(), 'index.html');
 const PONG_SYNC_PATH = path.join(process.cwd(), 'pong-sync.js');
 const PONG_STATIC_ASSETS = new Map([
+  ['/pong-tiktok-remote.html', [path.join(process.cwd(), 'scripts', 'tiktok_remote', 'client.html'), 'text/html; charset=utf-8']],
+  ['/universal-video-scraper.user.js', [path.join(process.cwd(), 'universal-video-scraper.user.js'), 'text/javascript; charset=utf-8']],
   ['/pong-observer.js', [path.join(process.cwd(), 'pong-observer.js'), 'text/javascript; charset=utf-8']],
+  ['/pong-collections.js', [path.join(process.cwd(), 'pong-collections.js'), 'text/javascript; charset=utf-8']],
   ['/pong-1.webmanifest', [path.join(process.cwd(), 'pong-1.webmanifest'), 'application/manifest+json; charset=utf-8']],
   ['/pong-2.webmanifest', [path.join(process.cwd(), 'pong-2.webmanifest'), 'application/manifest+json; charset=utf-8']],
   ['/pong-1-icon.svg', [path.join(process.cwd(), 'pong-1-icon.svg'), 'image/svg+xml; charset=utf-8']],
@@ -78,6 +160,16 @@ const PONG_STATIC_ASSETS = new Map([
 const PONG_SAVED_LINKS_V2_PATH = path.join(process.cwd(), 'pong-data', 'saved-links-v2.json');
 const PONG_SAVED_LINKS_LEGACY_PATH = path.join(process.cwd(), 'pong-data', 'saved-links.json');
 const PONG_SAVED_EROME_RECOVERY_PATH = path.join(process.cwd(), 'pong-data', 'saved-erome-recovery.json');
+const PONG_SWAP_ROOT = path.join(process.cwd(), 'Pong Swap');
+const PONG_SWAP_PORT = Number(process.env.PONG_SWAP_PORT || 8792);
+const PONG_SWAP_URL = `http://127.0.0.1:${PONG_SWAP_PORT}`;
+const PONG_SWAP_PYTHON = path.join(PONG_SWAP_ROOT, 'runtime', 'venv', 'Scripts', 'python.exe');
+const PONG_SWAP_SERVICE = path.join(PONG_SWAP_ROOT, 'pong_swap_service.py');
+let pongSwapProcess = null;
+let pongSwapStartPromise = null;
+let pongSwapLastHealth = null;
+let pongSwapReadyLeaseUntil = 0;
+const PONG_SWAP_READY_LEASE_MS = 60_000;
 const PC_SAVED_LINKS_PATH = path.join(LOCAL_AI_DIR, 'shared-saved-links-v1.json');
 const PONG_PLAYED_HISTORY_PATH = path.join(LOCAL_AI_DIR, 'played-history-v1.json');
 const SIMPCITY_SESSION_PATH = path.join(LOCAL_AI_DIR, 'simpcity-session-v1.dpapi');
@@ -89,6 +181,18 @@ const SIMPCITY_CHROME_PATH = process.env.PONG_SIMPCITY_CHROME || path.join(
   'Chrome',
   'Application',
   'chrome.exe'
+);
+const BROWSER_RELAY_FIREFOX_PATH = process.env.PONG_BROWSER_RELAY_FIREFOX || path.join(
+  process.env.PROGRAMFILES || 'C:\\Program Files',
+  'Mozilla Firefox',
+  'firefox.exe'
+);
+const BROWSER_RELAY_EDGE_PATH = process.env.PONG_BROWSER_RELAY_EDGE || path.join(
+  process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)',
+  'Microsoft',
+  'Edge',
+  'Application',
+  'msedge.exe'
 );
 const SIMPCITY_LOGIN_TIMEOUT_MS = Math.max(
   60_000,
@@ -118,7 +222,6 @@ const SIMPCITY_RECALL_AI_BATCH_LIMIT = Math.max(
   0,
   Math.min(20, Number(process.env.PONG_SIMPCITY_RECALL_AI_BATCH_LIMIT || 6))
 );
-const SIMPCITY_EARLY_ARTIST_VIDEO_COUNT = 20;
 const VIDEO_FILE_CACHE_DIR = path.resolve(
   process.env.PONG_VIDEO_FILE_CACHE_DIR ||
   (process.platform === 'win32' && existsSync('F:\\')
@@ -129,10 +232,20 @@ const VIDEO_FILE_CACHE_DIR = path.resolve(
 // it must never consume a drive just because several large videos are in flight.
 const VIDEO_FILE_CACHE_MAX_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_BYTES || 12 * 1024 * 1024 * 1024));
 const VIDEO_FILE_CACHE_MIN_FREE_BYTES = Math.max(512 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MIN_FREE_BYTES || 8 * 1024 * 1024 * 1024));
-// Large source files start much faster through byte-range streaming than by
-// waiting for a complete hidden-cache download. Keep full-file buffering for
-// ordinary clips and route larger videos through the existing range proxy.
-const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 256 * 1024 * 1024));
+// Long HD Recall videos must remain eligible for the growing range cache.
+// A 256 MiB ceiling rejected every card in the live 15-video Recall batch,
+// disabling prefetch and forcing repeated slow origin reads. Readers still
+// stream growing files; this does not require downloading an entire movie.
+// Keep individual entries bounded below the existing total cache budget.
+const VIDEO_FILE_CACHE_MAX_FILE_BYTES = Math.min(VIDEO_FILE_CACHE_MAX_BYTES,
+  Math.max(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_MAX_FILE_BYTES || 4 * 1024 * 1024 * 1024)));
+// Bunkr CDN shards often throttle one long response far below the user's LAN
+// bandwidth. Stitch a bounded number of independent byte ranges in order for
+// the visible reader. The first range streams immediately; later ranges fill
+// concurrently, so this improves source opening and sustained playback without
+// changing media bytes, decode quality, or face-swap settings.
+const BUNKR_FOREGROUND_RANGE_BYTES = Math.max(256 * 1024, Math.min(4 * 1024 * 1024, Number(process.env.PONG_BUNKR_FOREGROUND_RANGE_BYTES || 1024 * 1024)));
+const BUNKR_FOREGROUND_RANGE_CONCURRENCY = Math.max(2, Math.min(6, Number(process.env.PONG_BUNKR_FOREGROUND_RANGE_CONCURRENCY || 4)));
 const VIDEO_FILE_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_TTL_MS || 10 * 60 * 1000));
 const VIDEO_FILE_CACHE_VIEWED_TTL_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_VIEWED_TTL_MS || 2 * 60 * 1000));
 const VIDEO_FILE_CACHE_IDLE_WIPE_MS = Math.max(60 * 1000, Number(process.env.PONG_VIDEO_FILE_CACHE_IDLE_WIPE_MS || 4 * 60 * 1000));
@@ -163,7 +276,7 @@ const VIDEO_FILE_CACHE_BUFFER_HIGH_SECONDS = Math.max(
 );
 const VIDEO_FILE_CACHE_QUEUE_MAX = Math.max(60, Math.min(6000, Number(process.env.PONG_VIDEO_FILE_CACHE_QUEUE_MAX || 5000)));
 const VIDEO_FILE_CACHE_ACTIVE_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_ACTIVE_HOLD_MS || 20000));
-const VIDEO_FILE_CACHE_ENTRY_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_ENTRY_HOLD_MS || 45000));
+const VIDEO_FILE_CACHE_ENTRY_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_ENTRY_HOLD_MS || 90000));
 const VIDEO_FILE_CACHE_CURRENT_HOLD_MS = Math.max(5000, Number(process.env.PONG_VIDEO_FILE_CACHE_CURRENT_HOLD_MS || 30000));
 // Whole-file background downloads let one large CDN object monopolize a lane.
 // Preserve each partial file, but rotate the lane after this much new data so
@@ -173,6 +286,9 @@ const VIDEO_FILE_CACHE_BACKGROUND_QUANTUM_BYTES = Math.max(
   Math.min(64 * 1024 * 1024, Number(process.env.PONG_VIDEO_FILE_CACHE_BACKGROUND_QUANTUM_BYTES || 12 * 1024 * 1024))
 );
 const VIDEO_FILE_CACHE_READ_WAIT_MS = Math.max(10000, Number(process.env.PONG_VIDEO_FILE_CACHE_READ_WAIT_MS || 45000));
+// A failed TikTok watch-page extraction must not be relaunched by every warm
+// manifest. A later foreground/warm request can retry after this finite pause.
+const VIDEO_FILE_CACHE_TIKTOK_FAILURE_COOLDOWN_MS = 30000;
 const VIDEO_FILE_CACHE_IO_SETTLE_MS = 8000;
 const VIDEO_FILE_CACHE_WIPE_RETRIES = 12;
 const VIDEO_FILE_CACHE_TAIL_RANGE_ENABLED = process.env.PONG_VIDEO_TAIL_RANGE_ENABLED !== '0';
@@ -220,43 +336,111 @@ const MAX_LEARNED_RECORDS = 2000;
 const GATEWAY_TIMEOUT_MS = Math.max(5000, Number(process.env.PONG_GATEWAY_TIMEOUT_MS || 30000));
 const GATEWAY_MAX_REDIRECTS = 5;
 const GATEWAY_ALLOWED_HOSTS = ['coomerfans.com', 'onlyfaphouse.com'];
+// This independent public index is an ordering hint only. It never supplies a
+// delivered URL and never satisfies or rejects the strict clone-side 15-video
+// requirement. A short timeout, bounded concurrency and circuit breaker make
+// its complete absence equivalent to the pre-hint flow.
+const LOCAL2_SOURCE_HINTS_ENABLED = process.env.PONG_LOCAL2_SOURCE_HINTS !== '0';
+const LOCAL2_SOURCE_HINT_CONCURRENCY = Math.max(
+  1,
+  Math.min(2, Number(process.env.PONG_LOCAL2_SOURCE_HINT_CONCURRENCY || 2))
+);
+const phoneTransfers = await new PhoneTransferStore({
+  chunkBytes: 2 * 1024 * 1024,
+  directory: process.env.PONG_PHONE_TRANSFER_DIR || (process.platform === 'win32' && existsSync('F:\\')
+    ? 'F:\\.pong-phone-transfer-cache' : path.join(LOCAL_AI_DIR, '.phone-transfer-cache'))
+}).init();
+setInterval(() => { void phoneTransfers.prune().catch(() => {}); }, 15 * 60_000).unref();
+const LOCAL2_SOURCE_HINT_TIMEOUT_MS = Math.max(
+  750,
+  Math.min(5000, Number(process.env.PONG_LOCAL2_SOURCE_HINT_TIMEOUT_MS || 2500))
+);
+const LOCAL2_SOURCE_HINT_JOIN_MS = Math.max(
+  0,
+  Math.min(1000, Number(process.env.PONG_LOCAL2_SOURCE_HINT_JOIN_MS || 500))
+);
+const LOCAL2_SOURCE_HINT_TTL_MS = Math.max(
+  15_000,
+  Math.min(5 * 60_000, Number(process.env.PONG_LOCAL2_SOURCE_HINT_TTL_MS || 90_000))
+);
+const LOCAL2_SOURCE_HINT_AGENT = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 10_000,
+  maxSockets: LOCAL2_SOURCE_HINT_CONCURRENCY,
+  maxFreeSockets: LOCAL2_SOURCE_HINT_CONCURRENCY,
+  scheduling: 'lifo'
+});
 const GATEWAY_MEDIA_ALLOWED_HOSTS = [
-  'cdn.cr', 'pixeldrain.com', 'gofile.io',
+  'cdn.cr', 'scdn.st', 'pixeldrain.com', 'gofile.io',
   'cyberdrop.cr', 'cyberdrop.me', 'cyberdrop.to', 'cyberfile.me',
   'saint.to', 'saint2.su', 'saint2.cr', 'turbo.cr', 'turbocdn.st',
   'tiktok.com', 'fileditchfiles.st', 'fileditch.com'
 ];
+const GENERIC_MEDIA_AUTH_TTL_MS = Math.max(
+  5 * 60_000,
+  Number(process.env.PONG_GENERIC_MEDIA_AUTH_TTL_MS || 2 * 60 * 60_000)
+);
+const genericMediaAllowedHosts = new Map();
+const genericMediaReferers = new Map();
+const genericMediaUrlReferers = new Map();
+const genericMediaResolutionCache = new Map();
+const genericMediaProbeCache = new Map();
+const acquireGenericMediaBrowser = createMediaBrowserLimiter(2, 15000);
+// The source-browser relay buffers each bounded range before returning it to
+// Android. A 2 MiB first chunk could take longer than Pong's recovery window
+// on a remote CDN, causing a valid relay to be abandoned. 512 KiB is enough
+// for fast-start MP4 metadata/initial frames and turns over subsequent ranges
+// quickly through the three relay workers.
+const BROWSER_MEDIA_RELAY_CHUNK_BYTES = 512 * 1024;
+const BROWSER_MEDIA_RELAY_TTL_MS = 2 * 60 * 60_000;
+const browserMediaRelayClients = new Map();
+const browserMediaRelaySources = new Map();
+const browserMediaRelayJobs = new Map();
+const browserMediaRelayKeeperStarts = new Map();
 const GATEWAY_WARM_CONNECTIONS = Math.max(1, Math.min(4, Number(process.env.PONG_GATEWAY_WARM_CONNECTIONS || 2)));
 const GATEWAY_KEEP_WARM_MS = Math.max(10000, Number(process.env.PONG_GATEWAY_KEEP_WARM_MS || 20000));
 const GATEWAY_AGENT = new https.Agent({
+  // Node's bundled CA set can lag Windows' trusted intermediates. Generic
+  // media hosts that validate in Android/Chrome must not fail only inside the
+  // local gateway, so combine (never replace) bundled and system trust roots.
+  ca: [...new Set([
+    ...tls.getCACertificates('default'),
+    ...tls.getCACertificates('system')
+  ])],
   keepAlive: true,
   keepAliveMsecs: 15000,
   maxSockets: Math.max(24, Number(process.env.PONG_GATEWAY_MAX_SOCKETS || 72)),
   maxFreeSockets: Math.max(16, Number(process.env.PONG_GATEWAY_MAX_FREE_SOCKETS || 48)),
   scheduling: 'lifo'
 });
-const VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST = Math.max(4, Math.min(96, Number(
+const VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST = Math.max(1, Math.min(16, Number(
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST ||
   process.env.PONG_VIDEO_VERIFY_FETCH_CONCURRENCY ||
-  12
+  2
 )));
 const VIDEO_VERIFY_START_GAP_MS = Math.max(
   300,
-  Number(process.env.PONG_VIDEO_VERIFY_START_GAP_MS || 900)
+  Number(process.env.PONG_VIDEO_VERIFY_START_GAP_MS || 650)
+);
+// Profile/listing HTML and post verification reach the same upstream edge,
+// including across its two mirror hostnames. Keep their combined start rate at
+// the proven 1.9.1 floor instead of allowing two independent schedulers to add
+// up to a burst that the source reports as HTTP 503.
+const GATEWAY_SHARED_SOURCE_GAP_MS = Math.max(
+  650,
+  Number(process.env.PONG_GATEWAY_SHARED_SOURCE_GAP_MS || 650)
 );
 const VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST = Math.max(1, Math.min(
   VIDEO_VERIFY_FETCH_CONCURRENCY_PER_HOST,
   Number(process.env.PONG_VIDEO_VERIFY_PLAYBACK_FETCH_CONCURRENCY_PER_HOST || 8)
 ));
 const VIDEO_VERIFY_PER_ARTIST_CONCURRENCY = Math.max(2, Math.min(32, Number(process.env.PONG_VIDEO_VERIFY_PER_ARTIST_CONCURRENCY || 6)));
-// Default consumers still create only six workers. Local2/Local2.2 explicitly
-// request a wider artist pool and may use eight lanes, which proves 15 distinct
-// source-post videos in roughly two waves without changing any acceptance
-// requirement. Sixteen Local2.2 profiles can now fully occupy the 128-request
-// verifier while each artist remains capped at eight concurrent checks.
+// Allow two outstanding requests so response latency does not leave the proven
+// 650 ms source clock idle. Starts remain globally spaced by that same safe
+// floor, so this increases overlap rather than request rate.
 const VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST = Math.max(1, Math.min(
   16,
-  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 4)
+  Number(process.env.PONG_VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST || 2)
 ));
 const VIDEO_VERIFY_CACHE_MAX = Math.max(200, Number(process.env.PONG_VIDEO_VERIFY_CACHE_MAX || 6000));
 const VIDEO_VERIFY_CACHE_TTL_MS = Math.max(30000, Number(process.env.PONG_VIDEO_VERIFY_CACHE_TTL_MS || 900000));
@@ -278,6 +462,10 @@ const RANDOM40_RESERVOIR_PROFILE_PAGE_BATCH = Math.max(2, Math.min(12, Number(pr
 // and violates the no-preapproved-artist-cache contract. It is opt-in only for
 // explicit legacy diagnostics.
 const RANDOM40_RESERVOIR_ENABLED = process.env.PONG_RANDOM40_RESERVOIR_ENABLED === '1';
+// The production warm path is eligibility-only: source HTML and 15
+// byte-verified videos may live briefly in RAM, but no preference verdict is
+// computed until the user presses Local1. Pre-approval is a legacy opt-in.
+const RANDOM40_ACCEPTED_PREAPPROVAL_ENABLED = process.env.PONG_RANDOM40_ACCEPTED_PREAPPROVAL_ENABLED === '1';
 const RANDOM40_ACCEPTED_TARGET = Math.max(8, Math.min(32, Number(process.env.PONG_RANDOM40_ACCEPTED_TARGET || 24)));
 const RANDOM40_ACCEPTED_READY_MIN = Math.min(
   RANDOM40_ACCEPTED_TARGET,
@@ -387,6 +575,9 @@ const gatewayHtmlFetchStats = {
   concurrency: Math.max(1, Math.min(2, Number(process.env.PONG_GATEWAY_HTML_CONCURRENCY || 2)))
 };
 const gatewayHtmlFetchWaiters = [];
+let gatewayHtmlWaiterSequence = 0;
+let gatewaySharedSourceNextStartAt = 0;
+let gatewaySharedSourceActualNextStartAt = 0;
 const gatewayPowerShellFetchStats = {
   requests: 0,
   pages: 0,
@@ -403,7 +594,10 @@ const videoVerifyHostStates = new Map(GATEWAY_ALLOWED_HOSTS.map(host => [host, {
   host,
   queue: [],
   active: 0,
+  foregroundProofActive: 0,
   activeByGroup: new Map(),
+  nextStartAt: 0,
+  actualNextStartAt: 0,
   backoffUntil: 0,
   rateLimits: 0,
   completed: 0,
@@ -493,7 +687,7 @@ function json(res, status, payload) {
 function gatewayCorsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,HEAD,POST,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,Range,If-None-Match,If-Modified-Since,X-Pong-SimpCity-Controller',
     'Access-Control-Allow-Private-Network': 'true',
     'Access-Control-Expose-Headers': 'Accept-Ranges,Content-Length,Content-Range,Content-Type,ETag,Last-Modified',
@@ -509,11 +703,798 @@ function gatewayTargetUrl(raw) {
     throw new Error('invalid gateway URL');
   }
   const hostname = target.hostname.toLowerCase();
+  const dynamicExpiry = Number(genericMediaAllowedHosts.get(hostname) || 0);
+  if (dynamicExpiry && dynamicExpiry <= Date.now()) {
+    genericMediaAllowedHosts.delete(hostname);
+    genericMediaReferers.delete(hostname);
+  }
   const allowed = target.protocol === 'https:' && [...GATEWAY_ALLOWED_HOSTS, ...GATEWAY_MEDIA_ALLOWED_HOSTS].some(host => (
     hostname === host || hostname.endsWith(`.${host}`)
-  ));
+  )) || (target.protocol === 'https:' && dynamicExpiry > Date.now());
   if (!allowed || target.username || target.password) throw new Error('gateway host not allowed');
   return target;
+}
+
+const SOURCE_OPEN_CACHE_DIAGNOSTICS_ENABLED = process.env.PONG_SOURCE_OPEN_CACHE_DIAGNOSTICS === '1';
+function sourceOpenCacheDiagnosticAllowed(req, requestUrl) {
+  return SOURCE_OPEN_CACHE_DIAGNOSTICS_ENABLED &&
+    req.method === 'GET' &&
+    requestUrl.pathname === '/video-cache/diagnostics/record' &&
+    String(req.url || '').length <= 160 &&
+    isLoopbackAddress(req.socket?.remoteAddress) &&
+    !req.headers?.origin &&
+    /^[a-f0-9]{32}$/.test(String(requestUrl.searchParams.get('id') || ''));
+}
+
+function sourceOpenCacheDiagnosticRecord(record) {
+  if (!record) return { status: 'missing', bytes: 0, totalBytes: 0, failure: null };
+  const categories = new Set([
+    'canceled', 'timeout', 'upstream_http', 'network', 'source_unavailable', 'access_blocked',
+    'media_invalid', 'media_integrity', 'storage', 'extractor', 'unknown'
+  ]);
+  const status = ['idle', 'queued', 'downloading', 'ready', 'error'].includes(record.status)
+    ? record.status : 'missing';
+  const bounded = value => Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Number(value) || 0));
+  return {
+    status,
+    bytes: bounded(record.bytes),
+    totalBytes: bounded(record.totalBytes),
+    failure: categories.has(record.failureCategory) ? {
+      category: record.failureCategory,
+      attempts: Math.min(255, bounded(record.failureAttempts))
+    } : null
+  };
+}
+
+function authorizeGenericMediaUrl(rawUrl, referer = '') {
+  const target = publicMediaPageUrl(rawUrl);
+  const hostname = target.hostname.toLowerCase();
+  genericMediaAllowedHosts.set(hostname, Date.now() + GENERIC_MEDIA_AUTH_TTL_MS);
+  if (referer) {
+    try {
+      const page = publicMediaPageUrl(referer);
+      genericMediaReferers.set(hostname, {
+        url: page.toString(),
+        expiresAt: Date.now() + GENERIC_MEDIA_AUTH_TTL_MS
+      });
+      genericMediaUrlReferers.set(target.toString(), {
+        url: page.toString(),
+        expiresAt: Date.now() + GENERIC_MEDIA_AUTH_TTL_MS
+      });
+    } catch (_) {}
+  }
+  return target;
+}
+
+function authorizeGenericMediaRedirect(rawUrl, priorTarget) {
+  const priorHost = String(priorTarget?.hostname || '').toLowerCase();
+  if (Number(genericMediaAllowedHosts.get(priorHost) || 0) <= Date.now()) {
+    return gatewayTargetUrl(rawUrl);
+  }
+  const priorUrl = priorTarget?.toString?.() || '';
+  const referer = genericMediaUrlReferers.get(priorUrl)?.url ||
+    genericMediaReferers.get(priorHost)?.url || priorUrl;
+  return authorizeGenericMediaUrl(rawUrl, referer);
+}
+
+function publicMediaPageUrl(raw) {
+  let target;
+  try {
+    target = new URL(String(raw || '').trim());
+  } catch (_) {
+    throw new Error('invalid media page URL');
+  }
+  const hostname = target.hostname.toLowerCase().replace(/\.$/, '');
+  const blocked =
+    target.protocol !== 'https:' ||
+    target.username || target.password ||
+    hostname === 'localhost' || hostname.endsWith('.localhost') ||
+    hostname === '0.0.0.0' || hostname === '::1' ||
+    /^(?:127|10)\./.test(hostname) ||
+    /^192\.168\./.test(hostname) ||
+    /^169\.254\./.test(hostname) ||
+    /^172\.(?:1[6-9]|2\d|3[01])\./.test(hostname) ||
+    hostname.endsWith('.local') || hostname.endsWith('.internal');
+  if (blocked) throw new Error('media page host is not public');
+  target.hash = '';
+  return target;
+}
+
+function looksLikeGenericMediaResource(rawUrl, contentType = '') {
+  const type = String(contentType || '').toLowerCase();
+  if (/^(?:video|audio)\//.test(type)) return true;
+  if (/mpegurl|dash\+xml/.test(type)) return true;
+  try {
+    const target = new URL(rawUrl);
+    return /\.(?:mp4|m4v|mov|webm|mkv|m3u8|ogv)(?:$|[?#])/i.test(target.pathname + target.search) ||
+      ((target.hostname === 'googlevideo.com' || target.hostname.endsWith('.googlevideo.com')) && target.pathname === '/api/manifest/hls') ||
+      /\/hls\/[^/]+\/(?:master|index|playlist)\.txt$/i.test(target.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
+function looksLikeGenericHlsResource(rawUrl, contentType = '') {
+  const type = String(contentType || '').toLowerCase();
+  if (/mpegurl/.test(type)) return true;
+  try {
+    const target = new URL(String(rawUrl || ''));
+    return /\.m3u8$/i.test(target.pathname) ||
+      ((target.hostname === 'googlevideo.com' || target.hostname.endsWith('.googlevideo.com')) && target.pathname === '/api/manifest/hls') ||
+      /\/hls\/[^/]+\/(?:master|index|playlist)\.txt$/i.test(target.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
+function rewriteGenericHlsPlaylist(rawPlaylist, playlistUrl) {
+  let inheritedReferer = '';
+  try {
+    const playlistTarget = new URL(playlistUrl);
+    inheritedReferer = genericMediaUrlReferers.get(playlistTarget.toString())?.url ||
+      genericMediaReferers.get(playlistTarget.hostname.toLowerCase())?.url || '';
+  } catch (_) {}
+  const rewrite = value => {
+    const raw = String(value || '').trim();
+    if (!raw || raw.startsWith('data:')) return raw;
+    try {
+      const absolute = new URL(raw, playlistUrl).toString();
+      // Signed HLS CDNs commonly require the original watch page as Referer
+      // for every segment. Do not replace it with the intermediate CDN
+      // playlist URL while walking master -> rendition -> segment.
+      authorizeGenericMediaUrl(absolute, inheritedReferer);
+      return genericHlsProxyPath(absolute);
+    } catch (_) {
+      return raw;
+    }
+  };
+  return String(highestQualityHlsMaster(rawPlaylist) || '')
+    .split(/\r?\n/)
+    .map(line => {
+      if (!line) return line;
+      if (!line.startsWith('#')) return rewrite(line);
+      return line.replace(/\bURI="([^"]+)"/gi, (_match, value) => `URI="${rewrite(value)}"`);
+    })
+    .join('\n');
+}
+
+async function fetchPublicMediaPage(rawUrl, { timeoutMs = 20000, referer = '' } = {}) {
+  let target = publicMediaPageUrl(rawUrl);
+  for (let redirect = 0; redirect <= GATEWAY_MAX_REDIRECTS; redirect++) {
+    await requireMediaVpn(target);
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml;q=0.9,video/*;q=0.8,*/*;q=0.7',
+      'Accept-Language': 'en-US,en;q=0.9'
+    };
+    if (referer) headers.Referer = referer;
+    const response = await fetch(target, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(Math.max(3000, timeoutMs)),
+      headers
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+      if (!location) throw new Error(`media page redirect ${response.status} has no location`);
+      target = publicMediaPageUrl(new URL(location, target).toString());
+      continue;
+    }
+    if (!response.ok) {
+      const error = new Error(`media page HTTP ${response.status}`);
+      if (response.status === 403 || response.status === 429) error.code = 'page_challenge';
+      throw error;
+    }
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    if (contentType && !contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
+      if (looksLikeGenericMediaResource(target, contentType)) {
+        await response.body?.cancel().catch(() => {});
+        return { url: target.toString(), html: '', mediaUrl: target.toString(), contentType };
+      }
+      throw new Error('URL is not an HTML media page');
+    }
+    const html = await response.text();
+    if (Buffer.byteLength(html, 'utf8') > 4 * 1024 * 1024) throw new Error('media page is too large');
+    return { url: target.toString(), html };
+  }
+  throw new Error('too many media page redirects');
+}
+
+async function extractGenericMediaWithYtDlp(rawUrl, { timeoutMs = 45_000 } = {}) {
+  await requireMediaVpn(rawUrl);
+  return new Promise((resolve, reject) => {
+    const python = path.join(LOCAL_AI_DIR, 'lora-venv', 'Scripts', 'python.exe');
+    const child = spawn(python, [
+      '-m', 'yt_dlp', '--no-warnings', '--skip-download', '--no-playlist',
+      '--impersonate', 'chrome', '--socket-timeout', '15',
+      '-f', 'best[vcodec^=h264][ext=mp4]/best[vcodec^=avc1][ext=mp4]/best[ext=mp4]/best',
+      '--print', '%(url)s', String(rawUrl || '')
+    ], {
+      cwd: process.cwd(),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (error, urls = []) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(urls);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch (_) {}
+      finish(new Error('generic yt-dlp extraction timed out'));
+    }, Math.max(8000, Number(timeoutMs || 45_000)));
+    timer.unref?.();
+    child.stdout.on('data', chunk => {
+      stdout += chunk.toString();
+      if (stdout.length > 2 * 1024 * 1024) child.kill();
+    });
+    child.stderr.on('data', chunk => { stderr += chunk.toString().slice(0, 8192); });
+    child.once('error', finish);
+    child.once('close', code => {
+      const urls = [...new Set(stdout.split(/\r?\n/).map(value => value.trim()).filter(value => {
+        try {
+          const target = publicMediaPageUrl(value);
+          return target.protocol === 'https:';
+        } catch (_) {
+          return false;
+        }
+      }))];
+      if (urls.length) finish(null, urls.slice(0, 8));
+      else finish(new Error(stderr.trim().split(/\r?\n/).pop() || `generic yt-dlp exited ${code}`));
+    });
+  });
+}
+
+async function extractGenericMediaWithBrowser(rawUrl, { timeoutMs = 40_000 } = {}) {
+  await requireMediaVpn(rawUrl, true);
+  const releaseBrowser = await acquireGenericMediaBrowser();
+  let browser = null;
+  const captured = new Set();
+  let lastMedia = [];
+  let title = '';
+  let hlsCapturedAt = 0;
+  try {
+    browser = await startSimpCityBrowser({
+      headless: true,
+      hidden: true,
+      preserveMediaUrls: true,
+      allowMutedMediaPlayback: true,
+      stealth: true,
+      targetUrl: rawUrl,
+      cookies: [],
+      userAgent: ''
+    });
+    const recordResponse = params => {
+      const response = params?.response || {};
+      const value = String(response.url || '');
+      if (!value) return;
+      if (looksLikeGenericMediaResource(value, response.mimeType || '')) captured.add(value);
+    };
+    const removeListener = browser.cdp.on('Network.responseReceived', recordResponse);
+    try {
+      await browser.cdp.send('Page.reload', { ignoreCache: true }, Math.max(5000, timeoutMs));
+      const deadline = Date.now() + Math.max(5000, timeoutMs);
+      while (Date.now() < deadline) {
+        await simpCityDelay(900);
+        const snapshot = await browser.cdp.evaluate(`(() => {
+          document.querySelectorAll('video,audio').forEach(media => {
+            media.muted = true;
+            media.volume = 0;
+            try {
+              media.playbackRate = 16;
+              if (Number.isFinite(media.duration) && media.duration > 0 && media.duration < 90 && media.currentTime < media.duration - .5) {
+                media.currentTime = Math.max(0, media.duration - .25);
+              }
+              media.play().catch(() => {});
+            } catch (_) {}
+          });
+          const selectors = [
+            '.jw-display-icon-container', '.jw-icon-playback', '.vjs-big-play-button',
+            '[class*="play-button"]', '[class*="playButton"]', '[aria-label*="play" i]'
+          ];
+          for (const selector of selectors) {
+            const element = document.querySelector(selector);
+            if (element) { try { element.click(); } catch (_) {} }
+          }
+          for (const element of document.querySelectorAll('button,a,[role="button"]')) {
+            const label = String(element.innerText || element.getAttribute?.('aria-label') || '').trim();
+            if (/^(?:skip(?:\s+ad)?|close(?:\s+ad)?|continue)$/i.test(label)) {
+              try { element.click(); } catch (_) {}
+            }
+          }
+          const playerData = [];
+          try {
+            if (typeof window.jwplayer === 'function') {
+              const ids = [...document.querySelectorAll('.jwplayer[id]')].map(node => node.id);
+              for (const id of ['', ...ids]) {
+                try {
+                  const instance = id ? window.jwplayer(id) : window.jwplayer();
+                  const item = instance?.getPlaylistItem?.();
+                  if (item) playerData.push(item);
+                  const playlist = instance?.getPlaylist?.();
+                  if (playlist) playerData.push(playlist);
+                  const config = instance?.getConfig?.();
+                  if (config) playerData.push(config);
+                  try { instance?.setMute?.(true); } catch (_) {}
+                  try { instance?.setVolume?.(0); } catch (_) {}
+                  try { instance?.skipAd?.(); } catch (_) {}
+                  try {
+                    const duration = Number(instance?.getDuration?.() || 0);
+                    if (duration > 0 && duration < 120) instance?.seek?.(Math.max(0, duration - .05));
+                    instance?.play?.(true);
+                  } catch (_) {}
+                } catch (_) {}
+              }
+            }
+          } catch (_) {}
+          try {
+            const item = window.player?.getPlaylistItem?.();
+            if (item) playerData.push(item);
+          } catch (_) {}
+          const globalData = [];
+          const namedPlayerGlobals = ['pConf', 'qsx', 'kaken', 'utekmek', 'apx', 'downloadURL'];
+          const globalKeys = [...new Set([
+            ...namedPlayerGlobals,
+            ...Object.keys(window).filter(key => /(?:video|source|file|stream|config|player|playlist|download)/i.test(key))
+          ])].slice(0, 180);
+          for (const key of globalKeys) {
+            try {
+              const value = window[key];
+              if (typeof value === 'string' && value.length < 10000) globalData.push({ key, value });
+              else if (value && typeof value === 'object' && !(value instanceof Node)) {
+                const json = JSON.stringify(value);
+                if (json && json.length < 250000) globalData.push({ key, value });
+              }
+            } catch (_) {}
+          }
+          return {
+            title: String(document.title || ''),
+            html: String(document.documentElement?.outerHTML || '').slice(0, 4000000),
+            resources: performance.getEntriesByType('resource').map(entry => String(entry.name || '')).slice(-2000),
+            media: [...document.querySelectorAll('video,audio,source')].flatMap(media => [
+              String(media.currentSrc || ''), String(media.src || ''),
+              String(media.getAttribute?.('data-src') || ''), String(media.getAttribute?.('data-file') || '')
+            ]).filter(Boolean),
+            playerData,
+            globalData
+          };
+        })()`, 8000, true).catch(() => null);
+        if (!snapshot) continue;
+        title = snapshot.title || title;
+        const primary = extractGenericMediaPageMetadata(snapshot.html || '', rawUrl);
+        if (primary.identityEvidence === 'page-video-object' && primary.videoUrls.length) {
+          return { title: primary.title || title, videoUrls: primary.videoUrls,
+            durationSeconds: primary.durationSeconds, identityEvidence: primary.identityEvidence };
+        }
+        lastMedia = (snapshot.media || []).filter(Boolean);
+        for (const value of [...(snapshot.resources || []), ...(snapshot.media || [])]) {
+          if (looksLikeGenericMediaResource(value)) captured.add(value);
+        }
+        extractGenericVideoUrlsFromHtml(snapshot.html || '', rawUrl).forEach(value => captured.add(value));
+        extractGenericVideoUrlsFromHtml(JSON.stringify(snapshot.playerData || []), rawUrl)
+          .forEach(value => captured.add(value));
+        extractGenericVideoUrlsFromHtml(JSON.stringify(snapshot.globalData || []), rawUrl)
+          .forEach(value => captured.add(value));
+        if ([...captured].some(value => looksLikeGenericHlsResource(value))) {
+          if (!hlsCapturedAt) hlsCapturedAt = Date.now();
+          if (Date.now() - hlsCapturedAt >= 3000) break;
+        }
+      }
+      const ordered = [...new Set([...captured, ...lastMedia])]
+        .filter(value => looksLikeGenericMediaResource(value))
+        .sort((left, right) => Number(looksLikeGenericHlsResource(right)) - Number(looksLikeGenericHlsResource(left)));
+      return { title, videoUrls: ordered.slice(0, 64) };
+    } finally {
+      removeListener?.();
+    }
+  } finally {
+    if (browser) await stopSimpCityBrowser(browser).catch(() => {});
+    releaseBrowser();
+  }
+}
+
+async function extractGenericListingWithBrowser(rawUrl, { timeoutMs = 25_000 } = {}) {
+  await requireMediaVpn(rawUrl, true);
+  const releaseBrowser = await acquireGenericMediaBrowser();
+  let browser = null;
+  const collected = new Set();
+  let lastGrowthAt = Date.now();
+  try {
+    browser = await startSimpCityBrowser({
+      headless: true,
+      hidden: true,
+      preserveMediaUrls: false,
+      allowMutedMediaPlayback: false,
+      stealth: true,
+      targetUrl: rawUrl,
+      cookies: [],
+      userAgent: ''
+    });
+    await browser.cdp.send('Page.reload', { ignoreCache: true }, Math.max(5000, timeoutMs)).catch(() => {});
+    const deadline = Date.now() + Math.max(5000, timeoutMs);
+    while (Date.now() < deadline) {
+      await simpCityDelay(500);
+      const snapshot = await browser.cdp.evaluate(`(() => {
+        try { window.scrollTo(0, Math.max(document.body?.scrollHeight || 0, document.documentElement?.scrollHeight || 0)); } catch (_) {}
+        for (const element of document.querySelectorAll('*')) {
+          try {
+            if (element.scrollHeight > element.clientHeight + 200) element.scrollTop = element.scrollHeight;
+          } catch (_) {}
+        }
+        return {
+          url: String(location.href || ''),
+          html: String(document.documentElement?.outerHTML || '').slice(0, 4000000)
+        };
+      })()`, 8000, true).catch(() => null);
+      if (!snapshot?.html) continue;
+      const links = extractGenericWatchPageUrlsFromHtml(snapshot.html, snapshot.url || rawUrl, 40);
+      const before = collected.size;
+      links.forEach(link => collected.add(link));
+      if (collected.size > before) lastGrowthAt = Date.now();
+      if (collected.size >= 40 || (collected.size >= 2 && Date.now() - lastGrowthAt >= 2500)) {
+        return [...collected].slice(0, 40);
+      }
+    }
+    return [...collected].slice(0, 40);
+  } finally {
+    if (browser) await stopSimpCityBrowser(browser).catch(() => {});
+    releaseBrowser();
+  }
+}
+
+async function inspectGenericHlsPlayback(rawUrl, referer = '', timeoutMs = 12_000) {
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36',
+    'Accept': 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*;q=0.8'
+  };
+  if (referer) headers.Referer = referer;
+  const readPlaylist = async url => {
+    const response = await fetch(url, {
+      headers,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!response.ok) throw new Error(`HLS HTTP ${response.status}`);
+    const text = await response.text();
+    if (!/^#EXTM3U/m.test(text)) throw new Error('HLS response is not a playlist');
+    return { text, url: response.url || url };
+  };
+  try {
+    let playlist = await readPlaylist(rawUrl);
+    if (/#EXT-X-STREAM-INF:/i.test(playlist.text)) {
+      const lines = highestQualityHlsMaster(playlist.text).split(/\r?\n/);
+      const variants = [];
+      for (let index = 0; index < lines.length; index++) {
+        if (!/^#EXT-X-STREAM-INF:/i.test(lines[index])) continue;
+        const height = Number(lines[index].match(/RESOLUTION=\d+x(\d+)/i)?.[1] || 0);
+        const next = lines.slice(index + 1).find(line => line.trim() && !line.trim().startsWith('#'));
+        if (next) variants.push({ height, url: new URL(next.trim(), playlist.url).toString() });
+      }
+      variants.sort((left, right) => right.height - left.height);
+      if (!variants.length) throw new Error('HLS master has no rendition');
+      playlist = await readPlaylist(variants[0].url);
+    }
+    const durationSeconds = playlist.text.split(/\r?\n/).reduce((total, line) => {
+      const seconds = Number(line.match(/^#EXTINF:([0-9.]+)/i)?.[1] || 0);
+      return total + (Number.isFinite(seconds) ? seconds : 0);
+    }, 0);
+    const segmentLine = playlist.text.split(/\r?\n/).find(line => line.trim() && !line.trim().startsWith('#'));
+    if (!segmentLine) throw new Error('HLS media playlist has no segment');
+    const segmentUrl = new URL(segmentLine.trim(), playlist.url).toString();
+    const segment = await fetch(segmentUrl, {
+      headers: { ...headers, Range: 'bytes=0-1023' },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    const segmentType = String(segment.headers.get('content-type') || '');
+    const playable = (segment.status === 200 || segment.status === 206) && !/(?:text\/html|application\/(?:json|xml))/i.test(segmentType);
+    await segment.body?.cancel().catch(() => {});
+    return { playable, durationSeconds: playable ? durationSeconds : 0 };
+  } catch (_) {
+    return { playable: false, durationSeconds: 0 };
+  }
+}
+
+async function inspectGenericMediaPlayback(rawUrl, referer = '', timeoutMs = 12_000) {
+  if (looksLikeGenericHlsResource(rawUrl)) {
+    return inspectGenericHlsPlayback(rawUrl, referer, timeoutMs);
+  }
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36',
+    'Accept': 'video/*,audio/*;q=0.9,*/*;q=0.7',
+    'Range': 'bytes=0-1023'
+  };
+  if (referer) headers.Referer = referer;
+  try {
+    const response = await fetch(rawUrl, {
+      headers,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    const type = String(response.headers.get('content-type') || '').toLowerCase();
+    const playable = (response.status === 200 || response.status === 206) &&
+      (/^(?:video|audio)\//.test(type) || /octet-stream|application\/ogg/.test(type));
+    await response.body?.cancel().catch(() => {});
+    return { playable, durationSeconds: 0 };
+  } catch (_) {
+    return { playable: false, durationSeconds: 0 };
+  }
+}
+
+async function inspectRecallMediaSource(mediaUrl, referer) {
+  // Duration metadata is not proof that Pong can read the media. Check from
+  // the playback server's network context, coalescing immediate replay checks.
+  const key = `${referer}\n${mediaUrl}`;
+  const cached = genericMediaProbeCache.get(key);
+  if (cached?.expiresAt > Date.now()) return cached.promise;
+  if (genericMediaProbeCache.size >= 512) genericMediaProbeCache.delete(genericMediaProbeCache.keys().next().value);
+  const promise = inspectGenericMediaPlayback(mediaUrl, referer, 8000);
+  genericMediaProbeCache.set(key, { promise, expiresAt: Date.now() + 30_000 });
+  const result = await promise;
+  if (!result.playable) genericMediaProbeCache.delete(key);
+  return result;
+}
+
+async function resolveGenericMediaPage(rawUrl, { allowListing = true, requireHighestQuality = false } = {}) {
+  const rootUrl = publicMediaPageUrl(rawUrl).toString();
+  await requireMediaVpn(rootUrl);
+  const cacheKey = `${allowListing ? 'list' : 'main'}:${requireHighestQuality ? 'strict:' : ''}${rootUrl}`;
+  const cached = genericMediaResolutionCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+  const promise = (async () => {
+    const visited = new Set();
+    const found = [];
+    const listingTargets = [];
+    let title = '';
+    let durationSeconds = 0;
+    let primaryDeclared = false;
+    const add = (value, referer) => {
+      try {
+        const target = authorizeGenericMediaUrl(value, referer || rootUrl);
+        const normalized = target.toString();
+        if (!found.includes(normalized)) found.push(normalized);
+      } catch (_) {}
+    };
+    const visit = async (url, depth, referer = '') => {
+      const normalized = publicMediaPageUrl(url).toString();
+      if (visited.has(normalized) || visited.size >= 8) return;
+      visited.add(normalized);
+      const fetched = await fetchPublicMediaPage(normalized, { timeoutMs: 20_000, referer });
+      if (fetched.mediaUrl) {
+        add(fetched.mediaUrl, referer || rootUrl);
+        return;
+      }
+      const media = extractGenericMediaPageMetadata(fetched.html, fetched.url);
+      if (depth === 0 && media.identityEvidence === 'page-video-object') primaryDeclared = true;
+      if (!title && media.title) title = media.title;
+      if (!durationSeconds && Number(media.durationSeconds || 0) > 0) {
+        durationSeconds = Number(media.durationSeconds);
+      }
+      if (depth === 0) {
+        const root = new URL(rootUrl);
+        const rootLooksLikeWatchPage = (
+          /\/view_video\.php\?[^#]*\bviewkey=/i.test(root.pathname + root.search) ||
+          /\/(?:watch|videos?|scene|post)\/(?!search(?:[/?#]|$)|category(?:[/?#]|$)|tags?(?:[/?#]|$))[^/?#]+/i.test(root.pathname)
+        );
+        if (allowListing && !rootLooksLikeWatchPage && !primaryDeclared) {
+          listingTargets.push(...extractGenericWatchPageUrlsFromHtml(fetched.html, fetched.url, 40));
+        }
+      }
+      // A listing's inline GIFs, trailers, advertisements and hover previews
+      // are not independent videos. Resolve each genuine watch page instead.
+      if (!listingTargets.length) media.videoUrls.forEach(value => add(value, fetched.url));
+      if (primaryDeclared) return;
+      // A page can contain a directly declared trailer/source and one or more
+      // embedded full videos. Stopping after the first MP4 silently omitted
+      // the remaining media, so continue through this bounded embed tree.
+      if (depth >= 2) return;
+      const embeds = extractGenericEmbedUrlsFromHtml(fetched.html, fetched.url).slice(0, 6);
+      await Promise.all(embeds.map(embed => visit(embed, depth + 1, fetched.url).catch(() => {})));
+    };
+
+    await visit(rootUrl, 0).catch(async error => {
+      // A public page may require browser rendering even when a plain HTML
+      // request fails. Use the existing silent browser path, never credentials
+      // from another profile and never claim a challenge page as a video.
+      const dynamic = await extractGenericMediaWithBrowser(rootUrl, { timeoutMs: 14000 });
+      if (!dynamic.videoUrls?.length) throw error;
+      title = dynamic.title || title;
+      durationSeconds = Number(dynamic.durationSeconds || 0);
+      primaryDeclared = dynamic.identityEvidence === 'page-video-object';
+      dynamic.videoUrls.forEach(value => add(value, rootUrl));
+    });
+    if (allowListing && listingTargets.length < 2 && !primaryDeclared && !found.length) {
+      const root = new URL(rootUrl);
+      const rootLooksLikeWatchPage = (
+        /\/view_video\.php\?[^#]*\bviewkey=/i.test(root.pathname + root.search) ||
+        /\/(?:watch|videos?|scene|post)\/(?!search(?:[/?#]|$)|category(?:[/?#]|$)|tags?(?:[/?#]|$))[^/?#]+/i.test(root.pathname)
+      );
+      if (!rootLooksLikeWatchPage) {
+        const browserListings = await extractGenericListingWithBrowser(rootUrl).catch(() => []);
+        if (browserListings.length >= 2) {
+          listingTargets.length = 0;
+          listingTargets.push(...browserListings);
+          found.length = 0;
+        }
+      }
+    }
+    if (listingTargets.length >= 2) {
+      const entries = new Array(listingTargets.length);
+      let nextListingIndex = 0;
+      await Promise.all(Array.from({ length: Math.min(6, listingTargets.length) }, async () => {
+        while (nextListingIndex < listingTargets.length) {
+          const index = nextListingIndex++;
+          const watchUrl = listingTargets[index];
+          try {
+            const entry = await resolveGenericMediaPage(watchUrl, { allowListing: false });
+            entries[index] = {
+              requestedUrl: watchUrl,
+              ...entry,
+              entries: undefined
+            };
+          } catch (error) {
+            entries[index] = {
+              requestedUrl: watchUrl,
+              pageUrl: watchUrl,
+              title: '',
+              durationSeconds: 0,
+              videoUrls: [],
+              error: error.message || String(error)
+            };
+          }
+        }
+      }));
+      return {
+        pageUrl: rootUrl,
+        title,
+        durationSeconds: 0,
+        videoUrls: [],
+        entries: entries.filter(entry => Array.isArray(entry?.videoUrls) && entry.videoUrls.length)
+      };
+    }
+    if (!found.length) {
+      const extracted = await extractGenericMediaWithYtDlp(rootUrl).catch(() => []);
+      extracted.forEach(value => add(value, rootUrl));
+    }
+    if (!found.length) {
+      // Run the deepest discovered player first. Top-level pages commonly
+      // embed a cross-origin player whose feature manifest is requested before
+      // the parent reload listener attaches, leaving only later ad traffic.
+      // Opening the player itself exposes the authoritative JW/HLS requests
+      // and also avoids waiting through a full preroll cycle.
+      const dynamicTargets = [...visited].reverse().slice(0, 4);
+      for (const dynamicTarget of dynamicTargets) {
+        const dynamic = await extractGenericMediaWithBrowser(dynamicTarget, { timeoutMs: 25_000 })
+          .catch(() => ({ title: '', videoUrls: [] }));
+        if (!title && dynamic.title) title = dynamic.title;
+        dynamic.videoUrls.forEach(value => add(value, dynamicTarget));
+        if (found.some(value => looksLikeGenericHlsResource(value))) break;
+      }
+    }
+    let resolvedVideoUrls = found;
+    const rootHost = new URL(rootUrl).hostname.toLowerCase();
+    if (rootHost === 'pornhub.com' || rootHost.endsWith('.pornhub.com')) {
+      // Pornhub watch pages include the active movie followed by many short
+      // recommendation previews.  Their CDN paths carry a stable numeric
+      // content id; retain only the first (active) id so a swipe/source retry
+      // can never rotate from the 12-minute movie into a ten-second preview.
+      const contentId = value => String(value || '').match(/\/videos\/\d{6}\/\d{2}\/(\d+)\//i)?.[1]
+        || String(value || '').match(/\boriginal_(\d+)\.(?:mp4|m4v|mov|webm)/i)?.[1]
+        || '';
+      const primaryId = resolvedVideoUrls.map(contentId).find(Boolean) || '';
+      if (primaryId) {
+        const ownSources = resolvedVideoUrls.filter(value => contentId(value) === primaryId);
+        if (ownSources.length) resolvedVideoUrls = ownSources;
+      }
+      const quality = value => {
+        const text = String(value || '');
+        const height = Number(text.match(/(?:^|[/_-])(\d{3,4})P(?:[_./-]|$)/i)?.[1] || 0);
+        const isMaster = /master\.m3u8(?:[?#]|$)/i.test(text) ? 1 : 0;
+        const isHls = /\.m3u8(?:[?#]|$)/i.test(text) ? 1 : 0;
+        // Prefer the highest declared rendition and its adaptive master.  The
+        // standalone `original` URL is frequently a protected image/redirect
+        // endpoint rather than a browser-playable progressive file.
+        return (height * 1_000_000) + (isMaster * 10_000) + (isHls * 1_000);
+      };
+      const renditionHeight = value => Number(String(value || '').match(/(?:^|[/_-])(\d{3,4})P(?:[_./-]|$)/i)?.[1] || 0);
+      const rankedSources = resolvedVideoUrls
+        .map((value, index) => ({ value, index, score: quality(value) }))
+        .sort((left, right) => right.score - left.score || left.index - right.index)
+        .map(item => item.value);
+      const selectPlayableSource = async candidates => {
+        for (const candidate of candidates.slice(0, 12)) {
+          const inspection = await inspectGenericMediaPlayback(candidate, rootUrl);
+          if (!inspection.playable) continue;
+          if (!durationSeconds && inspection.durationSeconds > 0) {
+            durationSeconds = inspection.durationSeconds;
+          }
+          return candidate;
+        }
+        return '';
+      };
+      let selectedSource = await selectPlayableSource(rankedSources);
+      let highestKnownHeight = Math.max(0, ...rankedSources.map(renditionHeight));
+      if (!selectedSource || renditionHeight(selectedSource) < highestKnownHeight) {
+        // Static manifests can contain expired/protected placeholders. Capture
+        // the stream the real player requests, then apply the same identity,
+        // quality, and byte-level validation before exposing it to Pong.
+        const dynamic = await extractGenericMediaWithBrowser(rootUrl, { timeoutMs: 14_000 })
+          .catch(() => ({ title: '', videoUrls: [] }));
+        if (!title && dynamic.title) title = dynamic.title;
+        let refreshed = [...new Set((dynamic.videoUrls || []).filter(Boolean))];
+        if (primaryId) {
+          const ownRefreshed = refreshed.filter(value => contentId(value) === primaryId);
+          if (ownRefreshed.length) refreshed = ownRefreshed;
+        }
+        refreshed = refreshed
+          .map((value, index) => ({ value, index, score: quality(value) }))
+          .sort((left, right) => right.score - left.score || left.index - right.index)
+          .map(item => item.value);
+        highestKnownHeight = Math.max(highestKnownHeight, ...refreshed.map(renditionHeight));
+        refreshed.forEach(value => add(value, rootUrl));
+        const refreshedSource = await selectPlayableSource(refreshed);
+        if (refreshedSource && (!selectedSource || quality(refreshedSource) > quality(selectedSource))) {
+          selectedSource = refreshedSource;
+        }
+      }
+      // `highestKnownHeight` describes what the page advertised, not what the
+      // origin actually serves. Expired signatures and dead placeholder URLs
+      // used to make a verified 1080p/720p source fail merely because a broken
+      // higher label was present. Both the static and refreshed lists are
+      // sorted highest-first and probed in that order, so `selectedSource` is
+      // already the highest *accessible* rendition. Keep that verified source
+      // instead of reporting quality_unverified for an inaccessible advert.
+      // These are renditions of one logical video. Expose only the highest
+      // rendition whose first actual media segment is playable, rather than
+      // trusting a master URL that can lead to a 404/410 after attachment.
+      resolvedVideoUrls = selectedSource ? [selectedSource] : [];
+    }
+    return { pageUrl: rootUrl, title, durationSeconds, videoUrls: resolvedVideoUrls.slice(0, 64) };
+  })();
+  genericMediaResolutionCache.set(cacheKey, { promise, expiresAt: Date.now() + 30 * 60_000 });
+  try {
+    const resolved = await promise;
+    // A challenge, delayed player, or empty document is not a successful
+    // resolution. Do not pin that transient failure for the positive-cache TTL.
+    if (!resolved.videoUrls?.length && !resolved.entries?.length && genericMediaResolutionCache.get(cacheKey)?.promise === promise) {
+      genericMediaResolutionCache.delete(cacheKey);
+    }
+    return resolved;
+  } catch (error) {
+    genericMediaResolutionCache.delete(cacheKey);
+    throw error;
+  }
+}
+
+function gatewayMediaReferer(rawTarget) {
+  const target = rawTarget instanceof URL ? rawTarget : gatewayTargetUrl(rawTarget);
+  const hostname = target.hostname.toLowerCase();
+  const exactReferer = genericMediaUrlReferers.get(target.toString());
+  if (exactReferer?.expiresAt > Date.now() && exactReferer.url) return exactReferer.url;
+  if (exactReferer) genericMediaUrlReferers.delete(target.toString());
+  const dynamicReferer = genericMediaReferers.get(hostname);
+  if (dynamicReferer?.expiresAt > Date.now() && dynamicReferer.url) return dynamicReferer.url;
+  if (dynamicReferer) genericMediaReferers.delete(hostname);
+  if (hostname === 'coomerfans.com' || hostname.endsWith('.coomerfans.com')) {
+    return 'https://coomerfans.com/';
+  }
+  if (hostname === 'onlyfaphouse.com' || hostname.endsWith('.onlyfaphouse.com')) {
+    return 'https://onlyfaphouse.com/';
+  }
+  if (hostname === 'cdn.cr' || hostname.endsWith('.cdn.cr')) {
+    return 'https://dl.bunkr.cr/';
+  }
+  if (hostname === 'turbocdn.st' || hostname.endsWith('.turbocdn.st')) {
+    return 'https://turbo.cr/';
+  }
+  if (hostname === 'scdn.st' || hostname.endsWith('.scdn.st')) {
+    return 'https://simpcity.cr/';
+  }
+  return `${target.protocol}//${target.host}/`;
 }
 
 const gatewayCookieJars = new Map();
@@ -583,6 +1564,7 @@ async function gatewayH2Fetch(rawUrl, { signal = null, timeoutMs = GATEWAY_TIMEO
   if (signal?.aborted) throw new DOMException('gateway request aborted', 'AbortError');
   let target = gatewayTargetUrl(rawUrl);
   for (let redirect = 0; redirect <= GATEWAY_MAX_REDIRECTS; redirect++) {
+    await requireMediaVpn(target);
     const response = await new Promise((resolve, reject) => {
       if (signal?.aborted) {
         reject(new DOMException('gateway request aborted', 'AbortError'));
@@ -596,7 +1578,7 @@ async function gatewayH2Fetch(rawUrl, { signal = null, timeoutMs = GATEWAY_TIMEO
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'accept-language': 'en-US,en;q=0.9',
-        referer: `${target.protocol}//${target.host}/`,
+        referer: gatewayMediaReferer(target),
         'accept-encoding': 'gzip, br'
       };
       const cookie = gatewayCookieHeader(target);
@@ -654,7 +1636,7 @@ async function gatewayH2Fetch(rawUrl, { signal = null, timeoutMs = GATEWAY_TIMEO
     });
     gatewayStoreResponseCookies(target, response.headers);
     if (response.status >= 300 && response.status < 400 && response.headers.location) {
-      target = gatewayTargetUrl(new URL(String(response.headers.location), target).toString());
+      target = authorizeGenericMediaRedirect(new URL(String(response.headers.location), target).toString(), target);
       continue;
     }
     return response;
@@ -670,6 +1652,7 @@ async function gatewayHttp1BufferFetch(rawUrl, { signal = null, timeoutMs = GATE
   }
   let target = gatewayTargetUrl(rawUrl);
   for (let redirect = 0; redirect <= GATEWAY_MAX_REDIRECTS; redirect++) {
+    await requireMediaVpn(target);
     gatewayHttp1FallbackStats.requests++;
     const response = await new Promise((resolve, reject) => {
       let settled = false;
@@ -686,7 +1669,7 @@ async function gatewayHttp1BufferFetch(rawUrl, { signal = null, timeoutMs = GATE
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
         Connection: 'keep-alive',
-        Referer: `${target.protocol}//${target.host}/`
+        Referer: gatewayMediaReferer(target)
       };
       const cookie = gatewayCookieHeader(target);
       if (cookie) headers.Cookie = cookie;
@@ -719,7 +1702,7 @@ async function gatewayHttp1BufferFetch(rawUrl, { signal = null, timeoutMs = GATE
     if (status >= 300 && status < 400 && location) {
       response.resume();
       if (redirect >= GATEWAY_MAX_REDIRECTS) throw new Error('too many gateway HTTP/1 redirects');
-      target = gatewayTargetUrl(new URL(String(location), target).toString());
+      target = authorizeGenericMediaRedirect(new URL(String(location), target).toString(), target);
       continue;
     }
     const chunks = [];
@@ -753,15 +1736,22 @@ function gatewayRequest(current, req, controller, method = req.method === 'HEAD'
   return new Promise((resolve, reject) => {
     let settled = false;
     const headers = {
-      'User-Agent': 'Mozilla/5.0 PongLocalGateway/1.1',
+      // Generic CDNs frequently reject bot-shaped gateway user agents even
+      // when the same signed media URL works in Android Chromium.
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
       'Accept': String(req.headers?.accept || '*/*'),
       'Accept-Encoding': String(req.headers?.['accept-encoding'] || 'gzip, deflate, br'),
       'Connection': 'keep-alive',
-      'Referer': `${current.protocol}//${current.host}/`
+      'Referer': gatewayMediaReferer(current)
     };
-    for (const name of ['range', 'if-none-match', 'if-modified-since']) {
+    for (const name of ['range', 'if-range', 'if-none-match', 'if-modified-since']) {
       if (req.headers?.[name]) headers[name] = String(req.headers[name]);
     }
+    // Preserve the decoder/browser's Range exactly. The former 4 MiB desktop
+    // cap truncated PyAV's open-ended reads mid-packet (Pexels: 35/241 frames;
+    // the identical source decoded fully without the proxy). Cancellation is
+    // already handled by streamGatewayResponse destroying its upstream body;
+    // it must not be implemented by silently shortening a media response.
     const finish = (error, response) => {
       if (settled) return;
       settled = true;
@@ -808,15 +1798,17 @@ async function writeBrowserSecrets(secrets) {
 async function gatewayFetch(target, req, controller, method) {
   let current = gatewayTargetUrl(target);
   for (let redirect = 0; redirect <= GATEWAY_MAX_REDIRECTS; redirect++) {
+    await requireMediaVpn(current);
     const response = await gatewayRequest(current, req, controller, method);
     const status = Number(response.statusCode || 0);
     const location = response.headers.location;
     if (status < 300 || status >= 400 || !location) {
+      response.pongFinalUrl = current.toString();
       return response;
     }
     response.resume();
     if (redirect >= GATEWAY_MAX_REDIRECTS) throw new Error('too many gateway redirects');
-    current = gatewayTargetUrl(new URL(location, current).toString());
+    current = authorizeGenericMediaRedirect(new URL(location, current).toString(), current);
   }
   throw new Error('gateway redirect failed');
 }
@@ -838,12 +1830,23 @@ function videoVerifyDelay(ms, signal = null) {
 
 function gatewayHtmlReleaseSlot() {
   gatewayHtmlFetchStats.active = Math.max(0, gatewayHtmlFetchStats.active - 1);
-  const next = gatewayHtmlFetchWaiters.shift();
+  let selectedIndex = -1;
+  for (let index = 0; index < gatewayHtmlFetchWaiters.length; index++) {
+    if (
+      selectedIndex < 0 ||
+      gatewayHtmlFetchWaiters[index].priority > gatewayHtmlFetchWaiters[selectedIndex].priority ||
+      (
+        gatewayHtmlFetchWaiters[index].priority === gatewayHtmlFetchWaiters[selectedIndex].priority &&
+        gatewayHtmlFetchWaiters[index].sequence < gatewayHtmlFetchWaiters[selectedIndex].sequence
+      )
+    ) selectedIndex = index;
+  }
+  const next = selectedIndex >= 0 ? gatewayHtmlFetchWaiters.splice(selectedIndex, 1)[0] : null;
   gatewayHtmlFetchStats.queued = gatewayHtmlFetchWaiters.length;
-  next?.();
+  next?.enter?.();
 }
 
-function gatewayHtmlAcquireSlot(signal = null) {
+function gatewayHtmlAcquireSlot(signal = null, priority = 0) {
   if (signal?.aborted) {
     return Promise.reject(new DOMException('gateway HTML request aborted', 'AbortError'));
   }
@@ -852,19 +1855,25 @@ function gatewayHtmlAcquireSlot(signal = null) {
     return Promise.resolve(gatewayHtmlReleaseSlot);
   }
   return new Promise((resolve, reject) => {
+    const waiter = {
+      enter: null,
+      priority: Number(priority || 0),
+      sequence: ++gatewayHtmlWaiterSequence
+    };
     const enter = () => {
       signal?.removeEventListener('abort', abort);
       gatewayHtmlFetchStats.active++;
       gatewayHtmlFetchStats.queued = gatewayHtmlFetchWaiters.length;
       resolve(gatewayHtmlReleaseSlot);
     };
+    waiter.enter = enter;
     const abort = () => {
-      const index = gatewayHtmlFetchWaiters.indexOf(enter);
+      const index = gatewayHtmlFetchWaiters.indexOf(waiter);
       if (index >= 0) gatewayHtmlFetchWaiters.splice(index, 1);
       gatewayHtmlFetchStats.queued = gatewayHtmlFetchWaiters.length;
       reject(new DOMException('gateway HTML request aborted', 'AbortError'));
     };
-    gatewayHtmlFetchWaiters.push(enter);
+    gatewayHtmlFetchWaiters.push(waiter);
     gatewayHtmlFetchStats.queued = gatewayHtmlFetchWaiters.length;
     signal?.addEventListener('abort', abort, { once: true });
   });
@@ -905,22 +1914,35 @@ function gatewayHtmlRecordStatus(status) {
   }
 }
 
-async function gatewayHtmlBeginAttempt(signal = null) {
+async function gatewayHtmlBeginAttempt(signal = null, priority = 0) {
   const initialBackoff = gatewayHtmlBackoffRemainingMs();
   if (initialBackoff > 0) {
     gatewayHtmlFetchStats.skipped++;
-    throw new Error(`gateway HTML shared backoff (${initialBackoff}ms remaining)`);
+    const error = new Error(`gateway HTML shared backoff (${initialBackoff}ms remaining)`);
+    error.pongTransient = true;
+    error.retryAfterMs = initialBackoff;
+    throw error;
   }
-  const release = await gatewayHtmlAcquireSlot(signal);
+  const release = await gatewayHtmlAcquireSlot(signal, priority);
   try {
-    const waitMs = Math.max(0, gatewayHtmlFetchStats.nextStartAt - Date.now());
-    if (waitMs > 0) await videoVerifyDelay(waitMs, signal);
+    const startAt = Math.max(
+      Date.now(),
+      Number(gatewayHtmlFetchStats.nextStartAt || 0),
+      Number(gatewaySharedSourceNextStartAt || 0)
+    );
+    // Reserve synchronously before waiting so the second HTML lane and the
+    // video verifier cannot select the same start time.
+    gatewayHtmlFetchStats.nextStartAt = startAt + gatewayHtmlFetchStats.gapMs;
+    gatewaySharedSourceNextStartAt = startAt + GATEWAY_SHARED_SOURCE_GAP_MS;
+    await awaitGatewaySourceLaunch(signal, { requestedAt: startAt, html: true });
     const backoff = gatewayHtmlBackoffRemainingMs();
     if (backoff > 0) {
       gatewayHtmlFetchStats.skipped++;
-      throw new Error(`gateway HTML shared backoff (${backoff}ms remaining)`);
+      const error = new Error(`gateway HTML shared backoff (${backoff}ms remaining)`);
+      error.pongTransient = true;
+      error.retryAfterMs = backoff;
+      throw error;
     }
-    gatewayHtmlFetchStats.nextStartAt = Date.now() + gatewayHtmlFetchStats.gapMs;
     gatewayHtmlFetchStats.requests++;
     return release;
   } catch (error) {
@@ -936,8 +1958,10 @@ function videoVerifyStateForHost(hostname) {
       host,
       queue: [],
       active: 0,
+      foregroundProofActive: 0,
       activeByGroup: new Map(),
       nextStartAt: 0,
+      actualNextStartAt: 0,
       backoffUntil: 0,
       rateLimits: 0,
       completed: 0,
@@ -972,22 +1996,34 @@ function pumpVideoVerifyFetchQueue(state) {
       continue;
     }
     state.active++;
+    item.foregroundProof = item.priorityControl?.foregroundProof === true;
+    if (item.foregroundProof) state.foregroundProofActive++;
     state.activeByGroup.set(item.groupId, (state.activeByGroup.get(item.groupId) || 0) + 1);
     state.queueWaitTotalMs += Math.max(0, Date.now() - item.enqueuedAt);
-    const startAt = Math.max(Date.now(), Number(state.nextStartAt || 0));
+    const startAt = Math.max(
+      Date.now(),
+      Number(state.nextStartAt || 0),
+      Number(gatewaySharedSourceNextStartAt || 0)
+    );
     state.nextStartAt = startAt + VIDEO_VERIFY_START_GAP_MS;
+    gatewaySharedSourceNextStartAt = startAt + GATEWAY_SHARED_SOURCE_GAP_MS;
     Promise.resolve()
       .then(async () => {
         // Admission concurrency controls sockets, while this reservation
         // controls request rate. Previously 128 sockets could all start at
         // once and the source expressed its rate limit as HTTP 503.
-        const waitMs = Math.max(startAt, state.backoffUntil) - Date.now();
-        if (waitMs > 0) await videoVerifyDelay(waitMs, item.signal);
+        await awaitGatewaySourceLaunch(item.signal, {
+          requestedAt: startAt,
+          hostState: state
+        });
         return item.task(state);
       })
       .then(item.resolve, item.reject)
       .finally(() => {
         state.active = Math.max(0, state.active - 1);
+        if (item.foregroundProof) {
+          state.foregroundProofActive = Math.max(0, Number(state.foregroundProofActive || 0) - 1);
+        }
         const groupActive = Math.max(0, (state.activeByGroup.get(item.groupId) || 0) - 1);
         if (groupActive) state.activeByGroup.set(item.groupId, groupActive);
         else state.activeByGroup.delete(item.groupId);
@@ -1061,6 +2097,12 @@ function availableGatewayHosts() {
   return available.length ? available : GATEWAY_ALLOWED_HOSTS;
 }
 
+function gatewayHtmlIsTransientInterstitial(html) {
+  const value = String(html || '').slice(0, 250000);
+  return /<title[^>]*>\s*(?:Just a moment|Access denied|Bad gateway|Service unavailable|Gateway Timeout)/i.test(value) ||
+    /(?:cf-chl-|challenge-platform|cloudflare.*(?:challenge|ray id)|error code\s*(?:502|503|504))/i.test(value);
+}
+
 function random40ReservoirVerifiedCount() {
   return random40Reservoir.reduce((count, item) => count + (item?.verified ? 1 : 0), 0);
 }
@@ -1070,7 +2112,7 @@ function random40ReservoirIsReady() {
     random40ReservoirVerifiedCount() >= RANDOM40_RESERVOIR_READY_MIN;
 }
 
-async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = null) {
+async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = null, options = {}) {
   // Listing/profile reservoirs occasionally return transient 503/5xx responses
   // while their edge is rotating. A single failure used to permanently discard
   // that candidate page, starving Local2.2 even when the browser could load it.
@@ -1079,10 +2121,15 @@ async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = nu
   const maxAttempts = 3;
   let lastStatus = 0;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const releaseGatewaySlot = await gatewayHtmlBeginAttempt(signal);
+    const releaseGatewaySlot = await gatewayHtmlBeginAttempt(signal, Number(options?.priority || 0));
+    if (signal?.aborted) {
+      releaseGatewaySlot();
+      throw new DOMException('gateway request aborted', 'AbortError');
+    }
     const controller = new AbortController();
     const abort = () => controller.abort();
-    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       let response;
@@ -1093,8 +2140,14 @@ async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = nu
       }
       let status = Number(response?.status || 0);
       if (status >= 200 && status < 300) {
-        gatewayHtmlRecordStatus(status);
-        return response.body.toString('utf8');
+        const html = response.body.toString('utf8');
+        if (!gatewayHtmlIsTransientInterstitial(html)) {
+          gatewayHtmlRecordStatus(status);
+          return html;
+        }
+        // Challenge/error documents sometimes arrive with HTTP 200. They are
+        // availability failures, not evidence that an artist has zero posts.
+        status = 503;
       }
       let transient = status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
       // A transient response belongs to this stream, not necessarily the
@@ -1114,8 +2167,12 @@ async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = nu
           });
           status = Number(fallback.status || 0);
           if (status >= 200 && status < 300) {
-            gatewayHtmlRecordStatus(status);
-            return fallback.body.toString('utf8');
+            const html = fallback.body.toString('utf8');
+            if (!gatewayHtmlIsTransientInterstitial(html)) {
+              gatewayHtmlRecordStatus(status);
+              return html;
+            }
+            status = 503;
           }
           transient = status === 408 || status === 425 || status === 429 || status >= 500;
         } catch (_) {}
@@ -1126,11 +2183,15 @@ async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = nu
       // transport fallback only; it does not change candidate or model rules.
       if (transient && !controller.signal.aborted) {
         try {
-          const nativeHtml = await gatewayPowerShellFetchHtml(rawUrl, { timeoutMs });
-          if (nativeHtml) {
+          const nativeHtml = await gatewayPowerShellFetchHtml(rawUrl, {
+            timeoutMs,
+            signal: controller.signal
+          });
+          if (nativeHtml && !gatewayHtmlIsTransientInterstitial(nativeHtml)) {
             gatewayHtmlRecordStatus(200);
             return nativeHtml;
           }
+          if (nativeHtml) status = 503;
         } catch (_) {}
       }
       lastStatus = status;
@@ -1144,7 +2205,11 @@ async function random40ReservoirFetchHtml(rawUrl, timeoutMs = 12000, signal = nu
     await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
     if (signal?.aborted) throw new DOMException('gateway request aborted', 'AbortError');
   }
-  throw new Error(`reservoir HTTP ${lastStatus || 0}`);
+  const error = new Error(`reservoir HTTP ${lastStatus || 0}`);
+  error.pongTransient = true;
+  const retryAfterMs = Math.max(0, gatewayHtmlBackoffRemainingMs());
+  if (retryAfterMs) error.retryAfterMs = retryAfterMs;
+  throw error;
 }
 
 function random40ReservoirArtistUrls(html, pageUrl, { includeRecent = false } = {}) {
@@ -1398,7 +2463,12 @@ function fillRandom40Reservoir() {
       // promising profiles first. Every candidate remains eligible; this only
       // changes order, not the 15-playable-video or visual acceptance rules.
       const preparedCandidates = [];
-      await random40ReservoirPool(candidates.slice(0, 128), 48, async candidate => {
+      // Do not enqueue an entire listing page ahead of the deep verifier. The
+      // shared 650 ms source floor made 48 shallow profile requests delay the
+      // first eligible artist by 30+ seconds. A small ranked window gets one
+      // candidate through the complete 15-video proof promptly, then refills.
+      const shallowCandidateLimit = Math.max(8, Math.min(16, RANDOM40_RESERVOIR_TARGET));
+      await random40ReservoirPool(candidates.slice(0, shallowCandidateLimit), 4, async candidate => {
         const identity = random40ReservoirIdentity(candidate.artistUrl);
         if (!identity || random40ReservoirRecent.has(identity) || random40ReservoirPending.has(identity)) return;
         random40ReservoirPending.add(identity);
@@ -1433,8 +2503,8 @@ function fillRandom40Reservoir() {
       while (random40ReservoirRecent.size > 1200) {
         random40ReservoirRecent.delete(random40ReservoirRecent.values().next().value);
       }
-      const deepCandidates = preparedCandidates.slice(0, 64);
-      preparedCandidates.slice(64).forEach(candidate => random40ReservoirPending.delete(candidate.identity));
+      const deepCandidates = preparedCandidates.slice(0, shallowCandidateLimit);
+      preparedCandidates.slice(shallowCandidateLimit).forEach(candidate => random40ReservoirPending.delete(candidate.identity));
       await random40ReservoirPool(deepCandidates, RANDOM40_RESERVOIR_PROFILE_CONCURRENCY, async candidate => {
         const artistUrl = candidate.artistUrl;
         const identity = candidate.identity || random40ReservoirIdentity(artistUrl);
@@ -2280,7 +3350,7 @@ function random40AcceptedRejectionReasons() {
 }
 
 function fillRandom40AcceptedReservoir() {
-  if (!RANDOM40_RESERVOIR_ENABLED) return Promise.resolve();
+  if (!RANDOM40_RESERVOIR_ENABLED || !RANDOM40_ACCEPTED_PREAPPROVAL_ENABLED) return Promise.resolve();
   if (localDiscoveryForegroundActive) return Promise.resolve();
   if (Date.now() < random40AcceptedRefillPausedUntil || foregroundClassifyRequests > 0) return Promise.resolve();
   if (random40AcceptedFillPromise) return random40AcceptedFillPromise;
@@ -2379,6 +3449,7 @@ function fillRandom40AcceptedReservoir() {
 }
 
 function scheduleRandom40AcceptedReservoir(delayMs = 0) {
+  if (!RANDOM40_ACCEPTED_PREAPPROVAL_ENABLED) return;
   const timer = setTimeout(() => fillRandom40AcceptedReservoir().catch(() => {}), Math.max(0, delayMs));
   timer.unref();
 }
@@ -2667,14 +3738,60 @@ function extractGalleryDlVideoUrls(sourceUrl) {
   });
 }
 
-function extractTikTokVideoUrls(sourceUrl, signal = null) {
+function tiktokMetricNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function tiktokVideoEntry(rawUrl, metrics = {}) {
+  try {
+    const url = new URL(String(rawUrl || '').trim());
+    if (url.protocol !== 'https:' || !isTikTokVideoPageUrl(url.toString())) return null;
+    const id = String(metrics.id || url.pathname.match(/\/video\/(\d{12,24})/i)?.[1] || '');
+    return {
+      url: url.toString(),
+      id,
+      viewCount: tiktokMetricNumber(metrics.viewCount),
+      likeCount: tiktokMetricNumber(metrics.likeCount),
+      repostCount: tiktokMetricNumber(metrics.repostCount),
+      commentCount: tiktokMetricNumber(metrics.commentCount),
+      timestamp: tiktokMetricNumber(metrics.timestamp)
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function sortTikTokVideoEntries(entries = []) {
+  const unique = new Map();
+  for (const rawEntry of entries) {
+    const entry = rawEntry?.url ? tiktokVideoEntry(rawEntry.url, rawEntry) : tiktokVideoEntry(rawEntry);
+    if (!entry) continue;
+    const previous = unique.get(entry.url);
+    if (!previous || entry.viewCount > previous.viewCount) unique.set(entry.url, entry);
+  }
+  return [...unique.values()].sort((left, right) => (
+    right.viewCount - left.viewCount ||
+    right.likeCount - left.likeCount ||
+    right.repostCount - left.repostCount ||
+    right.commentCount - left.commentCount ||
+    right.timestamp - left.timestamp ||
+    String(right.id).localeCompare(String(left.id))
+  ));
+}
+
+function extractTikTokVideoEntries(sourceUrl, signal = null) {
   return new Promise((resolve, reject) => {
     const python = path.join(LOCAL_AI_DIR, 'lora-venv', 'Scripts', 'python.exe');
     const child = spawn(python, [
       '-m', 'yt_dlp', '--no-warnings', '--impersonate', 'chrome',
       '--ignore-errors', '--playlist-end', '12', '--skip-download', '-f',
       'best[vcodec^=h264][ext=mp4]/best[vcodec^=avc1][ext=mp4]/best[ext=mp4]',
-      '--print', '%(webpage_url)s\t%(vcodec)s\t%(ext)s', sourceUrl
+      // TikTok's profile extractor returns newest-first. Preserve its fast,
+      // bounded 12-post scan, but retain the public engagement metrics so Pong
+      // can present the most-watched available posts first instead of merely
+      // replaying extractor order.
+      '--print', '%(webpage_url)s\t%(vcodec)s\t%(ext)s\t%(view_count)s\t%(like_count)s\t%(repost_count)s\t%(comment_count)s\t%(timestamp)s\t%(id)s', sourceUrl
     ], {
       cwd: process.cwd(),
       windowsHide: true,
@@ -2683,13 +3800,13 @@ function extractTikTokVideoUrls(sourceUrl, signal = null) {
     let stdout = '';
     let stderr = '';
     let settled = false;
-    const finish = (error, urls = []) => {
+    const finish = (error, entries = []) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
       if (error) reject(error);
-      else resolve(urls);
+      else resolve(entries);
     };
     const abort = () => {
       child.kill();
@@ -2708,20 +3825,30 @@ function extractTikTokVideoUrls(sourceUrl, signal = null) {
     child.stderr.on('data', chunk => { stderr += chunk.toString(); });
     child.on('error', finish);
     child.on('close', code => {
-      const urls = stdout.split(/\r?\n/).map(value => value.trim()).flatMap(value => {
-        const [rawUrl, rawCodec, rawExt] = value.split('\t');
+      const entries = stdout.split(/\r?\n/).map(value => value.trim()).flatMap(value => {
+        const [rawUrl, rawCodec, rawExt, rawViews, rawLikes, rawReposts, rawComments, rawTimestamp, rawId] = value.split('\t');
         const codec = String(rawCodec || '').toLowerCase();
         const ext = String(rawExt || '').toLowerCase();
         if (!codec || codec === 'none' || codec === 'na' || (ext && ext !== 'mp4')) return [];
-        try {
-          const url = new URL(rawUrl);
-          return url.protocol === 'https:' && isTikTokVideoPageUrl(url.toString()) ? [url.toString()] : [];
-        } catch (_) { return []; }
+        const entry = tiktokVideoEntry(rawUrl, {
+          id: rawId,
+          viewCount: rawViews,
+          likeCount: rawLikes,
+          repostCount: rawReposts,
+          commentCount: rawComments,
+          timestamp: rawTimestamp
+        });
+        return entry ? [entry] : [];
       });
-      if (urls.length) finish(null, [...new Set(urls)].slice(0, 20));
+      const sorted = sortTikTokVideoEntries(entries).slice(0, 20);
+      if (sorted.length) finish(null, sorted);
       else finish(new Error(stderr.trim() || `TikTok extractor exited ${code}`));
     });
   });
+}
+
+async function extractTikTokVideoUrls(sourceUrl, signal = null) {
+  return (await extractTikTokVideoEntries(sourceUrl, signal)).map(entry => entry.url);
 }
 
 async function mapWithConcurrency(items, limit, mapper) {
@@ -2740,6 +3867,14 @@ async function extractBunkrVideoUrls(albumUrl, { signal = null, onVideo = null }
   const advancedUrl = new URL(albumUrl);
   advancedUrl.searchParams.set('advanced', '1');
   const html = await fetchBunkrImportHtml(advancedUrl.toString());
+  if (/^\/(?:f|v)\//i.test(advancedUrl.pathname)) {
+    const resolvedFile = await resolveBunkrFileVideoUrl(albumUrl, { html, signal }).catch(() => '');
+    const playableFile = resolvedFile
+      ? await probePlayableMediaUrl(resolvedFile, signal, 4000).catch(() => false)
+      : false;
+    if (playableFile && typeof onVideo === 'function') onVideo(resolvedFile);
+    return playableFile ? [resolvedFile] : [];
+  }
   const albumFilesMatch = html.match(/window\.albumFiles\s*=\s*\[([\s\S]*?)<\/script>/i);
   const script = albumFilesMatch?.[1] || '';
   const files = [];
@@ -2760,7 +3895,7 @@ async function extractBunkrVideoUrls(albumUrl, { signal = null, onVideo = null }
     Origin: 'https://dl.bunkr.cr',
     'Content-Type': 'application/json'
   };
-  const resolved = await mapWithConcurrency(files, 50, async file => {
+  const resolved = await mapWithConcurrency(files, 4, async file => simpCityBunkrFileResolveLimit(async () => {
     if (signal?.aborted) return '';
     try {
       const fileSignal = signal && typeof AbortSignal.any === 'function'
@@ -2786,13 +3921,49 @@ async function extractBunkrVideoUrls(albumUrl, { signal = null, onVideo = null }
       const mediaUrl = new URL(`${data.mediafiles}${data.path}`);
       Object.entries(sign).forEach(([key, value]) => mediaUrl.searchParams.set(key, String(value)));
       const resolvedUrl = mediaUrl.toString();
+      // Signing proves only that the object exists in Bunkr's catalog. Some
+      // legacy storage shards continue issuing signatures while their edge is
+      // returning 503. Recall's existing minimum remains twenty, but only
+      // byte-proven video objects are allowed to satisfy that count.
+      if (!await probePlayableMediaUrl(resolvedUrl, signal, 4000)) return '';
       if (typeof onVideo === 'function') onVideo(resolvedUrl);
       return resolvedUrl;
     } catch (_) {
       return '';
     }
-  });
+  }));
   return [...new Set(resolved.filter(Boolean))];
+}
+
+function isBunkrFilePageCandidate(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ''));
+    const host = url.hostname.replace(/^www\./, '').toLowerCase();
+    if (url.pathname.includes('...')) return false;
+    if (/^(?:bunkr\.(?:cr|ph|pk|si|ru|su|la|fi|site|black|media)|bunkrrr\.org|xbunkr\.com)$/i.test(host)) {
+      return /^\/(?:f|v)\/[a-z0-9_.%,-]+$/i.test(url.pathname);
+    }
+    return /^(?:cdn\.)?bunkr\.(?:cr|ph|pk|si|ru|su|la|fi|site|black|media)$/i.test(host) &&
+      /\.(?:mp4|m4v|mov|webm)$/i.test(url.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function resolveBunkrFileVideoUrl(rawUrl, { html = '', signal = null } = {}) {
+  if (!isBunkrFilePageCandidate(rawUrl)) return '';
+  const pageHtml = String(html || '') || await fetchBunkrImportHtml(rawUrl);
+  if (signal?.aborted) throw new DOMException('Bunkr resolution aborted', 'AbortError');
+  const match = pageHtml.match(/\b(?:var|let|const)\s+jsCDN\s*=\s*["']([^"']+)["']/i)
+    || pageHtml.match(/\bjsCDN\s*:\s*["']([^"']+)["']/i);
+  const candidate = decodeHtmlUrl(String(match?.[1] || ''))
+    .replace(/\\\//g, '/')
+    .trim();
+  if (!candidate) return '';
+  let parsed;
+  try { parsed = new URL(candidate); } catch (_) { return ''; }
+  if (parsed.protocol !== 'https:' || !/(^|\.)cdn\.cr$/i.test(parsed.hostname)) return '';
+  return refreshBunkrCdnSignedUrl(parsed.toString(), { signal, force: true });
 }
 
 const SIMPCITY_USER_AGENT =
@@ -2992,9 +4163,9 @@ async function extractTikTokCandidateProfile(candidate, fallbackVideos = []) {
   const timer = setTimeout(() => controller.abort(), 30000);
   timer.unref?.();
   try {
-    let videos = [];
+    let videoEntries = [];
     try {
-      videos = await extractTikTokVideoUrls(profileUrl, controller.signal);
+      videoEntries = await extractTikTokVideoEntries(profileUrl, controller.signal);
     } catch (profileError) {
       const indexedVideos = Array.isArray(fallbackVideos)
         ? [...new Set(fallbackVideos.filter(Boolean))].slice(0, 8)
@@ -3004,16 +4175,17 @@ async function extractTikTokCandidateProfile(candidate, fallbackVideos = []) {
       // playable MP4, otherwise Pong would show a side deck that never loads.
       const verified = await mapWithConcurrency(indexedVideos, 4, async videoUrl => {
         try {
-          const resolved = await extractTikTokVideoUrls(videoUrl, controller.signal);
-          return resolved.includes(videoUrl) ? videoUrl : resolved[0] || '';
+          const resolved = await extractTikTokVideoEntries(videoUrl, controller.signal);
+          return resolved.find(entry => entry.url === videoUrl) || resolved[0] || null;
         } catch (_) {
-          return '';
+          return null;
         }
       });
-      videos = verified.filter(Boolean);
-      if (!videos.length) throw profileError;
+      videoEntries = sortTikTokVideoEntries(verified.filter(Boolean));
+      if (!videoEntries.length) throw profileError;
     }
-    return videos.length ? { username: candidate, profileUrl, videos } : null;
+    const videos = videoEntries.map(entry => entry.url);
+    return videos.length ? { username: candidate, profileUrl, videos, videoEntries } : null;
   } finally {
     clearTimeout(timer);
   }
@@ -3064,11 +4236,36 @@ function enqueueSimpCityArtistLookup(rawNames) {
   return { queued: queued.length, pending: simpCityArtistLookupQueue.length, active: simpCityArtistLookupActive };
 }
 const simpCityRecallChannels = new Map([
-  [1, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), skipSeenEnabled: false }],
-  [2, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), skipSeenEnabled: false }],
-  [3, { payload: null, pending: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), skipSeenEnabled: false }]
+  [1, { payload: null, pending: null, mediaCapture: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), creatorPairAggregates: new Map(), skipSeenEnabled: false }],
+  [2, { payload: null, pending: null, mediaCapture: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), creatorPairAggregates: new Map(), skipSeenEnabled: false }],
+  [3, { payload: null, pending: null, mediaCapture: null, controller: null, finalizingId: '', skippedCreatorKeys: new Set(), collectionStoppedCreatorKeys: new Set(), collectionControllers: new Map(), creatorPairAggregates: new Map(), skipSeenEnabled: false }]
 ]);
 const simpCityRecallAlbumTasks = new Map();
+// A controlled restart may restore idle Recall payloads from a local snapshot.
+// No remote restore endpoint, source resolution, or outbound requests here.
+if (process.env.PONG_RECALL_RESTORE_FILE) {
+  const snapshot = JSON.parse(await fs.readFile(process.env.PONG_RECALL_RESTORE_FILE, 'utf8'));
+  for (const item of snapshot.channels || []) {
+    const state = simpCityRecallChannels.get(Number(item.channel));
+    if (!state || item.pending || item.recall?.live || item.mediaCapture?.state === 'running') {
+      throw new Error('Only idle Recall snapshots may be restored');
+    }
+    state.payload = item.recall || null;
+    state.mediaCapture = item.mediaCapture || null;
+    // The idle payload also needs its validated media authorization restored.
+    // Otherwise cards survive restart but their proxy/cache requests are denied
+    // because the process-local host and Referer maps started empty.
+    for (const bundle of state.payload?.genericBundles || []) {
+      for (const video of bundle.videos || []) {
+        for (const raw of new Set([video.videoUrl, ...(video.videoUrls || [])])) {
+          if (!raw) continue;
+          try { authorizeGenericMediaUrl(raw, video.pageUrl || bundle.pageUrl || ''); }
+          catch (_) { /* Invalid/non-public sources remain unauthorized. */ }
+        }
+      }
+    }
+  }
+}
 function simpCityRecallChannel(rawChannel) {
   const channel = Number(rawChannel);
   return channel === 3 ? 3 : channel === 2 ? 2 : 1;
@@ -3077,6 +4274,193 @@ function simpCityRecallState(rawChannel) {
   return simpCityRecallChannels.get(simpCityRecallChannel(rawChannel));
 }
 
+const desktopCaptureJobs = createDesktopCaptureJobs({
+  concurrency: 2,
+  active: context => {
+    const state = simpCityRecallState(context.channel);
+    return state.mediaCapture?.id === context.id && state.payload?.id === context.id;
+  },
+  resolve: async (target, context, verifying, signal) => {
+    const checkCaptureActive = () => {
+      if (signal?.aborted) throw Object.assign(new Error('timeout'), { code: 'timeout' });
+      if (simpCityRecallState(context.channel).mediaCapture?.id !== context.id) {
+        throw Object.assign(new Error('superseded'), { code: 'superseded' });
+      }
+    };
+    checkCaptureActive();
+    const started = Date.now();
+    const page = new URL(target.pageUrl);
+    const youtubeHost = page.hostname === 'youtu.be' || page.hostname === 'youtube.com' || page.hostname.endsWith('.youtube.com');
+    const youtubeVideoId = youtubeVideoIdFromPage(target.pageUrl);
+    // Index alone is not identity: ads and hydration can reorder native players.
+    // Only a same-page source fingerprint can admit a selected inline player.
+    if ((youtubeHost && (!youtubeVideoId || (target.logicalVideoId && target.logicalVideoId !== youtubeVideoId))) ||
+        (!youtubeHost && target.logicalVideoId &&
+          (!/^inline-video-[1-9]\d{0,3}$/.test(target.logicalVideoId) || !/^[a-f0-9]{64}$/.test(target.mediaIdentityHash || '')))) {
+      return { error: 'identity_unverified' };
+    }
+    try {
+      // The phone only queues a VPN operation and submits its links. Waiting
+      // belongs to this PC worker, never to a live browser polling loop.
+      if (requiresCaliforniaVpn(target.pageUrl)) await vpnControl.controller.operation;
+      checkCaptureActive();
+      await requireMediaVpn(target.pageUrl);
+    }
+    catch (_) { return { error: 'vpn_unavailable' }; }
+    checkCaptureActive();
+    const hintController = new AbortController();
+    const abortHints = () => hintController.abort();
+    signal?.addEventListener('abort', abortHints, { once: true });
+    try {
+    let resolved;
+    let resolutionError = null;
+    // Probe only the highest bound source hints while the normal PC resolver
+    // runs. Await the PC result before choosing; faster completion must never
+    // win over a better known rendition or an identity/quality rejection.
+    const hintProbes = new Map();
+    if (!youtubeHost && !target.logicalVideoId && target.sourceMediaHints?.length) {
+      for (const hint of planSourceMediaHints(null, null, target.sourceMediaHints).candidates) {
+        hintProbes.set(hint.url, verifySourceMediaHint(hint, { signal: hintController.signal }).catch(() => ({ playable: false })));
+      }
+    }
+    try {
+      if (youtubeHost) {
+        const youtube = await resolveYouTubeCapture(youtubeVideoId);
+        checkCaptureActive();
+        if (youtube.videoId !== youtubeVideoId) return { error: 'identity_unverified' };
+        const mediaUrl = authorizeGenericMediaUrl(youtube.videoUrl, target.pageUrl).toString();
+        resolved = { title: youtube.title, durationSeconds: youtube.durationSeconds, videoUrls: [mediaUrl] };
+      } else if (target.logicalVideoId) {
+        const fetched = await fetchPublicMediaPage(target.pageUrl, { timeoutMs: 20_000 });
+        checkCaptureActive();
+        const selected = resolveInlineVideoIdentityFromHtml({
+          html: fetched.html, pageUrl: fetched.url || target.pageUrl,
+          logicalVideoId: target.logicalVideoId, mediaIdentityHash: target.mediaIdentityHash
+        });
+        if (!selected) return { error: 'identity_unverified' };
+        resolved = { ...selected, title: '', videoUrls: selected.videoUrls.map(value =>
+          authorizeGenericMediaUrl(value, target.pageUrl).toString()) };
+      } else {
+        resolved = await resolveGenericMediaPage(target.pageUrl, { allowListing: false, requireHighestQuality: true });
+      }
+    } catch (error) { resolutionError = error; }
+    // A request already in flight may finish after its job deadline. Do not
+    // start another probe or accept its output after cancellation/supersession.
+    checkCaptureActive();
+    // Compare the independently bound hints with the PC result. Accept a
+    // strictly higher known rendition, never a downgrade or a rejected identity.
+    if (resolutionError?.code === 'quality_unverified') return { error: 'quality_unverified' };
+    const hintPlan = !youtubeHost && !target.logicalVideoId
+      ? planSourceMediaHints(resolved, resolutionError, target.sourceMediaHints)
+      : { mode: 'none', candidates: [] };
+    if (hintPlan.candidates.length) {
+      verifying();
+      const hintVerifyStarted = Date.now();
+      for (const hint of hintPlan.candidates) {
+        if (simpCityRecallState(context.channel).mediaCapture?.id !== context.id) return { error: 'superseded' };
+        const verified = await (hintProbes.get(hint.url) || verifySourceMediaHint(hint, { signal: hintController.signal }));
+        checkCaptureActive();
+        if (!verified.playable) continue;
+        const durationSeconds = Math.max(Number(target.durationSeconds || 0), Number(hint.durationSeconds || 0));
+        if (context.ignoreUnder30 && durationSeconds < 30) return { error: 'duration_unverified' };
+        const mediaUrl = authorizeGenericMediaUrl(verified.mediaUrl, target.pageUrl).toString();
+        return { video: { videoUrl: mediaUrl, videoUrls: [mediaUrl], pageUrl: target.pageUrl,
+          logicalVideoId: '', title: '', durationSeconds },
+          sourceSelection: { mode: `selected-source-${hintPlan.mode}`, width: hint.width, height: hint.height,
+            evidence: 'advertised-dimensions', verificationScope: 'response-headers', probesOverlappedResolution: true },
+          resolutionMs: hintVerifyStarted - started, verificationMs: Date.now() - hintVerifyStarted };
+      }
+      // A known higher advertised source was found but could not be verified.
+      // Do not silently fall back to the already-resolved lower source.
+      if (hintPlan.mode === 'upgrade') return { error: 'quality_unverified' };
+    }
+    if (resolutionError) {
+      if (resolutionError.code === 'page_challenge') {
+        console.warn('Desktop capture page challenge; source media was not accepted');
+      }
+      return { error: resolutionError.code === 'page_challenge' ? 'page_challenge' : 'resolution_failed' };
+    }
+    const resolutionMs = Date.now() - started;
+    const candidates = preferredDesktopCaptureMediaUrls(resolved?.videoUrls, resolved?.sources);
+    if (!candidates.length) return { error: 'no_video' };
+    verifying();
+    const verifyStarted = Date.now();
+    for (const mediaUrl of candidates.slice(0, 12)) {
+      if (simpCityRecallState(context.channel).mediaCapture?.id !== context.id) return { error: 'superseded' };
+      const inspection = await inspectRecallMediaSource(mediaUrl, target.pageUrl);
+      checkCaptureActive();
+      if (!inspection.playable) continue;
+      const durationSeconds = Math.max(
+        0,
+        Number(target.durationSeconds || 0),
+        Number(resolved.durationSeconds || 0),
+        Number(inspection.durationSeconds || 0)
+      );
+      if (context.ignoreUnder30 && (durationSeconds <= 0 || durationSeconds < 30)) return { error: 'duration_unverified' };
+      return {
+        video: {
+          videoUrl: mediaUrl,
+          videoUrls: [mediaUrl],
+          pageUrl: target.pageUrl,
+          logicalVideoId: target.logicalVideoId,
+          title: resolved.title || '',
+          durationSeconds
+        },
+        resolutionMs,
+        verificationMs: Date.now() - verifyStarted
+      };
+    }
+    return { error: 'source_unavailable' };
+    } finally {
+      signal?.removeEventListener('abort', abortHints);
+      abortHints();
+    }
+  },
+  commit: (context, video, completedPages) => {
+    const state = simpCityRecallState(context.channel);
+    if (state.mediaCapture?.id !== context.id || state.payload?.id !== context.id) {
+      throw Object.assign(new Error('superseded'), { code: 'superseded' });
+    }
+    const existingBundle = state.payload.genericBundles[0];
+    const videos = mergeRecallCapturedVideos(existingBundle.videos, [video]);
+    state.payload = {
+      ...state.payload,
+      genericBundles: [{ ...existingBundle, videos }],
+      savedAt: new Date().toISOString(),
+      fingerprint: crypto.createHash('sha256').update(`${context.sourceUrl}\n${videos.map(item => item.videoUrl).join('\n')}`).digest('hex')
+    };
+    state.mediaCapture = {
+      ...state.mediaCapture,
+      completedPages: Math.max(state.mediaCapture.completedPages, completedPages),
+      deliveredVideos: videos.length,
+      updatedAt: new Date().toISOString()
+    };
+    // Only the nearest two accepted direct sources get a small, low-priority
+    // prefix. Receipt/quality verification never waits for this optional I/O.
+    const startupUrl = startupPreparationUrl(video, videos.length);
+    if (startupUrl) {
+      try {
+        queueVideoFileCacheUrl(startupUrl, 2, { startupOnly: true });
+        pumpVideoFileCache();
+      } catch (_) { /* The normal range gateway remains available. */ }
+    }
+  },
+  finish: (context, status) => {
+    const state = simpCityRecallState(context.channel);
+    if (state.mediaCapture?.id !== context.id || state.payload?.id !== context.id) return;
+    const now = new Date().toISOString();
+    state.mediaCapture = {
+      ...state.mediaCapture,
+      state: status.readyCount ? 'complete' : 'empty',
+      completedPages: status.total,
+      deliveredVideos: status.readyCount,
+      updatedAt: now,
+      completedAt: now
+    };
+    state.payload = { ...state.payload, live: false, savedAt: now };
+  }
+});
+
 function resetSimpCityRecallState(state) {
   state.controller?.abort?.();
   for (const controller of state.collectionControllers?.values?.() || []) controller.abort?.();
@@ -3084,9 +4468,11 @@ function resetSimpCityRecallState(state) {
   state.finalizingId = '';
   state.payload = null;
   state.pending = null;
+  state.mediaCapture = null;
   state.skippedCreatorKeys = new Set();
   state.collectionStoppedCreatorKeys = new Set();
   state.collectionControllers = new Map();
+  state.creatorPairAggregates = new Map();
 }
 
 let pongPlayedHistoryLoaded = false;
@@ -3485,6 +4871,7 @@ class SimpCityCdpSession {
     this.url = url;
     this.nextId = 1;
     this.pending = new Map();
+    this.listeners = new Map();
   }
 
   async connect() {
@@ -3495,6 +4882,11 @@ class SimpCityCdpSession {
     });
     this.socket.addEventListener('message', event => {
       const message = JSON.parse(String(event.data || '{}'));
+      if (message.method && this.listeners.has(message.method)) {
+        for (const listener of this.listeners.get(message.method)) {
+          try { listener(message.params || {}); } catch (_) {}
+        }
+      }
       if (!message.id || !this.pending.has(message.id)) return;
       const pending = this.pending.get(message.id);
       this.pending.delete(message.id);
@@ -3524,13 +4916,13 @@ class SimpCityCdpSession {
     });
   }
 
-  async evaluate(expression, timeoutMs = 60_000) {
+  async evaluate(expression, timeoutMs = 60_000, userGesture = false) {
     const response = await this.send('Runtime.evaluate', {
       expression,
       awaitPromise: true,
       returnByValue: true,
       includeCommandLineAPI: false,
-      userGesture: false
+      userGesture: userGesture === true
     }, timeoutMs);
     if (response.exceptionDetails) {
       const detail = response.exceptionDetails.exception?.description || response.exceptionDetails.text;
@@ -3539,7 +4931,14 @@ class SimpCityCdpSession {
     return response.result?.value;
   }
 
+  on(method, listener) {
+    if (!this.listeners.has(method)) this.listeners.set(method, new Set());
+    this.listeners.get(method).add(listener);
+    return () => this.listeners.get(method)?.delete(listener);
+  }
+
   close() {
+    this.listeners.clear();
     try { this.socket?.close(); } catch (_) {}
   }
 }
@@ -3599,7 +4998,8 @@ async function reserveSimpCityDebugPort() {
   return port;
 }
 
-async function startSimpCityBrowser({ headless, hidden = false, allowLoopback = false, preserveMediaUrls = false, stealth = false, targetUrl, cookies = [], userAgent = '' }) {
+async function startSimpCityBrowser({ headless, hidden = false, allowLoopback = false, preserveMediaUrls = false, allowMutedMediaPlayback = false, stealth = false, targetUrl, cookies = [], userAgent = '' }) {
+  await requireMediaVpn(targetUrl, true);
   try {
     await fs.access(SIMPCITY_CHROME_PATH);
   } catch (_) {
@@ -3670,7 +5070,9 @@ async function startSimpCityBrowser({ headless, hidden = false, allowLoopback = 
         try { Object.defineProperty(navigator, 'languages', { configurable: true, get: () => ['en-US', 'en'] }); } catch (_) {}` : ''}
         const disableMedia = () => {
           document.querySelectorAll('video,audio').forEach(media => {
-            try { media.pause(); } catch (_) {}
+            if (${allowMutedMediaPlayback === true ? 'false' : 'true'}) {
+              try { media.pause(); } catch (_) {}
+            }
             media.muted = true;
             media.volume = 0;
             if (${preserveMediaUrls === true ? 'false' : 'true'}) {
@@ -3680,7 +5082,7 @@ async function startSimpCityBrowser({ headless, hidden = false, allowLoopback = 
             media.style.setProperty('display', 'none', 'important');
           });
         };
-        try {
+        if (${allowMutedMediaPlayback === true ? 'false' : 'true'}) try {
           Object.defineProperty(HTMLMediaElement.prototype, 'play', {
             configurable: true,
             value() { return Promise.reject(new DOMException('Media disabled', 'NotAllowedError')); }
@@ -4042,6 +5444,12 @@ async function submitSimpCityArtistSearch(browser, rawQuery, signal = null) {
     input.dispatchEvent(new Event('change', { bubbles: true }));
     const order = form.querySelector('[name="o"]');
     if (order) order.value = 'date';
+    const titleOnly = form.querySelector('[name="c[title_only]"], input[name*="[title_only]"]');
+    if (titleOnly) {
+      titleOnly.checked = true;
+      titleOnly.value = '1';
+      titleOnly.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     if (typeof form.requestSubmit === 'function') form.requestSubmit();
     else form.submit();
     return { ok: true, url: location.href, action: form.action || '' };
@@ -4071,8 +5479,9 @@ async function submitSimpCityArtistSearch(browser, rawQuery, signal = null) {
   return result;
 }
 
-async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved = true, rawArtistQuery = '') {
+async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved = true, rawArtistQuery = '', rawMulti = false) {
   const artistQuery = normalizeSimpCityArtistQuery(rawArtistQuery);
+  const multi = rawMulti === true;
   const requestedUrl = artistQuery ? 'https://simpcity.cr/search/' : rawUrl;
   const targetUrl = normalizeSimpCityBackgroundUrl(requestedUrl);
   if (!targetUrl) throw new Error('A valid SimpCity thread, tag, search, or forum URL is required');
@@ -4099,7 +5508,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
     await stopSimpCityBrowser(previous?.browser).catch(() => {});
     const login = await startSimpCityInteractiveLogin(targetUrl);
     const run = {
-      id: crypto.randomUUID(), channel, targetUrl, artistQuery, controller: new AbortController(), browser: null,
+      id: crypto.randomUUID(), channel, targetUrl, artistQuery, multi, controller: new AbortController(), browser: null,
       state: 'waiting_for_login', status: 'Open Pong and press Recall to finish the one-time PC login',
       startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: ''
     };
@@ -4125,7 +5534,7 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
   await stopSimpCityBrowser(previous?.browser).catch(() => {});
   const controller = new AbortController();
   const run = {
-    id: crypto.randomUUID(), channel, targetUrl, artistQuery, controller, browser: null,
+    id: crypto.randomUUID(), channel, targetUrl, artistQuery, multi, controller, browser: null,
     state: 'starting',
     status: profileResume
       ? `Pong ${channel}: resuming after the last passed profile`
@@ -4179,8 +5588,9 @@ async function startSimpCityBackgroundRecall(rawUrl, rawChannel, resumeFromSaved
       globalThis.PONG_SIMPCITY_CHANNEL = ${channel};
       globalThis.PONG_SIMPCITY_SOURCE_URL = ${JSON.stringify(scrapeSourceUrl)};
       globalThis.PONG_SIMPCITY_ARTIST_QUERY = ${JSON.stringify(artistQuery)};
+      globalThis.PONG_SIMPCITY_MULTI = ${multi};
       globalThis.PONG_SIMPCITY_RESUME_SKIP_PROFILES = ${Math.max(0, Number(profileCursor.passedProfiles || 0))};
-      globalThis.PONG_LOCAL_ENDPOINTS = ['http://127.0.0.1:8787'];
+      globalThis.PONG_LOCAL_ENDPOINTS = [${JSON.stringify(`http://127.0.0.1:${PORT}`)}];
       const request = options => {
         const timer = setTimeout(() => options.ontimeout?.(), Number(options.timeout || 90000));
         fetch(options.url, {
@@ -4818,11 +6228,23 @@ async function extractSimpCityCreatorsWithAi(rawPosts, signal = null, currentThr
 
 const simpCityRecallSearchLimit = createSimpCityLimiter(SIMPCITY_SEARCH_CONCURRENCY);
 const simpCityMediaResolveLimit = createSimpCityLimiter(4);
+// Creator orchestration is not itself a remote-host request. Keeping it on the
+// four-slot raw-media limiter serialized unrelated artists behind one slow
+// album. Six creator flows gives a 50% wider pipeline while the source/search
+// and Bunkr file limiters below continue to cap actual remote traffic.
+const simpCityCreatorPairLimit = createSimpCityLimiter(Math.max(
+  4,
+  Math.min(8, Number(process.env.PONG_SIMPCITY_CREATOR_CONCURRENCY || 6))
+));
+// Bunkr albums can expose hundreds of files. Bound that nested fan-out across
+// all creators so one album cannot starve the next Recall profile or trigger a
+// remote burst limit. Each album also uses only four of these eight fair lanes.
+const simpCityBunkrFileResolveLimit = createSimpCityLimiter(8);
 
 function isLikelyVideoRecord(record) {
   const mime = String(record?.mime_type || record?.mimetype || record?.type || '').toLowerCase();
   const name = String(record?.name || record?.filename || record?.link || record?.url || '');
-  return mime.startsWith('video/') || /\.(?:mp4|m4v|mov|webm)(?:$|[?#])/i.test(name);
+  return mime.startsWith('video/') || /\.(?:mp4|m4v|mkv|mov|webm)(?:$|[?#])/i.test(name);
 }
 
 function collectHostedVideoUrls(value, output = new Set(), depth = 0) {
@@ -4835,7 +6257,7 @@ function collectHostedVideoUrls(value, output = new Set(), depth = 0) {
         const url = new URL(candidate);
         const host = url.hostname.toLowerCase();
         if (
-          /\.(?:mp4|m4v|mov|webm)(?:$|[?#])/i.test(`${url.pathname}${url.search}`) ||
+          /\.(?:mp4|m4v|mkv|mov|webm)(?:$|[?#])/i.test(`${url.pathname}${url.search}`) ||
           (/(^|\.)gofile\.io$/i.test(host) && /\/download\//i.test(url.pathname))
         ) output.add(url.toString());
       } catch (_) {}
@@ -4951,18 +6373,24 @@ async function resolvePixeldrainVideos(rawUrl, signal = null) {
   return checked.map(item => item.status === 'fulfilled' ? item.value : '').filter(Boolean);
 }
 
-async function resolveGofileVideos(rawUrl, signal = null) {
+async function resolveGofileVideos(rawUrl, signal = null, rawPassword = '') {
   const id = new URL(rawUrl).pathname.match(/^\/d\/([a-z0-9_-]+)/i)?.[1] || '';
   if (!id) return [];
   const videos = new Set();
+  const password = String(rawPassword || '');
+  const passwordHash = password
+    ? crypto.createHash('sha256').update(password).digest('hex')
+    : '';
   // Public share pages commonly carry the resolved download data in their
   // application state. This path needs no stored Gofile credentials.
-  const html = await fetchSimpCityMediaPayload(rawUrl, { signal });
-  collectHostedVideoUrls(html, videos);
+  try {
+    const html = await fetchSimpCityMediaPayload(rawUrl, { signal });
+    collectHostedVideoUrls(html, videos);
+  } catch (_) {}
   try {
     const accountToken = await ensureGofileGuestToken(signal);
     const payload = await fetchSimpCityMediaPayload(
-      `https://api.gofile.io/contents/${encodeURIComponent(id)}?cache=true&page=1&pageSize=1000&maxdepth=5&sortField=createTime&sortDirection=1`,
+      `https://api.gofile.io/contents/${encodeURIComponent(id)}?cache=true&page=1&pageSize=1000&maxdepth=5&sortField=createTime&sortDirection=1${passwordHash ? `&password=${encodeURIComponent(passwordHash)}` : ''}`,
       {
         json: true,
         signal,
@@ -4977,6 +6405,21 @@ async function resolveGofileVideos(rawUrl, signal = null) {
     );
     collectHostedVideoUrls(payload, videos);
   } catch (_) {}
+  return [...videos];
+}
+
+async function resolveAnonfilesVideos(rawUrl, signal = null) {
+  const videos = new Set();
+  const html = await fetchSimpCityMediaPayload(rawUrl, { signal });
+  collectHostedVideoUrls(html, videos);
+  for (const match of String(html).matchAll(/(?:href|src)\s*=\s*["']([^"']+)["']/gi)) {
+    try {
+      const candidate = new URL(decodeHtmlUrl(match[1]), rawUrl);
+      if (candidate.protocol === 'https:' && /\.(?:mp4|m4v|mkv|mov|webm)(?:$|[?#])/i.test(`${candidate.pathname}${candidate.search}`)) {
+        videos.add(candidate.toString());
+      }
+    } catch (_) {}
+  }
   return [...videos];
 }
 
@@ -5000,9 +6443,22 @@ async function resolveSaintVideo(rawUrl, signal = null) {
 
 async function resolveSimpCityMediaLink(link, signal = null, options = {}) {
   let videos = [];
-  if (link?.kind === 'direct') videos = [link.url];
+  if (link?.kind === 'direct') {
+    const bunkrFile = isBunkrFilePageCandidate(link.url)
+      ? await resolveBunkrFileVideoUrl(link.url, { signal }).catch(() => '')
+      : '';
+    const resolved = bunkrFile || link.url;
+    // A direct-looking .mp4 URL is not proof of media.  Retired Bunkr CDN
+    // hosts now answer their old file URLs with a 200 HTML landing page; those
+    // links previously satisfied Recall's video count and produced a 0:00
+    // five-card bundle in Pong.  Byte-probe every direct candidate before it
+    // can enter a Recall album, not only refreshed Bunkr file pages.
+    if (!await probePlayableMediaUrl(resolved, signal, 4000)) return [];
+    videos = [resolved];
+  }
   else if (link?.kind === 'pixeldrain') videos = await resolvePixeldrainVideos(link.url, signal);
-  else if (link?.kind === 'gofile') videos = await resolveGofileVideos(link.url, signal);
+  else if (link?.kind === 'gofile') videos = await resolveGofileVideos(link.url, signal, link.password);
+  else if (link?.kind === 'anonfiles') videos = await resolveAnonfilesVideos(link.url, signal);
   else if (link?.kind === 'bunkr') videos = await extractBunkrVideoUrls(link.url, {
     signal,
     onVideo: options?.onVideo
@@ -5096,6 +6552,47 @@ function isTikTokVideoPageUrl(rawUrl) {
 async function downloadTikTokVideoFile(record, partPath, controller) {
   const python = path.join(LOCAL_AI_DIR, 'lora-venv', 'Scripts', 'python.exe');
   await fs.rm(partPath, { force: true }).catch(() => {});
+  record.bytes = 0;
+  record.totalBytes = 0;
+  record.headersReadyAt = 0;
+  record.progressiveMetadataValidated = false;
+  const hint=record.tiktokMediaHint;
+  if(process.env.PONG_TIKTOK_MEDIA_HINT_TRIAL==='1' && hint && Date.now()-hint.receivedAt<120000) {
+    let output;
+    try {
+      output=await fs.open(partPath,'w');
+      let position=0;
+      const tracker=createTikTokProgressTracker(record,{maxFileBytes:VIDEO_FILE_CACHE_MAX_FILE_BYTES,
+        onInvalid:()=>{throw new Error('TikTok hinted entity changed');}});
+      await streamTikTokMediaHint(hint,{
+        signal:controller.signal,maxBytes:VIDEO_FILE_CACHE_MAX_FILE_BYTES,
+        request:(target,signal)=>new Promise((resolve,reject)=>{
+          const request=https.request(target,{agent:GATEWAY_AGENT,signal,headers:{
+            accept:'video/mp4','accept-encoding':'identity',referer:'https://www.tiktok.com/',
+            'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36'
+          }},response=>{clearTimeout(timer);response.setTimeout(5000,()=>response.destroy(new Error('TikTok hinted media idle timeout')));resolve(response)});
+          const timer=setTimeout(()=>request.destroy(new Error('TikTok hinted media header timeout')),1500);
+          request.once('error',error=>{clearTimeout(timer);reject(error)});request.end();
+        }),
+        write:async chunk=>{let written=0;while(written<chunk.length){const r=await output.write(chunk,written,chunk.length-written,position);if(!r.bytesWritten)throw Error('TikTok hinted file write failed');written+=r.bytesWritten;position+=r.bytesWritten;}},
+        onMetadata:length=>tracker.stderr(`__PONG_TIKTOK_PROGRESS__${length}\n`),
+        onBytes:(chunk,bytes)=>{tracker.bytes(chunk);record.bytes=bytes;record.updatedAt=Date.now();}
+      });
+      await output.close();output=null;
+      record.totalBytes=record.bytes;record.contentType='video/mp4';record.headersReadyAt ||= Date.now();
+      record.tiktokSourceTransport='webview-source-hint';
+      return;
+    }catch(error){
+      await output?.close().catch(()=>{});
+      if(record.progressiveMetadataValidated){record.segmentedPrefixFailed=true;throw error;}
+      if(controller.signal.aborted)throw error;
+      // Nothing was published; safely discard this unexposed entity and use
+      // the established extractor. Never splice different media into readers.
+      await fs.rm(partPath,{force:true}).catch(()=>{});
+      record.bytes=0;record.totalBytes=0;record.headersReadyAt=0;
+      record.tiktokSourceTransport='extractor-fallback';
+    }
+  }
   await new Promise((resolve, reject) => {
     const child = spawn(python, [
       '-m', 'yt_dlp', '--no-warnings', '--impersonate', 'chrome',
@@ -5106,6 +6603,8 @@ async function downloadTikTokVideoFile(record, partPath, controller) {
       // cache validator still rejects audio-only or genuinely incompatible
       // fallbacks instead of presenting them as video.
       'best[vcodec^=h264][ext=mp4]/best[vcodec^=avc1][ext=mp4]/download/best[ext=mp4]/best',
+      '--newline', '--progress', '--progress-delta', '0.1',
+      '--progress-template', TIKTOK_PROGRESS_TEMPLATE,
       '-o', '-', record.sourceUrl
     ], {
       cwd: process.cwd(),
@@ -5119,6 +6618,7 @@ async function downloadTikTokVideoFile(record, partPath, controller) {
       if (settled) return;
       settled = true;
       controller.signal.removeEventListener('abort', abort);
+      if (error && record.progressiveMetadataValidated) record.segmentedPrefixFailed = true;
       if (error) reject(error);
       else resolve();
     };
@@ -5127,9 +6627,21 @@ async function downloadTikTokVideoFile(record, partPath, controller) {
       output.destroy();
       finish(new Error('TikTok cache download aborted'));
     };
+    const progress = createTikTokProgressTracker(record, {
+      maxFileBytes: VIDEO_FILE_CACHE_MAX_FILE_BYTES,
+      onInvalid: () => {
+        // Readers of a published entity must never receive a different retry.
+        record.segmentedPrefixFailed = true;
+        abort();
+      }
+    });
     controller.signal.addEventListener('abort', abort, { once: true });
-    child.stderr.on('data', chunk => { stderr += chunk.toString().slice(0, 65536); });
+    child.stderr.on('data', chunk => {
+      progress.stderr(chunk);
+      stderr = (stderr + chunk.toString()).slice(-65536);
+    });
     child.stdout.on('data', chunk => {
+      progress.bytes(chunk);
       record.bytes = Number(record.bytes || 0) + chunk.length;
       record.updatedAt = Date.now();
       if (record.bytes > VIDEO_FILE_CACHE_MAX_FILE_BYTES) abort();
@@ -5149,10 +6661,41 @@ async function downloadTikTokVideoFile(record, partPath, controller) {
   });
   const bytes = Number((await fs.stat(partPath)).size || 0);
   if (!bytes) throw new Error('TikTok downloader returned an empty video');
+  if (record.progressiveMetadataValidated && bytes !== Number(record.totalBytes)) {
+    record.segmentedPrefixFailed = true;
+    throw new Error('TikTok progressive entity did not complete');
+  }
   record.bytes = bytes;
   record.totalBytes = bytes;
   record.contentType = 'video/mp4';
-  record.headersReadyAt = Date.now();
+  record.headersReadyAt ||= Date.now();
+}
+
+function simpCityTikTokProfileCandidates(creator) {
+  const results = [];
+  const seen = new Set();
+  const add = rawValue => {
+    let value = String(rawValue || '').trim();
+    if (!value) return;
+    try {
+      const explicit = new URL(value);
+      if (!/(?:^|\.)tiktok\.com$/i.test(explicit.hostname)) return;
+      const handle = explicit.pathname.match(/^\/@([a-z0-9_.-]+)/i)?.[1] || '';
+      if (handle) value = handle;
+    } catch (_) {
+      value = value.replace(/^@/, '').replace(/\s+/g, '');
+    }
+    if (!/^[a-z0-9_.-]{2,30}$/i.test(value)) return;
+    const key = value.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    results.push(`https://www.tiktok.com/@${value}`);
+  };
+  add(creator?.evidence);
+  for (const value of creator?.usernames || []) add(value);
+  for (const value of creator?.aliases || []) add(value);
+  add(creator?.primaryName);
+  return results.slice(0, 3);
 }
 
 function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creators, options = {}) {
@@ -5160,14 +6703,46 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
   const recallSignal = state.controller?.signal || null;
   const taskKey = simpCityRecallTaskKey(channel, suppliedId);
   state.pending.creatorPairsSeen ||= [];
+  state.creatorPairAggregates ||= new Map();
+  state.collectionControllers ||= new Map();
+  state.collectionStoppedCreatorKeys ||= new Set();
   const seenPairs = new Set(state.pending.creatorPairsSeen);
   const postMap = new Map((posts || []).map(post => [String(post?.postId || ''), post]));
+
   const readyTasks = (creators || []).map(creator => {
     const creatorName = String(creator?.primaryName || '').trim();
     const creatorKey = creatorName.toLowerCase().replace(/[^a-z0-9]+/g, '');
-    const existingRecord = state.pending.albums.find(item => String(item?.creatorKey || '') === creatorKey) || null;
-    if (!creatorKey || (seenPairs.has(creatorKey) && options?.allowExisting !== true) || state.skippedCreatorKeys?.has(creatorKey)) {
-      return Promise.resolve();
+    if (!creatorKey || state.skippedCreatorKeys?.has(creatorKey)) return Promise.resolve();
+
+    let aggregate = state.creatorPairAggregates.get(creatorKey);
+    if (!aggregate || aggregate.suppliedId !== suppliedId) {
+      if (seenPairs.has(creatorKey) && options?.allowExisting !== true) return Promise.resolve();
+      const controller = new AbortController();
+      const abortCollection = () => controller.abort();
+      if (recallSignal?.aborted) controller.abort();
+      else recallSignal?.addEventListener('abort', abortCollection, { once: true });
+      const existingRecord = state.pending.albums.find(item => String(item?.creatorKey || '') === creatorKey) || null;
+      aggregate = {
+        suppliedId,
+        creatorName,
+        creatorKey,
+        pairId: `${suppliedId}:${creatorKey}`,
+        controller,
+        abortCollection,
+        jobs: 0,
+        sourceLinks: new Set(),
+        artistVideos: new Set(existingRecord?.videos || []),
+        tiktokVideos: new Set(existingRecord?.pairedGroups?.find(group => group?.mediaKind === 'tiktok')?.videos || []),
+        artistUrl: '',
+        tiktokUrl: '',
+        artistGroup: null,
+        tiktokGroup: null,
+        publishedRecord: existingRecord,
+        balbumsStarted: false,
+        tiktokProfilesTried: new Set()
+      };
+      state.creatorPairAggregates.set(creatorKey, aggregate);
+      state.collectionControllers.set(creatorKey, controller);
     }
 
     let resolveReady;
@@ -5178,133 +6753,126 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
       readySettled = true;
       resolveReady();
     };
-    const collectionController = new AbortController();
-    const abortCollection = () => collectionController.abort();
-    if (recallSignal?.aborted) collectionController.abort();
-    else recallSignal?.addEventListener('abort', abortCollection, { once: true });
-    state.collectionControllers ||= new Map();
-    state.collectionStoppedCreatorKeys ||= new Set();
-    state.collectionControllers.get(creatorKey)?.abort?.();
-    state.collectionControllers.set(creatorKey, collectionController);
+    const signal = aggregate.controller.signal;
 
-    // Deeper pages for an ordered creator profile revisit the same creator.
-    // Continue enriching the original record instead of publishing another
-    // top-level profile for every page that contains playable media.
-    let publishedRecord = existingRecord;
-    const backgroundTask = simpCityMediaResolveLimit(async () => {
-      const signal = collectionController.signal;
+    const publishOrUpdate = ({ force = false } = {}) => {
+      if (signal.aborted || state.pending?.id !== suppliedId) return false;
+      const playableReady = aggregate.artistVideos.size > 0 || aggregate.tiktokVideos.size > 0;
+      if (!aggregate.publishedRecord && !playableReady) return false;
+      if (
+        aggregate.publishedRecord && !force &&
+        aggregate.artistVideos.size % 5 !== 0 &&
+        (aggregate.tiktokVideos.size === 0 || aggregate.tiktokVideos.size % 5 !== 0)
+      ) return false;
+      if (!aggregate.artistVideos.size && !aggregate.tiktokVideos.size) return false;
+
+      if (!aggregate.artistGroup && aggregate.artistVideos.size) aggregate.artistGroup = {
+        url: aggregate.artistUrl || state.pending.threadUrl,
+        title: `Artist videos · ${aggregate.creatorName}`,
+        creatorName: aggregate.creatorName,
+        creatorKey,
+        pairId: aggregate.pairId,
+        mediaKind: 'artist-unified',
+        source: 'hosted',
+        videos: []
+      };
+      if (!aggregate.tiktokGroup && aggregate.tiktokVideos.size) aggregate.tiktokGroup = {
+        url: aggregate.tiktokUrl || state.pending.threadUrl,
+        title: `TikTok account · ${aggregate.creatorName}`,
+        creatorName: aggregate.creatorName,
+        creatorKey,
+        pairId: aggregate.pairId,
+        mediaKind: 'tiktok',
+        source: 'hosted',
+        videos: []
+      };
+      if (aggregate.artistGroup) {
+        aggregate.artistGroup.url = aggregate.artistUrl || aggregate.artistGroup.url;
+        aggregate.artistGroup.videos = [...aggregate.artistVideos];
+      }
+      if (aggregate.tiktokGroup) {
+        aggregate.tiktokGroup.url = aggregate.tiktokUrl || aggregate.tiktokGroup.url;
+        aggregate.tiktokGroup.videos = [...aggregate.tiktokVideos].slice(0, 20);
+      }
+      const pairedGroups = [aggregate.artistGroup, aggregate.tiktokGroup]
+        .filter(group => group?.videos?.length);
+
+      if (!aggregate.publishedRecord) {
+        const firstGroup = pairedGroups[0];
+        aggregate.publishedRecord = {
+          url: firstGroup.url,
+          title: aggregate.creatorName,
+          creatorName: aggregate.creatorName,
+          creatorKey,
+          pairId: aggregate.pairId,
+          sourceUrl: state.pending.threadUrl,
+          sourceLinks: [...aggregate.sourceLinks],
+          source: 'paired',
+          videos: firstGroup.videos,
+          pairedGroups,
+          collecting: true,
+          earlyPublishedAt: new Date().toISOString()
+        };
+        state.pending.albums.push(aggregate.publishedRecord);
+        seenPairs.add(creatorKey);
+        state.pending.creatorPairsSeen = [...seenPairs].slice(-2000);
+        state.pending.creatorPairsReady = Number(state.pending.creatorPairsReady || 0) + 1;
+        state.pending.albumsReady = state.pending.albums.length;
+        state.pending.updatedAt = new Date().toISOString();
+        if (!state.pending.firstAlbumAt) state.pending.firstAlbumAt = state.pending.updatedAt;
+        settleReady();
+      } else {
+        aggregate.publishedRecord.url = pairedGroups[0]?.url || aggregate.publishedRecord.url;
+        aggregate.publishedRecord.videos = pairedGroups[0]?.videos || aggregate.publishedRecord.videos;
+        aggregate.publishedRecord.pairedGroups = pairedGroups;
+        aggregate.publishedRecord.sourceLinks = [...aggregate.sourceLinks];
+        aggregate.publishedRecord.collecting = aggregate.jobs > 0 || !state.pending.inputComplete;
+        aggregate.publishedRecord.updatedAt = new Date().toISOString();
+        state.pending.updatedAt = aggregate.publishedRecord.updatedAt;
+      }
+      return true;
+    };
+
+    const addResolved = (link, videos) => {
+      if (signal.aborted || !Array.isArray(videos) || !videos.length) return;
+      if (link?.kind === 'tiktok') {
+        aggregate.tiktokUrl ||= link.url;
+        videos.forEach(video => aggregate.tiktokVideos.add(video));
+      } else {
+        aggregate.artistUrl ||= link?.url || '';
+        videos.forEach(video => aggregate.artistVideos.add(video));
+      }
+      publishOrUpdate();
+    };
+
+    // Count queued work before it enters the bounded resolver. Otherwise a
+    // completed page can briefly mark the record finished while later pages
+    // for the same creator are still waiting for an execution slot.
+    aggregate.jobs++;
+    const backgroundTask = simpCityCreatorPairLimit(async () => {
       if (
         state.collectionStoppedCreatorKeys.has(creatorKey) ||
         state.skippedCreatorKeys?.has(creatorKey) ||
         (state.skipSeenEnabled && await pongPlayedHistoryHas('simpcity-profile', state.pending?.threadUrl, creatorKey))
-      ) {
-        settleReady();
-        return;
-      }
+      ) return;
 
       const creatorPost = postMap.get(String(creator?.postId || ''));
-      // Normal megathread extraction is scoped to the one post that identified
-      // the creator. An explicitly ordered creator-profile scan is different:
-      // every collected post belongs to that one linked profile.
       const relevantPosts = options?.includeAllPosts === true
         ? [...postMap.values()]
         : creatorPost ? [creatorPost] : [];
-      const links = extractSimpCityMediaLinksForCreator(relevantPosts, creators, creator);
-      // Incremental profile scans may revisit an already-published artist as
-      // deeper pages arrive. Seed from the existing bundle so enrichment never
-      // replaces the fast page-1 result with a smaller later batch.
-      const artistVideos = new Set(existingRecord?.videos || []);
-      const tiktokVideos = new Set(existingRecord?.pairedGroups?.find(group => group?.mediaKind === 'tiktok')?.videos || []);
-      const pairId = `${suppliedId}:${creatorKey}`;
-      let artistGroup = null;
-      let tiktokGroup = null;
-      let tiktokUrl = '';
-      let artistUrl = '';
-
-      const publishOrUpdate = ({ final = false } = {}) => {
-        if (signal.aborted || state.pending?.id !== suppliedId) return false;
-        const artistReady = artistVideos.size >= SIMPCITY_EARLY_ARTIST_VIDEO_COUNT;
-        if (!publishedRecord && !artistReady && !final) return false;
-        if (
-          publishedRecord && !final &&
-          artistVideos.size % 5 !== 0 &&
-          (tiktokVideos.size === 0 || tiktokVideos.size % 5 !== 0)
-        ) return false;
-        if (!artistVideos.size && !tiktokVideos.size) {
-          if (final) settleReady();
-          return false;
-        }
-        if (!artistGroup && artistVideos.size) artistGroup = {
-          url: artistUrl || state.pending.threadUrl,
-          title: `Artist videos · ${creatorName}`,
-          creatorName,
-          creatorKey,
-          pairId,
-          mediaKind: 'artist-unified',
-          source: 'hosted',
-          videos: []
-        };
-        if (!tiktokGroup && tiktokVideos.size) tiktokGroup = {
-          url: tiktokUrl || state.pending.threadUrl,
-          title: `TikTok account · ${creatorName}`,
-          creatorName,
-          creatorKey,
-          pairId,
-          mediaKind: 'tiktok',
-          source: 'hosted',
-          videos: []
-        };
-        if (artistGroup) artistGroup.videos = [...artistVideos];
-        if (tiktokGroup) tiktokGroup.videos = [...tiktokVideos].slice(0, 20);
-        const pairedGroups = [artistGroup, tiktokGroup].filter(group => group?.videos?.length);
-
-        if (!publishedRecord) {
-          const firstGroup = pairedGroups[0];
-          publishedRecord = {
-            url: firstGroup.url,
-            title: creatorName,
-            creatorName,
-            creatorKey,
-            pairId,
-            sourceUrl: state.pending.threadUrl,
-            source: 'paired',
-            videos: firstGroup.videos,
-            pairedGroups,
-            collecting: !final,
-            earlyPublishedAt: artistReady ? new Date().toISOString() : ''
-          };
-          state.pending.albums.push(publishedRecord);
-          seenPairs.add(creatorKey);
-          state.pending.creatorPairsSeen = [...seenPairs].slice(-2000);
-          state.pending.creatorPairsReady = Number(state.pending.creatorPairsReady || 0) + 1;
-          state.pending.albumsReady = state.pending.albums.length;
-          state.pending.updatedAt = new Date().toISOString();
-          if (!state.pending.firstAlbumAt) state.pending.firstAlbumAt = state.pending.updatedAt;
-          settleReady();
-        } else {
-          publishedRecord.url = pairedGroups[0]?.url || publishedRecord.url;
-          publishedRecord.videos = pairedGroups[0]?.videos || publishedRecord.videos;
-          publishedRecord.pairedGroups = pairedGroups;
-          publishedRecord.collecting = !final;
-          publishedRecord.updatedAt = new Date().toISOString();
-          state.pending.updatedAt = publishedRecord.updatedAt;
-        }
+      const discoveredLinks = extractSimpCityMediaLinksForCreator(relevantPosts, creators, creator);
+      const links = discoveredLinks.filter(link => {
+        if (!link?.url || aggregate.sourceLinks.has(link.url)) return false;
+        aggregate.sourceLinks.add(link.url);
         return true;
-      };
+      });
 
-      const addResolved = (link, videos) => {
-        if (signal.aborted || !Array.isArray(videos) || !videos.length) return;
-        if (link?.kind === 'tiktok') {
-          tiktokUrl ||= link.url;
-          videos.forEach(video => tiktokVideos.add(video));
-        } else {
-          artistUrl ||= link?.url || '';
-          videos.forEach(video => artistVideos.add(video));
-        }
-        publishOrUpdate();
-      };
-
-      const hostedTasks = links.map(async link => {
+      const linkPriority = { direct: 6, bunkr: 5, gofile: 4, pixeldrain: 3, saint: 3 };
+      const hostedLinks = links.filter(link => link.kind !== 'tiktok').sort((left, right) =>
+        Number(linkPriority[right?.kind] || 1) - Number(linkPriority[left?.kind] || 1)
+      );
+      const tiktokLinks = links.filter(link => link.kind === 'tiktok');
+      const hostedTask = mapWithConcurrency(hostedLinks, 6, async link => {
         if (signal.aborted) return;
         try {
           addResolved(link, await resolveSimpCityMediaLink(link, signal, {
@@ -5312,37 +6880,71 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
           }));
         } catch (_) {}
       });
-      const balbumsTask = (async () => {
-        const balbums = await prefetchSimpCityCreatorAlbums([creator], {
-          signal,
-          maxAlbumsPerCreator: 20
-        });
-        await Promise.allSettled(balbums.map(async album => {
-          if (signal.aborted) return;
-          try {
-            const link = { kind: 'bunkr', url: album.url };
-            addResolved(link, await extractBunkrVideoUrls(album.url, {
-              signal,
-              onVideo: video => addResolved(link, [video])
-            }));
-          } catch (_) {}
-        }));
-      })();
+      const explicitTikTokTask = mapWithConcurrency(tiktokLinks, 1, async link => {
+        if (signal.aborted) return;
+        try { addResolved(link, await resolveSimpCityMediaLink(link, signal)); }
+        catch (_) {}
+      });
 
-      await Promise.allSettled([...hostedTasks, balbumsTask]);
-      publishOrUpdate({ final: true });
-      settleReady();
-    }).catch(() => {
-      settleReady();
-    }).finally(() => {
-      recallSignal?.removeEventListener('abort', abortCollection);
-      if (state.collectionControllers?.get(creatorKey) === collectionController) {
-        state.collectionControllers.delete(creatorKey);
+      let balbumsTask = Promise.resolve();
+      if (!aggregate.balbumsStarted) {
+        aggregate.balbumsStarted = true;
+        balbumsTask = (async () => {
+          const balbums = await prefetchSimpCityCreatorAlbums([creator], {
+            signal,
+            maxAlbumsPerCreator: 20
+          });
+          await mapWithConcurrency(balbums, 2, async album => {
+            if (signal.aborted || !album?.url || aggregate.sourceLinks.has(album.url)) return;
+            aggregate.sourceLinks.add(album.url);
+            try {
+              const link = { kind: 'bunkr', url: album.url };
+              addResolved(link, await extractBunkrVideoUrls(album.url, {
+                signal,
+                onVideo: video => addResolved(link, [video])
+              }));
+            } catch (_) {}
+          });
+        })();
       }
-      if (publishedRecord) {
-        publishedRecord.collecting = false;
-        publishedRecord.updatedAt = new Date().toISOString();
+
+      let fallbackTikTokTask = Promise.resolve();
+      const untriedTikTokProfiles = simpCityTikTokProfileCandidates(creator).filter(profileUrl => {
+        const key = profileUrl.toLowerCase();
+        if (aggregate.tiktokProfilesTried.has(key)) return false;
+        aggregate.tiktokProfilesTried.add(key);
+        return true;
+      });
+      if (!aggregate.tiktokVideos.size && untriedTikTokProfiles.length) {
+        fallbackTikTokTask = (async () => {
+          for (const profileUrl of untriedTikTokProfiles) {
+            if (signal.aborted || aggregate.tiktokVideos.size) return;
+            try {
+              const fallbackSignal = typeof AbortSignal.any === 'function'
+                ? AbortSignal.any([signal, AbortSignal.timeout(20_000)])
+                : signal;
+              const link = { kind: 'tiktok', url: profileUrl };
+              const videos = await resolveSimpCityMediaLink(link, fallbackSignal);
+              if (videos.length) {
+                aggregate.sourceLinks.add(profileUrl);
+                addResolved(link, videos);
+                return;
+              }
+            } catch (_) {}
+          }
+        })();
       }
+
+      await Promise.allSettled([hostedTask, explicitTikTokTask, balbumsTask, fallbackTikTokTask]);
+      publishOrUpdate({ force: true });
+    }).catch(() => {}).finally(() => {
+      aggregate.jobs = Math.max(0, aggregate.jobs - 1);
+      publishOrUpdate({ force: true });
+      if (aggregate.publishedRecord) {
+        aggregate.publishedRecord.collecting = aggregate.jobs > 0 || !state.pending?.inputComplete;
+        aggregate.publishedRecord.updatedAt = new Date().toISOString();
+      }
+      settleReady();
     });
 
     trackSimpCityRecallTask(taskKey, backgroundTask);
@@ -5354,17 +6956,25 @@ function scheduleSimpCityCreatorPairs(state, channel, suppliedId, posts, creator
 function simpCityPrimaryPairCreator(creators) {
   const candidates = Array.isArray(creators) ? creators.filter(Boolean) : [];
   if (!candidates.length) return [];
+  const threadCreator = candidates.find(creator => creator?.threadUrl) || null;
   const primary = candidates.find(creator => /(?:^|\.)tiktok\.com\//i.test(String(creator?.evidence || '')))
     || candidates[0];
   const displayName = String(
-    candidates.find(creator => creator?.threadUrl)?.primaryName || primary?.primaryName || ''
+    threadCreator?.primaryName || primary?.primaryName || ''
   ).trim();
   const aliases = [...new Set(candidates.flatMap(creator => [
     creator?.primaryName,
     ...(creator?.aliases || []),
     ...(creator?.usernames || [])
   ]).map(value => String(value || '').trim()).filter(Boolean))];
-  return [{ ...primary, primaryName: displayName, aliases, usernames: aliases }];
+  return [{
+    ...primary,
+    postId: String(threadCreator?.postId || primary?.postId || ''),
+    primaryName: displayName,
+    aliases,
+    usernames: aliases,
+    threadUrl: String(threadCreator?.threadUrl || primary?.threadUrl || '')
+  }];
 }
 
 function simpCityProfilePairCreators(creators) {
@@ -5554,6 +7164,12 @@ function finalizeSimpCityRecallWhenReady(state, channel, suppliedId) {
         aiErrors: state.pending.aiErrors
       }
     } : null;
+    for (const aggregate of state.creatorPairAggregates?.values?.() || []) {
+      if (aggregate?.publishedRecord) aggregate.publishedRecord.collecting = false;
+      state.controller?.signal?.removeEventListener?.('abort', aggregate?.abortCollection);
+    }
+    state.creatorPairAggregates = new Map();
+    state.collectionControllers = new Map();
     state.pending = null;
     state.controller = null;
   })().catch(() => {}).finally(() => {
@@ -6041,7 +7657,7 @@ async function artistLookupBrowserPostEntries(postUrls, artistInfo, stopAt, sign
 async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, groupId, priorityControl = null) {
   const normalizedPostUrl = gatewayTargetUrl(postUrl).toString();
   const cached = videoVerifyCache.get(normalizedPostUrl);
-  if (cached && Date.now() - cached.at < VIDEO_VERIFY_CACHE_TTL_MS) {
+  if (priorityControl?.forceFresh !== true && cached && Date.now() - cached.at < VIDEO_VERIFY_CACHE_TTL_MS) {
     videoVerifyCache.delete(normalizedPostUrl);
     videoVerifyCache.set(normalizedPostUrl, cached);
     return cached.entries;
@@ -6051,7 +7667,8 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, gro
   const entries = await scheduleVideoVerifyFetch(verificationHost, groupId, async hostState => {
     const controller = new AbortController();
     const abort = () => controller.abort();
-    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), Math.min(GATEWAY_TIMEOUT_MS, 16000));
     try {
       const sourceStarted = Date.now();
@@ -6073,6 +7690,16 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, gro
           timeoutMs: Math.min(GATEWAY_TIMEOUT_MS, 16000)
         });
       }
+      if (!response) {
+        if (signal?.aborted) throw new DOMException('video post request aborted', 'AbortError');
+        const error = new Error(
+          controller.signal.aborted
+            ? 'video post request timed out'
+            : 'video post transport unavailable'
+        );
+        error.pongTransient = true;
+        throw error;
+      }
       if (Number(response.status || 0) === 429) {
         const retryAfterSeconds = Number(response.headers['retry-after'] || 0);
         hostState.rateLimits++;
@@ -6080,7 +7707,9 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, gro
           hostState.backoffUntil,
           Date.now() + Math.min(120000, Math.max(30000, retryAfterSeconds * 1000))
         );
-        throw new Error('video post HTTP 429; shared host backoff engaged');
+        const error = new Error('video post HTTP 429; shared host backoff engaged');
+        error.pongTransient = true;
+        throw error;
       }
       const status = Number(response.status || 0);
       if (status === 503) {
@@ -6091,7 +7720,9 @@ async function fetchVideoEntriesForVerification(postUrl, artistInfo, signal, gro
         hostState.backoffUntil = Math.max(hostState.backoffUntil, Date.now() + 12_000);
       }
       if (status < 200 || status >= 300) {
-        throw new Error(`video post HTTP ${status}`);
+        const error = new Error(`video post HTTP ${status}`);
+        error.pongTransient = gatewayHtmlTransientStatus(status);
+        throw error;
       }
       const urls = extractVideoUrlsFromHtml(response.body.toString('utf8'), normalizedPostUrl);
       hostState.completed++;
@@ -6335,7 +7966,11 @@ async function verifyVideoPostBatch(payload, requestSignal) {
   const postGroups = balanceVideoPostGroups(originalPostUrls, artistInfo).slice(0, 500);
   const controller = new AbortController();
   const abort = () => controller.abort();
-  requestSignal?.addEventListener('abort', abort, { once: true });
+  // AbortSignal does not replay an abort event to listeners registered after it
+  // fired. A candidate stopped between stages previously started a fresh batch
+  // anyway and continued consuming source requests behind the next run.
+  if (requestSignal?.aborted) abort();
+  else requestSignal?.addEventListener('abort', abort, { once: true });
   const entries = [];
   const seenVideos = new Set();
   const mediaCandidates = new Set();
@@ -6367,6 +8002,8 @@ async function verifyVideoPostBatch(payload, requestSignal) {
         };
         return stateLoad(left) - stateLoad(right);
       });
+      let groupHadSuccessfulResponse = false;
+      let groupHadTransientFailure = false;
       for (const postUrl of sourceUrls) {
         let found;
         try {
@@ -6378,14 +8015,19 @@ async function verifyVideoPostBatch(payload, requestSignal) {
             priorityControl
           );
         } catch (error) {
-          if (/\b(?:429|502|503|504)\b|temporar|timed out|ECONNRESET/i.test(String(error?.message || error))) {
-            transientFailures++;
-          }
+          if (controller.signal.aborted) break;
+          if (
+            error?.pongTransient === true ||
+            /\b(?:408|425|429|5\d\d)\b|temporar|timed out|transport unavailable|fetch failed|ECONNRESET|ETIMEDOUT/i.test(
+              String(error?.message || error)
+            )
+          ) groupHadTransientFailure = true;
           // The alternate mirror is an availability fallback. Try it only when
           // the selected source failed; a successful canonical post response is
           // authoritative even when that post contains no video.
           continue;
         }
+        groupHadSuccessfulResponse = true;
         for (const entry of found) {
           if (!entry?.videoUrl) continue;
           const mediaKeys = canonicalVideoEntryKeys(entry);
@@ -6420,6 +8062,12 @@ async function verifyVideoPostBatch(payload, requestSignal) {
         // candidate's work and dominated the real six-minute trace. Preserve
         // the alternate solely for transport failure, not duplicate proof.
         break;
+      }
+      // A recovered mirror is authoritative. Count the canonical post as
+      // transient only when every available source failed, otherwise sparse
+      // profiles were needlessly retried from page one after a mirror recovery.
+      if (!controller.signal.aborted && !groupHadSuccessfulResponse && groupHadTransientFailure) {
+        transientFailures++;
       }
     }
   }
@@ -6751,12 +8399,24 @@ async function streamGatewayResponse(req, res, target) {
   const controller = new AbortController();
   const headerTimer = setTimeout(() => controller.abort(), GATEWAY_TIMEOUT_MS);
   let inactivityTimer = null;
+  let upstream = null;
   activeWorkloadControllers.add(controller);
-  const abort = () => controller.abort();
+  const abort = () => {
+    controller.abort();
+    // ClientRequest closes as soon as response headers arrive, so destroying
+    // it later does not retire the IncomingMessage body. Explicitly destroy
+    // that body when a card changes source; otherwise each abandoned MP4 can
+    // keep one gateway/browser socket occupied until the entire movie drains.
+    if (upstream && !upstream.destroyed) upstream.destroy();
+  };
   req.once('aborted', abort);
   res.once('close', abort);
   try {
-    const upstream = await gatewayFetch(target, req, controller, req.method === 'HEAD' ? 'HEAD' : 'GET');
+    upstream = await gatewayFetch(target, req, controller, req.method === 'HEAD' ? 'HEAD' : 'GET');
+    if (controller.signal.aborted) {
+      upstream.destroy();
+      throw new DOMException('gateway request aborted', 'AbortError');
+    }
     clearTimeout(headerTimer);
     const headers = gatewayCorsHeaders();
     for (const name of [
@@ -6766,9 +8426,22 @@ async function streamGatewayResponse(req, res, target) {
       const value = upstream.headers[name];
       if (value) headers[name] = value;
     }
-    if (/\.m4v$/i.test(new URL(target).pathname) && /^(?:video\/x-m4v|application\/octet-stream)$/i.test(String(headers['content-type'] || ''))) {
+    const targetPath = new URL(target).pathname;
+    const upstreamType = String(headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    // Several Recall CDNs label otherwise valid MP4/MOV files as generic bytes.
+    // Android WebView honors `nosniff`-style media decisions more strictly than
+    // desktop Chromium and rejects those responses before demuxing. The media
+    // cache already performs the same normalization; keep the direct recovery
+    // gateway consistent so a fallback does not turn a playable file blank.
+    if (/\.(?:mp4|m4v|mov)$/i.test(targetPath) && /^(?:video\/x-m4v|application\/octet-stream)$/i.test(upstreamType)) {
       headers['content-type'] = 'video/mp4';
     }
+    // Firefox reserves a small per-origin media connection pool. A canceled
+    // partial MP4 on an otherwise reusable localhost socket can remain counted
+    // against that pool long after the card changed. Make each proxied media
+    // response explicitly non-persistent; upstream CDN sockets still stay warm
+    // in GATEWAY_AGENT, so this costs only a loopback handshake.
+    headers.Connection = 'close';
     res.writeHead(Number(upstream.statusCode || 502), headers);
     if (req.method === 'HEAD') {
       upstream.resume();
@@ -6794,6 +8467,313 @@ async function streamGatewayResponse(req, res, target) {
   } finally {
     clearTimeout(headerTimer);
     clearTimeout(inactivityTimer);
+    activeWorkloadControllers.delete(controller);
+    req.off('aborted', abort);
+    res.off('close', abort);
+  }
+}
+
+function parseBunkrForegroundRange(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return { requested: false, start: 0, end: null };
+  const match = raw.match(/^bytes=(\d+)-(\d*)$/i);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = match[2] ? Number(match[2]) : null;
+  if (!Number.isSafeInteger(start) || start < 0) return null;
+  if (end !== null && (!Number.isSafeInteger(end) || end < start)) return null;
+  return { requested: true, start, end };
+}
+
+function bunkrForegroundRequestShape(req, start, end) {
+  return {
+    method: 'GET',
+    headers: {
+      accept: String(req.headers?.accept || 'video/*,*/*;q=0.8'),
+      'accept-encoding': 'identity',
+      range: `bytes=${start}-${end}`
+    }
+  };
+}
+
+function parseBunkrContentRange(value) {
+  const match = String(value || '').match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = Number(match[3]);
+  if (![start, end, total].every(Number.isSafeInteger) || start < 0 || end < start || total <= end) return null;
+  return { start, end, total };
+}
+
+async function readBunkrForegroundRange(target, req, controller, start, end, expectedTotal) {
+  const response = await gatewayFetch(
+    target,
+    bunkrForegroundRequestShape(req, start, end),
+    controller,
+    'GET'
+  );
+  const contentRange = parseBunkrContentRange(response.headers['content-range']);
+  if (
+    Number(response.statusCode || 0) !== 206 ||
+    !contentRange ||
+    contentRange.start !== start ||
+    contentRange.end !== end ||
+    contentRange.total !== expectedTotal
+  ) {
+    response.resume();
+    throw new Error('Bunkr foreground range response did not match the requested bytes');
+  }
+  const expectedBytes = end - start + 1;
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of response) {
+    bytes += chunk.length;
+    if (bytes > expectedBytes) {
+      response.destroy();
+      throw new Error('Bunkr foreground range exceeded its declared length');
+    }
+    chunks.push(chunk);
+  }
+  if (bytes !== expectedBytes) throw new Error('Bunkr foreground range ended early');
+  return Buffer.concat(chunks, bytes);
+}
+
+async function tryStreamParallelBunkrRange(req, res, target) {
+  if (req.method !== 'GET') return false;
+  let hostname = '';
+  try { hostname = gatewayTargetUrl(target).hostname.toLowerCase(); } catch (_) { return false; }
+  if (!(hostname === 'cdn.cr' || hostname.endsWith('.cdn.cr'))) return false;
+  const requestedRange = parseBunkrForegroundRange(req.headers.range);
+  // Keep indefinite/no-Range media readers on the proven streaming relay.
+  // Parallel assembly is only safe for the bounded metadata/keyframe ranges
+  // used by WebView and PyAV; otherwise a long-lived video can occupy several
+  // upstream sockets for its entire multi-gigabyte remainder.
+  if (!requestedRange || requestedRange.end === null) return false;
+
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const headerTimer = setTimeout(abort, GATEWAY_TIMEOUT_MS);
+  activeWorkloadControllers.add(controller);
+  req.once('aborted', abort);
+  res.once('close', abort);
+  let headersCommitted = false;
+  try {
+    const firstStart = requestedRange.start;
+    const requestedFirstEnd = requestedRange.end === null
+      ? firstStart + BUNKR_FOREGROUND_RANGE_BYTES - 1
+      : Math.min(requestedRange.end, firstStart + BUNKR_FOREGROUND_RANGE_BYTES - 1);
+    const firstResponse = await gatewayFetch(
+      target,
+      bunkrForegroundRequestShape(req, firstStart, requestedFirstEnd),
+      controller,
+      'GET'
+    );
+    clearTimeout(headerTimer);
+    const firstRange = parseBunkrContentRange(firstResponse.headers['content-range']);
+    if (
+      Number(firstResponse.statusCode || 0) !== 206 ||
+      !firstRange ||
+      firstRange.start !== firstStart ||
+      firstRange.end !== requestedFirstEnd
+    ) {
+      firstResponse.resume();
+      return false;
+    }
+    const finalEnd = Math.min(
+      firstRange.total - 1,
+      requestedRange.end === null ? firstRange.total - 1 : requestedRange.end
+    );
+    if (firstStart > finalEnd) {
+      firstResponse.resume();
+      return false;
+    }
+
+    const headers = gatewayCorsHeaders({
+      'accept-ranges': 'bytes',
+      'content-length': String(finalEnd - firstStart + 1),
+      'content-type': String(firstResponse.headers['content-type'] || 'video/mp4').split(';')[0] || 'video/mp4'
+    });
+    for (const name of ['etag', 'last-modified', 'vary']) {
+      if (firstResponse.headers[name]) headers[name] = firstResponse.headers[name];
+    }
+    if (requestedRange.requested) {
+      headers['content-range'] = `bytes ${firstStart}-${finalEnd}/${firstRange.total}`;
+    }
+    res.writeHead(requestedRange.requested ? 206 : 200, headers);
+    headersCommitted = true;
+
+    let nextStart = firstRange.end + 1;
+    const launchWave = () => {
+      const ranges = [];
+      while (nextStart <= finalEnd && ranges.length < BUNKR_FOREGROUND_RANGE_CONCURRENCY - 1) {
+        const start = nextStart;
+        const end = Math.min(finalEnd, start + BUNKR_FOREGROUND_RANGE_BYTES - 1);
+        nextStart = end + 1;
+        ranges.push({ start, end });
+      }
+      return ranges.map(range => readBunkrForegroundRange(
+        target,
+        req,
+        controller,
+        range.start,
+        range.end,
+        firstRange.total
+      ));
+    };
+
+    let pending = launchWave();
+    let firstBytes = 0;
+    for await (const chunk of firstResponse) {
+      firstBytes += chunk.length;
+      if (firstBytes > firstRange.end - firstRange.start + 1) {
+        throw new Error('Bunkr foreground first range exceeded its declared length');
+      }
+      if (!await writeVideoFileCacheChunk(res, chunk)) return true;
+    }
+    if (firstBytes !== firstRange.end - firstRange.start + 1) {
+      throw new Error('Bunkr foreground first range ended early');
+    }
+
+    while (pending.length) {
+      const buffers = await Promise.all(pending);
+      pending = launchWave();
+      for (const buffer of buffers) {
+        if (!await writeVideoFileCacheChunk(res, buffer)) return true;
+      }
+    }
+    if (!res.destroyed && !res.writableEnded) res.end();
+    return true;
+  } catch (error) {
+    if (headersCommitted) {
+      if (!res.destroyed && !res.writableEnded) res.destroy(error);
+      return true;
+    }
+    if (controller.signal.aborted) return true;
+    return false;
+  } finally {
+    clearTimeout(headerTimer);
+    activeWorkloadControllers.delete(controller);
+    req.off('aborted', abort);
+    res.off('close', abort);
+  }
+}
+
+let genericHlsRangeActive = 0;
+
+async function streamGenericHlsResponse(req, res, rawTarget) {
+  const target = gatewayTargetUrl(rawTarget).toString();
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const headerTimer = setTimeout(abort, GATEWAY_TIMEOUT_MS);
+  activeWorkloadControllers.add(controller);
+  req.once('aborted', abort);
+  res.once('close', abort);
+  try {
+    // Only a complete fMP4 media fragment is eligible. In particular, an
+    // incoming Range may represent EXT-X-BYTERANGE and must pass through as-is.
+    if (hlsRangeEligibleRequest(req.method, req.headers,
+      new URL(target).pathname, genericHlsRangeActive)) {
+      genericHlsRangeActive++;
+      try {
+        const streamed = await tryStreamHlsRanges({
+          pathname: new URL(target).pathname,
+          signal: controller.signal,
+          request: (method, headers, rangeController) => gatewayFetch(target, {
+            method,
+            headers: { ...req.headers, 'accept-encoding': 'identity', ...headers }
+          }, rangeController, method),
+          emitHeaders: metadata => {
+            clearTimeout(headerTimer);
+            res.writeHead(200, {
+              ...gatewayCorsHeaders(),
+              'content-type': metadata.type,
+              'content-length': metadata.length,
+              'accept-ranges': 'bytes',
+              'x-pong-hls-range': 'bounded',
+              etag: metadata.etag
+            });
+          },
+          emitChunk: async chunk => {
+            if (!await writeVideoFileCacheChunk(res, chunk)) {
+              throw new Error('HLS range downstream closed');
+            }
+          },
+          finish: () => { if (!res.destroyed && !res.writableEnded) res.end(); }
+        });
+        if (streamed) return;
+      } catch (error) {
+        if (res.headersSent && !res.destroyed) res.destroy(error);
+        if (res.headersSent || controller.signal.aborted) return;
+        // A failed metadata/first-range probe did not commit headers; retain
+        // the established single-response HLS transport for this resource.
+      } finally {
+        genericHlsRangeActive--;
+      }
+    }
+    const requestShape = {
+      method: req.method,
+      headers: { ...req.headers, 'accept-encoding': 'identity' }
+    };
+    const upstream = await gatewayFetch(
+      target,
+      requestShape,
+      controller,
+      req.method === 'HEAD' ? 'HEAD' : 'GET'
+    );
+    clearTimeout(headerTimer);
+    const status = Number(upstream.statusCode || 502);
+    const contentType = String(upstream.headers['content-type'] || '').toLowerCase();
+    if (looksLikeGenericHlsResource(target, contentType)) {
+      const chunks = [];
+      let bytes = 0;
+      for await (const chunk of upstream) {
+        const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        bytes += value.length;
+        if (bytes > 4 * 1024 * 1024) {
+          upstream.destroy(new Error('generic HLS playlist is too large'));
+          throw new Error('generic HLS playlist is too large');
+        }
+        chunks.push(value);
+      }
+      const rewritten = rewriteGenericHlsPlaylist(
+        Buffer.concat(chunks).toString('utf8'),
+        upstream.pongFinalUrl || target
+      );
+      const body = Buffer.from(rewritten, 'utf8');
+      res.writeHead(status, {
+        ...gatewayCorsHeaders(),
+        'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+        'Content-Length': body.length,
+        'Cache-Control': 'private, max-age=2',
+        'X-Content-Type-Options': 'nosniff'
+      });
+      if (req.method === 'HEAD') res.end();
+      else res.end(body);
+      return;
+    }
+    const headers = gatewayCorsHeaders();
+    for (const name of [
+      'content-type', 'content-length', 'content-range', 'accept-ranges',
+      'etag', 'last-modified', 'vary'
+    ]) {
+      const value = upstream.headers[name];
+      if (value) headers[name] = value;
+    }
+    res.writeHead(status, headers);
+    if (req.method === 'HEAD') {
+      upstream.resume();
+      res.end();
+    } else {
+      await new Promise((resolve, reject) => {
+        upstream.once('error', reject);
+        res.once('error', reject);
+        res.once('finish', resolve);
+        upstream.pipe(res);
+      });
+    }
+  } finally {
+    clearTimeout(headerTimer);
     activeWorkloadControllers.delete(controller);
     req.off('aborted', abort);
     res.off('close', abort);
@@ -6831,8 +8811,9 @@ const videoFileCacheSegmentStats = {
   bytes: 0
 };
 
-function videoFileCachePathFor(id, suffix = '.cache') {
-  return path.join(VIDEO_FILE_CACHE_DIR, `${id}${suffix}`);
+function videoFileCachePathFor(id, suffix = '.cache', generation = videoFileCacheGeneration) {
+  const safeGeneration = Math.max(0, Number(generation || 0));
+  return path.join(VIDEO_FILE_CACHE_DIR, `${safeGeneration}-${id}${suffix}`);
 }
 
 function assertVideoFileCachePathIsSafe(targetPath = VIDEO_FILE_CACHE_DIR) {
@@ -6901,6 +8882,60 @@ function videoFileCacheHeaders(extra = {}) {
   };
 }
 
+function videoFileCacheRecordHasPlayableFallback(record) {
+  if (!record || record.status === 'ready') return false;
+  // A TikTok watch page is not an MP4 origin. Never advertise its HTML as a
+  // direct-media recovery path after extraction or cache validation fails.
+  if (isTikTokVideoPageUrl(record.sourceUrl)) return false;
+  const bytes = Number(record.bytes || 0);
+  const totalBytes = Number(record.totalBytes || 0);
+  const failedWithoutBytes = record.status === 'error' && bytes <= 0;
+  const bunkrDirectStream = record.playbackProfile === 'bunkr';
+  const knownOversized = totalBytes > VIDEO_FILE_CACHE_MAX_FILE_BYTES;
+  // These are the exact cases serveVideoFileCacheMedia() sends through the
+  // range-preserving origin gateway instead of requiring a complete cache
+  // file. Do not broaden this to every error: a partial failed record from an
+  // arbitrary dead origin has neither playable cached bytes nor a qualified
+  // direct-fallback route.
+  return bunkrDirectStream || failedWithoutBytes || knownOversized;
+}
+
+function videoFileCacheFailureCategory(error) {
+  const code = String(error?.code || '').toUpperCase();
+  const message = String(error?.message || error || '');
+  // yt-dlp's TikTok extractor maps site status 10204 to this exact message.
+  // A second identical request from this host cannot repair that access gate.
+  if (/Your IP address is blocked from accessing this post/i.test(message)) return 'access_blocked';
+  if (code === 'VIDEO_CACHE_SEGMENT_PREFIX_FAILED') return 'media_integrity';
+  if (/\b(?:abort(?:ed)?|cancel(?:ed|led)?)\b/i.test(message)) return 'canceled';
+  if (/\b(?:timed?\s*out|timeout|ETIMEDOUT)\b/i.test(message) || code === 'ETIMEDOUT') return 'timeout';
+  if (/\b(?:HTTP\s*(?:Error\s*)?[45]\d\d|upstream\s+[45]\d\d)\b/i.test(message)) return 'upstream_http';
+  if (['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH'].includes(code) ||
+      /\b(?:network|DNS|SSL|TLS|certificate|connection reset)\b/i.test(message)) return 'network';
+  if (/\b(?:unable to extract|unsupported URL|no video formats|requested format is not available|video unavailable|private video)\b/i.test(message)) return 'source_unavailable';
+  if (/\b(?:file too large|empty video|invalid (?:resume range|media)|metadata|entity changed|did not complete)\b/i.test(message)) return 'media_invalid';
+  if (['EACCES', 'ENOSPC', 'EPERM'].includes(code) || /\b(?:file write failed|rename failed)\b/i.test(message)) return 'storage';
+  if (/(?:yt[_-]dlp|TikTok downloader|\[TikTok\])/i.test(message)) return 'extractor';
+  return 'unknown';
+}
+
+function noteVideoFileCacheFailure(record, error) {
+  record.failureCategory = record.segmentedPrefixFailed
+    ? 'media_integrity' : videoFileCacheFailureCategory(error);
+  record.failureAttempts = Math.min(255, Math.max(0, Number(record.failureAttempts || 0)) + 1);
+  record.lastFailureAt = Date.now();
+}
+
+function videoFileCacheShouldRetryAfterFailure(record, error) {
+  if (Number(record?.retries || 0) >= 2) return false;
+  // Do not spend two more background attempts on the same deterministic,
+  // zero-byte TikTok site block. The existing cooldown and changed-source
+  // recovery remain available; unrelated failures keep their retry budget.
+  return !(isTikTokVideoPageUrl(record?.sourceUrl) &&
+    record.failureCategory === 'access_blocked' &&
+    videoFileCacheFailureCategory(error) === 'access_blocked' && Number(record.bytes || 0) <= 0);
+}
+
 function videoFileCacheRecordJson(record, endpoint = '') {
   if (!record) return null;
   const playbackPath = `/video-cache/media/${encodeURIComponent(record.id)}`;
@@ -6908,11 +8943,18 @@ function videoFileCacheRecordJson(record, endpoint = '') {
     id: record.id,
     status: record.status,
     ready: record.status === 'ready',
-    playable: ['queued', 'downloading', 'ready'].includes(record.status),
+    playable: ['queued', 'downloading', 'ready'].includes(record.status) ||
+      videoFileCacheRecordHasPlayableFallback(record),
     bytes: Number(record.bytes || 0),
     availableBytes: Number(record.bytes || 0),
     totalBytes: Number(record.totalBytes || 0),
     contentType: record.contentType || 'video/mp4',
+    tiktokSourceTransport: record.tiktokSourceTransport || '',
+    failure: record.failureCategory ? {
+      category: record.failureCategory,
+      attempts: Math.max(0, Number(record.failureAttempts || 0)),
+      lastAt: new Date(Number(record.lastFailureAt || 0)).toISOString()
+    } : null,
     priority: currentVideoFileCachePriority(record),
     playbackBufferedSeconds: Number(record.playbackBufferedSeconds || 0),
     playbackBufferConstrained: record.playbackBufferConstrained === true,
@@ -6954,6 +8996,7 @@ function videoFileCacheSnapshot() {
     bytes: videoFileCacheBytes,
     partial_bytes: partialBytes,
     max_bytes: VIDEO_FILE_CACHE_MAX_BYTES,
+    max_file_bytes: VIDEO_FILE_CACHE_MAX_FILE_BYTES,
     minimum_free_bytes: VIDEO_FILE_CACHE_MIN_FREE_BYTES,
     concurrency: VIDEO_FILE_CACHE_DOWNLOAD_CONCURRENCY,
     background_concurrency: VIDEO_FILE_CACHE_BACKGROUND_CONCURRENCY,
@@ -7079,12 +9122,7 @@ async function waitForVideoFileCacheIo(readers, downloads) {
     new Promise(resolve => { timer = setTimeout(() => resolve(false), VIDEO_FILE_CACHE_IO_SETTLE_MS); })
   ]);
   clearTimeout(timer);
-  if (
-    !settled ||
-    videoFileCacheReaders.size ||
-    videoFileCacheControllers.size ||
-    [...videoFileCacheRecords.values()].some(record => record.downloadPromise)
-  ) throw new Error('video cache I/O did not settle before wipe');
+  if (!settled) throw new Error('video cache I/O did not settle before wipe');
 }
 
 async function initializeVideoFileCache() {
@@ -7112,19 +9150,30 @@ async function resetVideoFileCache(reason = 'reset') {
   if (videoFileCacheResetPromise) return videoFileCacheResetPromise;
   const operation = (async () => {
     videoFileCacheHealthy = false;
-    videoFileCacheHidden = false;
     videoFileCacheGeneration++;
     if (videoFileCacheRetryTimer) clearTimeout(videoFileCacheRetryTimer);
     videoFileCacheRetryTimer = null;
+    const staleRecords = [...videoFileCacheRecords.values()];
     const readers = [...videoFileCacheReaders];
-    const downloads = [...videoFileCacheRecords.values()].map(record => record.downloadPromise).filter(Boolean);
+    const downloads = staleRecords.map(record => record.downloadPromise).filter(Boolean);
+    const stalePaths = [...new Set(staleRecords.flatMap(record => [
+      record.filePath,
+      videoFileCachePathFor(record.id, '.part', record.cacheGeneration),
+      videoFileCachePathFor(record.id, '.cache', record.cacheGeneration),
+      // Version 28.88 and earlier did not namespace cache files. Include both
+      // legacy paths so the first rollover after an upgrade also cleans them.
+      path.join(VIDEO_FILE_CACHE_DIR, `${record.id}.part`),
+      path.join(VIDEO_FILE_CACHE_DIR, `${record.id}.cache`)
+    ].filter(Boolean)))];
     for (const controller of [...videoFileCacheControllers]) controller.abort();
     for (const reader of readers) reader.abort();
-    await waitForVideoFileCacheIo(readers, downloads);
-    await removeVideoFileCacheDirectory();
-    await fs.mkdir(VIDEO_FILE_CACHE_DIR, { recursive: true });
-    videoFileCacheHidden = await markVideoFileCacheHidden();
+    // Publish a fresh cache generation immediately. A native HTTP/file handle
+    // can remain blocked after AbortController fires; waiting for that old I/O
+    // used to leave every /video-cache/stream request permanently unavailable.
+    // Generation-prefixed filenames let the new player proceed without ever
+    // colliding with those abandoned writers.
     videoFileCacheControllers.clear();
+    videoFileCacheReaders.clear();
     videoFileCacheRecords.clear();
     videoFileCacheQueue = [];
     videoFileCacheActive = 0;
@@ -7133,8 +9182,18 @@ async function resetVideoFileCache(reason = 'reset') {
     videoFileCachePriorityEpoch = 0;
     videoFileCacheGlobalPlaybackConstrainedUntil = 0;
     videoFileCacheLastHeartbeatAt = 0;
+    await fs.mkdir(VIDEO_FILE_CACHE_DIR, { recursive: true });
+    videoFileCacheHidden = await markVideoFileCacheHidden();
     videoFileCacheHealthy = true;
-    console.log(`Video file cache wiped: ${reason}`);
+    console.log(`Video file cache generation replaced: ${reason}`);
+    void waitForVideoFileCacheIo(readers, downloads)
+      .then(() => Promise.allSettled(stalePaths.map(filePath => fs.rm(filePath, { force: true }))))
+      .catch(error => {
+        // Stale generation files are isolated from all current record paths.
+        // Startup performs a complete safe-root wipe, so a native request that
+        // never settles cannot poison playback or grow across process restarts.
+        console.warn(`Stale video cache cleanup deferred: ${error.message || error}`);
+      });
   })();
   videoFileCacheResetPromise = operation;
   try {
@@ -7161,11 +9220,24 @@ function currentVideoFileCachePriority(record, now = Date.now()) {
 }
 
 function isSameOriginLanBrowserRequest(req, requestUrl) {
-  if (req.headers.origin || !isPrivateLanAddress(req.socket.remoteAddress)) return false;
-  if (String(req.headers['sec-fetch-site'] || '').toLowerCase() !== 'same-origin') return false;
+  if (!isPrivateLanAddress(req.socket.remoteAddress)) return false;
   try {
-    const requestHost = new URL(`http://${req.headers.host || ''}`).hostname;
-    return isPrivateLanAddress(requestHost) && requestUrl.hostname === requestHost;
+    const requestOrigin = new URL(`http://${req.headers.host || ''}`);
+    const requestHost = requestOrigin.hostname;
+    if (!isPrivateLanAddress(requestHost) || requestUrl.hostname !== requestHost) return false;
+    // Android WebView can include Origin on a same-origin GET, especially
+    // after a media request. Accept it only when scheme/host/port exactly
+    // match this private-LAN server. This also lets an already-open Pong page
+    // recover after the local server restarts and invalidates its old token.
+    if (req.headers.origin) {
+      return new URL(String(req.headers.origin)).origin === requestOrigin.origin;
+    }
+    if (String(req.headers['sec-fetch-site'] || '').toLowerCase() === 'same-origin') return true;
+    // Android System WebView 124 omits Sec-Fetch-Site on some same-origin GETs
+    // but retains the exact Pong page Referer.
+    return req.headers.referer
+      ? new URL(String(req.headers.referer)).origin === requestOrigin.origin
+      : false;
   } catch (_) {
     return false;
   }
@@ -7198,6 +9270,7 @@ function hasValidLanBrowserSession(req) {
 }
 
 function promoteVideoFileCachePlaybackRecord(activeRecord) {
+  activeRecord.startupOnly = false;
   for (const record of videoFileCacheRecords.values()) {
     if (record === activeRecord) continue;
     if (Number(record.activeReaders || 0) > 0) continue;
@@ -7365,8 +9438,8 @@ async function evictVideoFileCacheIfNeeded(extraBytes = 0) {
     if (!expired && !oversized && !lowDisk) break;
     const wasReady = record.status === 'ready';
     const recordPath = wasReady
-      ? (record.filePath || videoFileCachePathFor(record.id, '.cache'))
-      : videoFileCachePathFor(record.id, '.part');
+      ? (record.filePath || videoFileCachePathFor(record.id, '.cache', record.cacheGeneration))
+      : videoFileCachePathFor(record.id, '.part', record.cacheGeneration);
     try { await fs.rm(recordPath, { force: true }); } catch (_) {}
     const removedBytes = Number(record.bytes || 0);
     residentBytes = Math.max(0, residentBytes - removedBytes);
@@ -7402,8 +9475,76 @@ function videoFileCacheCanUseLocal22Segments(record) {
   }
 }
 
-function requestLocal22VideoSegment(target, method, headers, controller) {
+function tikTokVideoFileCacheHintIdentity(hint) {
+  if (!hint?.urls?.length) return '';
+  // Signed query parameters and receivedAt can rotate on an otherwise
+  // unchanged CDN object; neither grants a fresh retry budget.
+  const mediaPaths = hint.urls.map(raw => {
+    const url = new URL(raw);
+    return `${url.hostname.toLowerCase()}${url.pathname}`;
+  });
+  return JSON.stringify([hint.videoId, mediaPaths, hint.width, hint.height, hint.size, hint.codec]);
+}
+
+function enqueueRequestedVideoFileCacheRecord(record, { hintChanged = false, now = Date.now() } = {}) {
+  if (!record || !['idle', 'error'].includes(record.status)) return false;
+  if (!isTikTokVideoPageUrl(record.sourceUrl)) {
+    if (!genericCacheRequestMayRetry(record, now)) return false;
+    if (record.startupOnly && record.startupPrepared) return false;
+    enqueueVideoFileCacheRecord(record);
+    return true;
+  }
+  // A published hint prefix may already be in a reader. Only a changed,
+  // validated hint with no remaining reader can start a new entity.
+  if (record.segmentedPrefixFailed) {
+    if (!hintChanged || Number(record.activeReaders || 0) > 0 || record.downloadPromise) return false;
+    record.segmentedPrefixFailed = false;
+  }
+  if (record.status === 'idle') {
+    enqueueVideoFileCacheRecord(record);
+    return true;
+  }
+  const exhausted = Number(record.retries || 0) >= 2;
+  const coolingDown = Number(record.retryNotBefore || 0) > now;
+  if (coolingDown) {
+    if (!hintChanged || now - Number(record.tiktokHintRecoveryAt || 0) <
+        VIDEO_FILE_CACHE_TIKTOK_FAILURE_COOLDOWN_MS) return false;
+    // A rotated set of syntactically valid hints is not an unlimited launch
+    // permit. Allow at most one identity-change recovery per cooldown window.
+    record.tiktokHintRecoveryAt = now;
+  }
+  if (hintChanged || exhausted) {
+    record.retries = 0;
+    record.retryNotBefore = 0;
+  }
+  enqueueVideoFileCacheRecord(record);
+  return true;
+}
+
+const VIDEO_FILE_CACHE_GENERIC_SEGMENT_MAX_ACTIVE = 2;
+let videoFileCacheGenericSegmentActive = 0;
+
+function videoFileCacheCanUseGenericSegments(record) {
+  if (
+    record?.startupOnly ||
+    record?.playbackProfile ||
+    currentVideoFileCachePriority(record) !== 0 ||
+    videoFileCacheGenericSegmentActive >= VIDEO_FILE_CACHE_GENERIC_SEGMENT_MAX_ACTIVE
+  ) return false;
+  try {
+    const target = gatewayTargetUrl(record.sourceUrl);
+    // The existing gateway authorization remains the sole host check. No
+    // redirects are followed by segmented requests; unsupported hosts fall
+    // back to the established single-response downloader.
+    return target.protocol === 'https:' && /\.mp4$/i.test(target.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
+function requestLocal22VideoSegment(target, method, headers, controller, headerTimeoutMs = 0) {
   return new Promise((resolve, reject) => {
+    let headerTimer = null;
     const request = https.request(target, {
       method,
       agent: GATEWAY_AGENT,
@@ -7413,122 +9554,69 @@ function requestLocal22VideoSegment(target, method, headers, controller) {
         accept: 'video/*,*/*;q=0.8',
         'accept-encoding': 'identity',
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
-        referer: `${target.protocol}//${target.host}/`,
+        referer: gatewayMediaReferer(target),
         ...headers
       }
-    }, resolve);
+    }, response => {
+      clearTimeout(headerTimer);
+      resolve(response);
+    });
+    if (headerTimeoutMs > 0) {
+      headerTimer = setTimeout(() => request.destroy(new Error('segmented video cache header timeout')), headerTimeoutMs);
+    }
     request.once('timeout', () => request.destroy(new Error('segmented video cache timeout')));
-    request.once('error', reject);
+    request.once('error', error => { clearTimeout(headerTimer); reject(error); });
     request.end();
   });
 }
 
-async function downloadLocal22VideoFileInSegments(record, partPath, controller, generation) {
+async function downloadLocal22VideoFileInSegments(record, partPath, controller, generation, generic = false) {
   videoFileCacheSegmentStats.attempts++;
   const target = gatewayTargetUrl(record.sourceUrl);
-  let handle;
   try {
-    const headResponse = await requestLocal22VideoSegment(target, 'HEAD', {}, controller);
-    const headStatus = Number(headResponse.statusCode || 0);
-    const totalBytes = Number(headResponse.headers['content-length'] || 0);
-    const acceptsRanges = /bytes/i.test(String(headResponse.headers['accept-ranges'] || ''));
-    const contentType = String(headResponse.headers['content-type'] || 'video/mp4').split(';')[0] || 'video/mp4';
-    const etag = String(headResponse.headers.etag || '');
-    const lastModified = String(headResponse.headers['last-modified'] || '');
-    headResponse.resume();
-    if (
-      headStatus !== 200 ||
-      !acceptsRanges ||
-      !Number.isFinite(totalBytes) ||
-      totalBytes <= 0 ||
-      totalBytes > VIDEO_FILE_CACHE_MAX_FILE_BYTES
-    ) throw new Error('segmented video cache metadata unavailable');
-
-    await fs.rm(partPath, { force: true }).catch(() => {});
-    handle = await fs.open(partPath, 'w');
-    record.bytes = 0;
-    record.totalBytes = totalBytes;
-    record.contentType = contentType;
-    record.etag = etag;
-    record.lastModified = lastModified;
-    record.headersReadyAt = Date.now();
-    const chunkBytes = VIDEO_FILE_CACHE_LOCAL22_SEGMENT_BYTES;
-    const chunkCount = Math.ceil(totalBytes / chunkBytes);
-    const segmentConcurrency = Math.max(
-      2,
-      Math.min(VIDEO_FILE_CACHE_LOCAL22_SEGMENT_CONCURRENCY, Number(record.segmentConcurrency || 2))
-    );
-
-    for (let waveStart = 0; waveStart < chunkCount; waveStart += segmentConcurrency) {
-      if (controller.signal.aborted || generation !== videoFileCacheGeneration) {
-        throw new Error('segmented video cache aborted');
-      }
-      const waveIndexes = Array.from(
-        { length: Math.min(segmentConcurrency, chunkCount - waveStart) },
-        (_, offset) => waveStart + offset
-      );
-      const requests = waveIndexes.map(async chunkIndex => {
-        const start = chunkIndex * chunkBytes;
-        const end = Math.min(totalBytes - 1, start + chunkBytes - 1);
-        const response = await requestLocal22VideoSegment(target, 'GET', {
-          range: `bytes=${start}-${end}`,
-          ...(etag || lastModified ? { 'if-range': etag || lastModified } : {})
-        }, controller);
-        const status = Number(response.statusCode || 0);
-        const contentRange = String(response.headers['content-range'] || '');
-        const match = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+)$/i);
-        if (
-          status !== 206 ||
-          !match ||
-          Number(match[1]) !== start ||
-          Number(match[2]) !== end ||
-          Number(match[3]) !== totalBytes
-        ) {
-          response.resume();
-          throw new Error('segmented video cache range mismatch');
-        }
-        const chunks = [];
-        let received = 0;
-        for await (const chunk of response) {
-          received += chunk.length;
-          if (received > end - start + 1) throw new Error('segmented video cache range overflow');
-          chunks.push(chunk);
-        }
-        if (received !== end - start + 1) throw new Error('segmented video cache range ended early');
-        return Buffer.concat(chunks, received);
-      });
-      const settledRequests = requests.map(request => request.then(
-        value => ({ value, error: null }),
-        error => ({ value: null, error })
-      ));
-      for (const request of settledRequests) {
-        const result = await request;
-        if (result.error) {
-          await Promise.all(settledRequests);
-          throw result.error;
-        }
-        const buffer = result.value;
-        await handle.write(buffer, 0, buffer.length, record.bytes);
-        record.bytes += buffer.length;
+    const segmentConcurrency = generic
+      ? Math.min(4, VIDEO_FILE_CACHE_LOCAL22_SEGMENT_CONCURRENCY)
+      : Math.max(2, Math.min(VIDEO_FILE_CACHE_LOCAL22_SEGMENT_CONCURRENCY, Number(record.segmentConcurrency || 2)));
+    const { downloadVideoSegments } = await import('./video-cache-segmented-downloader.mjs');
+    await downloadVideoSegments({
+      request: (method, headers, headerTimeoutMs) =>
+        requestLocal22VideoSegment(target, method, headers, controller, headerTimeoutMs),
+      openFile: filePath => fs.open(filePath, 'w'),
+      removeFile: filePath => fs.rm(filePath, { force: true }),
+      partPath,
+      targetPath: target.pathname,
+      signal: controller.signal,
+      isCurrentGeneration: () => generation === videoFileCacheGeneration,
+      generic,
+      chunkBytes: VIDEO_FILE_CACHE_LOCAL22_SEGMENT_BYTES,
+      concurrency: segmentConcurrency,
+      maxFileBytes: VIDEO_FILE_CACHE_MAX_FILE_BYTES,
+      onMetadata: metadata => {
+        record.bytes = 0;
+        record.totalBytes = metadata.totalBytes;
+        record.contentType = metadata.contentType;
+        record.etag = metadata.etag;
+        record.lastModified = metadata.lastModified;
+        record.headersReadyAt = Date.now();
+      },
+      onPrefix: (published, delta) => {
+        record.bytes = published;
         record.updatedAt = Date.now();
-        videoFileCacheSegmentStats.bytes += buffer.length;
+        videoFileCacheSegmentStats.bytes += delta;
       }
-    }
-    if (record.bytes !== totalBytes) throw new Error('segmented video cache did not complete');
+    });
     videoFileCacheSegmentStats.successes++;
   } catch (error) {
     videoFileCacheSegmentStats.failures++;
     throw error;
-  } finally {
-    if (handle) await handle.close().catch(() => {});
   }
 }
 
 async function downloadVideoFileCacheRecord(record, generation) {
   const controller = new AbortController();
   videoFileCacheControllers.add(controller);
-  const partPath = videoFileCachePathFor(record.id, '.part');
-  const finalPath = videoFileCachePathFor(record.id, '.cache');
+  const partPath = videoFileCachePathFor(record.id, '.part', record.cacheGeneration);
+  const finalPath = videoFileCachePathFor(record.id, '.cache', record.cacheGeneration);
   record.controller = controller;
   record.status = 'downloading';
   record.startedAt = Date.now();
@@ -7538,19 +9626,41 @@ async function downloadVideoFileCacheRecord(record, generation) {
     record.yieldForFairness = false;
     await fs.mkdir(VIDEO_FILE_CACHE_DIR, { recursive: true });
     let segmentedDownloadComplete = false;
-    if (!isTikTokVideoPageUrl(record.sourceUrl) && videoFileCacheCanUseLocal22Segments(record)) {
+    const genericSegments = videoFileCacheCanUseGenericSegments(record) &&
+      !(await fs.stat(partPath).catch(() => ({ size: 0 }))).size;
+    if (!isTikTokVideoPageUrl(record.sourceUrl) && (videoFileCacheCanUseLocal22Segments(record) || genericSegments)) {
+      if (genericSegments) videoFileCacheGenericSegmentActive++;
       try {
-        await downloadLocal22VideoFileInSegments(record, partPath, controller, generation);
+        await downloadLocal22VideoFileInSegments(record, partPath, controller, generation, genericSegments);
         segmentedDownloadComplete = true;
       } catch (error) {
         if (controller.signal.aborted) throw error;
+        const disposition = genericSegments
+          ? (await import('./video-cache-segmented-downloader.mjs')).segmentFailureDisposition(record.bytes)
+          : 'sequential-fallback';
+        if (disposition === 'poison') {
+          // Readers may already hold the old prefix. Do not delete it and
+          // splice a fresh sequential response onto the same media request.
+          record.segmentedPrefixFailed = true;
+          const terminalError = new Error(`segmented video cache failed after published prefix: ${error.message || error}`);
+          terminalError.code = 'VIDEO_CACHE_SEGMENT_PREFIX_FAILED';
+          throw terminalError;
+        }
         await fs.rm(partPath, { force: true }).catch(() => {});
         record.bytes = 0;
         record.totalBytes = 0;
         record.etag = '';
         record.lastModified = '';
+      } finally {
+        if (genericSegments) videoFileCacheGenericSegmentActive = Math.max(0, videoFileCacheGenericSegmentActive - 1);
       }
     }
+    // Saved Bunkr URLs carry short-lived signatures. Refresh from the immutable
+    // storage path before the first byte request so old saved entries start as
+    // quickly as newly scraped ones.
+    record.sourceUrl = await refreshBunkrCdnSignedUrl(record.sourceUrl, {
+      signal: controller.signal
+    }).catch(() => record.sourceUrl);
     let currentUrl = record.sourceUrl;
     let redirects = 0;
     let freshRestarts = 0;
@@ -7563,6 +9673,7 @@ async function downloadVideoFileCacheRecord(record, generation) {
       } catch (_) {}
       if (resumeOffset > VIDEO_FILE_CACHE_MAX_FILE_BYTES) throw new Error('video cache file too large');
       record.bytes = resumeOffset;
+      const preparationRange = startupPrefixRange(record, resumeOffset);
       const target = gatewayTargetUrl(currentUrl);
       const gofileToken = /(^|\.)gofile\.io$/i.test(target.hostname)
         ? await ensureGofileGuestToken().catch(() => '')
@@ -7572,7 +9683,7 @@ async function downloadVideoFileCacheRecord(record, generation) {
           accept: 'video/*,*/*;q=0.8',
           'accept-encoding': 'identity',
           'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
-          referer: `${target.protocol}//${target.host}/`
+          referer: gatewayMediaReferer(target)
         };
         if (gofileToken) headers.cookie = `accountToken=${gofileToken}`;
         if (resumeOffset > 0) {
@@ -7580,6 +9691,7 @@ async function downloadVideoFileCacheRecord(record, generation) {
           const ifRange = record.etag || record.lastModified || '';
           if (ifRange) headers['if-range'] = ifRange;
         }
+        if (preparationRange) headers.range = preparationRange;
         const request = https.request(target, {
           method: 'GET',
           agent: GATEWAY_AGENT,
@@ -7599,6 +9711,14 @@ async function downloadVideoFileCacheRecord(record, generation) {
         redirects++;
         continue;
       }
+      // A server ignoring Range must not turn optional preparation into an
+      // unbounded multi-GB download. Foreground requests use the usual path.
+      if (preparationRange && status === 200) {
+        response.destroy();
+        record.status = 'idle';
+        record.startupPrepared = true;
+        return;
+      }
       const contentRange = String(response.headers['content-range'] || '');
       const contentRangeMatch = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
       const unsatisfiedRangeMatch = contentRange.match(/^bytes\s+\*\/(\d+)$/i);
@@ -7612,6 +9732,18 @@ async function downloadVideoFileCacheRecord(record, generation) {
       }
       if (status !== 200 && status !== 206) {
         response.resume();
+        if ([401, 403, 410].includes(status) && freshRestarts < 2) {
+          const refreshedUrl = await refreshBunkrCdnSignedUrl(currentUrl, {
+            signal: controller.signal,
+            force: true
+          }).catch(() => '');
+          if (refreshedUrl && refreshedUrl !== currentUrl) {
+            currentUrl = refreshedUrl;
+            record.sourceUrl = refreshedUrl;
+            freshRestarts++;
+            continue;
+          }
+        }
         throw new Error(`video cache upstream ${status || 'failed'}`);
       }
       let append = false;
@@ -7654,6 +9786,16 @@ async function downloadVideoFileCacheRecord(record, generation) {
       }
       record.etag = String(response.headers.etag || record.etag || '');
       record.lastModified = String(response.headers['last-modified'] || record.lastModified || '');
+      if (preparationRange && (!contentRangeMatch ||
+          Number(contentRangeMatch[2]) + 1 > STARTUP_PREFIX_BYTES ||
+          (!record.etag && !record.lastModified))) {
+        // No validator means a later Range response could be another entity.
+        // Leave playback to the original gateway rather than splice bytes.
+        response.destroy();
+        record.status = 'idle';
+        record.startupPrepared = true;
+        return;
+      }
       if (Number(record.totalBytes || 0) > VIDEO_FILE_CACHE_MAX_FILE_BYTES) {
         response.resume();
         throw new Error('video cache file too large');
@@ -7706,9 +9848,20 @@ async function downloadVideoFileCacheRecord(record, generation) {
       record.upstreamResponse = null;
       record.pausedForPlayback = false;
       if (generation !== videoFileCacheGeneration) throw new Error('video cache generation changed');
+      if (preparationRange && bytes < Number(record.totalBytes || 0)) {
+        const expectedEnd = Math.min(STARTUP_PREFIX_BYTES, Number(record.totalBytes));
+        if (bytes !== expectedEnd) throw new Error('startup prefix ended before its bounded range');
+        record.startupPrepared = true;
+        record.status = 'idle';
+        // A player may promote this record while its bounded response is in
+        // flight. Resume with validators after this writer relinquishes it.
+        if (!record.startupOnly || Number(record.activeReaders || 0) > 0) enqueueVideoFileCacheRecord(record);
+        return;
+      }
       if (Number(record.totalBytes || 0) > 0 && bytes !== Number(record.totalBytes)) {
         throw new Error(`video cache upstream ended at ${bytes} of ${record.totalBytes} bytes`);
       }
+      if (preparationRange) record.startupPrepared = true;
       if (!record.totalBytes) record.totalBytes = bytes;
       break;
     }
@@ -7736,6 +9889,9 @@ async function downloadVideoFileCacheRecord(record, generation) {
     record.bytes = bytes;
     record.totalBytes = bytes;
     record.status = 'ready';
+    record.failureCategory = '';
+    record.failureAttempts = 0;
+    record.lastFailureAt = 0;
     record.updatedAt = Date.now();
     record.activeUntil = 0;
     record.entryUntil = 0;
@@ -7749,7 +9905,17 @@ async function downloadVideoFileCacheRecord(record, generation) {
     record.pausedForPlayback = false;
     if (generation === videoFileCacheGeneration) {
       record.updatedAt = Date.now();
-      if (record.yieldForFairness) {
+      if (record.segmentedPrefixFailed) {
+        noteVideoFileCacheFailure(record, error);
+        record.status = 'error';
+        record.error = error.message || String(error);
+        record.retryNotBefore = isTikTokVideoPageUrl(record.sourceUrl)
+          ? Date.now() + VIDEO_FILE_CACHE_TIKTOK_FAILURE_COOLDOWN_MS : Date.now() + GENERIC_FAILURE_COOLDOWN_MS;
+        record.retries = 2;
+        await fs.rm(partPath, { force: true }).catch(() => {});
+        record.bytes = 0;
+        record.totalBytes = 0;
+      } else if (record.yieldForFairness) {
         // Keep the valid partial file. The next turn resumes with Range from
         // record.bytes, while another reachable card gets this worker now.
         record.yieldForFairness = false;
@@ -7769,15 +9935,23 @@ async function downloadVideoFileCacheRecord(record, generation) {
         record.error = '';
         record.retryNotBefore = 0;
       } else {
+        if (!controller.signal.aborted) noteVideoFileCacheFailure(record, error);
         record.status = 'error';
         record.error = error.message || String(error);
-        if (Number(record.retries || 0) < 2) {
+        if (videoFileCacheShouldRetryAfterFailure(record, error)) {
           record.retries = Number(record.retries || 0) + 1;
           record.retryNotBefore = Date.now() + 500 * (2 ** record.retries);
           enqueueVideoFileCacheRecord(record);
         } else {
           await fs.rm(partPath, { force: true }).catch(() => {});
           record.bytes = 0;
+          if (isTikTokVideoPageUrl(record.sourceUrl)) {
+            if (record.failureCategory === 'access_blocked' &&
+                videoFileCacheFailureCategory(error) === 'access_blocked') record.retries = 2;
+            record.retryNotBefore = Date.now() + VIDEO_FILE_CACHE_TIKTOK_FAILURE_COOLDOWN_MS;
+          } else {
+            record.retryNotBefore = Date.now() + GENERIC_FAILURE_COOLDOWN_MS;
+          }
         }
       }
     }
@@ -7885,20 +10059,36 @@ function queueVideoFileCacheUrl(rawUrl, priority = 2, metadata = {}) {
       order: ++videoFileCacheOrder,
       bytes: 0,
       contentType: 'video/mp4',
+      startupOnly: metadata.startupOnly === true,
       updatedAt: Date.now(),
       lastAccessedAt: 0,
       retries: 0
     };
+    record.cacheGeneration = videoFileCacheGeneration;
     videoFileCacheRecords.set(record.id, record);
   }
   const now = Date.now();
   const alreadyPlaybackLease = record.playbackLease === true;
   record.aliases.add(rawUrl);
   record.sourceUrl = canonical.targetUrl;
+  if (metadata.startupOnly !== true) record.startupOnly = false;
   record.deferWhenIdle = false;
   if (metadata?.artistKey) record.artistKey = String(metadata.artistKey).slice(0, 300);
-  if (['local22', 'bunkr'].includes(String(metadata?.playbackProfile || ''))) {
-    record.playbackProfile = String(metadata.playbackProfile);
+  if (Object.prototype.hasOwnProperty.call(metadata || {}, 'playbackProfile')) {
+    const requestedProfile = String(metadata?.playbackProfile || '');
+    record.playbackProfile = ['local22', 'bunkr', 'tiktok'].includes(requestedProfile)
+      ? requestedProfile
+      : '';
+  }
+  let hintChanged = false;
+  if(record.playbackProfile==='tiktok'&&metadata?.tiktokMediaHint){
+    const hint=normalizeTikTokMediaHint(record.sourceUrl,metadata.tiktokMediaHint);
+    if(hint){
+      const previousIdentity=tikTokVideoFileCacheHintIdentity(record.tiktokMediaHint);
+      const nextIdentity=tikTokVideoFileCacheHintIdentity(hint);
+      hintChanged=nextIdentity!==previousIdentity;
+      record.tiktokMediaHint=hint;
+    }
   }
   if (record.playbackProfile === 'local22') {
     const hasExplicitSegmentConcurrency = Object.prototype.hasOwnProperty.call(
@@ -7926,7 +10116,7 @@ function queueVideoFileCacheUrl(rawUrl, priority = 2, metadata = {}) {
   else if (Number(priority) === 1) record.currentUntil = Math.max(Number(record.currentUntil || 0), now + VIDEO_FILE_CACHE_CURRENT_HOLD_MS);
   record.priority = currentVideoFileCachePriority(record, now);
   if (record.status === 'idle' || record.status === 'error') {
-    enqueueVideoFileCacheRecord(record, { resetRetries: true });
+    enqueueRequestedVideoFileCacheRecord(record, { hintChanged, now });
   }
   return record;
 }
@@ -7969,26 +10159,52 @@ function videoFileCacheRange(rangeHeader, size) {
 async function videoFileCacheAvailableFile(record) {
   const candidates = record.status === 'ready' && record.filePath
     ? [record.filePath]
-    : [videoFileCachePathFor(record.id, '.part'), record.filePath].filter(Boolean);
+    : [videoFileCachePathFor(record.id, '.part', record.cacheGeneration), record.filePath].filter(Boolean);
   for (const filePath of candidates) {
     try {
       const stat = await fs.stat(filePath);
       if (stat.isFile()) return { filePath, size: Number(stat.size || 0) };
     } catch (_) {}
   }
-  return { filePath: candidates[0] || videoFileCachePathFor(record.id, '.part'), size: 0 };
+  return {
+    filePath: candidates[0] || videoFileCachePathFor(record.id, '.part', record.cacheGeneration),
+    size: 0
+  };
 }
 
-async function waitForVideoFileCacheMetadata(record, generation) {
+async function waitForVideoFileCacheMetadata(record, generation, readerResponse = null) {
   const startedAt = Date.now();
   while (generation === videoFileCacheGeneration && videoFileCacheRecords.get(record.id) === record) {
+    if (readerResponse && (readerResponse.destroyed || readerResponse.writableEnded ||
+        Number(record.activeReaders || 0) <= 0)) throw new Error('video cache reader closed');
+    // An aborted background writer may still carry the old entity length until
+    // its catch/finally path discards the partial. Do not publish that length to
+    // a new foreground reader or race a second writer against its cleanup.
+    if (record.controller?.signal?.aborted && record.downloadPromise) {
+      if (Date.now() - startedAt > VIDEO_FILE_CACHE_READ_WAIT_MS) throw new Error('video cache metadata wait timed out');
+      await new Promise(resolve => setTimeout(resolve, 40));
+      continue;
+    }
+    if (record.status === 'idle' && !record.downloadPromise &&
+        Number(record.activeReaders || 0) > 0) {
+      record.deferWhenIdle = false;
+      enqueueRequestedVideoFileCacheRecord(record);
+    }
+    if (record.status === 'queued' && !record.downloadPromise) pumpVideoFileCache();
     if (Number(record.totalBytes || 0) > 0) return Number(record.totalBytes);
     if (record.status === 'ready') {
       const available = await videoFileCacheAvailableFile(record);
+      if (generation !== videoFileCacheGeneration || videoFileCacheRecords.get(record.id) !== record) {
+        throw new Error('video cache was reset');
+      }
+      if (readerResponse && (readerResponse.destroyed || readerResponse.writableEnded ||
+          Number(record.activeReaders || 0) <= 0)) throw new Error('video cache reader closed');
       if (available.size > 0) return available.size;
     }
     if (record.status === 'error' && !record.downloadPromise && !videoFileCacheQueue.includes(record)) {
-      throw new Error(record.error || 'video cache download failed');
+      // Extractor stderr can contain signed media URLs or request details.
+      // The status record exposes only a fixed failure category and timing.
+      throw new Error('video cache download failed');
     }
     if (Date.now() - startedAt > VIDEO_FILE_CACHE_READ_WAIT_MS) throw new Error('video cache metadata wait timed out');
     await new Promise(resolve => setTimeout(resolve, 40));
@@ -8019,6 +10235,7 @@ function videoFileCacheTailRangeEligible(record, selectedRange, size, availableB
   if (
     !VIDEO_FILE_CACHE_TAIL_RANGE_ENABLED ||
     !record ||
+    isTikTokVideoPageUrl(record.sourceUrl) ||
     record.status !== 'downloading' ||
     !record.downloadPromise ||
     selectedRange?.status !== 206 ||
@@ -8042,6 +10259,7 @@ function videoFileCacheTailRangeEligible(record, selectedRange, size, availableB
 }
 
 async function tryOpenVideoFileCacheTailRange(req, res, record, start, end, totalBytes) {
+  if (isTikTokVideoPageUrl(record?.sourceUrl)) return null;
   if (videoFileCacheTailRangeStats.active >= VIDEO_FILE_CACHE_TAIL_RANGE_MAX_ACTIVE) return null;
   videoFileCacheTailRangeStats.attempts++;
   videoFileCacheTailRangeStats.active++;
@@ -8082,7 +10300,7 @@ async function tryOpenVideoFileCacheTailRange(req, res, record, start, end, tota
           accept: 'video/*,*/*;q=0.8',
           'accept-encoding': 'identity',
           'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
-          referer: `${current.protocol}//${current.host}/`,
+          referer: gatewayMediaReferer(current),
           range: `bytes=${start}-${end}`
         };
         if (ifRange) headers['if-range'] = ifRange;
@@ -8111,7 +10329,7 @@ async function tryOpenVideoFileCacheTailRange(req, res, record, start, end, tota
       if ([301, 302, 303, 307, 308].includes(status) && response.headers.location) {
         response.resume();
         if (redirect >= GATEWAY_MAX_REDIRECTS) throw new Error('too many video cache tail range redirects');
-        current = gatewayTargetUrl(new URL(String(response.headers.location), current).href);
+        current = authorizeGenericMediaRedirect(new URL(String(response.headers.location), current).href, current);
         response = null;
         continue;
       }
@@ -8197,6 +10415,7 @@ async function streamGrowingVideoFileCacheRange(req, res, record, start, end, ge
   let position = start;
   let lastProgressAt = Date.now();
   while (position <= end && !req.destroyed && !res.destroyed && !res.writableEnded) {
+    if (record.segmentedPrefixFailed) throw new Error('segmented video cache prefix failed');
     if (generation !== videoFileCacheGeneration || videoFileCacheRecords.get(record.id) !== record) {
       throw new Error('video cache was reset');
     }
@@ -8208,6 +10427,7 @@ async function streamGrowingVideoFileCacheRange(req, res, record, start, end, ge
         handle = await fs.open(available.filePath, 'r');
         const buffer = Buffer.allocUnsafe(Math.min(256 * 1024, readableEnd - position + 1));
         while (position <= readableEnd && !req.destroyed && !res.destroyed) {
+          if (record.segmentedPrefixFailed) throw new Error('segmented video cache prefix failed');
           const requested = Math.min(buffer.length, readableEnd - position + 1);
           const { bytesRead } = await handle.read(buffer, 0, requested, position);
           if (!bytesRead) break;
@@ -8226,9 +10446,9 @@ async function streamGrowingVideoFileCacheRange(req, res, record, start, end, ge
       continue;
     }
     if (record.status === 'error' && !record.downloadPromise && !videoFileCacheQueue.includes(record)) {
-      throw new Error(record.error || 'video cache download failed');
+      throw new Error('video cache download failed');
     }
-    if (record.status === 'idle' || record.status === 'error') enqueueVideoFileCacheRecord(record, { resetRetries: true });
+    if (record.status === 'idle' || record.status === 'error') enqueueRequestedVideoFileCacheRecord(record);
     record.activeUntil = Number.MAX_SAFE_INTEGER;
     record.priority = 0;
     pumpVideoFileCache();
@@ -8276,6 +10496,28 @@ async function serveVideoFileCacheMedia(req, res, id) {
     json(res, 404, { ok: false, error: 'video cache record was not found' });
     return;
   }
+  if (record.segmentedPrefixFailed) {
+    if (Number(record.activeReaders || 0) > 0 || record.downloadPromise) {
+      json(res, 502, { ok: false, error: 'segmented video cache prefix failed; retry after active reader closes' });
+      return;
+    }
+    // All readers of the old entity have gone. A new request may start a
+    // fresh file only after the poisoned partial is actually removed.
+    try {
+      await fs.rm(videoFileCachePathFor(record.id, '.part', record.cacheGeneration), { force: true });
+    } catch (error) {
+      json(res, 503, { ok: false, error: `segmented video cache cleanup failed: ${error.message || error}` });
+      return;
+    }
+    record.segmentedPrefixFailed = false;
+    record.status = 'idle';
+    record.bytes = 0;
+    record.totalBytes = 0;
+    record.etag = '';
+    record.lastModified = '';
+    record.error = '';
+    record.retries = 0;
+  }
   const reader = registerVideoFileCacheReader(res);
   let readerReleased = false;
   const releaseReader = () => {
@@ -8289,21 +10531,40 @@ async function serveVideoFileCacheMedia(req, res, id) {
   record.activeReaders = Number(record.activeReaders || 0) + 1;
   res.once('close', releaseReader);
   promoteVideoFileCachePlaybackRecord(record);
+  if (!record.controller?.signal?.aborted) record.deferWhenIdle = false;
   record.currentUntil = 0;
-  const failedWithoutBytes = record.status === 'error' && Number(record.bytes || 0) <= 0;
-  if (failedWithoutBytes) {
+  // Direct relay and recovery readers need the same foreground bandwidth
+  // protection as growing-cache readers, including their early-return paths.
+  touchVideoFileCacheHeartbeat();
+  protectVideoFileCacheForegroundPlayback(12000, { playbackProfile: record.playbackProfile || '' });
+  if (record.status === 'error' && Number(record.bytes || 0) <= 0 &&
+      isTikTokVideoPageUrl(record.sourceUrl)) {
+    enqueueRequestedVideoFileCacheRecord(record);
+  }
+  if (record.status === 'error' && Number(record.bytes || 0) <= 0) {
     // Do not make the active player wait through the same complete-file cache
     // retry after that transport has already failed. The range-preserving
-    // gateway is independently usable and is the correct foreground fallback.
+    // gateway is independently usable only for a direct-media source.
     try {
+      if (isTikTokVideoPageUrl(record.sourceUrl)) {
+        json(res, 502, { ok: false, error: 'TikTok media source unavailable' });
+        return;
+      }
+      if (record.playbackProfile === 'bunkr' && await tryStreamParallelBunkrRange(req, res, record.sourceUrl)) return;
       await streamGatewayResponse(req, res, record.sourceUrl);
     } finally {
       res.off('close', releaseReader);
       releaseReader();
+      record.playbackLease = false;
+      record.activeUntil = 0;
+      record.priority = currentVideoFileCachePriority(record);
+      rebalanceVideoFileCacheDownloads();
+      pumpVideoFileCache();
     }
     return;
   }
-  const recallOriginStream = record.playbackProfile === 'bunkr' && record.status !== 'ready';
+  const recallOriginStream = !isTikTokVideoPageUrl(record.sourceUrl) &&
+    record.playbackProfile === 'bunkr' && record.status !== 'ready';
   if (recallOriginStream) {
     // Recall/Erome bundles can contain many large clips from the same CDN.
     // Waiting for each incomplete full-file cache entry made the first prepared
@@ -8313,6 +10574,7 @@ async function serveVideoFileCacheMedia(req, res, id) {
     record.deferWhenIdle = true;
     record.controller?.abort();
     try {
+      if (await tryStreamParallelBunkrRange(req, res, record.sourceUrl)) return;
       await streamGatewayResponse(req, res, record.sourceUrl);
     } finally {
       res.off('close', releaseReader);
@@ -8320,27 +10582,36 @@ async function serveVideoFileCacheMedia(req, res, id) {
     }
     return;
   }
-  const knownOversized = Number(record.totalBytes || 0) > VIDEO_FILE_CACHE_MAX_FILE_BYTES;
+  const abortedWriterCleaningUp = record.controller?.signal?.aborted && record.downloadPromise;
+  const knownOversized = !abortedWriterCleaningUp &&
+    Number(record.totalBytes || 0) > VIDEO_FILE_CACHE_MAX_FILE_BYTES;
   if (!knownOversized && (record.status === 'idle' || record.status === 'error')) {
-    enqueueVideoFileCacheRecord(record, { resetRetries: true });
+    enqueueRequestedVideoFileCacheRecord(record);
+    pumpVideoFileCache();
   }
-  touchVideoFileCacheHeartbeat();
-  // A real media reader is the strongest foreground signal. Recall/Bunkr cards
-  // do not send Random40 buffer telemetry, so reclaim their worker lanes here.
-  protectVideoFileCacheForegroundPlayback(12000, { playbackProfile: record.playbackProfile || '' });
   let tailRangeSession = null;
   try {
     if (knownOversized) {
+      if (isTikTokVideoPageUrl(record.sourceUrl)) {
+        json(res, 502, { ok: false, error: 'TikTok media exceeds cache limit' });
+        return;
+      }
+      if (record.playbackProfile === 'bunkr' && await tryStreamParallelBunkrRange(req, res, record.sourceUrl)) return;
       await streamGatewayResponse(req, res, record.sourceUrl);
       return;
     }
-    const size = await waitForVideoFileCacheMetadata(record, generation);
+    const size = await waitForVideoFileCacheMetadata(record, generation, res);
     if (size > VIDEO_FILE_CACHE_MAX_FILE_BYTES) {
+      if (isTikTokVideoPageUrl(record.sourceUrl)) {
+        json(res, 502, { ok: false, error: 'TikTok media exceeds cache limit' });
+        return;
+      }
       // Multi-gigabyte Pixeldrain/Balbums files are valid media, but caching the
       // complete file would exceed the per-file safety limit. Preserve Chrome's
       // Range header and stream only the requested bytes through the gateway.
       record.deferWhenIdle = true;
       record.controller?.abort();
+      if (record.playbackProfile === 'bunkr' && await tryStreamParallelBunkrRange(req, res, record.sourceUrl)) return;
       await streamGatewayResponse(req, res, record.sourceUrl);
       return;
     }
@@ -8500,20 +10771,474 @@ async function writeJsonFile(filePath, value) {
 let pcSavedLinksWriteTail = Promise.resolve();
 
 function emptyPcSavedLinks() {
-  return { savedVideos: {}, savedArtists: {}, updatedAt: '' };
+  return { savedVideos: {}, savedArtists: {}, savedCollections: {}, updatedAt: '' };
+}
+
+function readBodyBuffer(req, limit = BROWSER_MEDIA_RELAY_CHUNK_BYTES + 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new Error('Relay response body is too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function validBrowserMediaRelayId(value) {
+  const normalized = String(value || '').trim();
+  return /^[a-z0-9-]{8,100}$/i.test(normalized) ? normalized : '';
+}
+
+function pruneBrowserMediaRelayState() {
+  const now = Date.now();
+  for (const [sourceId, source] of browserMediaRelaySources) {
+    if (Number(source?.expiresAt || 0) <= now) browserMediaRelaySources.delete(sourceId);
+  }
+  for (const [clientId, client] of browserMediaRelayClients) {
+    if (now - Number(client?.lastSeen || 0) <= BROWSER_MEDIA_RELAY_TTL_MS) continue;
+    for (const waiter of client.waiters.splice(0)) waiter(null);
+    browserMediaRelayClients.delete(clientId);
+  }
+}
+
+function browserMediaRelayClient(clientId) {
+  pruneBrowserMediaRelayState();
+  let client = browserMediaRelayClients.get(clientId);
+  if (!client) {
+    client = { jobs: [], waiters: [], lastSeen: Date.now() };
+    browserMediaRelayClients.set(clientId, client);
+  }
+  client.lastSeen = Date.now();
+  return client;
+}
+
+function queueBrowserMediaRelayJob(source, range, method = 'GET', validator = '') {
+  const client = browserMediaRelayClient(source.clientId);
+  const jobId = crypto.randomUUID();
+  let settle;
+  const resultPromise = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+  const timer = setTimeout(() => {
+    const pending = browserMediaRelayJobs.get(jobId);
+    if (!pending) return;
+    browserMediaRelayJobs.delete(jobId);
+    pending.reject(new Error('The source browser did not return this video range in time'));
+  }, 45_000);
+  timer.unref?.();
+  browserMediaRelayJobs.set(jobId, { ...settle, timer, clientId: source.clientId });
+  const publicJob = {
+    id: jobId,
+    sourceId: source.id,
+    pageUrl: source.pageUrl,
+    candidates: source.candidates,
+    pinCandidate: source.phoneConnectionOnly === true || source.transferPinned === true,
+    validator,
+    range,
+    method,
+    createdAt: Date.now()
+  };
+  const waiter = client.waiters.shift();
+  if (waiter) waiter(publicJob);
+  else client.jobs.push(publicJob);
+  return resultPromise;
+}
+
+function parseBrowserMediaRelayRange(headerValue) {
+  const match = String(headerValue || '').match(/^bytes=(\d+)-(\d*)$/i);
+  const start = Math.max(0, Number(match?.[1] || 0));
+  const requestedEnd = match?.[2] ? Number(match[2]) : start + BROWSER_MEDIA_RELAY_CHUNK_BYTES - 1;
+  const end = Math.max(start, Math.min(
+    Number.isFinite(requestedEnd) ? requestedEnd : start + BROWSER_MEDIA_RELAY_CHUNK_BYTES - 1,
+    start + BROWSER_MEDIA_RELAY_CHUNK_BYTES - 1
+  ));
+  return `bytes=${start}-${end}`;
+}
+
+function browserMediaRelayCacheBust(rawUrl) {
+  const target = publicMediaPageUrl(rawUrl);
+  target.searchParams.set('_pong_relay', `${Date.now()}-${crypto.randomUUID()}`);
+  return target.toString();
+}
+
+function hqpornerRelayPage(rawUrl) {
+  try {
+    const target = publicMediaPageUrl(rawUrl);
+    return /(?:^|\.)hqporner\.com$/i.test(target.hostname) && /^\/hdporn\//i.test(target.pathname)
+      ? target.toString()
+      : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function hqpornerCapturedPlayer(rawUrl) {
+  try {
+    const target = publicMediaPageUrl(rawUrl);
+    return /(?:^|\.)mydaddy\.cc$/i.test(target.hostname) && /^\/video\/[^/]+\/?$/i.test(target.pathname)
+      ? target.toString()
+      : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function extractHqpornerPlayerUrl(html, pageUrl) {
+  const decoded = decodeHtmlUrl(String(html || '')).replace(/\\\//g, '/');
+  const candidates = [
+    ...decoded.matchAll(/(?:https?:)?\/\/[^"'<>\s]+\/video\/[^/"'<>\s]+\//gi),
+    ...decoded.matchAll(/(?:nativeplayer|altplayer)\.php\?i=([^"'&<>\s]+)/gi)
+  ].map(match => match[1] || match[0]);
+  for (const candidate of candidates) {
+    try {
+      const value = String(candidate || '').startsWith('//') ? `https:${candidate}` : candidate;
+      const target = publicMediaPageUrl(new URL(value, pageUrl).toString());
+      if (/\/video\/[^/]+\/?$/i.test(target.pathname)) return target.toString();
+    } catch (_) {}
+  }
+  return '';
+}
+
+function extractHqpornerMediaUrls(html, playerUrl) {
+  const decoded = decodeHtmlUrl(String(html || '')).replace(/\\\//g, '/');
+  const candidates = [];
+  for (const match of decoded.matchAll(/(?:https?:)?\/\/[^"'<>\s]+\/pubs\/[^/"'<>\s]+\/(?:360|480|720|1080)\.mp4(?:\?[^"'<>\s]*)?/gi)) {
+    try {
+      const value = String(match[0] || '').startsWith('//') ? `https:${match[0]}` : match[0];
+      const target = publicMediaPageUrl(new URL(value, playerUrl).toString());
+      if (!candidates.includes(target.toString())) candidates.push(target.toString());
+    } catch (_) {}
+  }
+  return candidates.sort((left, right) => {
+    const quality = value => Number(String(value).match(/\/(\d{3,4})\.mp4(?:[?#]|$)/i)?.[1] || 9999);
+    return quality(left) - quality(right);
+  });
+}
+
+async function fetchHqpornerMediaRange(rawUrl, range, playerUrl, timeoutMs = 12000) {
+  const target = publicMediaPageUrl(rawUrl);
+  const response = await fetch(target, {
+    redirect: 'follow',
+    signal: AbortSignal.timeout(Math.max(3000, timeoutMs)),
+    headers: {
+      'User-Agent': SIMPCITY_USER_AGENT,
+      'Accept': 'video/*,application/octet-stream;q=0.9,*/*;q=0.5',
+      'Accept-Encoding': 'identity',
+      'Range': range,
+      'Referer': playerUrl
+    }
+  });
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (![200, 206].includes(response.status)) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`HQPorner media HTTP ${response.status}`);
+  }
+  if (response.status === 200 && contentLength > BROWSER_MEDIA_RELAY_CHUNK_BYTES + 64 * 1024) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error('HQPorner media host ignored the bounded byte range');
+  }
+  const body = Buffer.from(await response.arrayBuffer());
+  if (!body.length || body.length > BROWSER_MEDIA_RELAY_CHUNK_BYTES + 64 * 1024) {
+    throw new Error('HQPorner media returned an invalid byte-range body');
+  }
+  return {
+    status: response.status,
+    body,
+    sourceUrl: response.url || target.toString(),
+    contentType: response.headers.get('content-type') || 'video/mp4',
+    contentRange: response.headers.get('content-range') || '',
+    acceptRanges: response.headers.get('accept-ranges') || 'bytes'
+  };
+}
+
+async function fetchFreshHqpornerRelayRange(source, range) {
+  const pageUrl = hqpornerRelayPage(source?.watchPageUrl || source?.pageUrl);
+  if (!pageUrl) throw new Error('Not an HQPorner watch page');
+  const capturedPlayerUrl = hqpornerCapturedPlayer(source?.pageUrl);
+
+  // Reuse the just-minted path while the player is actively reading adjacent
+  // ranges. If the CDN invalidates it, fall through and mint another one.
+  if (source.freshMediaUrl && Number(source.freshMediaExpiresAt || 0) > Date.now()) {
+    try {
+      return await fetchHqpornerMediaRange(
+        source.freshMediaUrl,
+        range,
+        source.freshPlayerUrl || pageUrl,
+        8000
+      );
+    } catch (_) {
+      source.freshMediaUrl = '';
+      source.freshMediaExpiresAt = 0;
+    }
+  }
+
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      let playerUrl = capturedPlayerUrl;
+      if (!playerUrl) {
+        const watch = await fetchPublicMediaPage(browserMediaRelayCacheBust(pageUrl), {
+          timeoutMs: 8000,
+          referer: pageUrl
+        });
+        playerUrl = extractHqpornerPlayerUrl(watch.html, pageUrl);
+      }
+      if (!playerUrl) throw new Error('HQPorner did not expose its nested player');
+      const player = await fetchPublicMediaPage(browserMediaRelayCacheBust(playerUrl), {
+        timeoutMs: 8000,
+        referer: pageUrl
+      });
+      const mediaUrls = extractHqpornerMediaUrls(player.html, playerUrl);
+      if (!mediaUrls.length) throw new Error('HQPorner player did not expose an MP4');
+      let mediaError = null;
+      for (const mediaUrl of mediaUrls) {
+        try {
+          const result = await fetchHqpornerMediaRange(mediaUrl, range, playerUrl);
+          source.freshMediaUrl = result.sourceUrl || mediaUrl;
+          source.freshPlayerUrl = playerUrl;
+          source.freshMediaExpiresAt = Date.now() + 30_000;
+          return result;
+        } catch (error) {
+          mediaError = error;
+        }
+      }
+      throw mediaError || new Error('HQPorner media range could not be loaded');
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 120 * (attempt + 1)));
+    }
+  }
+  throw lastError || new Error('HQPorner media range could not be loaded after retries');
+}
+
+function queueFreshHqpornerRelayRange(source, range) {
+  // Chromium can ask for the MP4 header and tail at nearly the same time. Two
+  // simultaneous player refreshes mint two CDN paths, and the newer path can
+  // invalidate the older request before its headers arrive. Serialize ranges
+  // per logical video so all of them reuse one freshly minted path.
+  const previous = source.freshRelayTail || Promise.resolve();
+  const run = previous
+    .catch(() => {})
+    .then(() => fetchFreshHqpornerRelayRange(source, range));
+  source.freshRelayTail = run;
+  run.finally(() => {
+    if (source.freshRelayTail === run) source.freshRelayTail = null;
+  }).catch(() => {});
+  return run;
+}
+
+function ensureBrowserMediaRelayKeeper(clientId, browserName = '') {
+  if (String(browserName || '').toLowerCase() === 'test') return false;
+  const normalizedClientId = validBrowserMediaRelayId(clientId);
+  if (!normalizedClientId) return false;
+  const lastStart = Number(browserMediaRelayKeeperStarts.get(normalizedClientId) || 0);
+  if (Date.now() - lastStart < 30_000) return true;
+  browserMediaRelayKeeperStarts.set(normalizedClientId, Date.now());
+  const keeperUrl = `http://127.0.0.1:${PORT}/browser-relay-keeper?pongBrowserRelayClientId=${encodeURIComponent(normalizedClientId)}`;
+  const requestedBrowser = String(browserName || '').toLowerCase();
+  const useFirefox = requestedBrowser === 'firefox' && existsSync(BROWSER_RELAY_FIREFOX_PATH);
+  const useEdge = requestedBrowser === 'edge' && existsSync(BROWSER_RELAY_EDGE_PATH);
+  const executable = useFirefox
+    ? BROWSER_RELAY_FIREFOX_PATH
+    : useEdge
+      ? BROWSER_RELAY_EDGE_PATH
+      : SIMPCITY_CHROME_PATH;
+  if (!existsSync(executable)) return false;
+  const args = useFirefox
+    ? ['-headless', '-private-window', keeperUrl]
+    : [
+        '--profile-directory=Default',
+        `--app=${keeperUrl}`,
+        '--window-position=-32000,-32000',
+        '--window-size=320,220',
+        '--mute-audio',
+        '--autoplay-policy=document-user-activation-required',
+        '--no-first-run',
+        '--no-default-browser-check'
+      ];
+  try {
+    const child = spawn(executable, args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    });
+    child.unref();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function refreshBunkrCdnSignedUrl(rawUrl, { signal = null, force = false } = {}) {
+  const target = gatewayTargetUrl(rawUrl);
+  if (!/(^|\.)cdn\.cr$/i.test(target.hostname) || !/\/storage\/media\//i.test(target.pathname)) {
+    return target.toString();
+  }
+  const expiry = Number(target.searchParams.get('ex') || target.searchParams.get('e') || 0);
+  if (!force && expiry > Math.floor(Date.now() / 1000) + 90) return target.toString();
+  const headers = {
+    Referer: 'https://dl.bunkr.cr/',
+    Origin: 'https://dl.bunkr.cr',
+    'User-Agent': SIMPCITY_USER_AGENT
+  };
+  const signUrl = new URL('https://glb-apisign.cdn.cr/sign');
+  signUrl.searchParams.set('path', target.pathname);
+  const timeoutSignal = AbortSignal.timeout(6000);
+  const requestSignal = signal && typeof AbortSignal.any === 'function'
+    ? AbortSignal.any([signal, timeoutSignal])
+    : timeoutSignal;
+  const response = await fetch(signUrl, { headers, signal: requestSignal });
+  if (!response.ok) throw new Error(`Bunkr media sign failed: ${response.status}`);
+  const signed = await response.json();
+  const originalName = target.searchParams.get('n') || '';
+  target.search = '';
+  Object.entries(signed || {}).forEach(([key, value]) => target.searchParams.set(key, String(value)));
+  if (originalName) target.searchParams.set('n', originalName);
+  return target.toString();
+}
+
+function canonicalPersistentMediaUrl(rawUrl) {
+  let current = String(rawUrl || '').trim();
+  for (let depth = 0; current && depth < 5; depth++) {
+    let parsed;
+    try {
+      parsed = new URL(current, `http://127.0.0.1:${PORT}/`);
+    } catch (_) {
+      break;
+    }
+    const wrapper = /\/(?:video-cache\/stream|proxy|(?:bunkr|erome)\.mp4)$/i.test(parsed.pathname || '');
+    const nested = wrapper
+      ? String(parsed.searchParams.get('url') || parsed.searchParams.get('u') || '').trim()
+      : '';
+    if (!nested || nested === current) break;
+    current = nested;
+  }
+  return current;
+}
+
+function canonicalPersistentMediaKey(rawUrl, record = {}) {
+  const canonicalUrl = canonicalPersistentMediaUrl(
+    record?.canonicalMediaUrl || record?.originalVideoUrl || record?.videoUrl || record?.url || rawUrl
+  );
+  try {
+    const parsed = new URL(canonicalUrl, `http://127.0.0.1:${PORT}/`);
+    const decodedPath = decodeURIComponent(parsed.pathname || '').replace(/\/+/g, '/');
+    const storageMatch = decodedPath.match(/\/(?:storage|storager)\/(.+\.(?:mp4|m4v|webm|mov))$/i);
+    if (storageMatch) return `media:${storageMatch[1].toLowerCase()}`;
+    parsed.hash = '';
+    return parsed.toString();
+  } catch (_) {
+    return canonicalUrl || String(rawUrl || '').trim();
+  }
+}
+
+function canonicalPersistentArtistKey(rawKey, record = {}) {
+  const artistUrl = String(record?.artistUrl || '').trim();
+  if (artistUrl) {
+    try {
+      const parsed = new URL(artistUrl);
+      parsed.hash = '';
+      parsed.search = '';
+      parsed.pathname = (parsed.pathname || '/').replace(/\/+$/, '') || '/';
+      return `artist-url:${parsed.toString().toLowerCase()}`;
+    } catch (_) {}
+  }
+  return String(record?.artistKey || rawKey || '').trim().toLowerCase();
 }
 
 function normalizePcSavedLinks(value) {
   const data = value && typeof value === 'object' && !Array.isArray(value)
     ? value
     : emptyPcSavedLinks();
+  const savedVideos = {};
+  for (const [rawKey, rawRecord] of Object.entries(data.savedVideos || {})) {
+    if (!rawRecord || typeof rawRecord !== 'object' || Array.isArray(rawRecord)) continue;
+    const url = canonicalPersistentMediaUrl(rawRecord.url || rawKey);
+    const key = canonicalPersistentMediaKey(url, rawRecord);
+    if (!key || !url) continue;
+    const previous = savedVideos[key] || {};
+    savedVideos[key] = { ...previous, ...rawRecord, url, mediaKey: key };
+  }
+  const savedArtists = {};
+  for (const [rawKey, rawRecord] of Object.entries(data.savedArtists || {})) {
+    if (!rawRecord || typeof rawRecord !== 'object' || Array.isArray(rawRecord)) continue;
+    const key = canonicalPersistentArtistKey(rawKey, rawRecord);
+    if (!key) continue;
+    const previous = savedArtists[key] || {};
+    const videosByKey = new Map();
+    for (const rawUrl of [
+      ...(Array.isArray(previous.videos) ? previous.videos : []),
+      ...(Array.isArray(rawRecord.videos) ? rawRecord.videos : [])
+    ]) {
+      const url = canonicalPersistentMediaUrl(rawUrl);
+      const mediaKey = canonicalPersistentMediaKey(url);
+      if (url && mediaKey) videosByKey.set(mediaKey, url);
+    }
+    savedArtists[key] = {
+      ...previous,
+      ...rawRecord,
+      artistKey: String(rawRecord.artistKey || previous.artistKey || key),
+      videos: [...videosByKey.values()],
+      videoMeta: {
+        ...(previous.videoMeta && typeof previous.videoMeta === 'object' ? previous.videoMeta : {}),
+        ...(rawRecord.videoMeta && typeof rawRecord.videoMeta === 'object' ? rawRecord.videoMeta : {})
+      }
+    };
+  }
+  const savedCollections = {};
+  for (const [rawKey, rawRecord] of Object.entries(data.savedCollections || {})) {
+    if (!rawRecord || typeof rawRecord !== 'object' || Array.isArray(rawRecord)) continue;
+    const id = String(rawRecord.id || rawKey || '').trim().toLowerCase().slice(0, 120);
+    const name = String(rawRecord.name || '').trim().slice(0, 80);
+    if (!id || !name) continue;
+    const deletedAt = String(rawRecord.deletedAt || '');
+    const bundles = [];
+    const seenBundles = new Set();
+    for (const rawBundle of deletedAt ? [] : (Array.isArray(rawRecord.bundles) ? rawRecord.bundles : [])) {
+      if (!rawBundle || typeof rawBundle !== 'object' || Array.isArray(rawBundle)) continue;
+      const bundleId = String(rawBundle.id || '').trim().slice(0, 180);
+      if (!bundleId || seenBundles.has(bundleId)) continue;
+      const videos = [];
+      const seenVideos = new Set();
+      for (const rawVideo of Array.isArray(rawBundle.videos) ? rawBundle.videos : []) {
+        const rawUrl = typeof rawVideo === 'string' ? rawVideo : rawVideo?.url;
+        const url = canonicalPersistentMediaUrl(rawUrl);
+        const mediaKey = canonicalPersistentMediaKey(url, rawVideo || {});
+        if (!url || !mediaKey || seenVideos.has(mediaKey)) continue;
+        seenVideos.add(mediaKey);
+        videos.push({
+          ...(rawVideo && typeof rawVideo === 'object' && !Array.isArray(rawVideo) ? rawVideo : {}),
+          url,
+          mediaKey
+        });
+      }
+      if (!videos.length) continue;
+      seenBundles.add(bundleId);
+      bundles.push({
+        ...rawBundle,
+        id: bundleId,
+        label: String(rawBundle.label || rawBundle.artistName || '').trim().slice(0, 160),
+        videos
+      });
+    }
+    savedCollections[id] = {
+      ...rawRecord,
+      id,
+      name,
+      bundles,
+      deletedAt
+    };
+  }
   return {
-    savedVideos: data.savedVideos && typeof data.savedVideos === 'object' && !Array.isArray(data.savedVideos)
-      ? data.savedVideos
-      : {},
-    savedArtists: data.savedArtists && typeof data.savedArtists === 'object' && !Array.isArray(data.savedArtists)
-      ? data.savedArtists
-      : {},
+    savedVideos,
+    savedArtists,
+    savedCollections,
     updatedAt: String(data.updatedAt || '')
   };
 }
@@ -8543,6 +11268,69 @@ function mergePcSavedLinks(baseValue, incomingValue) {
         ...(previous.videoMeta && typeof previous.videoMeta === 'object' ? previous.videoMeta : {}),
         ...(record.videoMeta && typeof record.videoMeta === 'object' ? record.videoMeta : {})
       }
+    };
+  }
+  for (const [key, record] of Object.entries(incoming.savedCollections)) {
+    if (!key || !record || typeof record !== 'object') continue;
+    const previous = base.savedCollections[key] || {};
+    if (previous.deletedAt || record.deletedAt) {
+      const previousTime = Date.parse(previous.updatedAt || previous.deletedAt || 0) || 0;
+      const recordTime = Date.parse(record.updatedAt || record.deletedAt || 0) || 0;
+      const recordWins = recordTime > previousTime || (
+        recordTime === previousTime && Boolean(record.deletedAt) && !previous.deletedAt
+      );
+      if (!Object.keys(previous).length || recordWins) {
+        base.savedCollections[key] = {
+          ...record,
+          id: key,
+          bundles: record.deletedAt ? [] : (Array.isArray(record.bundles) ? record.bundles : []),
+          deletedAt: String(record.deletedAt || '')
+        };
+      }
+      continue;
+    }
+    const bundleOrder = [];
+    const bundlesById = new Map();
+    for (const bundle of [
+      ...(Array.isArray(previous.bundles) ? previous.bundles : []),
+      ...(Array.isArray(record.bundles) ? record.bundles : [])
+    ]) {
+      const bundleId = String(bundle?.id || '').trim();
+      if (!bundleId) continue;
+      if (!bundlesById.has(bundleId)) bundleOrder.push(bundleId);
+      const priorBundle = bundlesById.get(bundleId) || {};
+      const videoOrder = [];
+      const videosByKey = new Map();
+      for (const video of [
+        ...(Array.isArray(priorBundle.videos) ? priorBundle.videos : []),
+        ...(Array.isArray(bundle?.videos) ? bundle.videos : [])
+      ]) {
+        const url = canonicalPersistentMediaUrl(typeof video === 'string' ? video : video?.url);
+        const mediaKey = canonicalPersistentMediaKey(url, video || {});
+        if (!url || !mediaKey) continue;
+        if (!videosByKey.has(mediaKey)) videoOrder.push(mediaKey);
+        videosByKey.set(mediaKey, {
+          ...(videosByKey.get(mediaKey) || {}),
+          ...(video && typeof video === 'object' && !Array.isArray(video) ? video : {}),
+          url,
+          mediaKey
+        });
+      }
+      bundlesById.set(bundleId, {
+        ...priorBundle,
+        ...bundle,
+        id: bundleId,
+        videos: videoOrder.map(mediaKey => videosByKey.get(mediaKey))
+      });
+    }
+    base.savedCollections[key] = {
+      ...previous,
+      ...record,
+      id: key,
+      bundles: bundleOrder.map(bundleId => bundlesById.get(bundleId)),
+      createdAt: String(previous.createdAt || record.createdAt || new Date().toISOString()),
+      updatedAt: String(record.updatedAt || previous.updatedAt || new Date().toISOString()),
+      deletedAt: ''
     };
   }
   base.updatedAt = new Date().toISOString();
@@ -9130,6 +11918,79 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 3000, control
     clearTimeout(timer);
     parentSignal?.removeEventListener('abort', abortFromParent);
     if (tracked) activeWorkloadControllers.delete(controller);
+  }
+}
+
+function local22TwoRuleTextReason(artist = {}) {
+  const combined = `${artist.artistName || ''} ${artist.pageText || ''} ${artist.artistUrl || ''}`
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, ' ');
+  const nameTokens = String(artist.artistName || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .split(/[^a-z0-9]+/g)
+    .filter(Boolean);
+  if (nameTokens.some(token => token.includes('bbw'))) {
+    return 'explicit creator label indicates a body-shape mismatch';
+  }
+  if (nameTokens.some(token =>
+    ['boy', 'boi', 'male', 'man', 'guy', 'dude'].includes(token) ||
+    /(?:were|the|only|all)(?:guys?|dudes?|males?)$/.test(token)
+  )) return 'explicit creator label indicates male-presenting content';
+  if (/\b(?:i am|i'm)\s+(?:a\s+)?(?:man|male|guy|dude|boy)\b/i.test(combined)) {
+    return 'explicit male self-description';
+  }
+  return '';
+}
+
+async function awaitGatewaySourceLaunch(signal, {
+  requestedAt = 0,
+  hostState = null,
+  html = false
+} = {}) {
+  let requestedFloor = Math.max(0, Number(requestedAt || 0));
+  for (;;) {
+    if (
+      html &&
+      localDiscoveryForegroundActive &&
+      [...videoVerifyHostStates.values()].some(state =>
+        Number(state.foregroundProofActive || 0) > 0 &&
+        Number(state.backoffUntil || 0) <= Date.now()
+      )
+    ) {
+      // A strong four-of-four media sample is close to completing the
+      // authoritative 15-video gate, so let that small proof finish first.
+      // Weak/empty samples must not stop profile discovery: doing so let one
+      // low-yield candidate monopolize the shared source clock for minutes.
+      await videoVerifyDelay(100, signal);
+      requestedFloor = 0;
+      continue;
+    }
+    const now = Date.now();
+    const backoffUntil = Math.max(
+      html ? Number(gatewayHtmlFetchStats.backoffUntil || 0) : 0,
+      Number(hostState?.backoffUntil || 0)
+    );
+    const launchAt = Math.max(
+      requestedFloor,
+      Number(gatewaySharedSourceActualNextStartAt || 0),
+      Number(hostState?.actualNextStartAt || 0),
+      backoffUntil
+    );
+    if (launchAt > now) {
+      await videoVerifyDelay(launchAt - now, signal);
+      // Re-check live backoff and the slots claimed by other wakeups. Without
+      // this loop, every request already waiting when a 503 arrived resumed at
+      // the same millisecond and immediately triggered another rate limit.
+      requestedFloor = 0;
+      continue;
+    }
+    const admittedAt = Date.now();
+    gatewaySharedSourceActualNextStartAt = admittedAt + GATEWAY_SHARED_SOURCE_GAP_MS;
+    if (hostState) hostState.actualNextStartAt = admittedAt + VIDEO_VERIFY_START_GAP_MS;
+    return;
   }
 }
 
@@ -9975,13 +12836,57 @@ function reviewReasonsIncludeUsability(reasons = []) {
   return reasons.some(reason => /\b(photograph|logo|placeholder|usability|non-photo)\b/i.test(String(reason || '')));
 }
 
+function local2ReviewScopedHardVeto(result = {}, reviewReasons = []) {
+  if (!reviewReasons.length) return local2HardVeto(result);
+  const checks = result?.checks || {};
+  if (reviewReasonsIncludeGender(reviewReasons)) {
+    if (checks.male_present === true || checks.male_only === true) return 'male-presenting person visible';
+    if (checks.female_presenting_adult === false) return 'no clearly female-presenting adult visible';
+  }
+  if (reviewReasonsIncludeAnatomy(reviewReasons) && random40ReservoirDecisionHasAnatomyConflict(result)) {
+    return 'visible attached anatomy conflicts with hard filter';
+  }
+  if (reviewReasonsIncludeAge(reviewReasons) && checks.appears_over_50 === true) return 'appears over age limit';
+  if (reviewReasonsIncludeFeet(reviewReasons) && checks.feet_dominant === true) return 'feet are the main subject';
+  if (
+    reviewReasonsIncludeUsability(reviewReasons) &&
+    (checks.logo_or_placeholder === true || checks.photograph === false)
+  ) return 'non-photo or placeholder image';
+  return '';
+}
+
+function local2ReviewScopedChecks(checks = {}, reviewReasons = []) {
+  if (!reviewReasons.length) return { ...checks };
+  const scoped = {};
+  const copy = key => {
+    if (checks[key] !== undefined && checks[key] !== null) scoped[key] = checks[key];
+  };
+  if (reviewReasonsIncludeGender(reviewReasons)) {
+    ['female_presenting_adult', 'woman_prominent', 'male_present', 'male_only'].forEach(copy);
+  }
+  if (reviewReasonsIncludeAnatomy(reviewReasons)) {
+    ['attached_male_anatomy', 'sex_toy_visible', 'toy_or_dildo', 'anatomy_ambiguous'].forEach(copy);
+  }
+  if (reviewReasonsIncludeAge(reviewReasons)) {
+    ['appears_over_50', 'underage_looking', 'age_ambiguous'].forEach(copy);
+  }
+  if (reviewReasonsIncludeFeet(reviewReasons)) copy('feet_dominant');
+  if (reviewReasonsIncludeUsability(reviewReasons)) {
+    ['photograph', 'logo_or_placeholder'].forEach(copy);
+  }
+  if (reviewReasonsIncludeBody(reviewReasons)) {
+    ['body_preference_conflict', 'body_evidence_ambiguous'].forEach(copy);
+  }
+  return scoped;
+}
+
 function enforceHardCheckReviewCompleteness(result = {}, reviewReasons = []) {
   const checks = { ...(result?.checks || {}) };
   const anatomy = normalizeAnatomyAssessment(result?.anatomy_assessment || {}, checks);
   // Missing requested fields are unresolved, never implied-safe. This keeps a
   // truncated/partial Qwen response from synthesizing a hard-filter pass.
   const normalizedResult = { ...result, checks, anatomy_assessment: anatomy };
-  const hardVeto = local2HardVeto(normalizedResult);
+  const hardVeto = local2ReviewScopedHardVeto(normalizedResult, reviewReasons);
   const bodyVeto = reviewReasonsIncludeBody(reviewReasons) ? local2VisualPreferenceVeto(normalizedResult) : '';
   if (hardVeto || bodyVeto) {
     return {
@@ -10051,9 +12956,12 @@ function mergeDefinedVisionChecks(base = {}, override = {}) {
 
 function mergePersonalQwenReview(personal, qwen, reviewReasons = []) {
   const checks = qwen?.checks || {};
+  const scopedChecks = local2ReviewScopedChecks(checks, reviewReasons);
   const anatomy = qwen?.anatomy_assessment || {};
-  const hardVeto = local2HardVeto(qwen);
-  const bodyVeto = local2VisualPreferenceVeto(qwen);
+  const hardVeto = local2ReviewScopedHardVeto(qwen, reviewReasons);
+  const bodyVeto = reviewReasonsIncludeBody(reviewReasons)
+    ? local2VisualPreferenceVeto(qwen)
+    : '';
   const anatomyUnresolved = reviewReasonsIncludeAnatomy(reviewReasons) && !(
     anatomy.attached_male_anatomy === false && checks.attached_male_anatomy !== true &&
     anatomy.ambiguous !== true && checks.anatomy_ambiguous !== true
@@ -10096,7 +13004,7 @@ function mergePersonalQwenReview(personal, qwen, reviewReasons = []) {
       requires_qwen_review: false,
       qwen_review_resolved: false,
       qwen_review_reasons: reviewReasons,
-      checks: mergeDefinedVisionChecks(personal?.checks, checks),
+      checks: mergeDefinedVisionChecks(personal?.checks, scopedChecks),
       personal_age_assessment: personal?.age_assessment || null,
       age_assessment: {
         ...(personal?.age_assessment || {}),
@@ -10119,7 +13027,7 @@ function mergePersonalQwenReview(personal, qwen, reviewReasons = []) {
     requires_qwen_review: false,
     qwen_review_resolved: true,
     qwen_review_reasons: reviewReasons,
-    checks: mergeDefinedVisionChecks(personal?.checks, checks),
+    checks: mergeDefinedVisionChecks(personal?.checks, scopedChecks),
     personal_age_assessment: personal?.age_assessment || null,
     age_assessment: {
       ...(personal?.age_assessment || {}),
@@ -10584,8 +13492,10 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
   const artist = payload.artist || {};
   const visionModel = requestedVisionModel(payload.visionModel);
   const localVariant = String(payload.localVariant || '').toLowerCase();
-  const hard = textHardFilter(artist, { localVariant }) ||
-    (localVariant === 'local2' ? local2ExplicitCreatorTextHardReason(artist) : '');
+  const hard = payload.skipTextPolicy === true
+    ? ''
+    : textHardFilter(artist, { localVariant }) ||
+      (localVariant === 'local2' ? local2ExplicitCreatorTextHardReason(artist) : '');
   if (hard) {
     return {
       decision: 'reject',
@@ -10716,6 +13626,11 @@ async function classifyInner(payload, generation = workloadGeneration, signal = 
           signal
         });
       } catch (error) {
+        if (String(payload.stage || '').toLowerCase() === 'hard-confirmation') {
+          throw new Error(
+            `Local2 hard-confirmation service temporarily unavailable: ${error.message || String(error)}`
+          );
+        }
         qwen = {
           decision: 'unsure',
           confidence: 0.5,
@@ -11274,17 +14189,218 @@ function local2ExplicitCreatorTextHardReason(artistInfo = {}) {
   const compactName = rawName
     .normalize('NFKD')
     .replace(/[^a-z0-9]+/g, '');
-  if (!compactName) return '';
-  // These are explicit creator self-descriptions in the account slug, not an
-  // appearance inference. Keep the patterns narrow so words such as
-  // "transformation" do not become false positives.
+  const explicitProfileText = [
+    artistInfo?.artistName,
+    artistInfo?.pageText,
+    artistInfo?.artistUrl
+  ]
+    .map(value => String(value || '').normalize('NFKD').toLowerCase())
+    .join(' ')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/%2d|%5f/gi, ' ')
+    .replace(/\s+/g, ' ');
+  if (!compactName && !explicitProfileText.trim()) return '';
+  // This is an explicit profile-label rule, never a visual inference. The
+  // boundary/compound list deliberately does not match unrelated words such
+  // as "transformation", "translate", "transport", or "transition".
   if (
     /^ts[a-z0-9]/.test(compactName) ||
-    /(?:transgender|transgirl|transwoman|transfem|tgirl|shemale|ladyboy)/.test(compactName) ||
-    /(?:^|[^a-z0-9])(?:ts|trans|transgender|tgirl|mtf)(?:$|[^a-z0-9])/.test(rawName) ||
-    /(?:mtf|trans)$/.test(compactName)
-  ) return 'blocked explicit creator self-description';
+    /(?:transgender|transsexual|transexual|transgirl|transwoman|transfemale|transfem|translatina|transbabe|transbeauty|transqueen|transprincess|transdoll|transmodel|transcreator|transxxx|transonlyfans|transfree|tgirl|shemale|ladyboy)/.test(compactName) ||
+    /(?:mtf|trans)$/.test(compactName) ||
+    /(?:^|[^a-z0-9])(?:ts|trans|transgender|transsexual|transexual|transfem|tgirl|mtf|shemale|ladyboy)(?:$|[^a-z0-9])/.test(explicitProfileText) ||
+    /(?:^|[^a-z0-9])(?:trans|t)[\s_-]+(?:girl|woman|female|fem|creator|model)(?:$|[^a-z0-9])/.test(explicitProfileText)
+  ) return 'blocked explicit trans creator label';
   return '';
+}
+
+function local2SourceHintApiPosts(cacheKey, { signal = null } = {}) {
+  const match = String(cacheKey || '').match(/^onlyfans:([a-z0-9_.-]{1,100})$/i);
+  if (!match) return Promise.reject(new Error('unsupported Local2 source-hint identity'));
+  const requestUrl = new URL(
+    `/api/v1/onlyfans/user/${encodeURIComponent(match[1])}/posts?o=0`,
+    'https://coomer.st/'
+  );
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let response = null;
+    const finish = (error, value = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const abort = () => {
+      try { request.destroy(new DOMException('Local2 source hint aborted', 'AbortError')); } catch (_) {}
+    };
+    const timer = setTimeout(() => {
+      try { request.destroy(new Error('Local2 source hint timed out')); } catch (_) {}
+    }, LOCAL2_SOURCE_HINT_TIMEOUT_MS);
+    timer.unref?.();
+    const request = https.request(requestUrl, {
+      method: 'GET',
+      family: 4,
+      agent: LOCAL2_SOURCE_HINT_AGENT,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36',
+        'Accept': 'text/css',
+        'Accept-Encoding': 'gzip',
+        'Referer': 'https://coomer.st/'
+      }
+    }, incoming => {
+      response = incoming;
+      if (Number(incoming.statusCode || 0) !== 200) {
+        incoming.resume();
+        finish(new Error(`Local2 source hint HTTP ${Number(incoming.statusCode || 0)}`));
+        return;
+      }
+      const chunks = [];
+      let bytes = 0;
+      incoming.on('data', chunk => {
+        bytes += chunk.length;
+        if (bytes > 2 * 1024 * 1024) {
+          incoming.destroy(new Error('Local2 source hint response too large'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      incoming.once('error', finish);
+      incoming.once('end', () => {
+        const compressed = Buffer.concat(chunks);
+        const parse = buffer => {
+          try {
+            const parsed = JSON.parse(buffer.toString('utf8'));
+            if (!Array.isArray(parsed)) throw new Error('Local2 source hint response was not an array');
+            finish(null, parsed.slice(0, 50));
+          } catch (error) {
+            finish(error);
+          }
+        };
+        if (String(incoming.headers['content-encoding'] || '').toLowerCase() === 'gzip') {
+          zlib.gunzip(compressed, { maxOutputLength: 8 * 1024 * 1024 }, (error, buffer) => {
+            if (error) finish(error);
+            else parse(buffer);
+          });
+        } else parse(compressed);
+      });
+    });
+    request.once('error', error => {
+      if (signal?.aborted && error?.name !== 'AbortError') {
+        finish(new DOMException('Local2 source hint aborted', 'AbortError'));
+      } else finish(error);
+    });
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    request.end();
+  });
+}
+
+const local2SourceHintClient = new Local2SourceHintClient({
+  fetchPosts: local2SourceHintApiPosts,
+  concurrency: LOCAL2_SOURCE_HINT_CONCURRENCY,
+  ttlMs: LOCAL2_SOURCE_HINT_TTL_MS,
+  failureThreshold: 3,
+  circuitMs: 30_000,
+  maximumCacheEntries: 256
+});
+
+function freshLocal2SourceHintRunStats() {
+  return {
+    startedAt: new Date().toISOString(),
+    eligibleProfiles: 0,
+    resolvedProfiles: 0,
+    appliedProfiles: 0,
+    exactMatches: 0,
+    unmatchedPosts: 0,
+    hintedVideoPosts: 0,
+    hintedNonVideoPosts: 0,
+    changedPositions: 0,
+    projectedRequestSavings: 0,
+    projectedSavingsSamples: 0,
+    verificationRuns: 0,
+    verificationPasses: 0,
+    verifiedMediaFound: 0,
+    verifiedPostsChecked: 0
+  };
+}
+
+let local2SourceHintRunStats = freshLocal2SourceHintRunStats();
+
+function resetLocal2SourceHintRunStats() {
+  local2SourceHintRunStats = freshLocal2SourceHintRunStats();
+}
+
+function local2SourceHintSnapshot() {
+  return {
+    enabled: LOCAL2_SOURCE_HINTS_ENABLED,
+    authority: 'ordering-only; clone HTML remains the sole 15-video proof',
+    supportedServices: ['onlyfans'],
+    timeoutMs: LOCAL2_SOURCE_HINT_TIMEOUT_MS,
+    joinMs: LOCAL2_SOURCE_HINT_JOIN_MS,
+    client: local2SourceHintClient.snapshot(),
+    run: { ...local2SourceHintRunStats }
+  };
+}
+
+function local2SourceHintPostsForArtist(artistUrl, signal = null) {
+  if (!LOCAL2_SOURCE_HINTS_ENABLED) return null;
+  try {
+    const url = gatewayTargetUrl(artistUrl);
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (!['u', 'c'].includes(String(parts[0] || '').toLowerCase())) return null;
+    if (String(parts[1] || '').toLowerCase() !== 'onlyfans') return null;
+    const slug = decodeURIComponent(String(parts[3] || '')).trim();
+    if (!/^[a-z0-9_.-]{1,100}$/i.test(slug)) return null;
+    local2SourceHintRunStats.eligibleProfiles++;
+    return local2SourceHintClient.postsFor(`onlyfans:${slug}`, { signal });
+  } catch (_) {
+    return null;
+  }
+}
+
+function local2JoinSourceHint(promise) {
+  if (!promise || LOCAL2_SOURCE_HINT_JOIN_MS <= 0) return Promise.resolve(null);
+  return Promise.race([
+    promise,
+    new Promise(resolve => {
+      const timer = setTimeout(() => resolve(null), LOCAL2_SOURCE_HINT_JOIN_MS);
+      timer.unref?.();
+    })
+  ]);
+}
+
+function recordLocal2SourceHintOrdering(diagnostics = {}) {
+  local2SourceHintRunStats.resolvedProfiles++;
+  local2SourceHintRunStats.appliedProfiles += Number(diagnostics.applied === true);
+  for (const key of [
+    'exactMatches',
+    'unmatchedPosts',
+    'hintedVideoPosts',
+    'hintedNonVideoPosts',
+    'changedPositions'
+  ]) {
+    local2SourceHintRunStats[key] += Math.max(0, Number(diagnostics[key] || 0));
+  }
+  if (Number.isFinite(diagnostics.projectedRequestSavings)) {
+    local2SourceHintRunStats.projectedRequestSavings += Math.max(
+      0,
+      Number(diagnostics.projectedRequestSavings || 0)
+    );
+    local2SourceHintRunStats.projectedSavingsSamples++;
+  }
+}
+
+function recordLocal2SourceHintVerification(profile, result) {
+  if (!profile?.sourceHintDiagnostics) return;
+  const entries = Array.isArray(result?.entries) ? result.entries : [];
+  local2SourceHintRunStats.verificationRuns++;
+  // Each call is a bounded proof quantum, normally eight posts, so it cannot
+  // return all fifteen entries by itself. Count productive quanta and their
+  // media yield instead of misreporting every useful hint as a failure.
+  local2SourceHintRunStats.verificationPasses += Number(entries.length > 0);
+  local2SourceHintRunStats.verifiedMediaFound += entries.length;
+  local2SourceHintRunStats.verifiedPostsChecked += Math.max(0, Number(result?.checked || 0));
 }
 
 function local2PipelineDecision(result = {}, fallbackImageUrls = []) {
@@ -11304,6 +14420,11 @@ function local2PipelineDecision(result = {}, fallbackImageUrls = []) {
     reason: String(result?.reason || 'Local2 clean decision').slice(0, 240),
     reasonCode: String(result?.reason_code || '').slice(0, 80),
     model: String(result?.model || 'Local2 clean').slice(0, 256),
+    historyOnly: result?.history_only === true,
+    exactFeedbackApplied: result?.exact_feedback_applied === true,
+    preferenceProbability: Number.isFinite(Number(result?.preference_probability))
+      ? Number(result.preference_probability)
+      : null,
     hardFilters: {
       photograph: checks.photograph === true,
       femalePresentingAdult: checks.female_presenting_adult === true,
@@ -11666,70 +14787,99 @@ function local2FlashListingCandidates(html, pageUrl, sourcePage) {
   return candidates;
 }
 
+async function local2RankListingCandidates(candidates, signal = null) {
+  const values = Array.isArray(candidates) ? candidates : [];
+  for (let offset = 0; offset < values.length; offset += 16) {
+    const batch = values.slice(offset, offset + 16);
+    try {
+      const response = await preferenceAiRequest('/local2-clean/rank-thumbnails', {
+        thumbnailUrls: batch.map(candidate => candidate?.profileImageUrl || '')
+      }, 45_000, { workload: true, signal });
+      applyLocal2ListingRanks(batch, response);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // Ranking is opportunistic. Availability can change queue order only;
+      // it must never stop discovery or become an acceptance requirement.
+    }
+  }
+  return values;
+}
+
 async function local2FlashDiscoverPages(pages, context) {
   const hosts = availableGatewayHosts().length ? availableGatewayHosts() : GATEWAY_ALLOWED_HOSTS;
-  const requests = pages.flatMap(page => hosts.map(host => ({
-    page,
-    host,
-    pageUrl: `https://${host}/?page=${page}`
-  })));
-  const results = await Promise.allSettled(requests.map(async request => ({
-    ...request,
-    html: await random40ReservoirFetchHtml(request.pageUrl, 12000, context.signal)
-  })));
+  const results = await Promise.allSettled(pages.map(async page => {
+    let lastError = null;
+    const startIndex = Math.abs(Number(page || 0)) % Math.max(1, hosts.length);
+    const orderedHosts = hosts.map((_, index) => hosts[(startIndex + index) % hosts.length]);
+    for (const host of orderedHosts) {
+      const pageUrl = `https://${host}/?page=${page}`;
+      try {
+        const html = await random40ReservoirFetchHtml(pageUrl, 12000, context.signal, { priority: 200 });
+        const parsed = local2FlashListingCandidates(html, pageUrl, page);
+        const candidates = parsed.length
+          ? parsed
+          : random40ReservoirArtistUrls(html, pageUrl).map(artistUrl => ({
+              artistId: random40ReservoirIdentity(artistUrl),
+              artistUrl,
+              sourcePage: page,
+              profileImageUrl: ''
+            }));
+        if (candidates.length) return { page, host, pageUrl, candidates };
+      } catch (error) {
+        if (context.signal?.aborted) throw error;
+        lastError = error;
+      }
+    }
+    if (lastError) throw lastError;
+    return { page, host: '', pageUrl: '', candidates: [] };
+  }));
   const groups = [];
-  const seen = new Set();
   const failures = results.filter(result => result.status === 'rejected');
   if (failures.length === results.length && failures.length) {
-    const retryable = failures.find(result => /shared backoff|\b(?:429|502|503|504)\b|temporar|fetch failed|ECONNRESET|ETIMEDOUT/i.test(String(result.reason?.message || result.reason || '')));
+    const retryable = failures.find(result =>
+      result.reason?.pongTransient === true ||
+      /shared backoff|reservoir HTTP 0|\b(?:429|502|503|504)\b|temporar|fetch failed|ECONNRESET|ETIMEDOUT/i.test(
+        String(result.reason?.message || result.reason || '')
+      )
+    );
     if (retryable) throw retryable.reason;
   }
   for (const result of results) {
     if (result.status !== 'fulfilled') continue;
-    const parsed = local2FlashListingCandidates(
-      result.value.html,
-      result.value.pageUrl,
-      result.value.page
-    );
-    const fallback = parsed.length
-      ? parsed
-      : random40ReservoirArtistUrls(result.value.html, result.value.pageUrl).map(artistUrl => ({
-          artistId: random40ReservoirIdentity(artistUrl),
-          artistUrl,
-          sourcePage: result.value.page,
-          profileImageUrl: ''
-        }));
-    groups.push(fallback);
+    groups.push(result.value.candidates || []);
   }
-  // Local2.2 optimizes time to the first passing artist. Do not make an unlucky
-  // random listing page monopolize all sixteen workers for minutes: take eight
-  // profiles from each mirrored source, then immediately sample another page.
-  // This changes discovery order only; every sampled profile still runs through
-  // the identical 15-video, visual-model, and hard-filter contracts below.
-  // Both Local buttons use the same bounded, page-diverse production flow.
-  // Four listing pages contribute candidates to one interleaved wave, so an
-  // unusually media-poor page cannot occupy every worker for minutes.
-  const defaultMaximumPerWave = pages.length === 1 ? 96 : 32;
+  // Rank a small page-balanced cross-section first, then retain the complete
+  // unranked remainder. Ranking is only a scheduling hint; it must never make
+  // a fetched profile disappear from this fresh run.
+  const defaultMaximumPerWave = LOCAL2_CANDIDATES_PER_WAVE;
   const maximumPerWave = Math.max(
-    16,
+    8,
     Math.min(192, Number(process.env.PONG_LOCAL2_FLASH_CANDIDATES_PER_WAVE || defaultMaximumPerWave))
   );
-  const candidates = [];
-  const maximumGroupLength = Math.max(0, ...groups.map(group => group.length));
-  // Sample every selected page/source before taking a second row from any one
-  // listing. Concatenation made an otherwise good creator on the fourth page
-  // wait behind hundreds of profiles from the first three pages.
-  for (let offset = 0; offset < maximumGroupLength && candidates.length < maximumPerWave; offset++) {
-    for (const group of groups) {
-      const candidate = group[offset];
-      if (!candidate) continue;
-      if (!candidate.artistId || seen.has(candidate.artistId)) continue;
-      seen.add(candidate.artistId);
-      candidates.push(candidate);
-      if (candidates.length >= maximumPerWave) break;
-    }
-  }
-  return candidates;
+  const { rankingPool, deferred } = local2PageBalancedAdmission(groups, maximumPerWave);
+  // The rank API deliberately accepts at most sixteen thumbnails per call.
+  // Rank four page-balanced batches before admission. On the warmed model the
+  // extra batches cost only a few seconds, while the wider taste ordering keeps
+  // proof waiters from hiding better candidates on the same four source pages.
+  await Promise.all([
+    local2RankListingCandidates(rankingPool, context.signal),
+    // Density is scheduling evidence only.  Starting known 15-video profiles
+    // first prevents strict-AI winners from being hidden behind dozens of
+    // candidates that must eventually fail the unchanged media floor.
+    local22BlankApplyVideoDensityHints(rankingPool, context.signal)
+  ]);
+  rankingPool.sort((left, right) =>
+    Number(Number(right.likelyVideoCount || 0) >= 15) -
+      Number(Number(left.likelyVideoCount || 0) >= 15) ||
+    Number(right.preferenceRank ?? -1) - Number(left.preferenceRank ?? -1) ||
+    Number(right.likelyVideoCount || 0) - Number(left.likelyVideoCount || 0)
+  );
+  // The first sixteen receive the optional GPU scheduling rank. Every other
+  // unique profile remains queued in page-balanced order behind them. The
+  // previous bounded return silently discarded roughly three quarters of each
+  // fetched page forever because the engine had already marked those pages as
+  // seen; that was both a coverage regression and a source of false scarcity.
+  return [...rankingPool, ...deferred];
 }
 
 function local2FlashDecisionIsSafe(decision = {}) {
@@ -11890,6 +15040,121 @@ function local2FlashAcquireQualificationSlot(signal) {
   });
 }
 
+function local22TwoRuleDecision(decision = {}) {
+  const hard = decision?.hardFilters || {};
+  const raw = decision?.rawDecision || {};
+  const checks = raw?.checks || {};
+  const examined = Number(decision?.evidence?.examinedImages || 0);
+  const clearBody = Number(decision?.evidence?.clearBodyViews || 0);
+  if (hard.malePresent === true || checks.male_only === true) {
+    return { accepted: false, category: 'policy', reason: 'male-presenting evidence confirmed' };
+  }
+  if (hard.bodyMismatch === true) {
+    return { accepted: false, category: 'policy', reason: 'body-shape mismatch confirmed by two clear views' };
+  }
+  const explicitPresentationSafe = checks.female_presenting_adult === true &&
+    checks.male_present === false && checks.male_only === false;
+  const explicitBodySafe = checks.body_preference_conflict === false;
+  // Request four independent images, but do not invent a third preference
+  // rule when one CDN image fails to decode. Three examined views (including
+  // two clear body views) are sufficient to apply both requested exclusions;
+  // fewer than that remains fail-closed evidence, not a policy rejection.
+  if (!explicitPresentationSafe || !explicitBodySafe || examined < 3 || clearBody < 2) {
+    return {
+      accepted: false,
+      category: 'evidence',
+      reason: `Local2.2 two-rule evidence incomplete (${examined}/3 images, ${clearBody}/2 body views)`
+    };
+  }
+  return { accepted: true, category: 'accepted', reason: 'Local2.2 two-rule visual check passed' };
+}
+
+function local2Disqualification(message, category = 'evidence') {
+  const error = new Error(String(message || 'Local2 candidate disqualified'));
+  error.pongCategory = category === 'policy' ? 'policy' : 'evidence';
+  return error;
+}
+
+// Keep expansion state outside the profile object. The profile is serialized to
+// the AI sidecar, so attaching HTML pages or promises to it would turn a small
+// visual decision request into a multi-megabyte transfer.
+const local2FlashProfileExpansionState = new WeakMap();
+
+function local2FlashRefreshPreparedProfile(profile, state) {
+  const postImageEntries = random40ReservoirBestImageEntries(state.pages.flatMap(item =>
+    random40ReservoirPostImageEntries(
+      item.html,
+      random40ReservoirProfilePageUrl(state.artistUrl, item.page),
+      state.artistInfo
+    )
+  ), 32);
+  profile.postImageEntries = postImageEntries;
+  // Prefer one image from each source post before considering a second image
+  // from the same post. The hard-safe model perceptually deduplicates its
+  // inputs, so feeding six near-identical album thumbnails made otherwise
+  // valid candidates fail the unchanged six-distinct-image requirement.
+  const distinctPostImages = [];
+  const repeatedPostImages = [];
+  const seenImagePosts = new Set();
+  for (const entry of postImageEntries) {
+    const postKey = canonicalVideoPostKey(entry?.postUrl) ||
+      normalizeUrl(entry?.postUrl, state.artistUrl) ||
+      normalizeUrl(entry?.imageUrl, state.artistUrl);
+    if (postKey && !seenImagePosts.has(postKey)) {
+      seenImagePosts.add(postKey);
+      distinctPostImages.push(entry);
+    } else {
+      repeatedPostImages.push(entry);
+    }
+  }
+  profile.candidateImageUrls = [...new Set([
+    profile.profileImageUrl,
+    ...distinctPostImages.map(entry => entry.imageUrl),
+    ...repeatedPostImages.map(entry => entry.imageUrl)
+  ].map(url => normalizeUrl(url)).filter(Boolean))].slice(0, state.decisionImageLimit);
+  profile.videoPostUrls = [...state.allVideoPostUrls];
+  profile.likelyVideoPostCount = state.likelyVideoPostUrls.length;
+  profile.scannedThroughPage = state.pages.at(-1)?.page || 1;
+  return profile;
+}
+
+async function local2FlashFetchProfileDepthBatch(profile, state, context) {
+  if (state.nextPage > state.maximumPages) return false;
+  // One page is the smallest useful evidence increment. The former three-page
+  // fan-out held a scarce shallow-admission lane until all three returned even
+  // when the first page already supplied the complete eight-image decision or
+  // crossed the fifteen-video hint threshold.
+  const pageNumbers = [state.nextPage];
+  state.nextPage = (pageNumbers.at(-1) || state.nextPage) + 1;
+  const results = await Promise.allSettled(pageNumbers.map(page => state.fetchProfilePage(page)));
+  let foundAny = false;
+  let batchTransientError = null;
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled' && state.addPage(pageNumbers[index], result.value)) {
+      foundAny = true;
+      return;
+    }
+    if (
+      result.status === 'rejected' &&
+      (
+        result.reason?.pongTransient === true ||
+        /shared backoff|reservoir HTTP 0|\b(?:429|502|503|504)\b|temporar|fetch failed|ECONNRESET|ETIMEDOUT/i.test(
+          String(result.reason?.message || result.reason || '')
+        )
+      )
+    ) {
+      batchTransientError ||= result.reason;
+      state.mediaDepthTransientError ||= result.reason;
+    }
+  });
+  // A partially successful three-page batch must not silently skip the failed
+  // page and later turn missing evidence into a permanent rejection. Retry the
+  // candidate under the engine's bounded transient policy instead.
+  if (batchTransientError) throw batchTransientError;
+  if (foundAny) local2FlashRefreshPreparedProfile(profile, state);
+  return foundAny;
+}
+
 async function local2FlashPrepareProfile(candidate, context) {
   const artistUrl = gatewayTargetUrl(candidate.artistUrl).toString();
   const artistInfo = random40ReservoirArtistInfo(artistUrl);
@@ -11899,11 +15164,22 @@ async function local2FlashPrepareProfile(candidate, context) {
   const allVideoPostUrls = [];
   const allKeys = new Set();
   const maximumPages = Math.max(4, Math.min(24, Number(process.env.PONG_LOCAL2_FLASH_GATE_PAGES || 12)));
+  let expansionState = null;
 
   const fetchProfilePage = async page => {
     const primaryUrl = random40ReservoirProfilePageUrl(artistUrl, page);
+    const priority = page === 1
+      ? 100
+      : expansionState?.mediaProofPriority === true
+        ? 150
+        : local2DeepHtmlPriority(candidate, likelyVideoPostUrls.length, allVideoPostUrls.length);
     try {
-      return await random40ReservoirFetchHtml(primaryUrl, page === 1 ? 10000 : 8000, context.signal);
+      return await random40ReservoirFetchHtml(
+        primaryUrl,
+        page === 1 ? 10000 : 8000,
+        context.signal,
+        { priority }
+      );
     } catch (error) {
       if (context.signal?.aborted) throw error;
       const mirrorUrl = new URL(primaryUrl);
@@ -11914,13 +15190,22 @@ async function local2FlashPrepareProfile(candidate, context) {
       // transiently stalled HTTP/2 stream. The counterpart has the same artist
       // identity and content contract, so retrying there recovers availability
       // without changing which profiles or media pass any gate.
-      return random40ReservoirFetchHtml(mirrorUrl.toString(), page === 1 ? 10000 : 8000, context.signal);
+      return random40ReservoirFetchHtml(
+        mirrorUrl.toString(),
+        page === 1 ? 10000 : 8000,
+        context.signal,
+        { priority }
+      );
     }
   };
 
   const addPage = (page, html) => {
     if (random40ReservoirProfileScore(html).posts <= 0) return false;
-    pages.push({ page, html });
+    pages.push({
+      page,
+      html,
+      pageUrl: random40ReservoirProfilePageUrl(artistUrl, page)
+    });
     for (const postUrl of local2LikelyVideoPostUrls(html, artistUrl)) {
       const key = canonicalVideoPostKey(postUrl);
       if (!key || likelyKeys.has(key)) continue;
@@ -11937,55 +15222,322 @@ async function local2FlashPrepareProfile(candidate, context) {
   };
 
   const firstHtml = await fetchProfilePage(1);
-  if (!addPage(1, firstHtml)) throw new Error('Local2 Flash profile listing unavailable');
-  // Most video-rich creators prove the cheap 15-post requirement on page one.
-  // Count every candidate video-post link here. The narrower no-thumbnail
-  // heuristic is useful for ranking, but it must not reject real video posts
-  // before the authoritative post-page verifier gets to inspect them.
-  for (let batchStart = 2; batchStart <= maximumPages && allVideoPostUrls.length < 15; batchStart += 3) {
-    const pageNumbers = [batchStart, batchStart + 1, batchStart + 2].filter(page => page <= maximumPages);
-    const results = await Promise.allSettled(pageNumbers.map(page => fetchProfilePage(page)));
-    let foundAny = false;
-    results.forEach((result, index) => {
-      if (result.status === 'fulfilled' && addPage(pageNumbers[index], result.value)) foundAny = true;
-    });
-    if (!foundAny) break;
-  }
-  if (allVideoPostUrls.length < 15) {
-    throw new Error(`Local2 Flash video gate found ${allVideoPostUrls.length}/15`);
-  }
+  if (!addPage(1, firstHtml)) throw local2Disqualification('Local2 Flash profile listing unavailable');
+  // These hard-text checks consume only page one. Run them before requesting
+  // as many as eleven deeper profile pages; the prior ordering spent scarce
+  // gateway slots on artists that the exact same text rule then rejected.
   const pageText = local2ProfileTextEvidence(firstHtml, artistInfo);
   artistInfo.pageText = pageText;
-  const hardTextReason = textHardFilter(artistInfo, { localVariant: 'local2' });
-  if (hardTextReason) throw new Error(hardTextReason);
-  const explicitCreatorReason = local2ExplicitCreatorTextHardReason(artistInfo);
-  if (explicitCreatorReason) throw new Error(explicitCreatorReason);
+  const twoRuleLocal22 = context?.variant === 'local22-turbo';
+  const hardTextReason = twoRuleLocal22
+    ? local22TwoRuleTextReason(artistInfo)
+    : textHardFilter(artistInfo, { localVariant: 'local2' });
+  if (hardTextReason) throw local2Disqualification(hardTextReason, 'policy');
+  const explicitCreatorReason = twoRuleLocal22 ? '' : local2ExplicitCreatorTextHardReason(artistInfo);
+  if (explicitCreatorReason) throw local2Disqualification(explicitCreatorReason, 'policy');
+  // Start the optional bulk-index lookup only after page one passes the exact
+  // text policy. It runs on a separate two-request connection pool while clone
+  // depth/image work continues, so most useful hints are ready without adding
+  // a serial source request to qualification.
+  const sourceHintPromise = Promise.resolve(
+    local2SourceHintPostsForArtist(artistUrl, context.signal)
+  ).catch(() => null);
   const profileImageUrl = random40ReservoirProfileImageUrl(firstHtml, artistUrl);
-  const postImageEntries = random40ReservoirBestImageEntries(pages.flatMap(item =>
-    random40ReservoirPostImageEntries(
-      item.html,
-      random40ReservoirProfilePageUrl(artistUrl, item.page),
-      artistInfo
-    )
-  ), 32);
-  const decisionImageLimit = ['local22-turbo', 'local2-fast'].includes(context?.variant)
-    ? LOCAL22_TURBO_DECISION_IMAGES
-    : LOCAL2_FLASH_DECISION_IMAGES;
-  const candidateImageUrls = [...new Set([
-    profileImageUrl,
-    ...postImageEntries.map(entry => entry.imageUrl)
-  ].map(url => normalizeUrl(url)).filter(Boolean))].slice(0, decisionImageLimit);
-  if (candidateImageUrls.length < 2) throw new Error('Local2 Flash found fewer than two review images');
-  return {
+  // Local2's unchanged hard-safe gate still requires six perceptually
+  // independent images. Collect up to the model's bounded eight-image default
+  // so perceptual deduplication has replacements; acceptance still requires
+  // six. Local2.2 remains its separate four-image history-only flow.
+  const decisionImageLimit = context?.variant === 'local2-fast'
+    ? LOCAL2_CLEAN_MAX_IMAGES
+    : ['local22-turbo', 'test-ai'].includes(context?.variant)
+      ? LOCAL22_TURBO_DECISION_IMAGES
+      : LOCAL2_FLASH_DECISION_IMAGES;
+  const profile = {
     ...artistInfo,
     sourcePage: Number(candidate.sourcePage || 0),
     profileImageUrl,
-    candidateImageUrls,
-    postImageEntries,
-    videoPostUrls: allVideoPostUrls,
-    likelyVideoPostCount: likelyVideoPostUrls.length,
-    scannedThroughPage: pages.at(-1)?.page || 1
+    candidateImageUrls: [],
+    postImageEntries: [],
+    videoPostUrls: [],
+    sourceHintDiagnostics: null,
+    likelyVideoPostCount: 0,
+    scannedThroughPage: 1
   };
+  const state = {
+    candidate,
+    artistUrl,
+    artistInfo,
+    pages,
+    likelyVideoPostUrls,
+    allVideoPostUrls,
+    allKeys,
+    maximumPages,
+    decisionImageLimit,
+    nextPage: 2,
+    fetchProfilePage,
+    addPage,
+    sourceHintPromise,
+    mediaDepthTransientError: null,
+    mediaProofPriority: false
+  };
+  expansionState = state;
+  local2FlashProfileExpansionState.set(profile, state);
+  local2FlashRefreshPreparedProfile(profile, state);
+
+  // Page-one HTML and deterministic text checks are the scarce admission unit.
+  // Release that lane before any optional low-priority visual-depth pages; the
+  // gateway scheduler still bounds those pages and always favors new page-one
+  // work, so sparse profiles cannot hide later candidates for a minute.
+  context?.onShallowProfileReady?.();
+
+  // The primary preference/hard-filter model needs visual evidence, not a full
+  // media inventory. Most profile page ones already contain the complete eight-
+  // image review batch. Only visually sparse pages expand before AI; the costly
+  // 15-video depth scan is deferred until the exact same model has accepted the
+  // artist. This is a sequencing change only, not a new acceptance shortcut.
+  while (
+    profile.candidateImageUrls.length < decisionImageLimit &&
+    state.nextPage <= maximumPages
+  ) {
+    if (!await local2FlashFetchProfileDepthBatch(profile, state, context)) break;
+  }
+  if (profile.candidateImageUrls.length < 2) {
+    throw local2Disqualification('Local2 Flash found fewer than two review images');
+  }
+  return profile;
+}
+
+async function local2FlashCompleteProfileMedia(profile, context) {
+  const state = local2FlashProfileExpansionState.get(profile);
+  if (!state) return profile;
+  let orderedVideoPostUrls = [...state.allVideoPostUrls];
+  if (!Array.isArray(state.sourceHintPosts)) {
+    const resolvedPosts = await local2JoinSourceHint(state.sourceHintPromise);
+    if (Array.isArray(resolvedPosts)) state.sourceHintPosts = resolvedPosts;
+  }
+  const sourceHintPosts = state.sourceHintPosts;
+  if (Array.isArray(sourceHintPosts)) {
+    const hinted = orderLocal2ClonePostsWithSourceHints({
+      postUrls: state.allVideoPostUrls,
+      listingPages: state.pages,
+      apiPosts: sourceHintPosts,
+      targetVideos: 15
+    });
+    // Hints may reorder clone URLs only. Cardinality and the exact authoritative
+    // clone set must remain byte-for-byte equivalent before applying the order.
+    if (
+      hinted.postUrls.length === state.allVideoPostUrls.length &&
+      hinted.postUrls.every(url => state.allKeys.has(canonicalVideoPostKey(url)))
+    ) {
+      orderedVideoPostUrls = hinted.postUrls;
+      profile.sourceHintDiagnostics = hinted.diagnostics;
+      if (!state.sourceHintRecorded) {
+        state.sourceHintRecorded = true;
+        recordLocal2SourceHintOrdering(hinted.diagnostics);
+      }
+    }
+  }
+  profile.videoPostUrls = orderedVideoPostUrls;
+  profile.likelyVideoPostCount = state.likelyVideoPostUrls.length;
+  profile.scannedThroughPage = state.pages.at(-1)?.page || 1;
+  return profile;
+}
+
+function local2FlashPromoteProfileMedia(profile, promoted = true) {
+  const state = local2FlashProfileExpansionState.get(profile);
+  if (state) state.mediaProofPriority = promoted === true;
+}
+
+async function local2FlashVerifyProfileProgressively(
+  profile,
+  context,
+  { skipSample = false, sampleHits = 0, sampleEntries = [], samplePostUrls = [] } = {}
+) {
+  const state = local2FlashProfileExpansionState.get(profile);
+  const verifiedMedia = [];
+  const verifiedMediaKeys = new Set();
+  const scannedPostKeys = new Set();
+  for (const entry of Array.isArray(sampleEntries) ? sampleEntries : []) {
+    const mediaKeys = canonicalVideoEntryKeys(entry);
+    if (!mediaKeys.length || mediaKeys.some(key => verifiedMediaKeys.has(key))) continue;
+    mediaKeys.forEach(key => verifiedMediaKeys.add(key));
+    verifiedMedia.push(entry);
+  }
+  for (const postUrl of Array.isArray(samplePostUrls) ? samplePostUrls : []) {
+    const key = canonicalVideoPostKey(postUrl);
+    if (key) scannedPostKeys.add(key);
+  }
+  const priorityControl = context?.verificationPriority || null;
+  let proofBasePriority = Number(priorityControl?.priority || 0);
+  let lastQuantumHits = Math.max(0, Number(sampleHits || 0));
+  let performedInitialDepthPrefetch = false;
+  const refreshProofSchedulingEvidence = () => {
+    if (!priorityControl) return;
+    const previousHintBoost = Math.max(0, Number(priorityControl.sourceHintBoost || 0));
+    const nextHintBoost = local2SourceHintSchedulingBoost(profile);
+    priorityControl.priority = Number(priorityControl.priority || 0) -
+      previousHintBoost + nextHintBoost;
+    priorityControl.sourceHintBoost = nextHintBoost;
+    priorityControl.foregroundProof = local2SampleSupportsForegroundProof({
+      sampleHits,
+      sourceHintDiagnostics: profile.sourceHintDiagnostics,
+      requiredVideos: 15
+    });
+    proofBasePriority = Number(priorityControl.priority || 0);
+  };
+  for (;;) {
+    await local2FlashCompleteProfileMedia(profile, context);
+    // A one-page hint can look sparse even when the same bulk index proves that
+    // page two crosses the 15-video floor. Refresh both priority and foreground
+    // eligibility whenever bounded depth changes the exact matched cohort.
+    refreshProofSchedulingEvidence();
+    // A low likely-video count cannot reject the artist, but it is a useful
+    // signal to collect another cheap profile listing batch before spending the
+    // shared source budget exhaustively checking dozens of mostly image posts.
+    // The previous live proof checked an entire sparse page, then discovered 32
+    // likely video posts one batch deeper; this ordering alone cost ~20 seconds.
+    if (
+      !performedInitialDepthPrefetch &&
+      state &&
+      state.nextPage <= state.maximumPages &&
+      local2ShouldPrefetchProfileDepth({
+        sampleHits,
+        likelyVideoPosts: profile.likelyVideoPostCount,
+        sourceHintDiagnostics: profile.sourceHintDiagnostics,
+        requiredVideos: 15
+      })
+    ) {
+      performedInitialDepthPrefetch = true;
+      if (await local2FlashFetchProfileDepthBatch(profile, state, context)) {
+        await local2FlashCompleteProfileMedia(profile, context);
+        refreshProofSchedulingEvidence();
+      }
+    }
+
+    const unscannedPostUrls = profile.videoPostUrls.filter(postUrl => {
+      const key = canonicalVideoPostKey(postUrl);
+      return key && !scannedPostKeys.has(key);
+    });
+    if (unscannedPostUrls.length) {
+      const foregroundDense = priorityControl?.foregroundProof === true;
+      const quantumLimit = foregroundDense
+        ? Math.max(LOCAL2_MEDIA_PROOF_POST_QUANTUM, 15 - verifiedMedia.length)
+        : LOCAL2_MEDIA_PROOF_POST_QUANTUM;
+      const postQuantum = unscannedPostUrls.slice(0, quantumLimit);
+      // Dense candidates should finish promptly, while a zero-hit quantum must
+      // yield to the other AI-accepted profiles instead of monopolizing the
+      // only source-proof lane. This priority changes ordering only; every
+      // bounded post and profile page is still examined before rejection.
+      const proofPriority = proofBasePriority +
+        verifiedMedia.length * 500 +
+        Math.min(4, lastQuantumHits) * 100;
+      const releaseMediaProof = await local2AcquireMediaProofSlot(
+        context.signal,
+        proofPriority
+      );
+      let quantumVerified;
+      try {
+        quantumVerified = await local2FlashVerifyProfile(profile, context, {
+          skipSample,
+          postUrls: postQuantum,
+          stopAt: Math.max(1, 15 - verifiedMedia.length)
+        });
+      } finally {
+        releaseMediaProof();
+      }
+      skipSample = true;
+      postQuantum.forEach(postUrl => {
+        const key = canonicalVideoPostKey(postUrl);
+        if (key) scannedPostKeys.add(key);
+      });
+      let added = 0;
+      for (const entry of quantumVerified) {
+        const mediaKeys = canonicalVideoEntryKeys(entry);
+        if (!mediaKeys.length || mediaKeys.some(key => verifiedMediaKeys.has(key))) continue;
+        mediaKeys.forEach(key => verifiedMediaKeys.add(key));
+        verifiedMedia.push(entry);
+        added++;
+        if (verifiedMedia.length >= 15) return verifiedMedia.slice(0, 15);
+      }
+      lastQuantumHits = added;
+      // Only observed real media may move later depth pages ahead of new
+      // profile admission. A merely AI-approved but zero-video profile must
+      // yield its HTML slots so the pipeline can keep finding better artists.
+      local2FlashPromoteProfileMedia(
+        profile,
+        verifiedMedia.length >= 4 || lastQuantumHits >= 3
+      );
+      // Sparse profiles re-enter after eight posts. A genuinely dense 4/4
+      // profile may use one fifteen-post chunk so another waiter cannot force
+      // an otherwise ready winner through several full round-robin cycles.
+      continue;
+    }
+    // Post-card counts and text hints are scheduling evidence only. They can
+    // never reject an artist: continue through the bounded profile depth until
+    // clone post HTML actually proves fifteen distinct media objects or there
+    // are no more source pages. This also permits one post containing multiple
+    // distinct videos to satisfy more than one unit of the unchanged media gate.
+    if (!state || state.nextPage > state.maximumPages) return verifiedMedia;
+    if (!await local2FlashFetchProfileDepthBatch(profile, state, context)) {
+      return verifiedMedia;
+    }
+  }
+}
+
+async function local22TurboFastMediaProof(profile, context) {
+  const state = local2FlashProfileExpansionState.get(profile);
+  const entries = [];
+  const seenMedia = new Set();
+  const scannedPosts = new Set();
+  let pageEnded = false;
+  const addEntries = (html, postUrl) => {
+    extractVideoUrlsFromHtml(html, postUrl).forEach((videoUrl, postIndex) => {
+      if (!videoUrl || seenMedia.has(videoUrl) || entries.length >= 15) return;
+      seenMedia.add(videoUrl);
+      entries.push({
+        ...profile,
+        type: 'video',
+        videoUrl,
+        postUrl,
+        postIndex,
+        mediaKey: videoUrl,
+        alternateVideoUrls: [],
+        actualMediaSourceVerified: true,
+        playbackProbeVerified: true,
+        playbackFastStart: false
+      });
+    });
+  };
+
+  // Batch exact post HTML through the same hidden transport proven by Test
+  // AI's ten-artist benchmark. Every counted item remains a real video/source
+  // URL extracted from the authoritative clone post.
+  while (!context.signal?.aborted && entries.length < 15) {
+    await local2FlashCompleteProfileMedia(profile, context);
+    const pending = profile.videoPostUrls.filter(postUrl => {
+      const key = canonicalVideoPostKey(postUrl);
+      return key && !scannedPosts.has(key);
+    }).slice(0, 20);
+    if (pending.length) {
+      const rows = await Promise.allSettled(pending.map(postUrl =>
+        testAiFetchHtml(postUrl, context.signal, 8000)
+      ));
+      rows.forEach((row, index) => {
+        const postUrl = pending[index];
+        const key = canonicalVideoPostKey(postUrl);
+        if (key) scannedPosts.add(key);
+        if (row.status === 'fulfilled') addEntries(row.value, postUrl);
+      });
+      if (entries.length >= 15) break;
+    }
+    if (!state || pageEnded || state.nextPage > state.maximumPages) break;
+    const page = state.nextPage++;
+    const pageUrl = random40ReservoirProfilePageUrl(state.artistUrl, page);
+    const html = await testAiFetchHtml(pageUrl, context.signal, 8000);
+    pageEnded = !state.addPage(page, html);
+    if (!pageEnded) local2FlashRefreshPreparedProfile(profile, state);
+  }
+  return { entries, scannedPostUrls: [...scannedPosts] };
 }
 
 function local2FlashSelectConfirmationImages(profile) {
@@ -12066,6 +15618,7 @@ async function local2FlashConfirmHardFilters(profile, initialDecision, context) 
   if (selected.length < 6) {
     return {
       accepted: false,
+      category: 'evidence',
       reason: `only ${selected.length}/6 distinct hard-confirmation images`
     };
   }
@@ -12078,6 +15631,7 @@ async function local2FlashConfirmHardFilters(profile, initialDecision, context) 
   if (images.length < 6) {
     return {
       accepted: false,
+      category: 'evidence',
       reason: `only ${images.length}/6 full-resolution hard-confirmation images`
     };
   }
@@ -12097,6 +15651,7 @@ async function local2FlashConfirmHardFilters(profile, initialDecision, context) 
   if (!local2FlashDecisionIsSafe(confirmation)) {
     return {
       accepted: false,
+      category: confirmation?.verdict === 'reject' ? 'policy' : 'evidence',
       reason: confirmation.reason || 'Local2 hard-filter confirmation rejected',
       diagnostic: confirmation
     };
@@ -12104,6 +15659,7 @@ async function local2FlashConfirmHardFilters(profile, initialDecision, context) 
   if (examined < 6) {
     return {
       accepted: false,
+      category: 'evidence',
       reason: `only ${examined}/6 perceptually distinct hard-confirmation images`,
       diagnostic: confirmation
     };
@@ -12111,6 +15667,7 @@ async function local2FlashConfirmHardFilters(profile, initialDecision, context) 
   if (clearBody < LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES) {
     return {
       accepted: false,
+      category: 'evidence',
       reason: `only ${clearBody}/${LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES} clear body views`,
       diagnostic: confirmation
     };
@@ -12122,7 +15679,7 @@ async function local2FlashConfirmHardFilters(profile, initialDecision, context) 
   };
 }
 
-async function local2FlashVerifyProfile(profile, context) {
+async function local2FlashSampleProfile(profile, context) {
   const priorityControl = context?.verificationPriority || null;
   if (priorityControl && profile.videoPostUrls.length > 4) {
     // A four-post sample is a scheduling probe, never an acceptance gate. The
@@ -12131,31 +15688,107 @@ async function local2FlashVerifyProfile(profile, context) {
     // whose strongest four post cards actually contain video move ahead of
     // hundreds of zero-video profiles competing for the same source host.
     const startingPriority = Number(priorityControl.priority || 0);
+    const samplePostUrls = profile.videoPostUrls.slice(0, 4);
     const sample = await verifyVideoPostBatch({
-      postUrls: profile.videoPostUrls.slice(0, 4),
+      postUrls: samplePostUrls,
       stopAt: 4,
-      perArtistConcurrency: 4,
+      perArtistConcurrency: LOCAL2_VERIFIER_CONCURRENCY,
       artistInfo: profile,
       priorityControl
     }, context.signal).catch(() => ({ entries: [] }));
     const sampleHits = Array.isArray(sample?.entries) ? sample.entries.length : 0;
-    priorityControl.priority = startingPriority + sampleHits * 100 - (4 - sampleHits) * 25;
+    priorityControl.foregroundProof = local2SampleSupportsForegroundProof({
+      sampleHits,
+      sourceHintDiagnostics: profile.sourceHintDiagnostics,
+      requiredVideos: 15
+    });
+    priorityControl.priority = local2VerifierPriorityAfterSample({
+      startingPriority,
+      sourceHintBoost: priorityControl.sourceHintBoost,
+      sampleHits,
+      sampleSize: 4
+    });
+    return {
+      hits: sampleHits,
+      entries: Array.isArray(sample?.entries) ? sample.entries : [],
+      postUrls: samplePostUrls
+    };
+  }
+  return { hits: 0, entries: [], postUrls: [] };
+}
+
+async function local2FlashVerifyProfile(
+  profile,
+  context,
+  { skipSample = false, postUrls = null, stopAt = 15 } = {}
+) {
+  const priorityControl = context?.verificationPriority || null;
+  // The Local2 fast path immediately performs the authoritative clone batch
+  // below.  Its former four-post legacy sample fetched the same evidence once
+  // through the paced gateway and then again through Firefox, adding several
+  // seconds without participating in any acceptance decision.
+  if (!skipSample && context?.variant !== 'local2-fast') {
+    await local2FlashSampleProfile(profile, context);
+  }
+  // Local2's decision has already passed before this function is reached. Use
+  // the hidden private Firefox batch transport to prove the unchanged fifteen
+  // real source-post videos without spacing each independent post fetch by the
+  // legacy 650 ms gateway clock. The parser and cardinality contract are the
+  // same: only explicit video/source URLs from authoritative clone HTML count.
+  if (context?.variant === 'local2-fast') {
+    const targets = Array.isArray(postUrls) ? postUrls : profile.videoPostUrls;
+    const pages = await local22BlankFetchBatch(targets, context.signal, { priority: 100 });
+    const entries = [];
+    const seenMedia = new Set();
+    let checked = 0;
+    for (const postUrl of targets) {
+      let canonicalUrl = '';
+      try { canonicalUrl = local22BlankCanonicalSourceUrl(postUrl); }
+      catch (_) { continue; }
+      const html = pages.get(canonicalUrl);
+      if (!html) continue;
+      checked++;
+      for (const [postIndex, videoUrl] of extractVideoUrlsFromHtml(html, postUrl).entries()) {
+        if (!videoUrl || seenMedia.has(videoUrl)) continue;
+        seenMedia.add(videoUrl);
+        entries.push({
+          videoUrl,
+          postUrl,
+          postIndex,
+          alternateVideoUrls: [],
+          playbackProbeVerified: true,
+          playbackFastStart: false
+        });
+        if (entries.length >= stopAt) break;
+      }
+      if (entries.length >= stopAt) break;
+    }
+    recordLocal2SourceHintVerification(profile, { entries, checked });
+    return entries.slice(0, 20).map(entry => ({
+      videoUrl: entry.videoUrl,
+      postUrl: entry.postUrl,
+      postIndex: Number(entry.postIndex || 0),
+      alternateVideoUrls: entry.alternateVideoUrls,
+      verified: true,
+      fastStart: false
+    }));
   }
   const result = await verifyVideoPostBatch({
-    postUrls: profile.videoPostUrls,
+    postUrls: Array.isArray(postUrls) ? postUrls : profile.videoPostUrls,
     // Fifteen distinct source-post media URLs is the delivery contract. Do
     // not spend five extra post requests before publishing; the player needs
     // only five foreground-proven entries for its immediate swipe window.
-    stopAt: 15,
-    // The host scheduler permits eight active requests for one artist. Creating
-    // fourteen workers only placed six redundant requests per artist ahead of
-    // newer candidate groups, producing the hundreds-deep queue seen in the
-    // real Android trace. Eight preserves the same maximum active work and all
-    // fifteen checks while allowing round-robin progress between artists.
-    perArtistConcurrency: 8,
+    stopAt,
+    // Every Local2 clone request shares the same 650 ms source-start clock.
+    // Two workers already saturate that clock across its two mirror hostnames;
+    // a wider fan-out merely reserves 5-7 seconds of future starts for one
+    // media-sparse artist and delays page-one/sample evidence from better
+    // candidates. This changes only interleaving, never the 15-video proof.
+    perArtistConcurrency: LOCAL2_VERIFIER_CONCURRENCY,
     artistInfo: profile,
     priorityControl
-  }, context.signal).catch(() => ({ entries: [] }));
+  }, context.signal);
+  recordLocal2SourceHintVerification(profile, result);
   const verified = Array.isArray(result?.entries) ? result.entries : [];
   // A successful source-post fetch plus an explicit, distinct <video>/<source>
   // media URL is the fast verification contract. Probing every URL again caused
@@ -12322,6 +15955,68 @@ const local2FlashMediaProbeWaiters = [];
 let local2FlashPlaybackPriorityUntil = 0;
 let local2FlashPlaybackPriorityTimer = null;
 
+function freshLocal2PlaybackMirrorStats() {
+  return {
+    startedAt: new Date().toISOString(),
+    runs: 0,
+    entries: 0,
+    mirrorCandidates: 0,
+    probes: 0,
+    playableProbes: 0,
+    fastStartProbes: 0,
+    selectedMirrors: 0,
+    selectedOriginals: 0,
+    failedOpenEntries: 0,
+    elapsedMs: 0,
+    lastRun: null
+  };
+}
+
+let local2PlaybackMirrorStats = freshLocal2PlaybackMirrorStats();
+
+function resetLocal2PlaybackMirrorStats() {
+  local2PlaybackMirrorStats = freshLocal2PlaybackMirrorStats();
+}
+
+function recordLocal2PlaybackMirrorStats(diagnostics = {}) {
+  local2PlaybackMirrorStats.runs++;
+  for (const key of [
+    'entries',
+    'mirrorCandidates',
+    'probes',
+    'playableProbes',
+    'fastStartProbes',
+    'selectedMirrors',
+    'selectedOriginals',
+    'failedOpenEntries',
+    'elapsedMs'
+  ]) {
+    local2PlaybackMirrorStats[key] += Math.max(0, Number(diagnostics[key] || 0));
+  }
+  local2PlaybackMirrorStats.lastRun = {
+    at: new Date().toISOString(),
+    ...diagnostics
+  };
+}
+
+function local2PlaybackMirrorSnapshot() {
+  return {
+    enabled: true,
+    authority: 'playback-only; clone 15-video proof and artist verdict remain unchanged',
+    probeBytes: 65536,
+    probeTimeoutMs: 3000,
+    entryConcurrency: 8,
+    activeRuns: local2FlashMediaProbeActive,
+    queuedRuns: local2FlashMediaProbeWaiters.length,
+    run: {
+      ...local2PlaybackMirrorStats,
+      lastRun: local2PlaybackMirrorStats.lastRun
+        ? { ...local2PlaybackMirrorStats.lastRun }
+        : null
+    }
+  };
+}
+
 function local2FlashMediaProbeLimit() {
   // Foreground playback gets most of the connection budget, but never reduce
   // qualification to zero: a repeatedly buffering first card would otherwise
@@ -12393,6 +16088,76 @@ function local2FlashAcquireMediaProbeSlot(signal) {
     local2FlashMediaProbeWaiters.push(enter);
     signal?.addEventListener('abort', abort, { once: true });
   });
+}
+
+async function local2PreparePlaybackMediaMirrors(media, context) {
+  const source = Array.isArray(media) ? media : [];
+  if (!source.length) return { media: source, diagnostics: { entries: 0 } };
+  // Keep all fifteen authoritatively verified entries in the delivered
+  // bundle, but spend mirror/CDN probes only on the five-card foreground
+  // window. The retained tail becomes active as the viewer advances.
+  const foreground = source.slice(0, 5);
+  const retainedTail = source.slice(5);
+  let release = null;
+  try {
+    release = await local2FlashAcquireMediaProbeSlot(context.signal);
+    const selected = await selectLocal2PlaybackMediaMirrors(foreground, {
+      signal: context.signal,
+      concurrency: 8,
+      timeoutMs: 3000,
+      probe: async (url, { signal, timeoutMs }) => {
+        const playable = await probePlayableMediaUrl(url, signal, timeoutMs);
+        return {
+          playable,
+          ...(videoPlaybackProbeCache.get(url) || {})
+        };
+      }
+    });
+    const turboPlaybackRanking = context?.variant === 'local22-turbo';
+    const prepared = selected.media.map(entry => ({
+      ...entry,
+      local22TurboPlaybackRanked: turboPlaybackRanking,
+      ...local2FlashPlaybackProbeDetails(entry)
+    }));
+    prepared.sort((left, right) => turboPlaybackRanking
+      ? local2FlashCompareTurboPlaybackMedia(left, right)
+      : Number(right?.fastStart === true) - Number(left?.fastStart === true) ||
+        Number(left?.probeLatencyMs || Number.MAX_SAFE_INTEGER) -
+          Number(right?.probeLatencyMs || Number.MAX_SAFE_INTEGER)
+    );
+    const tail = retainedTail.map(entry => ({
+      ...entry,
+      local22TurboPlaybackRanked: false,
+      ...local2FlashPlaybackProbeDetails(entry)
+    }));
+    const diagnostics = {
+      ...selected.diagnostics,
+      retainedEntries: source.length,
+      deferredPlaybackEntries: tail.length
+    };
+    recordLocal2PlaybackMirrorStats(diagnostics);
+    return { ...selected, diagnostics, media: [...prepared, ...tail] };
+  } catch (error) {
+    // This is a playback optimization after the authoritative 15-video proof.
+    // Any timeout, unavailable counterpart, or internal probe error must leave
+    // the already accepted media untouched rather than change the verdict.
+    const diagnostics = {
+      entries: source.length,
+      mirrorCandidates: 0,
+      probes: 0,
+      playableProbes: 0,
+      fastStartProbes: 0,
+      selectedMirrors: 0,
+      selectedOriginals: 0,
+      failedOpenEntries: source.length,
+      elapsedMs: 0,
+      error: String(error?.message || error || 'playback mirror selection failed').slice(0, 240)
+    };
+    recordLocal2PlaybackMirrorStats(diagnostics);
+    return { media: source, diagnostics };
+  } finally {
+    release?.();
+  }
 }
 
 async function local2FlashPrioritizePlayableMedia(media, context) {
@@ -12510,24 +16275,10 @@ async function local2FlashQualifyCandidate(candidate, context) {
   else context.signal?.addEventListener('abort', abortBranch, { once: true });
   const branchContext = { ...context, signal: branchController.signal };
   try {
-    // Prove authoritative media before consuming scarce preference/GPU work.
-    // Aborted Node requests cannot cancel Python work already admitted, so the
-    // old speculative ordering left hundreds of doomed classifications alive.
-    const verifiedMedia = await local2FlashVerifyProfile(profile, branchContext);
-    if (verifiedMedia.length < 15) {
-      return { accepted: false, reason: `only ${verifiedMedia.length}/15 verified media URLs` };
-    }
-    const prioritized = await local2FlashPrioritizePlayableMedia(verifiedMedia, branchContext);
-    const media = prioritized.media;
-    flashTimings.mediaMs = Date.now() - flashStartedAt;
-    if (media.length < 15) return { accepted: false, reason: `only ${media.length}/15 verified media URLs` };
-    if (prioritized.fastStartProven < 5) {
-      return {
-        accepted: false,
-        reason: `only ${prioritized.fastStartProven}/5 foreground media URLs passed the fast-start byte probe`
-      };
-    }
-
+    // Reject preference/hard-filter misses before crawling fifteen source-post
+    // pages. This is the primary model and unchanged confirmation gate, merely
+    // sequenced ahead of media proof so rejected artists consume no scraper
+    // budget and cannot delay a later accepted artist.
     releaseQualificationSlot = await local2FlashAcquireQualificationSlot(branchController.signal);
     const decisionStartedAt = Date.now();
     const rawDecision = await classifyInner({
@@ -12538,7 +16289,7 @@ async function local2FlashQualifyCandidate(candidate, context) {
       deferQwenReview: true,
       visionModel: LOCAL2_QWEN_MODEL,
       artist: profile,
-      candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL2_FLASH_DECISION_IMAGES)
+      candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL2_CLEAN_MAX_IMAGES)
     }, workloadGeneration, branchController.signal);
     const decision = local2PipelineDecision(rawDecision, profile.candidateImageUrls);
     flashTimings.decisionMs = Date.now() - decisionStartedAt;
@@ -12549,21 +16300,71 @@ async function local2FlashQualifyCandidate(candidate, context) {
         diagnostic: decision
       };
     }
-    const confirmationStartedAt = Date.now();
-    const confirmation = await local2FlashConfirmHardFilters(profile, decision, branchContext);
-    flashTimings.confirmationMs = Date.now() - confirmationStartedAt;
-    if (!confirmation.accepted || !confirmation.decision) {
-      return {
-        accepted: false,
-        reason: confirmation.reason || 'Local2 hard-filter confirmation rejected',
-        diagnostic: {
-          initialDecision: decision,
-          hardConfirmation: confirmation.diagnostic || null,
-          flashTimings
-        }
-      };
+    // Use the read-only structured catalog only to avoid wasting the exact
+    // clone verifier on a conclusively complete, sub-15 inventory and to put
+    // likely video posts first.  Clone post HTML below remains the sole final
+    // authority, so an unavailable/incomplete index can never reject an artist.
+    let inventory = null;
+    try {
+      inventory = await testAiStructuredVideoInventory(candidate, branchContext, 15);
+      if (inventory.complete === true && inventory.posts.length > 0 && inventory.videoCount < 15) {
+        return {
+          accepted: false,
+          reason: `only ${inventory.videoCount}/15 indexed video URLs`,
+          diagnostic: { initialDecision: decision, hardConfirmation: null, flashTimings }
+        };
+      }
+    } catch (_) {
+      // Transport/index failure is non-authoritative; retain exhaustive clone
+      // proof and its unchanged 15-video requirement.
+      inventory = null;
+    }
+
+    // The primary pass already receives all eight prepared images.  When it
+    // has six distinct images, three clear body views, and every hard-safe bit
+    // is explicit, repeating the same classifier adds no new gate.  Reserve the
+    // focused confirmation pass for genuinely incomplete/ambiguous evidence.
+    const primaryEvidenceComplete =
+      local2FlashDecisionIsSafe(decision) &&
+      Number(decision?.evidence?.examinedImages || 0) >= 6 &&
+      Number(decision?.evidence?.clearBodyViews || 0) >= LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES;
+    let confirmation = { accepted: true, decision, diagnostic: null };
+    if (!primaryEvidenceComplete) {
+      const confirmationStartedAt = Date.now();
+      confirmation = await local2FlashConfirmHardFilters(profile, decision, branchContext);
+      flashTimings.confirmationMs = Date.now() - confirmationStartedAt;
+      if (!confirmation.accepted || !confirmation.decision) {
+        return {
+          accepted: false,
+          reason: confirmation.reason || 'Local2 hard-filter confirmation rejected',
+          diagnostic: {
+            initialDecision: decision,
+            hardConfirmation: confirmation.diagnostic || null,
+            flashTimings
+          }
+        };
+      }
     }
     const confirmedDecision = confirmation.decision;
+    releaseQualificationSlot();
+    releaseQualificationSlot = null;
+    if (inventory?.videoCount >= 15) {
+      await local2FlashPrimeStructuredMedia(profile, inventory, branchContext);
+    }
+
+    const mediaStartedAt = Date.now();
+    const verifiedMedia = await local2FlashVerifyProfile(profile, branchContext);
+    if (verifiedMedia.length < 15) {
+      return { accepted: false, reason: `only ${verifiedMedia.length}/15 verified media URLs` };
+    }
+    // Playback probing is an ordering/transport optimization after the artist
+    // has satisfied every acceptance gate. Prepare the five-card foreground
+    // window and retain all fifteen exact clone URLs; a temporarily slow CDN
+    // must not turn an otherwise valid artist into a permanent rejection.
+    const preparedPlayback = await local2PreparePlaybackMediaMirrors(verifiedMedia, branchContext);
+    const media = preparedPlayback.media;
+    flashTimings.mediaMs = Date.now() - mediaStartedAt;
+    if (media.length < 15) return { accepted: false, reason: `only ${media.length}/15 verified media URLs` };
     flashTimings.totalMs = Date.now() - flashStartedAt;
     return {
       accepted: true,
@@ -12586,6 +16387,11 @@ let local22TurboQualificationActive = 0;
 const local22TurboQualificationWaiters = [];
 let local22TurboWorkActive = 0;
 const local22TurboWorkWaiters = [];
+let local22TurboWorkWaiterSequence = 0;
+let local2MediaProofActive = 0;
+const local2MediaProofWaiters = [];
+let local2MediaProofWaiterSequence = 0;
+const LOCAL2_MEDIA_PROOF_CONCURRENCY = 2;
 const local22TurboBranchControllers = new Set();
 let local22TurboDeliveredArtists = 0;
 let local22TurboStartupPrebufferPromise = null;
@@ -12617,12 +16423,10 @@ function local22TurboDrainQualificationWaiters() {
 }
 
 function local22TurboWorkLimit() {
-  // Sixteen profile gates can issue up to 48 listing requests at once. The old
-  // forty-eight-profile fan-out generated as many as 144 simultaneous listing
-  // requests and buried early winners in the source queue.
-  // Profile HTML does not use the media playback cache. Keep all sixteen lanes
-  // running while the user watches so the accepted cushion replenishes.
-  return 16;
+  // Two HTML connections at a 650 ms shared launch floor are saturated by four
+  // live profiles. Sixteen gates only built a 30+ request queue and inflated a
+  // passing profile's observed preparation from seconds to over a minute.
+  return LOCAL2_SHALLOW_PROFILE_CONCURRENCY;
 }
 
 function local22TurboDrainWorkWaiters() {
@@ -12630,11 +16434,13 @@ function local22TurboDrainWorkWaiters() {
     local22TurboWorkActive < local22TurboWorkLimit() &&
     local22TurboWorkWaiters.length
   ) {
-    local22TurboWorkWaiters.shift()?.();
+    const selectedIndex = local2HighestPriorityWaiterIndex(local22TurboWorkWaiters);
+    if (selectedIndex < 0) break;
+    local22TurboWorkWaiters.splice(selectedIndex, 1)[0]?.enter?.();
   }
 }
 
-function local22TurboAcquireWorkSlot(signal) {
+function local22TurboAcquireWorkSlot(signal, priority = 0) {
   if (local22TurboWorkActive < local22TurboWorkLimit()) {
     local22TurboWorkActive++;
     return Promise.resolve(() => {
@@ -12643,6 +16449,11 @@ function local22TurboAcquireWorkSlot(signal) {
     });
   }
   return new Promise((resolve, reject) => {
+    const waiter = {
+      enter: null,
+      priority: Number(priority || 0),
+      sequence: ++local22TurboWorkWaiterSequence
+    };
     const enter = () => {
       signal?.removeEventListener('abort', abort);
       local22TurboWorkActive++;
@@ -12651,14 +16462,59 @@ function local22TurboAcquireWorkSlot(signal) {
         local22TurboDrainWorkWaiters();
       });
     };
+    waiter.enter = enter;
     const abort = () => {
-      const index = local22TurboWorkWaiters.indexOf(enter);
+      const index = local22TurboWorkWaiters.indexOf(waiter);
       if (index >= 0) local22TurboWorkWaiters.splice(index, 1);
       reject(signal?.reason || new Error('Local2.2 Turbo stopped'));
     };
     if (signal?.aborted) return abort();
-    local22TurboWorkWaiters.push(enter);
+    local22TurboWorkWaiters.push(waiter);
     signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function local2DrainMediaProofWaiters() {
+  while (local2MediaProofActive < LOCAL2_MEDIA_PROOF_CONCURRENCY && local2MediaProofWaiters.length) {
+    const selectedIndex = local2HighestPriorityWaiterIndex(local2MediaProofWaiters);
+    if (selectedIndex < 0) break;
+    local2MediaProofWaiters.splice(selectedIndex, 1)[0]?.enter?.();
+  }
+}
+
+function local2AcquireMediaProofSlot(signal, priority = 0) {
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason || new Error('Local2 media proof stopped'));
+  }
+  if (local2MediaProofActive < LOCAL2_MEDIA_PROOF_CONCURRENCY && !local2MediaProofWaiters.length) {
+    local2MediaProofActive++;
+    return Promise.resolve(() => {
+      local2MediaProofActive = Math.max(0, local2MediaProofActive - 1);
+      local2DrainMediaProofWaiters();
+    });
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = {
+      enter: null,
+      priority: Number(priority || 0),
+      sequence: ++local2MediaProofWaiterSequence
+    };
+    const enter = () => {
+      signal?.removeEventListener('abort', abort);
+      local2MediaProofActive++;
+      resolve(() => {
+        local2MediaProofActive = Math.max(0, local2MediaProofActive - 1);
+        local2DrainMediaProofWaiters();
+      });
+    };
+    waiter.enter = enter;
+    const abort = () => {
+      const index = local2MediaProofWaiters.indexOf(waiter);
+      if (index >= 0) local2MediaProofWaiters.splice(index, 1);
+      reject(signal.reason || new Error('Local2 media proof stopped'));
+    };
+    local2MediaProofWaiters.push(waiter);
+    signal.addEventListener('abort', abort, { once: true });
   });
 }
 
@@ -12791,26 +16647,1210 @@ async function local22TurboPrebufferFirstMedia(media, profile, signal) {
   return rows[0].entry.serverPrebufferReady === true;
 }
 
+async function local22TestAiEvaluateInBackground(profile, revision) {
+  const controller = new AbortController();
+  let releaseQualification = null;
+  let decision = null;
+  try {
+    releaseQualification = await local22TurboAcquireQualificationSlot(controller.signal, 0);
+    const rawDecision = await classifyInner({
+      app: 'pong-test-ai-background',
+      localVariant: 'local2',
+      preferencePolicy: 'broad-hard-safe',
+      stage: 'full',
+      deferQwenReview: true,
+      visionModel: LOCAL2_QWEN_MODEL,
+      artist: profile,
+      candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL22_TURBO_DECISION_IMAGES)
+    }, workloadGeneration, controller.signal);
+    decision = local2PipelineDecision(rawDecision, profile.candidateImageUrls);
+  } catch (error) {
+    decision = {
+      verdict: 'unavailable', confidence: 0,
+      reason: String(error?.message || 'AI decision unavailable'),
+      reasonCode: 'ai_unavailable', hardFilters: {},
+      evidence: { examinedImages: profile.candidateImageUrls.length, clearBodyViews: 0 }
+    };
+  } finally {
+    releaseQualification?.();
+  }
+  const examined = Number(decision?.evidence?.examinedImages || 0);
+  const clearBody = Number(decision?.evidence?.clearBodyViews || 0);
+  const aiWouldAccept = local2FlashDecisionIsSafe(decision) &&
+    examined >= 6 && clearBody >= LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES;
+  const audit = {
+    workflow: 'test-ai-candidate', auditedAt: new Date().toISOString(),
+    artistUrl: profile.artistUrl, artistName: profile.artistName,
+    aiLabel: aiWouldAccept ? 'accept' : 'reject',
+    aiOriginalVerdict: String(decision?.verdict || 'unavailable'),
+    aiReason: String(decision?.reason || 'AI decision unavailable'),
+    verifiedVideoCount: 15, revision, decision
+  };
+  await fs.mkdir(LOCAL_AI_DIR, { recursive: true });
+  await fs.appendFile(TRAIN_AI_AUDIT_PATH, `${JSON.stringify(audit)}\n`, 'utf8');
+}
+
+async function local22TestAiEvaluateCandidateInBackground(candidate, revision) {
+  const controller = new AbortController();
+  try {
+    const profile = await local2FlashPrepareProfile(candidate, {
+      signal: controller.signal,
+      variant: 'test-ai-background',
+      revision,
+      onShallowProfileReady() {}
+    });
+    await local22TestAiEvaluateInBackground(profile, revision);
+  } catch (error) {
+    const artistInfo = random40ReservoirArtistInfo(candidate.artistUrl);
+    const audit = {
+      workflow: 'test-ai-candidate', auditedAt: new Date().toISOString(),
+      artistUrl: artistInfo.artistUrl, artistName: artistInfo.artistName,
+      aiLabel: 'unavailable', aiOriginalVerdict: 'unavailable',
+      aiReason: String(error?.message || 'AI background preparation unavailable'),
+      verifiedVideoCount: 15, revision
+    };
+    await fs.mkdir(LOCAL_AI_DIR, { recursive: true });
+    await fs.appendFile(TRAIN_AI_AUDIT_PATH, `${JSON.stringify(audit)}\n`, 'utf8');
+  }
+}
+
+function scheduleTestAiEvaluation(candidate, revision) {
+  const timer = setTimeout(() => {
+    void (async () => {
+      await ensureAiWorkersReady(LOCAL2_QWEN_MODEL);
+      await local22TestAiEvaluateCandidateInBackground(candidate, revision);
+    })().catch(() => {});
+  }, 60_000);
+  timer.unref?.();
+}
+
+async function ensureTestAiFirefoxScraper() {
+  const healthy = async () => {
+    try {
+      const response = await fetch(`${TEST_AI_FIREFOX_SCRAPER_URL}/health`, {
+        signal: AbortSignal.timeout(4000)
+      });
+      return response.ok;
+    } catch (_) { return false; }
+  };
+  if (await healthy()) return;
+  if (testAiFirefoxScraperStartPromise) return testAiFirefoxScraperStartPromise;
+  testAiFirefoxScraperStartPromise = (async () => {
+    if (!existsSync(TEST_AI_FIREFOX_PYTHON) || !existsSync(TEST_AI_FIREFOX_SCRIPT)) {
+      throw new Error('Hidden Firefox scraper runtime is unavailable');
+    }
+    // A busy scraper can miss a short health deadline. Starting another Python
+    // service on every miss creates a process storm and starves the one healthy
+    // Firefox instance. Allow at most one launch attempt per minute.
+    if (Date.now() < testAiFirefoxScraperSpawnNotBefore) {
+      const error = new Error('Hidden Firefox scraper is recovering');
+      error.pongTransient = true;
+      error.retryAfterMs = testAiFirefoxScraperSpawnNotBefore - Date.now();
+      throw error;
+    }
+    testAiFirefoxScraperSpawnNotBefore = Date.now() + 60_000;
+    const child = spawn(TEST_AI_FIREFOX_PYTHON, [TEST_AI_FIREFOX_SCRIPT], {
+      cwd: process.cwd(),
+      detached: true,
+      windowsHide: true,
+      stdio: 'ignore'
+    });
+    testAiFirefoxScraperProcess = child;
+    child.once('exit', () => {
+      if (testAiFirefoxScraperProcess === child) testAiFirefoxScraperProcess = null;
+    });
+    child.unref();
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      if (await healthy()) return;
+      await videoVerifyDelay(250);
+    }
+    throw new Error('Hidden Firefox scraper did not become ready');
+  })();
+  try { await testAiFirefoxScraperStartPromise; }
+  finally { testAiFirefoxScraperStartPromise = null; }
+}
+
+function local22BlankCanonicalSourceUrl(rawUrl) {
+  const url = new URL(rawUrl);
+  url.hostname = url.hostname.replace(/^www\./i, '').toLowerCase();
+  // The two public catalogs expose the same creator/post graph.  The private
+  // Firefox session is deliberately authenticated to one origin only, so send
+  // OnlyfaHouse creator routes through the byte-equivalent CoomerFans route
+  // instead of timing out and falling through two slower transports.  Post
+  // routes already share `/p/...` and therefore need only the host rewrite.
+  if (url.hostname === 'onlyfaphouse.com') {
+    url.hostname = 'coomerfans.com';
+    if (/^\/c\//i.test(url.pathname)) url.pathname = url.pathname.replace(/^\/c\//i, '/u/');
+  }
+  return url.toString();
+}
+
+// The blank-slate lane uses the private VPS only as a stateless source
+// transport. HTML is returned to this process and discarded after extraction;
+// no screenshots, media files, or browser history are written there. Twenty
+// shared lanes match the proven userscript ceiling without multiplying it by
+// candidate concurrency.
+const local22BlankVpsFetchLimit = createSimpCityLimiter(20);
+const local22BlankVpsBatchLimit = createSimpCityLimiter(2);
+let local22BlankSourceBackoffUntil = 0;
+
+function local22BlankRecordSourceStatus(status) {
+  const value = Number(status || 0);
+  if (value === 429) {
+    // The private Firefox worker applies a paced micro-batch cooldown itself.
+    // Retain a short cross-transport guard without freezing both Local buttons
+    // for two minutes after one fully rate-limited batch.
+    local22BlankSourceBackoffUntil = Math.max(local22BlankSourceBackoffUntil, Date.now() + 15_000);
+  }
+}
+
+async function local22BlankRespectSourceBackoff(signal) {
+  const remaining = Math.max(0, local22BlankSourceBackoffUntil - Date.now());
+  if (remaining) await videoVerifyDelay(remaining, signal);
+}
+
+async function local22BlankVpsFetchHtml(rawUrl, signal) {
+  if (!VPS_SCRAPER_CONFIG.url || !VPS_SCRAPER_CONFIG.secret) {
+    throw new Error('Local2.2 private VPS scraper is not configured');
+  }
+  const response = await local22BlankVpsFetchLimit(() => fetch(
+    `${VPS_SCRAPER_CONFIG.url}/fetch?url=${encodeURIComponent(rawUrl)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${VPS_SCRAPER_CONFIG.secret}`,
+        Accept: 'text/html,application/xhtml+xml'
+      },
+      signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)].filter(Boolean))
+    }
+  ));
+  const html = await response.text();
+  if (!response.ok) throw new Error(`Local2.2 private VPS HTTP ${response.status}`);
+  if (!html || gatewayHtmlIsTransientInterstitial(html)) {
+    throw new Error('Local2.2 private VPS returned an unusable page');
+  }
+  return html;
+}
+
+async function local22BlankFirefoxFetchBatch(urls, signal, { priority = 0 } = {}) {
+  if (!TEST_AI_FIREFOX_SCRAPER_URL || !urls.length) return new Map();
+  await ensureTestAiFirefoxScraper();
+  const response = await fetch(`${TEST_AI_FIREFOX_SCRAPER_URL}/fetch-batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ urls: urls.slice(0, 20), priority: Number(priority || 0) }),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(50_000)].filter(Boolean))
+  });
+  if (!response.ok) throw new Error(`Local2.2 private Firefox batch HTTP ${response.status}`);
+  const payload = await response.json();
+  const output = new Map();
+  let rateLimitedRows = 0;
+  for (const row of Array.isArray(payload?.rows) ? payload.rows : []) {
+    if (Number(row?.status || 0) === 429) rateLimitedRows++;
+    let url = '';
+    try { url = local22BlankCanonicalSourceUrl(String(row?.url || '')); }
+    catch (_) { continue; }
+    const html = String(row?.html || row?.body || '');
+    if (
+      Number(row?.status || 0) >= 200 &&
+      Number(row?.status || 0) < 300 &&
+      html &&
+      !gatewayHtmlIsTransientInterstitial(html)
+    ) output.set(url, html);
+  }
+  output.pongRateLimitedRows = rateLimitedRows;
+  return output;
+}
+
+async function local22BlankFetchBatch(rawUrls, signal, { priority = 0 } = {}) {
+  const urls = [...new Set((Array.isArray(rawUrls) ? rawUrls : [])
+    .map(value => {
+      try { return local22BlankCanonicalSourceUrl(value); }
+      catch (_) { return ''; }
+    })
+    .filter(Boolean))].slice(0, 20);
+  if (!urls.length) return new Map();
+  await local22BlankRespectSourceBackoff(signal);
+  const fetchVpsBatch = async batchUrls => local22BlankVpsBatchLimit(async () => {
+    const response = await fetch(`${VPS_SCRAPER_CONFIG.url}/fetch-batch`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${VPS_SCRAPER_CONFIG.secret}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json'
+      },
+      body: JSON.stringify({ urls: batchUrls }),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(35_000)].filter(Boolean))
+    });
+    if (!response.ok) throw new Error(`Local2.2 private VPS batch HTTP ${response.status}`);
+    const payload = await response.json();
+    const output = new Map();
+    let rateLimitedRows = 0;
+    for (const row of Array.isArray(payload?.rows) ? payload.rows : []) {
+      if (Number(row?.status || 0) === 429) rateLimitedRows++;
+      let url = '';
+      try { url = local22BlankCanonicalSourceUrl(String(row?.url || '')); }
+      catch (_) { continue; }
+      const html = String(row?.body || row?.html || '');
+      if (
+        Number(row?.status || 0) >= 200 &&
+        Number(row?.status || 0) < 300 &&
+        html &&
+        !gatewayHtmlIsTransientInterstitial(html)
+      ) {
+        output.set(url, html);
+      }
+    }
+    output.pongRateLimitedRows = rateLimitedRows;
+    return output;
+  });
+  // The authenticated hidden Firefox path matches the proven high-throughput
+  // userscript behavior and does not persist browsing data. Keep the VPS as a
+  // stateless recovery transport so a tunnel stall cannot hold every healthy
+  // candidate for its full timeout.
+  let output = new Map();
+  let rateLimitedRows = 0;
+  try {
+    output = await local22BlankFirefoxFetchBatch(urls, signal, { priority });
+    rateLimitedRows += Number(output.pongRateLimitedRows || 0);
+  } catch (_) {
+    output = new Map();
+  }
+  let stillMissing = urls.filter(url => !output.has(url));
+  if (
+    !output.size &&
+    stillMissing.length &&
+    !signal?.aborted &&
+    VPS_SCRAPER_CONFIG.url &&
+    VPS_SCRAPER_CONFIG.secret
+  ) {
+    try {
+      const vpsRecovery = await fetchVpsBatch(stillMissing);
+      rateLimitedRows += Number(vpsRecovery.pongRateLimitedRows || 0);
+      for (const [url, html] of vpsRecovery) output.set(url, html);
+    } catch (_) {
+      // The no-store direct/mirror lane below remains available.
+    }
+  }
+  stillMissing = urls.filter(url => !output.has(url));
+  if (!output.size && stillMissing.length && !signal?.aborted) {
+    await Promise.all(stillMissing.map(async url => {
+      try {
+        const html = await testAiFetchHtml(url, signal, 8000);
+        if (html && !gatewayHtmlIsTransientInterstitial(html)) output.set(url, html);
+      } catch (_) {
+        // Missing rows are handled below. A partial batch stays useful; a
+        // completely empty batch is retried by the engine as operational I/O.
+      }
+    }));
+  }
+  if (signal?.aborted) throw signal.reason || new Error('Local2.2 stopped');
+  if (!output.size) {
+    // A partial batch is still useful and should not freeze all healthy work
+    // merely because one URL returned 429. Pause globally only when every
+    // configured source transport failed to return even one requested page.
+    if (rateLimitedRows > 0) local22BlankRecordSourceStatus(429);
+    const error = new Error('Local2.2 source transports returned no pages');
+    error.pongTransient = true;
+    error.retryAfterMs = Math.max(900, local22BlankSourceBackoffUntil - Date.now());
+    throw error;
+  }
+  return output;
+}
+
+async function testAiDirectFetchHtml(rawUrl, signal, timeoutMs = 8000) {
+  let fallbackError = null;
+  const nativeFetch = async targetUrl => {
+    const target = gatewayTargetUrl(targetUrl).toString();
+    const response = await fetch(target, {
+      headers: {
+        Accept: 'text/html,application/xhtml+xml',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36'
+      },
+      redirect: 'follow',
+      signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)].filter(Boolean))
+    });
+    const html = await response.text();
+    if (!response.ok) throw new Error(`Test AI native HTTP ${response.status}`);
+    if (gatewayHtmlIsTransientInterstitial(html)) throw new Error('Test AI native verification page');
+    return html;
+  };
+  // This is the exact transport used by the passing 10-artist benchmark.
+  try { return await nativeFetch(rawUrl); }
+  catch (error) {
+    if (signal?.aborted) throw error;
+    fallbackError = error;
+  }
+  try {
+    const mirrorUrl = new URL(rawUrl);
+    if (mirrorUrl.hostname.endsWith('coomerfans.com')) {
+      mirrorUrl.hostname = 'onlyfaphouse.com';
+      return await nativeFetch(mirrorUrl.toString());
+    }
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    fallbackError = error;
+  }
+  // The ordinary server transport is both the fastest path and, unlike the
+  // current browser/VPS sessions, may remain healthy when those sessions have
+  // entered a source-specific 429/503 bucket. Test it first. The browser is a
+  // compatibility fallback for verification/interstitial responses, not a
+  // mandatory hop in front of every listing and post request.
+  try {
+    let response = await gatewayH2Fetch(rawUrl, { signal, timeoutMs }).catch(() => null);
+    if (!response || Number(response.status || 0) >= 500) {
+      response = await gatewayHttp1BufferFetch(rawUrl, { signal, timeoutMs });
+    }
+    const status = Number(response?.status || 0);
+    if (status >= 200 && status < 300) {
+      const html = response.body.toString('utf8');
+      if (!gatewayHtmlIsTransientInterstitial(html)) return html;
+    }
+  } catch (error) {
+    if (signal?.aborted) throw error;
+  }
+  // The two catalogs mirror the same public post graph but maintain separate
+  // throttle buckets. The successful 10/55.3 s benchmark used this immediate
+  // mirror fallback before any browser automation.
+  try {
+    const mirrorUrl = new URL(rawUrl);
+    if (mirrorUrl.hostname.endsWith('coomerfans.com')) {
+      mirrorUrl.hostname = 'onlyfaphouse.com';
+      let response = await gatewayH2Fetch(mirrorUrl.toString(), { signal, timeoutMs }).catch(() => null);
+      if (!response || Number(response.status || 0) >= 500) {
+        response = await gatewayHttp1BufferFetch(mirrorUrl.toString(), { signal, timeoutMs });
+      }
+      const status = Number(response?.status || 0);
+      if (status >= 200 && status < 300) {
+        const html = response.body.toString('utf8');
+        if (!gatewayHtmlIsTransientInterstitial(html)) return html;
+      }
+    }
+  } catch (error) {
+    if (signal?.aborted) throw error;
+  }
+  if (TEST_AI_FIREFOX_SCRAPER_URL) {
+    try {
+      await ensureTestAiFirefoxScraper();
+      const response = await fetch(
+        `${TEST_AI_FIREFOX_SCRAPER_URL}/fetch?url=${encodeURIComponent(rawUrl)}`,
+        { signal: AbortSignal.any([signal, AbortSignal.timeout(Math.max(10000, timeoutMs + 37000))].filter(Boolean)) }
+      );
+      if (!response.ok) throw new Error(`Firefox scraper HTTP ${response.status}`);
+      const html = await response.text();
+      if (gatewayHtmlIsTransientInterstitial(html)) throw new Error('Firefox scraper received a verification page');
+      return html;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      fallbackError = error;
+      // Preserve the VPS relay as an automatic fallback while Firefox starts or
+      // recovers; a healthy hidden Firefox remains the preferred Test AI path.
+    }
+  }
+  if (VPS_SCRAPER_CONFIG.url && VPS_SCRAPER_CONFIG.secret) {
+    try {
+      const response = await fetch(
+        `${VPS_SCRAPER_CONFIG.url}/fetch?url=${encodeURIComponent(rawUrl)}`,
+        {
+          headers: { Authorization: `Bearer ${VPS_SCRAPER_CONFIG.secret}` },
+          signal: AbortSignal.any([signal, AbortSignal.timeout(Math.max(5000, timeoutMs + 12000))].filter(Boolean))
+        }
+      );
+      if (!response.ok) throw new Error(`VPS scraper HTTP ${response.status}`);
+      const html = await response.text();
+      if (gatewayHtmlIsTransientInterstitial(html)) {
+        const error = new Error('VPS scraper received a transient verification page');
+        error.pongTransient = true;
+        throw error;
+      }
+      return html;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      fallbackError = error;
+    }
+  }
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (signal?.aborted) throw new DOMException('Test AI scrape aborted', 'AbortError');
+    try {
+      let response = await gatewayH2Fetch(rawUrl, { signal, timeoutMs }).catch(() => null);
+      if (!response || Number(response.status || 0) >= 500) {
+        response = await gatewayHttp1BufferFetch(rawUrl, { signal, timeoutMs });
+      }
+      const status = Number(response?.status || 0);
+      if (status >= 200 && status < 300) {
+        const html = response.body.toString('utf8');
+        if (!gatewayHtmlIsTransientInterstitial(html)) return html;
+      }
+      lastError = new Error(`Test AI direct HTTP ${status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt === 0) await videoVerifyDelay(400, signal);
+  }
+  const terminalError = lastError || fallbackError || new Error('Test AI direct fetch failed');
+  if (/\b(?:429|503)\b/.test(String(terminalError?.message || terminalError))) {
+    terminalError.pongTransient = true;
+    terminalError.retryAfterMs = 1000;
+  }
+  throw terminalError;
+}
+
+// The reference userscript sustains twenty requests at once. Share those
+// twenty lanes across every Test AI artist so increasing artist concurrency
+// cannot multiply into an accidental 40/80-request burst.
+const testAiSourceFetchLimit = createSimpCityLimiter(20);
+const testAiFetchHtml = (rawUrl, signal, timeoutMs = 8000) => testAiSourceFetchLimit(async () => {
+  const startAt = Math.max(Date.now(), testAiSourceNextStartAt);
+  // Five initial post fetches rather than fifteen keep 450 ms stable while
+  // leaving enough headroom for ten artists inside a minute.
+  testAiSourceNextStartAt = startAt + 450;
+  if (startAt > Date.now()) await videoVerifyDelay(startAt - Date.now(), signal);
+  return testAiDirectFetchHtml(rawUrl, signal, timeoutMs);
+});
+
+function testAiStructuredArtistIdentity(artistUrl) {
+  try {
+    const parts = new URL(artistUrl).pathname.split('/').filter(Boolean);
+    if (!['u', 'c'].includes(String(parts[0] || '').toLowerCase()) || !parts[1] || !parts[3]) return null;
+    return { service: parts[1].toLowerCase(), username: decodeURIComponent(parts[3]) };
+  } catch (_) { return null; }
+}
+
+const testAiStructuredFetchLimit = createSimpCityLimiter(8);
+
+async function testAiStructuredFetch(endpoint, signal) {
+  const headers = {
+    Accept: 'text/css',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36'
+  };
+  return testAiStructuredFetchLimit(async () => {
+    const read = async (requestUrl, requestHeaders, timeoutMs) => {
+      const response = await fetch(requestUrl, {
+        headers: requestHeaders,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)].filter(Boolean))
+      });
+      if (response.status === 404) return [];
+      if (!response.ok) throw new Error(`Test AI structured index HTTP ${response.status}`);
+      const body = await response.json();
+      return Array.isArray(body) ? body : [];
+    };
+    // The public read-only endpoint is consistently sub-second from the Pong
+    // host. The VPS remains a fallback instead of adding tunnel latency to
+    // every density check and complete ten-video inventory.
+    try {
+      return await read(endpoint, headers, 4000);
+    } catch (directError) {
+      if (signal?.aborted || !VPS_SCRAPER_CONFIG.url || !VPS_SCRAPER_CONFIG.secret) {
+        throw directError;
+      }
+      return read(
+        `${VPS_SCRAPER_CONFIG.url}/fetch?url=${encodeURIComponent(endpoint)}`,
+        { ...headers, Authorization: `Bearer ${VPS_SCRAPER_CONFIG.secret}` },
+        8000
+      );
+    }
+  });
+}
+
+async function testAiStructuredVideoCount(candidate, context, targetVideos = 15) {
+  const inventory = await testAiStructuredVideoInventory(candidate, context, targetVideos);
+  return inventory.videoCount;
+}
+
+async function testAiStructuredVideoInventory(candidate, context, targetVideos = 15) {
+  const identity = testAiStructuredArtistIdentity(candidate?.artistUrl || '');
+  if (!identity) return { videoCount: 0, posts: [], complete: false };
+  const media = new Set();
+  const inventoryPosts = [];
+  const target = Math.max(1, Number(targetVideos || 15));
+  let complete = false;
+  for (let offset = 0; offset <= 950 && !context.signal?.aborted && media.size < target; offset += 50) {
+    const endpoint = `https://coomer.st/api/v1/${encodeURIComponent(identity.service)}/user/${encodeURIComponent(identity.username)}/posts?o=${offset}`;
+    const posts = await testAiStructuredFetch(endpoint, context.signal);
+    if (!posts.length) {
+      complete = inventoryPosts.length > 0;
+      break;
+    }
+    inventoryPosts.push(...posts);
+    posts.forEach(post => {
+      [post?.file, ...(Array.isArray(post?.attachments) ? post.attachments : [])].forEach(item => {
+        const mediaPath = String(item?.path || '');
+        if (/\.(?:mp4|m4v|mov|webm)(?:\?|$)/i.test(mediaPath)) media.add(mediaPath);
+      });
+    });
+    if (posts.length < 50) {
+      complete = true;
+      break;
+    }
+  }
+  return {
+    videoCount: media.size,
+    posts: inventoryPosts,
+    complete: complete || media.size >= target
+  };
+}
+
+async function local2FlashPrimeStructuredMedia(profile, inventory, context) {
+  const state = local2FlashProfileExpansionState.get(profile);
+  if (!state || !Array.isArray(inventory?.posts) || inventory.videoCount < 15) return;
+  state.sourceHintPosts = inventory.posts;
+  state.sourceHintPromise = Promise.resolve(inventory.posts);
+
+  // A clone profile page currently contains thirty post cards.  Determine the
+  // shallowest page that can contain the first fifteen catalogued videos, then
+  // fetch any missing listing pages in one high-priority private-browser batch.
+  // This is scheduling only: every delivered URL is still extracted from and
+  // counted against the corresponding authoritative clone post page.
+  let cumulativeVideos = 0;
+  let postsToTarget = 0;
+  for (const post of inventory.posts) {
+    postsToTarget++;
+    cumulativeVideos += local2ApiPostVideoCount(post);
+    if (cumulativeVideos >= 15) break;
+  }
+  if (cumulativeVideos < 15) return;
+  const targetPage = Math.min(
+    state.maximumPages,
+    Math.max(1, Math.ceil(postsToTarget / 30))
+  );
+  const startPage = Math.max(2, Number(state.nextPage || 2));
+  if (startPage <= targetPage) {
+    const pageNumbers = Array.from(
+      { length: targetPage - startPage + 1 },
+      (_, index) => startPage + index
+    );
+    const pageUrls = pageNumbers.map(page => random40ReservoirProfilePageUrl(state.artistUrl, page));
+    const fetched = await local22BlankFetchBatch(pageUrls, context.signal, { priority: 100 });
+    pageNumbers.forEach((page, index) => {
+      const pageUrl = pageUrls[index];
+      const html = fetched.get(local22BlankCanonicalSourceUrl(pageUrl));
+      if (html) state.addPage(page, html);
+    });
+    state.nextPage = targetPage + 1;
+    local2FlashRefreshPreparedProfile(profile, state);
+  }
+  await local2FlashCompleteProfileMedia(profile, context);
+}
+
+async function testAiDiscoverPages(pages, context) {
+  const results = await Promise.allSettled(pages.map(async page => {
+    const pageUrl = `https://coomerfans.com/?page=${page}`;
+    const html = await testAiFetchHtml(pageUrl, context.signal, 8000);
+    const parsed = local2FlashListingCandidates(html, pageUrl, page);
+    return parsed.length ? parsed : random40ReservoirArtistUrls(html, pageUrl).map(artistUrl => ({
+      artistId: random40ReservoirIdentity(artistUrl), artistUrl, sourcePage: page, profileImageUrl: ''
+    }));
+  }));
+  const groups = results.filter(row => row.status === 'fulfilled').map(row => row.value);
+  if (!groups.length) {
+    const error = results.find(row => row.status === 'rejected')?.reason || new Error('VPS discovery returned no pages');
+    error.pongTransient = true;
+    throw error;
+  }
+  const candidates = groups.flat();
+  const qualified = [];
+  const examined = new Set();
+  let cursor = 0;
+  const target = 20;
+  const prefilterDeadline = Date.now() + 8_000;
+  async function prefilterWorker() {
+    while (!context.signal?.aborted && Date.now() < prefilterDeadline && qualified.length < target && cursor < candidates.length) {
+      const candidate = candidates[cursor++];
+      examined.add(candidate);
+      try {
+        const availableVideoCount = await testAiStructuredVideoCount(candidate, context);
+        if (availableVideoCount >= 15) qualified.push({ ...candidate, testAiAvailableVideoCount: availableVideoCount });
+      } catch (_) {
+        // A structured-index miss is only a scheduling miss. Preserve the
+        // candidate for the slower authoritative fallback instead of rejecting.
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: 8 }, prefilterWorker));
+  qualified.sort((left, right) =>
+    Number(right.testAiAvailableVideoCount || 0) - Number(left.testAiAvailableVideoCount || 0));
+  const deferred = candidates.filter(candidate => !examined.has(candidate));
+  return [...qualified, ...deferred];
+}
+
+async function local22TestAiFastScrapeCandidate(candidate, context) {
+  const startedAt = Date.now();
+  const artistUrl = gatewayTargetUrl(candidate.artistUrl).toString();
+  const artistInfo = random40ReservoirArtistInfo(artistUrl);
+  const seenPosts = new Set();
+  const candidatePostUrls = [];
+  const seenVideos = new Set();
+  const entries = [];
+  const availableVideoCount = Math.max(0, Number(candidate.testAiAvailableVideoCount || 0));
+  let successfulListingPages = 0;
+  let failedListingPages = 0;
+  let attemptedPostPages = 0;
+  let successfulPostPages = 0;
+  const postFailureReasons = [];
+  let nextPage = 1;
+  const maximumPages = Math.max(8, Math.min(200, Number(process.env.PONG_TEST_AI_MAX_PROFILE_PAGES || 100)));
+
+  while (!context.signal?.aborted && seenPosts.size < 15 && nextPage <= maximumPages) {
+    // Match the proven Firefox userscript precisely: fetch page 1 alone so a
+    // video-heavy artist can qualify immediately. Only expand to eight-page
+    // batches when page 1 did not expose fifteen explicit videos.
+    const listingBatchSize = 1;
+    const pageNumbers = Array.from({ length: listingBatchSize }, (_, i) => nextPage + i);
+    nextPage = pageNumbers.at(-1) + 1;
+    const listingRows = await Promise.allSettled(pageNumbers.map(page => testAiFetchHtml(
+      random40ReservoirProfilePageUrl(artistUrl, page), context.signal, 8000
+    )));
+    let anyContent = false;
+    const postUrls = [];
+    listingRows.forEach((row, index) => {
+      if (row.status !== 'fulfilled') {
+        failedListingPages++;
+        return;
+      }
+      successfulListingPages++;
+      if (random40ReservoirProfileScore(row.value).posts > 0) anyContent = true;
+      for (const postUrl of random40ReservoirVideoPostUrls(row.value, random40ReservoirProfilePageUrl(artistUrl, pageNumbers[index]))) {
+        const key = canonicalVideoPostKey(postUrl);
+        if (!key || seenPosts.has(key)) continue;
+        seenPosts.add(key);
+        candidatePostUrls.push(postUrl);
+        postUrls.push(postUrl);
+      }
+    });
+    if (!anyContent) break;
+  }
+  if (availableVideoCount < 15 || seenPosts.size < 15) {
+    return { accepted: false, category: 'evidence', reason: `only ${Math.min(availableVideoCount, seenPosts.size)}/15 independently confirmed videos` };
+  }
+  const postUrls = candidatePostUrls;
+  for (let offset = 0; offset < Math.min(15, postUrls.length) && entries.length < 5; offset += 5) {
+    const batch = postUrls.slice(offset, offset + 5);
+    attemptedPostPages += batch.length;
+    const postRows = await Promise.allSettled(batch.map(postUrl => testAiFetchHtml(
+      postUrl, context.signal, 8000
+    )));
+    postRows.forEach((row, index) => {
+      if (row.status !== 'fulfilled') {
+        postFailureReasons.push(`${batch[index]} => ${String(row.reason?.message || row.reason || 'failed')}`);
+        return;
+      }
+      successfulPostPages++;
+      extractVideoUrlsFromHtml(row.value, batch[index]).forEach((videoUrl, postIndex) => {
+        if (seenVideos.has(videoUrl) || entries.length >= 5) return;
+        seenVideos.add(videoUrl);
+        entries.push({
+          ...artistInfo, type: 'video', videoUrl, mediaKey: videoUrl,
+          postUrl: batch[index], postIndex, alternateVideoUrls: [],
+          playbackProbeVerified: false, playbackFastStart: false
+        });
+      });
+    });
+  }
+  if (entries.length < 5) {
+    if (!successfulListingPages || failedListingPages > 0 || successfulPostPages < attemptedPostPages) {
+      const failureDetail = postFailureReasons[0] ? `; ${postFailureReasons[0]}` : '';
+      const error = new Error(`Test AI source transport incomplete (${successfulListingPages} listing pages, ${successfulPostPages}/${attemptedPostPages} post pages${failureDetail})`);
+      error.pongTransient = true;
+      throw error;
+    }
+    return { accepted: false, category: 'evidence', reason: `only ${entries.length}/5 initial playable video URLs` };
+  }
+  const playbackEntries = entries.map(entry => {
+    const mirrorUrl = local2MediaCdnMirrorUrl(entry.videoUrl);
+    const primaryIsCoomerFans = (() => {
+      try { return new URL(entry.videoUrl).hostname.toLowerCase().includes('coomerfans'); }
+      catch (_) { return false; }
+    })();
+    const primaryUrl = primaryIsCoomerFans && mirrorUrl ? mirrorUrl : entry.videoUrl;
+    return {
+      ...entry,
+      videoUrl: primaryUrl,
+      alternateVideoUrls: [...new Set([
+        entry.videoUrl,
+        mirrorUrl,
+        ...(Array.isArray(entry.alternateVideoUrls) ? entry.alternateVideoUrls : [])
+      ].filter(url => url && url !== primaryUrl))]
+    };
+  });
+  scheduleTestAiEvaluation(candidate, context.revision);
+  return {
+    accepted: true,
+    mediaQualified: true,
+    dto: local2FlashAcceptedDto(artistInfo, playbackEntries, {
+      verdict: 'pending', confidence: 0, reason: 'AI evaluation running in background',
+      testAi: true, aiWouldAccept: null, aiVerdict: 'pending',
+      aiOriginalVerdict: 'pending', aiOriginalReason: 'AI evaluation running in background',
+      availableVideoCount
+    }, context.revision),
+    diagnostic: {
+      testAi: true, aiBackground: true, scraper: 'structured-prefilter-five-first',
+      profilePagesRequested: Math.min(maximumPages, nextPage - 1),
+      availableVideoCount,
+      elapsedMs: Date.now() - startedAt
+    }
+  };
+}
+
+async function local22TestAiQualifyMediaFirst(profile, context, profileMs) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(context.signal?.reason || new Error('Test AI stopped'));
+  if (context.signal?.aborted) abort();
+  else context.signal?.addEventListener('abort', abort, { once: true });
+  try {
+    const branchContext = {
+      ...context,
+      signal: controller.signal,
+      variant: 'test-ai',
+      verificationPriority: { priority: Number(profile.likelyVideoPostCount || 0) * 10, sourceHintBoost: 0 }
+    };
+    await local2FlashCompleteProfileMedia(profile, branchContext);
+    const release = await local2AcquireMediaProofSlot(controller.signal, branchContext.verificationPriority.priority);
+    let sample;
+    try { sample = await local2FlashSampleProfile(profile, branchContext); }
+    finally { release(); }
+    const sampleHits = Math.max(0, Number(sample?.hits || 0));
+    local2FlashPromoteProfileMedia(profile, sampleHits >= 3);
+    const media = await local2FlashVerifyProfileProgressively(profile, branchContext, {
+      skipSample: true,
+      sampleHits,
+      sampleEntries: sample?.entries,
+      samplePostUrls: sample?.postUrls
+    });
+    if (media.length < 15) {
+      return { accepted: false, category: 'evidence', reason: `only ${media.length}/15 verified media URLs` };
+    }
+    // Delivery never waits for the model or CDN mirror ranking. The fifteenth
+    // authoritative video is the complete Test AI admission rule.
+    void local22TestAiEvaluateInBackground(profile, context.revision).catch(() => {});
+    return {
+      accepted: true,
+      mediaQualified: true,
+      dto: local2FlashAcceptedDto(profile, media.slice(0, 15), {
+        verdict: 'pending', confidence: 0, reason: 'AI evaluation running in background',
+        testAi: true, aiWouldAccept: null, aiVerdict: 'pending',
+        aiOriginalVerdict: 'pending', aiOriginalReason: 'AI evaluation running in background'
+      }, context.revision),
+      diagnostic: { testAi: true, aiBackground: true, profileMs }
+    };
+  } finally {
+    context.signal?.removeEventListener('abort', abort);
+  }
+}
+
+async function local22BlankApplyVideoDensityHints(candidates, signal) {
+  const sample = (Array.isArray(candidates) ? candidates : []).slice(0, 64);
+  if (!sample.length) return;
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(new Error('Local2.2 density hint deadline')), 8000);
+  timer.unref?.();
+  const hintSignal = AbortSignal.any([signal, timeoutController.signal].filter(Boolean));
+  try {
+    await Promise.allSettled(sample.map(async candidate => {
+      const identity = testAiStructuredArtistIdentity(candidate?.artistUrl || '');
+      if (!identity) return;
+      const endpoint = `https://coomer.st/api/v1/${encodeURIComponent(identity.service)}/user/${encodeURIComponent(identity.username)}/posts?o=0`;
+      const posts = await testAiStructuredFetch(endpoint, hintSignal);
+      const media = new Set();
+      posts.forEach(post => {
+        [post?.file, ...(Array.isArray(post?.attachments) ? post.attachments : [])].forEach(item => {
+          const mediaPath = String(item?.path || '');
+          if (/\.(?:mp4|m4v|mov|webm)(?:\?|$)/i.test(mediaPath)) media.add(mediaPath);
+        });
+      });
+      candidate.likelyVideoCount = Math.max(Number(candidate.likelyVideoCount || 0), media.size);
+    }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function local22BlankDiscoverPages(pages, context) {
+  const pageUrls = pages.map(page => `https://coomerfans.com/?page=${page}`);
+  const fetched = await local22BlankFetchBatch(pageUrls, context.signal);
+  const candidates = [];
+  pageUrls.forEach((pageUrl, index) => {
+    const html = fetched.get(local22BlankCanonicalSourceUrl(pageUrl));
+    if (!html) return;
+    const page = Number(pages[index] || 0);
+    const parsed = local2FlashListingCandidates(html, pageUrl, page);
+    candidates.push(...(parsed.length ? parsed : random40ReservoirArtistUrls(html, pageUrl).map(artistUrl => ({
+      artistId: random40ReservoirIdentity(artistUrl),
+      artistUrl,
+      sourcePage: page,
+      profileImageUrl: ''
+    }))));
+  });
+  if (!candidates.length) {
+    const error = new Error('Local2.2 discovery returned no artists');
+    error.pongTransient = true;
+    error.retryAfterMs = 1000;
+    throw error;
+  }
+  // The thumbnail head is trained from the same history-only labels. It only
+  // chooses which candidates start first; every admitted artist still runs a
+  // fresh four-image decision and ten-video proof.
+  await Promise.all([
+    local2RankListingCandidates(candidates.slice(0, 32), context.signal),
+    local22BlankApplyVideoDensityHints(candidates, context.signal)
+  ]);
+  candidates.sort((left, right) =>
+    Number(Number(right.likelyVideoCount || 0) >= LOCAL22_BLANK_MIN_VIDEOS) -
+      Number(Number(left.likelyVideoCount || 0) >= LOCAL22_BLANK_MIN_VIDEOS) ||
+    Number(right.preferenceRank ?? -1) - Number(left.preferenceRank ?? -1) ||
+    Number(right.likelyVideoCount || 0) - Number(left.likelyVideoCount || 0)
+  );
+  return candidates;
+}
+
+function local22BlankProfileFromPages(candidate, pages) {
+  const artistUrl = local22BlankCanonicalSourceUrl(candidate.artistUrl);
+  const artistInfo = random40ReservoirArtistInfo(artistUrl);
+  const firstHtml = pages.find(item => item.page === 1)?.html || pages[0]?.html || '';
+  const postImageEntries = random40ReservoirBestImageEntries(pages.flatMap(item =>
+    random40ReservoirPostImageEntries(item.html, item.pageUrl, artistInfo)
+  ), 32);
+  const candidateImageUrls = [...new Set([
+    random40ReservoirProfileImageUrl(firstHtml, artistUrl),
+    ...postImageEntries.map(entry => entry.imageUrl)
+  ].map(url => normalizeUrl(url)).filter(Boolean))].slice(0, LOCAL22_BLANK_DECISION_IMAGES);
+  const videoPostUrls = [];
+  const seenPosts = new Set();
+  for (const page of pages) {
+    for (const postUrl of [
+      ...random40ReservoirVideoPostUrls(page.html, page.pageUrl),
+      ...local2LikelyVideoPostUrls(page.html, artistUrl)
+    ]) {
+      const key = canonicalVideoPostKey(postUrl);
+      if (!key || seenPosts.has(key)) continue;
+      seenPosts.add(key);
+      videoPostUrls.push(postUrl);
+    }
+  }
+  return {
+    ...artistInfo,
+    artistUrl,
+    sourcePage: Number(candidate.sourcePage || 0),
+    profileImageUrl: candidateImageUrls[0] || '',
+    candidateImageUrls,
+    postImageEntries,
+    videoPostUrls,
+    likelyVideoPostCount: videoPostUrls.length,
+    scannedThroughPage: Math.max(1, ...pages.map(item => Number(item.page || 1)))
+  };
+}
+
+async function local22BlankFetchProfile(candidate, context) {
+  const artistUrl = local22BlankCanonicalSourceUrl(candidate.artistUrl);
+  const pages = [];
+  const fetchPages = async numbers => {
+    const urls = numbers.map(page => random40ReservoirProfilePageUrl(artistUrl, page));
+    const fetched = await local22BlankFetchBatch(urls, context.signal);
+    numbers.forEach((page, index) => {
+      const pageUrl = urls[index];
+      const html = fetched.get(local22BlankCanonicalSourceUrl(pageUrl));
+      if (html && random40ReservoirProfileScore(html).posts > 0) {
+        pages.push({ page, pageUrl, html });
+      }
+    });
+  };
+  await fetchPages([1]);
+  if (!pages.length) throw local2Disqualification('Local2.2 profile page unavailable');
+  let profile = local22BlankProfileFromPages(candidate, pages);
+  if (
+    profile.candidateImageUrls.length < 2 ||
+    profile.videoPostUrls.length < LOCAL22_BLANK_MIN_VIDEOS
+  ) {
+    await fetchPages([2, 3, 4]);
+    profile = local22BlankProfileFromPages(candidate, pages);
+  }
+  if (profile.candidateImageUrls.length < 2) {
+    throw local2Disqualification(`only ${profile.candidateImageUrls.length}/2 usable history images`);
+  }
+  return { profile, pages, fetchPages };
+}
+
+async function local22BlankVerifyMedia(profileState, context) {
+  let { profile } = profileState;
+  const entries = [];
+  const seenMedia = new Set();
+  const checkedPosts = new Set();
+  let nextProfilePage = Math.max(2, Number(profile.scannedThroughPage || 1) + 1);
+  // Use the read-only bulk index only to order the identical clone post set.
+  // Exact clone HTML below remains the sole ten-video admission authority.
+  if (!Object.hasOwn(profileState, 'sourceHintPosts')) {
+    profileState.sourceHintPosts = await local2SourceHintPostsForArtist(
+      profile.artistUrl,
+      context.signal
+    );
+  }
+  const applySourceOrder = () => {
+    if (!Array.isArray(profileState.sourceHintPosts)) return;
+    const hinted = orderLocal2ClonePostsWithSourceHints({
+      postUrls: profile.videoPostUrls,
+      listingPages: profileState.pages,
+      apiPosts: profileState.sourceHintPosts,
+      targetVideos: LOCAL22_BLANK_MIN_VIDEOS
+    });
+    if (
+      hinted.postUrls.length === profile.videoPostUrls.length &&
+      hinted.postUrls.every(url => profile.videoPostUrls.some(original =>
+        canonicalVideoPostKey(original) === canonicalVideoPostKey(url)
+      ))
+    ) {
+      profile.videoPostUrls = hinted.postUrls;
+      profile.sourceHintDiagnostics = hinted.diagnostics;
+      recordLocal2SourceHintOrdering(hinted.diagnostics);
+    }
+  };
+  applySourceOrder();
+  // Page one often exposes plenty of generic post cards but only two or three
+  // actual video posts. Fetch the next seven listing pages in one private
+  // browser batch after the AI accepts, then prove the densest exact clone
+  // posts. This replaces up to four serial depth rounds with one bounded read.
+  const deepestLoadedPage = Math.max(1, ...profileState.pages.map(item => Number(item.page || 1)));
+  const hintedDepth = Number(profileState.sourceHintDepthPages || 0);
+  const targetListingDepth = hintedDepth > 0
+    ? Math.max(deepestLoadedPage, Math.min(20, hintedDepth))
+    : Math.max(deepestLoadedPage, 4);
+  if (deepestLoadedPage < targetListingDepth) {
+    const depthPages = Array.from(
+      { length: targetListingDepth - deepestLoadedPage },
+      (_, index) => deepestLoadedPage + index + 1
+    );
+    await profileState.fetchPages(depthPages);
+    profile = local22BlankProfileFromPages(profileState.profile, profileState.pages);
+    profileState.profile = profile;
+    nextProfilePage = targetListingDepth + 1;
+    applySourceOrder();
+  }
+  const addPostHtml = (html, postUrl) => {
+    for (const [postIndex, videoUrl] of extractVideoUrlsFromHtml(html, postUrl).entries()) {
+      const key = normalizeUrl(videoUrl, postUrl);
+      if (!key || seenMedia.has(key) || entries.length >= LOCAL22_BLANK_MIN_VIDEOS) continue;
+      seenMedia.add(key);
+      entries.push({
+        ...profile,
+        type: 'video',
+        videoUrl: key,
+        mediaKey: key,
+        postUrl,
+        postIndex,
+        alternateVideoUrls: [],
+        actualMediaSourceVerified: true,
+        playbackProbeVerified: false,
+        playbackFastStart: false
+      });
+    }
+  };
+  for (let round = 0; round < 5 && entries.length < LOCAL22_BLANK_MIN_VIDEOS; round++) {
+    const pending = profile.videoPostUrls.filter(postUrl => {
+      const key = canonicalVideoPostKey(postUrl);
+      return key && !checkedPosts.has(key);
+    }).slice(0, 20);
+    if (pending.length) {
+      const fetched = await local22BlankFetchBatch(pending, context.signal, { priority: 100 });
+      for (const postUrl of pending) {
+        const key = canonicalVideoPostKey(postUrl);
+        if (key) checkedPosts.add(key);
+        const html = fetched.get(local22BlankCanonicalSourceUrl(postUrl));
+        if (html) addPostHtml(html, postUrl);
+        if (entries.length >= LOCAL22_BLANK_MIN_VIDEOS) break;
+      }
+    }
+    if (entries.length >= LOCAL22_BLANK_MIN_VIDEOS) break;
+    const pageNumbers = [nextProfilePage, nextProfilePage + 1, nextProfilePage + 2, nextProfilePage + 3];
+    nextProfilePage += pageNumbers.length;
+    await profileState.fetchPages(pageNumbers);
+    const refreshed = local22BlankProfileFromPages(profileState.profile, profileState.pages);
+    profileState.profile = refreshed;
+    profile = refreshed;
+    applySourceOrder();
+  }
+  return entries.slice(0, LOCAL22_BLANK_MIN_VIDEOS);
+}
+
+async function local22BlankQualifyCandidate(candidate, context) {
+  const startedAt = Date.now();
+  const branchController = new AbortController();
+  const abort = () => branchController.abort(context.signal?.reason || new Error('Local2.2 stopped'));
+  if (context.signal?.aborted) abort();
+  else context.signal?.addEventListener('abort', abort, { once: true });
+  try {
+    const profileState = await local22BlankFetchProfile(candidate, {
+      ...context,
+      signal: branchController.signal
+    });
+    const profile = profileState.profile;
+    const decisionStartedAt = Date.now();
+    const rawDecision = await preferenceAiRequest('/local2-clean/classify', {
+      app: 'pong-local22-blank-slate',
+      localVariant: 'local2',
+      preferencePolicy: 'local22-history-only',
+      stage: 'full',
+      artist: profile,
+      candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL22_BLANK_DECISION_IMAGES)
+    }, 45_000, { workload: true, signal: branchController.signal });
+    const decisionMs = Date.now() - decisionStartedAt;
+    const decision = local2PipelineDecision(rawDecision, profile.candidateImageUrls);
+    if (decision.verdict !== 'accept' || decision.historyOnly !== true) {
+      return {
+        accepted: false,
+        category: 'policy',
+        reason: decision.reason || 'history-only preference rejection',
+        diagnostic: { decision, decisionMs, elapsedMs: Date.now() - startedAt }
+      };
+    }
+    // The structured inventory and clone are views of the same source graph.
+    // A complete inventory below ten conclusively fails the unchanged media
+    // floor in milliseconds. If the inventory is unavailable or incomplete,
+    // retain the exhaustive clone fallback so transport cannot reject anyone.
+    try {
+      const inventory = await testAiStructuredVideoInventory(
+        candidate,
+        { ...context, signal: branchController.signal },
+        LOCAL22_BLANK_MIN_VIDEOS
+      );
+      if (
+        inventory.complete === true &&
+        inventory.posts.length > 0 &&
+        inventory.videoCount < LOCAL22_BLANK_MIN_VIDEOS
+      ) {
+        return {
+          accepted: false,
+          category: 'evidence',
+          reason: `only ${inventory.videoCount}/${LOCAL22_BLANK_MIN_VIDEOS} indexed video URLs`,
+          diagnostic: { decision, decisionMs, structuredInventory: true, elapsedMs: Date.now() - startedAt }
+        };
+      }
+      if (inventory.videoCount >= LOCAL22_BLANK_MIN_VIDEOS) {
+        profileState.sourceHintPosts = inventory.posts;
+        let cumulativeVideos = 0;
+        let postsToTarget = 0;
+        for (const post of inventory.posts) {
+          postsToTarget++;
+          cumulativeVideos += local2ApiPostVideoCount(post);
+          if (cumulativeVideos >= LOCAL22_BLANK_MIN_VIDEOS) break;
+        }
+        profileState.sourceHintDepthPages = Math.min(
+          20,
+          Math.max(1, Math.ceil(postsToTarget / 30))
+        );
+      }
+    } catch (_) {
+      // Exact clone proof below remains authoritative on any index failure.
+    }
+    const mediaStartedAt = Date.now();
+    // Rejected artists never spend source requests on post pages. Two accepted
+    // artists may prove their ten media objects concurrently, which keeps the
+    // VPS below the same twenty-request ceiling as the reference userscript.
+    const releaseMediaProof = await local2AcquireMediaProofSlot(
+      branchController.signal,
+      Number(candidate?.preferenceRank || 0)
+    );
+    let verifiedMedia;
+    try {
+      verifiedMedia = await local22BlankVerifyMedia(profileState, {
+        ...context,
+        signal: branchController.signal
+      });
+    } finally {
+      releaseMediaProof();
+    }
+    const mediaMs = Date.now() - mediaStartedAt;
+    if (verifiedMedia.length < LOCAL22_BLANK_MIN_VIDEOS) {
+      return {
+        accepted: false,
+        category: 'evidence',
+        reason: `only ${verifiedMedia.length}/${LOCAL22_BLANK_MIN_VIDEOS} verified media URLs`,
+        diagnostic: { decision, decisionMs, mediaMs, elapsedMs: Date.now() - startedAt }
+      };
+    }
+    // Probe/rank only the five videos that Android may play immediately. The
+    // remaining five are already verified and travel in the same bundle, but
+    // do not delay delivery with unnecessary CDN work.
+    const prepared = await local2PreparePlaybackMediaMirrors(
+      verifiedMedia.slice(0, 5),
+      { ...context, signal: branchController.signal }
+    ).catch(() => ({ media: verifiedMedia.slice(0, 5), diagnostics: null }));
+    const media = [...prepared.media, ...verifiedMedia.slice(5)];
+    return {
+      accepted: true,
+      mediaQualified: true,
+      dto: local2FlashAcceptedDto(profile, media, {
+        ...decision,
+        historyOnly: true,
+        minimumVerifiedVideos: LOCAL22_BLANK_MIN_VIDEOS,
+        reason: `History-only Local2.2 accepted: ${decision.reason}`.slice(0, 240)
+      }, context.revision),
+      diagnostic: {
+        decision,
+        decisionMs,
+        verifiedVideoCount: verifiedMedia.length,
+        elapsedMs: Date.now() - startedAt
+      }
+    };
+  } finally {
+    context.signal?.removeEventListener('abort', abort);
+    if (!branchController.signal.aborted) {
+      branchController.abort(new Error('Local2.2 candidate settled'));
+    }
+  }
+}
+
 async function local22TurboQualifyCandidateInner(candidate, context, preparedProfile = null) {
   const startedAt = Date.now() - Number(context?.preparedProfileMs || 0);
-  const qualificationVariant = context?.variant === 'local22-turbo'
-    ? 'local22-turbo'
-    : 'local2-fast';
+  const testAiMode = context?.variant === 'test-ai';
+  if (testAiMode && !preparedProfile) {
+    return local22TestAiFastScrapeCandidate(candidate, context);
+  }
+  const qualificationVariant = testAiMode
+    ? 'test-ai'
+    : context?.variant === 'local22-turbo'
+      ? 'local22-turbo'
+      : 'local2-fast';
+  const twoRuleMode = qualificationVariant === 'local22-turbo';
   const profile = preparedProfile || await local2FlashPrepareProfile(candidate, {
       ...context,
       variant: qualificationVariant
     });
   const profileMs = Number(context?.preparedProfileMs || (Date.now() - startedAt));
-  if (profile.candidateImageUrls.length < 6) {
+  if (testAiMode) {
+    return local22TestAiQualifyMediaFirst(profile, context, profileMs);
+  }
+  // Prepared profiles may arrive from the shallow scheduling lane rather than
+  // being built inside this call. Recheck Local2's explicit-label policy here,
+  // before either AI inference or video proof, so no alternate preparation or
+  // future fast path can deliver an explicitly trans-labeled artist.
+  if (qualificationVariant === 'local2-fast') {
+    const explicitCreatorReason = local2ExplicitCreatorTextHardReason(profile);
+    if (explicitCreatorReason) {
+      return {
+        accepted: false,
+        category: 'policy',
+        reason: explicitCreatorReason
+      };
+    }
+  }
+  const requiredDecisionImages = twoRuleMode ? 4 : 6;
+  if (!testAiMode && profile.candidateImageUrls.length < requiredDecisionImages) {
     return {
       accepted: false,
-      reason: `only ${profile.candidateImageUrls.length}/6 distinct hard-filter images`
+      category: 'evidence',
+      reason: `only ${profile.candidateImageUrls.length}/${requiredDecisionImages} distinct decision images`
     };
   }
   // The narrow video-post heuristic is only a scheduling hint. Version 26.48
   // correctly stopped using it as an acceptance gate; low-hint profiles still
   // run later and can pass if the authoritative verifier proves 15 real videos.
-  const qualificationPriority = Number(profile.likelyVideoPostCount || 0);
+  // The independent index lookup began beside page-one fetching. Join it for at
+  // most 500 ms here so profiles with fifteen exact timestamp-matched video
+  // posts enter AI/proof queues first. It can only reorder clone URLs and is not
+  // consulted by any acceptance or rejection condition.
+  await local2FlashCompleteProfileMedia(profile, context);
+  const likelyVideoPriority = Number(profile.likelyVideoPostCount || 0);
+  let sourceHintPriority = local2SourceHintSchedulingBoost(profile);
+  const qualificationPriority = sourceHintPriority + likelyVideoPriority;
   const branchController = new AbortController();
   local22TurboBranchControllers.add(branchController);
   const abortBranch = () => branchController.abort(
@@ -12818,32 +17858,48 @@ async function local22TurboQualifyCandidateInner(candidate, context, preparedPro
   );
   if (context.signal?.aborted) abortBranch();
   else context.signal?.addEventListener('abort', abortBranch, { once: true });
-  const verificationPriority = { priority: qualificationPriority };
+  // Finish dense, high-yield profiles first instead of spreading the shared
+  // verifier evenly across dozens of likely failures. This changes queue order
+  // only; every artist still has to prove the identical 15 distinct videos.
+  let densityPriority = Math.max(0, 13 - Number(profile.scannedThroughPage || 12)) * 200;
+  const verificationPriority = {
+    // Exact source metadata is a scheduling hint only. A profile with at least
+    // fifteen timestamp-matched video posts gets its authoritative four-post
+    // sample first; the verifier still fetches clone pages and still requires
+    // fifteen distinct real URLs before acceptance.
+    priority: sourceHintPriority + densityPriority + likelyVideoPriority * 10,
+    sourceHintBoost: sourceHintPriority
+  };
   const branchContext = {
     ...context,
     signal: branchController.signal,
-    variant: 'local22-turbo',
+    variant: qualificationVariant,
     verificationPriority
   };
-  let releaseQualification = null;
   try {
     const classifyPreparedProfile = async () => {
-      releaseQualification = await local22TurboAcquireQualificationSlot(
+      const releaseQualification = await local22TurboAcquireQualificationSlot(
         branchController.signal,
         qualificationPriority
       );
       try {
         const rawDecision = await classifyInner({
-          app: qualificationVariant === 'local22-turbo'
+          app: testAiMode
+            ? 'pong-test-ai'
+            : qualificationVariant === 'local22-turbo'
             ? 'pong-random40-local22-turbo'
             : 'pong-random40-local2-fast',
           localVariant: 'local2',
-          preferencePolicy: 'broad-hard-safe',
+          preferencePolicy: twoRuleMode ? 'local22-two-rule' : 'broad-hard-safe',
           stage: 'full',
           deferQwenReview: true,
+          skipTextPolicy: twoRuleMode,
           visionModel: LOCAL2_QWEN_MODEL,
           artist: profile,
-          candidateImageUrls: profile.candidateImageUrls.slice(0, LOCAL22_TURBO_DECISION_IMAGES)
+          candidateImageUrls: profile.candidateImageUrls.slice(
+            0,
+            twoRuleMode ? requiredDecisionImages : LOCAL2_CLEAN_MAX_IMAGES
+          )
         }, workloadGeneration, branchController.signal);
         return {
           decision: local2PipelineDecision(rawDecision, profile.candidateImageUrls),
@@ -12851,6 +17907,12 @@ async function local22TurboQualifyCandidateInner(candidate, context, preparedPro
         };
       } catch (error) {
         return { decision: null, error };
+      } finally {
+        // A qualification lane represents scarce GPU inference, not the
+        // candidate's subsequent source/CDN work. Holding this slot through
+        // the 15-video verifier serialized unrelated decisions behind slow
+        // network responses and caused the long gaps after the first artist.
+        releaseQualification();
       }
     };
 
@@ -12862,63 +17924,220 @@ async function local22TurboQualifyCandidateInner(candidate, context, preparedPro
     const decisionStartedAt = Date.now();
     const decisionResult = await classifyPreparedProfile();
     const decisionMs = Date.now() - decisionStartedAt;
-    if (decisionResult.error) {
-      return {
-        accepted: false,
-        reason: String(decisionResult.error?.message || decisionResult.error)
-      };
+    if (decisionResult.error && !testAiMode) {
+      // Let the engine's bounded transient retry policy distinguish temporary
+      // service/network failures from a real model rejection. Returning false
+      // here permanently mislabeled an unavailable classifier as a rejected
+      // artist and made the rejection counter impossible to audit.
+      throw decisionResult.error;
     }
-    const decision = decisionResult.decision;
-    if (!local2FlashDecisionIsSafe(decision)) {
-      return {
-        accepted: false,
-        reason: decision?.reason || 'Local2.2 hard-filter or preference rejection',
-        diagnostic: decision
-      };
+    const initialDecision = decisionResult.decision || {
+      verdict: 'unavailable',
+      confidence: 0,
+      reason: String(decisionResult.error?.message || 'AI decision unavailable'),
+      reasonCode: 'ai_unavailable',
+      hardFilters: {},
+      evidence: { examinedImages: profile.candidateImageUrls.length, clearBodyViews: 0 }
+    };
+    let decision = initialDecision;
+    let twoRuleOutcome = null;
+    let confirmationDiagnostic = null;
+    let confirmationMs = 0;
+    if (twoRuleMode) {
+      twoRuleOutcome = local22TwoRuleDecision(decision);
+      if (!twoRuleOutcome.accepted) {
+        return {
+          accepted: false,
+          category: twoRuleOutcome.category,
+          reason: twoRuleOutcome.reason,
+          diagnostic: decision
+        };
+      }
+    } else if (!local2FlashDecisionIsSafe(decision)) {
+      if (!local2FlashDecisionCanConfirm(decision)) {
+        if (!testAiMode) {
+          return {
+            accepted: false,
+            category: 'policy',
+            reason: decision?.reason || 'Local2.2 hard-filter or preference rejection',
+            diagnostic: decision
+          };
+        }
+      }
+
+      // The fast personal model remains the only preference judge. Qwen is a
+      // narrow, fail-closed resolver only when that model already likes the
+      // artist but cannot prove one or more hard-filter fields. This rescues
+      // known good ambiguous profiles without letting a second model loosen
+      // or replace the learned preference criteria.
+      const confirmationStartedAt = Date.now();
+      // Do not occupy a primary DINO/SigLIP qualification lane while the
+      // independent Qwen worker resolves this edge case. Ollama already has a
+      // strict two-request queue, so sharing the primary semaphore only made
+      // one ambiguous artist block several unrelated fast decisions.
+      const confirmation = local2FlashDecisionCanConfirm(decision)
+        ? await local2FlashConfirmHardFilters(profile, decision, branchContext)
+        : null;
+      confirmationMs = Date.now() - confirmationStartedAt;
+      confirmationDiagnostic = confirmation?.diagnostic || null;
+      if ((!confirmation?.accepted || !confirmation?.decision) && !testAiMode) {
+        return {
+          accepted: false,
+          category: confirmation?.category || 'evidence',
+          reason: confirmation?.reason || 'Local2.2 hard-filter confirmation rejected',
+          diagnostic: {
+            initialDecision,
+            hardConfirmation: confirmationDiagnostic,
+            timings: { profileMs, decisionMs, confirmationMs }
+          }
+        };
+      }
+      if (confirmation?.accepted && confirmation?.decision) decision = confirmation.decision;
+    }
+    const preferenceProbability = twoRuleMode ? 0 : Number(
+      initialDecision?.rawDecision?.preference_probability ??
+      initialDecision?.confidence ??
+      0
+    );
+    if (Number.isFinite(preferenceProbability)) {
+      verificationPriority.priority += Math.round(Math.max(0, Math.min(1, preferenceProbability)) * 100);
     }
     const examined = Number(decision?.evidence?.examinedImages || 0);
     const clearBody = Number(decision?.evidence?.clearBodyViews || 0);
-    if (examined < 6) {
+    const aiWouldAccept = twoRuleMode
+      ? twoRuleOutcome?.accepted === true
+      : local2FlashDecisionIsSafe(decision) &&
+        examined >= 6 &&
+        clearBody >= LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES;
+    if (!testAiMode && !twoRuleMode && examined < 6) {
       return {
         accepted: false,
+        category: 'evidence',
         reason: `only ${examined}/6 perceptually distinct hard-filter images`,
         diagnostic: decision
       };
     }
-    if (clearBody < LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES) {
+    if (!testAiMode && !twoRuleMode && clearBody < LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES) {
       return {
         accepted: false,
+        category: 'evidence',
         reason: `only ${clearBody}/${LOCAL2_FLASH_CONFIRMATION_CLEAR_BODY_IMAGES} clear body views`,
         diagnostic: decision
       };
     }
     const mediaStartedAt = Date.now();
-    const media = await local2FlashVerifyProfile(profile, branchContext);
-    const mediaMs = Date.now() - mediaStartedAt;
-    if (media.length < 15) {
-      return { accepted: false, reason: `only ${media.length}/15 verified media URLs` };
+    await local2FlashCompleteProfileMedia(profile, branchContext);
+    sourceHintPriority = local2SourceHintSchedulingBoost(profile);
+    densityPriority = Math.max(0, 13 - Number(profile.scannedThroughPage || 12)) * 200;
+    verificationPriority.sourceHintBoost = sourceHintPriority;
+    verificationPriority.priority = sourceHintPriority + densityPriority +
+      Number(profile.likelyVideoPostCount || 0) * 10 +
+      Math.round(Math.max(0, Math.min(1, preferenceProbability)) * 100);
+    // Spend four authoritative post checks to distinguish a dense profile from
+    // a stale text/API hint, then yield each bounded proof quantum through the
+    // priority lane. A truly dense 4/4 profile may temporarily pause competing
+    // HTML, but a 4/4 prefix created by source-hint reordering cannot: its exact
+    // full-page density decides that scheduling privilege.
+    let fastProof = null;
+    if (twoRuleMode) {
+      fastProof = await local22TurboFastMediaProof(profile, branchContext).catch(() => null);
     }
+    let verifiedMedia = Array.isArray(fastProof?.entries) ? fastProof.entries : [];
+    if (verifiedMedia.length < 15) {
+      const releaseSampleProof = await local2AcquireMediaProofSlot(
+        branchContext.signal,
+        verificationPriority.priority
+      );
+      let sample;
+      try {
+        sample = await local2FlashSampleProfile(profile, branchContext);
+      } finally {
+        releaseSampleProof();
+      }
+      const combinedSampleEntries = [...verifiedMedia, ...(sample?.entries || [])];
+      const combinedSamplePosts = [...(fastProof?.scannedPostUrls || []), ...(sample?.postUrls || [])];
+      const sampleHits = combinedSampleEntries.length;
+      local2FlashPromoteProfileMedia(profile, sampleHits >= 3);
+      verifiedMedia = await local2FlashVerifyProfileProgressively(
+        profile,
+        branchContext,
+        {
+          skipSample: true,
+          sampleHits,
+          sampleEntries: combinedSampleEntries,
+          samplePostUrls: combinedSamplePosts
+        }
+      );
+    }
+    const mediaMs = Date.now() - mediaStartedAt;
+    if (verifiedMedia.length < 15) {
+      return {
+        accepted: false,
+        category: 'evidence',
+        reason: `only ${verifiedMedia.length}/15 verified media URLs`
+      };
+    }
+    // Both live Local2 buttons converge here. Clone post HTML has already
+    // authoritatively proved fifteen distinct videos, so CDN probes may only
+    // select a responsive playback hostname and populate fallbacks. They can
+    // never add/remove proof or reject this otherwise accepted artist.
+    const playbackMirrorStartedAt = Date.now();
+    const playbackMirrors = await local2PreparePlaybackMediaMirrors(verifiedMedia, branchContext);
+    const media = playbackMirrors.media;
+    const playbackMirrorMs = Date.now() - playbackMirrorStartedAt;
     const prebufferStartedAt = Date.now();
     const prebufferReady = qualificationVariant === 'local22-turbo'
       ? await local22TurboPrebufferFirstMedia(media, profile, branchController.signal)
       : false;
+    if (testAiMode) {
+      const audit = {
+        workflow: 'test-ai-candidate',
+        auditedAt: new Date().toISOString(),
+        artistUrl: profile.artistUrl,
+        artistName: profile.artistName,
+        aiLabel: aiWouldAccept ? 'accept' : 'reject',
+        aiOriginalVerdict: String(decision?.verdict || 'unavailable'),
+        aiReason: String(decision?.reason || 'AI decision unavailable'),
+        verifiedVideoCount: verifiedMedia.length,
+        decision
+      };
+      void fs.mkdir(LOCAL_AI_DIR, { recursive: true })
+        .then(() => fs.appendFile(TRAIN_AI_AUDIT_PATH, `${JSON.stringify(audit)}\n`, 'utf8'))
+        .catch(() => {});
+    }
     return {
       accepted: true,
       mediaQualified: true,
-      dto: local2FlashAcceptedDto(profile, media, {
+      dto: local2FlashAcceptedDto(profile, media, testAiMode ? {
         ...decision,
-        reason: `Local2.2 personalized and hard-filter decision passed: ${decision.reason || 'accepted'}`.slice(0, 240)
+        testAi: true,
+        aiWouldAccept,
+        aiVerdict: aiWouldAccept ? 'accept' : 'reject',
+        aiOriginalVerdict: String(decision?.verdict || 'unavailable'),
+        aiOriginalReason: String(decision?.reason || 'AI decision unavailable').slice(0, 240),
+        reason: `Test AI predicted ${aiWouldAccept ? 'ACCEPT' : 'REJECT'}: ${decision?.reason || 'no reason'}`.slice(0, 240)
+      } : {
+        ...decision,
+        reason: twoRuleMode
+          ? 'Local2.2 two-rule decision passed: no male-presenting or repeated body-shape mismatch evidence'
+          : `Local2 personalized and hard-filter decision passed: ${decision.reason || 'accepted'}`.slice(0, 240)
       }, context.revision),
       diagnostic: {
         ...decision,
+        initialDecision: confirmationDiagnostic ? initialDecision : undefined,
+        hardConfirmation: confirmationDiagnostic,
         turbo: true,
         likelyVideoPostCount: Number(profile.likelyVideoPostCount || 0),
+        playbackMirrors: playbackMirrors.diagnostics,
+        playbackMirrorMs,
         prebufferReady,
         prebufferMs: Date.now() - prebufferStartedAt,
         timings: {
           profileMs,
           mediaMs,
           decisionMs,
+          confirmationMs,
+          playbackMirrorMs,
           prebufferMs: Date.now() - prebufferStartedAt
         },
         elapsedMs: Date.now() - startedAt
@@ -12928,21 +18147,37 @@ async function local22TurboQualifyCandidateInner(candidate, context, preparedPro
     local22TurboBranchControllers.delete(branchController);
     context.signal?.removeEventListener('abort', abortBranch);
     if (!branchController.signal.aborted) branchController.abort();
-    releaseQualification?.();
   }
 }
 
 async function local22TurboQualifyCandidate(candidate, context) {
-  const releaseWork = await local22TurboAcquireWorkSlot(context.signal);
+  // Test AI is a scraper benchmark, so it must not enter Local2's visual
+  // preparation/work semaphore before its fifteen-video delivery decision.
+  if (context?.variant === 'test-ai') {
+    return local22TestAiFastScrapeCandidate(candidate, context);
+  }
+  const releaseWork = await local22TurboAcquireWorkSlot(
+    context.signal,
+    local2CandidatePreferenceRank(candidate)
+  );
+  let workReleased = false;
+  const releaseShallowWork = () => {
+    if (workReleased) return;
+    workReleased = true;
+    releaseWork();
+  };
   const profileStartedAt = Date.now();
   let profile;
   try {
     profile = await local2FlashPrepareProfile(candidate, {
       ...context,
-      variant: context?.variant === 'local22-turbo' ? 'local22-turbo' : 'local2-fast'
+      variant: context?.variant === 'test-ai'
+        ? 'test-ai'
+        : context?.variant === 'local22-turbo' ? 'local22-turbo' : 'local2-fast',
+      onShallowProfileReady: releaseShallowWork
     });
   } finally {
-    releaseWork();
+    releaseShallowWork();
   }
   return local22TurboQualifyCandidateInner(candidate, {
     ...context,
@@ -12952,22 +18187,23 @@ async function local22TurboQualifyCandidate(candidate, context) {
 
 const local2FlashEngine = new Local2FlashEngine({
   discoverPages: local2FlashDiscoverPages,
-  // Local and Local2.2 share one 15-media + conservative eight-image hard-safe
-  // flow. Playback speed ranks media and controls caching; it does not decide
-  // whether an artist passes the user's acceptance criteria.
-  qualifyCandidate: local22TurboQualifyCandidate,
+  // Local2 uses its strict AI-first qualifier: personalized preference and the
+  // conservative hard-confirmation gate run before the unchanged 15-video
+  // proof. Local2.2 has its own separate history-only engine below.
+  qualifyCandidate: local2FlashQualifyCandidate,
   getRevision: async () => {
     const health = await local2CleanHealth().catch(() => null);
     return String(health?.local2_revision || local2LastKnownRevision || 'local2-flash-uninitialized');
   },
   targetAccepted: 48,
   readyMinimum: 1,
-  // Submit the first random page as soon as its two source listings return.
-  // Candidate qualification then overlaps the next page instead of waiting
-  // for an eight-request four-page discovery barrier.
+  // Fetch four listing pages through the same proven shared rate limiter, then
+  // interleave only one sixteen-candidate rank batch across them. This bounded
+  // diversity window prevents sixty lookalike neighbors from determining the
+  // entire startup order; the counterpart host remains fallback-only.
   pageConcurrency: 4,
-  candidateConcurrency: 32,
-  maximumPendingCandidates: 64,
+  candidateConcurrency: LOCAL2_CANDIDATE_CONCURRENCY,
+  maximumPendingCandidates: LOCAL2_MAX_PENDING_CANDIDATES,
   // Stage-local network/model timeouts already bound work. Do not convert time
   // spent waiting for a fair scheduler slot into a false artist rejection.
   candidateTimeoutMs: 0,
@@ -12979,25 +18215,23 @@ const local2FlashEngine = new Local2FlashEngine({
 });
 
 const local22TurboEngine = new Local2FlashEngine({
-  discoverPages: local2FlashDiscoverPages,
-  qualifyCandidate: local22TurboQualifyCandidate,
+  discoverPages: local22BlankDiscoverPages,
+  qualifyCandidate: local22BlankQualifyCandidate,
   getRevision: async () => {
     const health = await local2CleanHealth().catch(() => null);
     return String(health?.local2_revision || local2LastKnownRevision || 'local22-turbo-uninitialized');
   },
   targetAccepted: 48,
   readyMinimum: 1,
-  // Publish candidates as soon as one paired source page returns. A three-page
-  // discovery wave was a hidden startup barrier on otherwise high-yield pages.
-  // The wider candidate pool overlaps the next page only after the first page's
-  // candidates are already qualifying.
-  pageConcurrency: 4,
-  // Three 16-profile discovery waves may be prepared concurrently. Media-poor
-  // profiles no longer prevent the next random page's stronger candidates from
-  // entering the priority scheduler, while the verification host ceilings
-  // still bound actual network work independently.
-  candidateConcurrency: 32,
-  maximumPendingCandidates: 64,
+  // Two listing pages keep the private Firefox fetcher supplied without
+  // creating a large admission wave ahead of the first accepted artist.
+  pageConcurrency: 2,
+  // Six candidates overlap cheap profile/inventory reads while the model stays
+  // capped at four GPU lanes and media proof at two. A wider admission window
+  // filled the single browser FIFO with profile pages ahead of nearly complete
+  // proofs and increased first-artist latency from 18 to 47 seconds.
+  candidateConcurrency: LOCAL22_BLANK_CANDIDATE_CONCURRENCY,
+  maximumPendingCandidates: LOCAL22_BLANK_CANDIDATE_CONCURRENCY * 2,
   // This is a stuck-work guard, not an acceptance deadline. With eight active
   // qualification lanes, a candidate should no longer spend most of its life
   // waiting for admission. Keep enough headroom for slow source hosts so valid
@@ -13009,6 +18243,33 @@ const local22TurboEngine = new Local2FlashEngine({
   candidateTimeoutMs: 0,
   maximumPages: 3500,
   variant: 'local22-turbo'
+});
+
+// Evaluation-only lane: run the exact Local2 AI decision for auditing, but
+// deliver both predicted accepts and predicted rejects when (and only when)
+// the authoritative source proof finds fifteen distinct real videos.
+const testAiEngine = new Local2FlashEngine({
+  discoverPages: testAiDiscoverPages,
+  qualifyCandidate: local22TurboQualifyCandidate,
+  getRevision: async () => {
+    const health = await local2CleanHealth().catch(() => null);
+    return String(health?.local2_revision || local2LastKnownRevision || 'test-ai-uninitialized');
+  },
+  targetAccepted: 48,
+  readyMinimum: 1,
+  pageConcurrency: 4,
+  // Several artists may advance together, but all of them share the same
+  // twenty-request source pool above. This increases completed artists without
+  // multiplying the source burst rate.
+  candidateConcurrency: 2,
+  maximumPendingCandidates: 4,
+  candidateTimeoutMs: 0,
+  // A source-wide 429/503 is operational backpressure, not evidence that an
+  // artist has fewer than fifteen videos. Keep the candidate pending until the
+  // source recovers instead of silently discarding it after three retries.
+  maximumTransientRetries: 0,
+  maximumPages: 3500,
+  variant: 'test-ai'
 });
 
 const local2Adapter = createLocal2NodeAdapter({
@@ -13039,12 +18300,168 @@ const local2Adapter = createLocal2NodeAdapter({
   }
 });
 
+async function pongSwapHealth(timeoutMs = 900) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  timer.unref?.();
+  try {
+    const response = await fetch(`${PONG_SWAP_URL}/health`, {
+      cache: 'no-store',
+      signal: controller.signal
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch (_) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function markPongSwapReady(health) {
+  pongSwapLastHealth = health || { ok: true };
+  pongSwapReadyLeaseUntil = Date.now() + PONG_SWAP_READY_LEASE_MS;
+  return health;
+}
+
+function invalidatePongSwapReadiness() {
+  pongSwapLastHealth = null;
+  pongSwapReadyLeaseUntil = 0;
+}
+
+async function ensurePongSwapService({ warm = false } = {}) {
+  // Share both the existing-service warm path and the spawned-service path.
+  // Previously this latch was consulted only after a new /health probe, so a
+  // face menu issued 18 serialized health checks while the same warm/model
+  // lock was already in flight.
+  if (pongSwapStartPromise) return pongSwapStartPromise;
+  const ownedProcessLive = Boolean(pongSwapProcess && pongSwapProcess.exitCode === null);
+  if (
+    pongSwapLastHealth &&
+    (ownedProcessLive || Date.now() < pongSwapReadyLeaseUntil) &&
+    (!warm || pongSwapLastHealth.ready)
+  ) return pongSwapLastHealth;
+  pongSwapStartPromise = (async () => {
+    let health = await pongSwapHealth();
+    if (health) {
+      if (warm && !health.ready) {
+        const response = await fetch(`${PONG_SWAP_URL}/warm`, { method: 'POST' });
+        if (!response.ok) throw new Error(`Pong Swap warmup HTTP ${response.status}`);
+        health = await response.json();
+      }
+      return markPongSwapReady(health);
+    }
+    if (!existsSync(PONG_SWAP_PYTHON) || !existsSync(PONG_SWAP_SERVICE)) {
+      throw new Error('Pong Swap runtime is not installed');
+    }
+    if (!pongSwapProcess || pongSwapProcess.exitCode !== null) {
+      const stdoutLog = createWriteStream(path.join(PONG_SWAP_ROOT, 'logs', 'service-stdout.log'), { flags: 'a' });
+      const stderrLog = createWriteStream(path.join(PONG_SWAP_ROOT, 'logs', 'service-stderr.log'), { flags: 'a' });
+      pongSwapProcess = spawn(PONG_SWAP_PYTHON, [PONG_SWAP_SERVICE], {
+        cwd: PONG_SWAP_ROOT,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1'
+        }
+      });
+      pongSwapProcess.stdout.pipe(stdoutLog);
+      pongSwapProcess.stderr.pipe(stderrLog);
+      pongSwapProcess.once('exit', () => {
+        stdoutLog.end();
+        stderrLog.end();
+        pongSwapProcess = null;
+        invalidatePongSwapReadiness();
+      });
+    }
+    const deadline = Date.now() + 15_000;
+    health = null;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      health = await pongSwapHealth(1200);
+      if (health) break;
+    }
+    if (!health) throw new Error('Pong Swap service did not become reachable');
+    if (warm && !health.ready) {
+      const response = await fetch(`${PONG_SWAP_URL}/warm`, { method: 'POST' });
+      if (!response.ok) throw new Error(`Pong Swap warmup HTTP ${response.status}`);
+      health = await response.json();
+    }
+    return markPongSwapReady(health);
+  })().finally(() => {
+    pongSwapStartPromise = null;
+  });
+  return pongSwapStartPromise;
+}
+
+async function proxyPongSwapRequest(req, res, requestUrl, { cors = false } = {}) {
+  // Direct-loopback-only renderer diagnostics must never become accessible
+  // through the LAN-facing Pong proxy, even to an authenticated browser.
+  if (requestUrl.pathname.startsWith('/pong-swap/diagnostics/')) {
+    json(res, 404, { ok: false, error: 'endpoint not found' });
+    return;
+  }
+  await ensurePongSwapService({ warm: false });
+  const upstreamPath = `${requestUrl.pathname.replace(/^\/pong-swap/, '') || '/'}${requestUrl.search}`;
+  await new Promise((resolve, reject) => {
+    const headers = { ...req.headers, host: `127.0.0.1:${PONG_SWAP_PORT}`, 'x-pong-proxy': '1' };
+    delete headers.origin;
+    delete headers.referer;
+    const upstream = http.request({
+      hostname: '127.0.0.1',
+      port: PONG_SWAP_PORT,
+      method: req.method,
+      path: upstreamPath,
+      headers
+    }, response => {
+      const responseHeaders = { ...response.headers };
+      responseHeaders['cache-control'] = responseHeaders['cache-control'] || 'no-store';
+      if (cors) Object.assign(responseHeaders, gatewayCorsHeaders());
+      res.writeHead(response.statusCode || 502, responseHeaders);
+      response.pipe(res);
+      response.once('end', resolve);
+      response.once('error', reject);
+    });
+    // Media streams are intentionally open-ended. Every control-plane request
+    // must be bounded so one wedged Python/native operation cannot pin a Node
+    // socket and make Pong's buttons appear frozen indefinitely.
+    if (!/\/stream\/?$/.test(requestUrl.pathname)) {
+      upstream.setTimeout(30_000, () => {
+        upstream.destroy(new Error('Pong Swap control request timed out'));
+      });
+    }
+    upstream.once('error', error => {
+      invalidatePongSwapReadiness();
+      reject(error);
+    });
+    req.once('aborted', () => upstream.destroy());
+    res.once('close', () => {
+      if (!res.writableEnded) upstream.destroy();
+    });
+    req.pipe(upstream);
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   let requestUrl;
   try {
     requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   } catch (_) {
     json(res, 400, { ok: false, error: 'invalid request URL' });
+    return;
+  }
+  if (await vpnControl.handle(req, res, requestUrl)) return;
+  if (requestUrl.pathname === '/video-cache/diagnostics/record') {
+    if (!sourceOpenCacheDiagnosticAllowed(req, requestUrl)) {
+      json(res, 404, { ok: false, error: 'endpoint not found' });
+      return;
+    }
+    const id = requestUrl.searchParams.get('id');
+    json(res, 200, {
+      ok: true,
+      record: sourceOpenCacheDiagnosticRecord(videoFileCacheRecords.get(id))
+    });
     return;
   }
   if ((req.method === 'GET' || req.method === 'HEAD') && /^\/pong\/?$/.test(requestUrl.pathname)) {
@@ -13140,8 +18557,10 @@ const server = http.createServer(async (req, res) => {
       requestUrl.pathname === '/random40/candidates' ||
       requestUrl.pathname === '/video-cache/status' ||
       requestUrl.pathname === '/proxy' ||
+      isGenericHlsProxyPath(requestUrl.pathname) ||
       requestUrl.pathname === '/leakedzone/media' ||
       requestUrl.pathname === '/video-cache/stream' ||
+      requestUrl.pathname.startsWith('/media-browser-relay/stream/') ||
       requestUrl.pathname.startsWith('/video-cache/media/')
     );
   const sameOriginLanBrowser = isSameOriginLanBrowserRequest(req, requestUrl);
@@ -13150,6 +18569,8 @@ const server = http.createServer(async (req, res) => {
     req.method === 'POST' &&
     (
       requestUrl.pathname.startsWith('/simpcity/recall') ||
+      requestUrl.pathname === '/media-page/recall' ||
+      requestUrl.pathname === '/media-page/detection-feedback' ||
       requestUrl.pathname === '/simpcity/extract-creators'
     ) &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
@@ -13176,11 +18597,20 @@ const server = http.createServer(async (req, res) => {
     ) &&
     req.headers['x-pong-simpcity-controller'] === '1' &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
+  const desktopCaptureLanAccess =
+    requestUrl.pathname === '/media-page/desktop-capture' &&
+    (req.method === 'GET' || req.method === 'POST') &&
+    (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
+  const browserMediaRelayController =
+    requestUrl.pathname.startsWith('/media-browser-relay/') &&
+    !requestUrl.pathname.startsWith('/media-browser-relay/stream/') &&
+    req.headers['x-pong-simpcity-controller'] === '1' &&
+    (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
   const pcSavedLinksLanWrite =
     req.method === 'POST' &&
     requestUrl.pathname === '/saved-links/save' &&
     (isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress));
-  if (!anonymousLanMediaRead && !simpCityRecallLanWrite && !simpCityControllerLanWrite && !pcSavedLinksLanWrite && !sameOriginLanBrowser && !authenticatedLanBrowser && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
+  if (!anonymousLanMediaRead && !simpCityRecallLanWrite && !desktopCaptureLanAccess && !simpCityControllerLanWrite && !browserMediaRelayController && !pcSavedLinksLanWrite && !sameOriginLanBrowser && !authenticatedLanBrowser && !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
     json(res, 403, { ok: false, error: 'browser origin is not allowed' });
     return;
   }
@@ -13189,9 +18619,250 @@ const server = http.createServer(async (req, res) => {
     res.end();
     return;
   }
+  if ((req.method === 'GET' || req.method === 'HEAD') && requestUrl.pathname === '/browser-relay-keeper') {
+    const clientId = validBrowserMediaRelayId(requestUrl.searchParams.get('pongBrowserRelayClientId'));
+    if (!clientId) {
+      json(res, 400, { ok: false, error: 'A valid browser relay client ID is required' });
+      return;
+    }
+    const html = Buffer.from(`<!doctype html><html><head><meta charset="utf-8"><title>Pong private media relay</title></head><body style="background:#090b10;color:#dce7ff;font:14px system-ui;padding:20px"><strong>Pong private media relay</strong><p>This hidden helper keeps authenticated browser playback available to Pong.</p></body></html>`);
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': html.length,
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      'X-Content-Type-Options': 'nosniff'
+    });
+    if (req.method === 'HEAD') res.end();
+    else res.end(html);
+    return;
+  }
 
   try {
+    if (requestUrl.pathname === '/pong-swap' || requestUrl.pathname.startsWith('/pong-swap/')) {
+      await proxyPongSwapRequest(req, res, requestUrl);
+      return;
+    }
     const url = requestUrl;
+    if (req.method === 'GET' && url.pathname === '/media-page/desktop-capture') {
+      const id = String(url.searchParams.get('id') || '');
+      if (!id) {
+        json(res, 200, { ok: true, desktopOwned: true, backgroundNetworkPreparation: true, selectedInlineIdentity: true, boundedMediaRanges: true, version: '30.29', maxTargets: 80 });
+        return;
+      }
+      const job = /^[a-f0-9-]{36}$/i.test(id) ? desktopCaptureJobs.get(id) : null;
+      json(res, job ? 200 : 404, job ? { ok: true, desktopOwned: true, job } : { ok: false, error: 'Capture job not found' });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/media-page/desktop-capture') {
+      const body = await readBody(req);
+      if (Buffer.byteLength(body) > 128 * 1024) {
+        json(res, 413, { ok: false, error: 'Capture request too large' });
+        return;
+      }
+      const payload = JSON.parse(body || '{}');
+      const id = String(payload?.id || '');
+      if (!/^[a-f0-9-]{36}$/i.test(id)) {
+        json(res, 400, { ok: false, error: 'A UUID capture ID is required' });
+        return;
+      }
+      const channel = Number(payload?.channel);
+      if (channel !== 1 && channel !== 2) {
+        json(res, 400, { ok: false, error: 'Desktop capture supports Recall channel 1 or 2' });
+        return;
+      }
+      const rawTargets = payload?.targets;
+      if (!Array.isArray(rawTargets) || !rawTargets.length || rawTargets.length > 80) {
+        json(res, 400, { ok: false, error: 'Select 1 to 80 video page URLs' });
+        return;
+      }
+      const sourceUrl = publicMediaPageUrl(payload?.sourceUrl).toString();
+      const targets = rawTargets.map(target => {
+        const pageUrl = publicMediaPageUrl(target?.url).toString();
+        const logicalVideoId = normalizeRecallVideoId(target?.logicalVideoId);
+        const durationSeconds = Math.max(0, Number(target?.durationSeconds || 0));
+        return {
+          pageUrl, logicalVideoId,
+          mediaIdentityHash: /^[a-f0-9]{64}$/i.test(String(target?.mediaIdentityHash || ''))
+            ? String(target.mediaIdentityHash).toLowerCase() : '',
+          durationSeconds,
+          sourceMediaHints: !logicalVideoId && pageUrl === sourceUrl
+            ? normalizeSourceMediaHints(pageUrl, target?.sourceMediaHints, durationSeconds) : []
+        };
+      });
+      const uniqueTargets = new Set(targets.map(target => recallMediaIdentity(target.pageUrl, target.logicalVideoId)));
+      if (uniqueTargets.size !== targets.length) {
+        json(res, 400, { ok: false, error: 'Selected video pages must be unique' });
+        return;
+      }
+      const fingerprint = desktopCaptureFingerprint({ channel, sourceUrl, targets, mode: payload?.mode, ignoreUnder30: payload?.ignoreUnder30 });
+      const previous = desktopCaptureJobs.get(id);
+      if (previous) {
+        const duplicate = desktopCaptureJobs.start({ id, fingerprint, targets, context: {} });
+        json(res, duplicate.duplicate ? 202 : 409, duplicate.duplicate
+          ? { ok: true, desktopOwned: true, backgroundNetworkPreparation: true, job: duplicate.status }
+          : { ok: false, error: 'Capture ID is already used for different targets' });
+        return;
+      }
+      if (!desktopCaptureJobs.canStart()) {
+        json(res, 503, { ok: false, error: 'Desktop capture queue is full' });
+        return;
+      }
+      const state = simpCityRecallState(channel);
+      state.controller?.abort();
+      state.pending = null;
+      const now = new Date().toISOString();
+      const title = String(payload?.title || 'Desktop capture').slice(0, 240);
+      const bundleId = String(payload?.bundleId || id).slice(0, 160);
+      state.mediaCapture = {
+        id, bundleId, channel, mode: payload?.mode === 'main' ? 'main' : 'all',
+        sourceUrl, title, state: 'running', totalPages: targets.length,
+        completedPages: 0, deliveredVideos: 0, startedAt: now, updatedAt: now, completedAt: ''
+      };
+      state.payload = {
+        id, fingerprint: '', names: [], albums: [],
+        genericBundles: [{ id: bundleId, title, pageUrl: sourceUrl, videos: [] }],
+        aiExtracted: false, threadUrl: sourceUrl, savedAt: now, live: true, channel
+      };
+      const started = desktopCaptureJobs.start({
+        id, fingerprint, targets,
+        context: { id, channel, sourceUrl, ignoreUnder30: payload?.ignoreUnder30 === true }
+      });
+      json(res, 202, { ok: true, desktopOwned: true, backgroundNetworkPreparation: true, job: started.status });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/media-browser-relay/capabilities') {
+      json(res, 200, { ok: true, phoneConnectionFiles: true, phoneTransferBeforeReady: true, version: '30.17', formats: ['mp4','webm','mov','m4v'] });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/media-browser-relay/transfers') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const source = browserMediaRelaySources.get(validBrowserMediaRelayId(payload.sourceId));
+      if (!source || source.clientId !== validBrowserMediaRelayId(payload.clientId) || !source.phoneConnectionOnly) {
+        json(res, 409, { ok: false, error: 'Capture this video again with Use phone connection checked.' });
+        return;
+      }
+      source.requiresTransfer = true;
+      const pinned = { ...source, candidates: source.candidates.slice(0, 1), transferPinned: true };
+      const transfer = phoneTransfers.start(source.id, (range, validator) => queueBrowserMediaRelayJob(pinned, range, 'GET', validator));
+      json(res, 200, { ok: true, transfer });
+      return;
+    }
+    if (req.method === 'GET' && /^\/media-browser-relay\/transfers\/[a-f0-9-]{36}$/i.test(url.pathname)) {
+      const transfer = phoneTransfers.status(url.pathname.split('/').pop());
+      json(res, transfer ? 200 : 404, { ok: !!transfer, transfer });
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/media-browser-relay/jobs') {
+      const clientId = validBrowserMediaRelayId(url.searchParams.get('clientId'));
+      if (!clientId) throw new Error('A valid browser relay client ID is required');
+      pruneBrowserMediaRelayState();
+      const hasLiveSources = [...browserMediaRelaySources.values()]
+        .some(source => source.clientId === clientId && Number(source.expiresAt || 0) > Date.now());
+      if (!hasLiveSources) {
+        json(res, 200, { ok: true, job: null, expired: true });
+        return;
+      }
+      const client = browserMediaRelayClient(clientId);
+      let job = client.jobs.shift() || null;
+      if (!job) {
+        job = await new Promise(resolve => {
+          let done = false;
+          const finish = value => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            client.waiters = client.waiters.filter(waiter => waiter !== finish);
+            resolve(value || null);
+          };
+          const timer = setTimeout(() => finish(null), 20_000);
+          timer.unref?.();
+          client.waiters.push(finish);
+          req.once('aborted', () => finish(null));
+        });
+      }
+      client.lastSeen = Date.now();
+      json(res, 200, { ok: true, job });
+      return;
+    }
+    if (req.method === 'POST' && /^\/media-browser-relay\/jobs\/[a-z0-9-]+\/result$/i.test(url.pathname)) {
+      const jobId = validBrowserMediaRelayId(url.pathname.split('/')[3]);
+      const pending = browserMediaRelayJobs.get(jobId);
+      const body = await readBodyBuffer(req, 2 * 1024 * 1024 + 64 * 1024);
+      if (!pending) {
+        json(res, 410, { ok: false, error: 'This browser relay job has expired' });
+        return;
+      }
+      browserMediaRelayJobs.delete(jobId);
+      clearTimeout(pending.timer);
+      const status = Math.max(200, Math.min(599, Number(req.headers['x-pong-relay-status'] || 502)));
+      pending.resolve({
+        status,
+        body,
+        contentType: String(req.headers['x-pong-relay-content-type'] || 'application/octet-stream').slice(0, 200),
+        contentRange: String(req.headers['x-pong-relay-content-range'] || '').slice(0, 200),
+        acceptRanges: String(req.headers['x-pong-relay-accept-ranges'] || 'bytes').slice(0, 40),
+        sourceUrl: String(req.headers['x-pong-relay-source-url'] || '').slice(0, 3000),
+        etag: String(req.headers['x-pong-relay-etag'] || '').slice(0, 300),
+        lastModified: String(req.headers['x-pong-relay-last-modified'] || '').slice(0, 100),
+        error: String(req.headers['x-pong-relay-error'] || '').slice(0, 500)
+      });
+      json(res, 200, { ok: true, bytes: body.length });
+      return;
+    }
+    if ((req.method === 'GET' || req.method === 'HEAD') && /^\/media-browser-relay\/stream\/[a-z0-9-]+$/i.test(url.pathname)) {
+      const sourceId = validBrowserMediaRelayId(url.pathname.split('/')[3]);
+      // A completed transfer is independent of the browser and of volatile
+      // source registrations, including after a helper restart.
+      if (await phoneTransfers.serve(sourceId, req, res)) return;
+      pruneBrowserMediaRelayState();
+      const source = browserMediaRelaySources.get(sourceId);
+      if (!source) {
+        json(res, 410, { ok: false, error: 'This browser-assisted video has expired. Capture it again in Firefox.' });
+        return;
+      }
+      source.expiresAt = Date.now() + BROWSER_MEDIA_RELAY_TTL_MS;
+      if (source.requiresTransfer) {
+        json(res, 425, { ok: false, error: 'Keep Firefox foregrounded until Send says Ready to switch to Pong.', transfer: phoneTransfers.status(sourceId) });
+        return;
+      }
+      const range = parseBrowserMediaRelayRange(req.headers.range);
+      let result;
+      let directRelayError = '';
+      if (!source.phoneConnectionOnly && hqpornerRelayPage(source.watchPageUrl || source.pageUrl)) {
+        try {
+          // HQPorner's public nested player can be refreshed locally much
+          // faster than a byte buffer can make a browser-worker round trip.
+          result = await queueFreshHqpornerRelayRange(source, range);
+        } catch (error) {
+          directRelayError = error?.message || String(error);
+          // Retain the authenticated source browser as a compatibility path if
+          // the public player changes shape or starts requiring its cookies.
+          result = await queueBrowserMediaRelayJob(source, range, req.method);
+        }
+      } else {
+        result = await queueBrowserMediaRelayJob(source, range, req.method);
+      }
+      if (![200, 206].includes(result.status) || !result.body?.length) {
+        const browserError = result.error || `The source browser returned HTTP ${result.status}`;
+        throw new Error(directRelayError
+          ? `Local HQ refresh: ${directRelayError}; browser relay: ${browserError}`
+          : browserError);
+      }
+      const headers = {
+        'Content-Type': result.contentType || 'video/mp4',
+        'Content-Length': result.body.length,
+        'Accept-Ranges': result.acceptRanges || 'bytes',
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'X-Pong-Browser-Relay': '1',
+        'X-Content-Type-Options': 'nosniff'
+      };
+      if (result.contentRange) headers['Content-Range'] = result.contentRange;
+      const responseStatus = result.status === 206 || result.contentRange ? 206 : 200;
+      res.writeHead(responseStatus, headers);
+      if (req.method === 'HEAD') res.end();
+      else res.end(result.body);
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/saved-links/state') {
       const data = await readPcSavedLinks();
       json(res, 200, {
@@ -13199,7 +18870,8 @@ const server = http.createServer(async (req, res) => {
         data,
         counts: {
           videos: Object.keys(data.savedVideos).length,
-          artists: Object.keys(data.savedArtists).length
+          artists: Object.keys(data.savedArtists).length,
+          collections: Object.keys(data.savedCollections).length
         }
       });
       return;
@@ -13212,8 +18884,45 @@ const server = http.createServer(async (req, res) => {
         data,
         counts: {
           videos: Object.keys(data.savedVideos).length,
-          artists: Object.keys(data.savedArtists).length
+          artists: Object.keys(data.savedArtists).length,
+          collections: Object.keys(data.savedCollections).length
         }
+      });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/media-page/resolve') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const requestedUrls = [...new Set((Array.isArray(payload?.urls) ? payload.urls : [payload?.url])
+        .map(value => String(value || '').trim())
+        .filter(Boolean))].slice(0, 12);
+      const pageGroups = new Array(requestedUrls.length);
+      let nextPageIndex = 0;
+      await Promise.all(Array.from({ length: Math.min(3, requestedUrls.length) }, async () => {
+        while (nextPageIndex < requestedUrls.length) {
+          const index = nextPageIndex++;
+          const requestedUrl = requestedUrls[index];
+          try {
+            const media = await resolveGenericMediaPage(requestedUrl);
+            const expanded = Array.isArray(media.entries) && media.entries.length
+              ? media.entries.map(entry => ({
+                  requestedUrl: entry.requestedUrl || entry.pageUrl || requestedUrl,
+                  collectionUrl: requestedUrl,
+                  collectionTitle: media.title || '',
+                  ok: Array.isArray(entry.videoUrls) && entry.videoUrls.length > 0,
+                  ...entry
+                }))
+              : [{ requestedUrl, collectionUrl: requestedUrl, ok: media.videoUrls.length > 0, ...media }];
+            pageGroups[index] = expanded;
+          } catch (error) {
+            pageGroups[index] = [{ requestedUrl, collectionUrl: requestedUrl, ok: false, pageUrl: requestedUrl, title: '', videoUrls: [], error: error.message || String(error) }];
+          }
+        }
+      }));
+      const pages = pageGroups.flatMap(group => Array.isArray(group) ? group : []);
+      json(res, pages.some(page => page.ok) ? 200 : 422, {
+        ok: pages.some(page => page.ok),
+        pages,
+        videoUrls: [...new Set(pages.flatMap(page => page.videoUrls || []))]
       });
       return;
     }
@@ -13320,7 +19029,8 @@ const server = http.createServer(async (req, res) => {
         payload?.url,
         payload?.channel,
         payload?.resumeFromSaved !== false,
-        payload?.artistQuery
+        payload?.artistQuery,
+        payload?.multi === true
       )) });
       return;
     }
@@ -13378,7 +19088,7 @@ const server = http.createServer(async (req, res) => {
       const run = simpCityBackgroundRuns.get(channel);
       json(res, 200, { ok: true, channel, run: run ? {
         id: run.id, state: run.state, targetUrl: run.targetUrl, status: run.status || '',
-        artistQuery: run.artistQuery || '',
+        artistQuery: run.artistQuery || '', multi: run.multi === true,
         error: run.error || '', profileResume: run.profileResume === true,
         passedProfiles: Number(run.passedProfiles || 0),
         startedAt: run.startedAt, updatedAt: run.updatedAt
@@ -13436,6 +19146,7 @@ const server = http.createServer(async (req, res) => {
           username: candidate,
           profileUrl: `https://www.tiktok.com/@${candidate}`,
           videos: fallbackVideos.slice(0, 20),
+          videoEntries: sortTikTokVideoEntries(fallbackVideos).slice(0, 20),
           searchFallback: true
         });
         profileKeys.add(identity);
@@ -13471,7 +19182,12 @@ const server = http.createServer(async (req, res) => {
         });
         profiles = fallbackResults.filter(Boolean);
       }
-      const videos = [...new Set(profiles.flatMap(profile => profile.videos || []))].slice(0, 60);
+      const videoEntries = sortTikTokVideoEntries(profiles.flatMap(profile => (
+        Array.isArray(profile.videoEntries) && profile.videoEntries.length
+          ? profile.videoEntries
+          : profile.videos || []
+      ))).slice(0, 60);
+      const videos = videoEntries.map(entry => entry.url);
       const matchedUsernames = profiles.map(profile => profile.username);
       json(res, 200, {
         ok: true,
@@ -13480,8 +19196,10 @@ const server = http.createServer(async (req, res) => {
         matchedUsernames,
         profileUrl: profiles[0]?.profileUrl || `https://www.tiktok.com/@${username}`,
         profiles,
+        videoEntries,
         videos,
         count: videos.length,
+        sort: 'popular',
         candidatesChecked: candidates.length,
         errors: errors.slice(0, 3)
       });
@@ -13795,6 +19513,407 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { ok: true, saved: true, updatedAt: entry.updatedAt });
       return;
     }
+    if (req.method === 'POST' && url.pathname === '/media-page/detection-feedback') {
+      const body = await readBody(req);
+      if (Buffer.byteLength(body) > 128 * 1024) {
+        json(res, 413, { ok: false, error: 'Detection report too large' });
+        return;
+      }
+      const result = await saveDetectionFeedback(path.join(LOCAL_AI_DIR, 'detection-feedback'), JSON.parse(body || '{}'));
+      json(res, 200, result);
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/media-page/recall') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const channel = simpCityRecallChannel(payload?.channel);
+      const state = simpCityRecallState(channel);
+      const sourceUrl = publicMediaPageUrl(payload?.sourceUrl).toString();
+      // Complete must still finalize an in-flight capture if connectivity drops.
+      if (payload?.phoneConnectionOnly !== true && payload?.capturePhase !== 'complete') await requireMediaVpn(sourceUrl, payload?.capturePhase === 'start');
+      const mode = payload?.mode === 'main' ? 'main' : 'all';
+      const ignoreUnder30 = payload?.ignoreUnder30 === true;
+      const capturePhase = ['start', 'append', 'complete'].includes(String(payload?.capturePhase || ''))
+        ? String(payload.capturePhase)
+        : '';
+      const captureId = /^[a-z0-9-]{8,100}$/i.test(String(payload?.captureId || payload?.id || ''))
+        ? String(payload.captureId || payload.id)
+        : '';
+      const captureBundleId = String(payload?.bundleId || captureId || crypto.randomUUID()).slice(0, 160);
+      const captureTitle = String(payload?.title || 'Browser capture').slice(0, 240);
+      if (capturePhase === 'start') {
+        if (!captureId) throw new Error('A valid browser capture ID is required');
+        state.controller?.abort();
+        state.pending = null;
+        state.mediaCapture = {
+          id: captureId,
+          bundleId: captureBundleId,
+          channel,
+          mode,
+          sourceUrl,
+          title: captureTitle,
+          state: 'running',
+          totalPages: Math.max(1, Math.min(500, Number(payload?.totalPages || 1))),
+          completedPages: 0,
+          deliveredVideos: 0,
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          completedAt: ''
+        };
+        state.payload = {
+          id: captureId,
+          fingerprint: '',
+          names: [],
+          albums: [],
+          genericBundles: [{
+            id: captureBundleId,
+            title: captureTitle,
+            pageUrl: sourceUrl,
+            videos: []
+          }],
+          aiExtracted: false,
+          threadUrl: sourceUrl,
+          savedAt: new Date().toISOString(),
+          live: true,
+          channel
+        };
+        json(res, 200, {
+          ok: true,
+          channel,
+          mode,
+          phase: capturePhase,
+          videos: 0,
+          capabilities: { independentVideoIdentity: true, phoneConnectionFiles: true, phoneTransferBeforeReady: true },
+          capture: state.mediaCapture,
+          recall: state.payload
+        });
+        return;
+      }
+      if (capturePhase) {
+        if (!captureId || state.mediaCapture?.id !== captureId || state.payload?.id !== captureId) {
+          json(res, 409, { ok: false, error: 'This browser capture is no longer the active Recall capture' });
+          return;
+        }
+        if (capturePhase === 'complete') {
+          const bundle = state.payload.genericBundles?.[0];
+          const totalVideos = Array.isArray(bundle?.videos) ? bundle.videos.length : 0;
+          state.mediaCapture = {
+            ...state.mediaCapture,
+            state: totalVideos ? 'complete' : 'empty',
+            completedPages: Math.max(
+              Number(state.mediaCapture.completedPages || 0),
+              Math.min(500, Number(payload?.completedPages || state.mediaCapture.totalPages || 0))
+            ),
+            deliveredVideos: totalVideos,
+            updatedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString()
+          };
+          state.payload.live = false;
+          state.payload.savedAt = new Date().toISOString();
+          state.payload.fingerprint = crypto.createHash('sha256').update(
+            `${sourceUrl}\n${(bundle?.videos || []).map(video => video.videoUrl).join('\n')}`
+          ).digest('hex');
+          json(res, 200, {
+            ok: true,
+            channel,
+            mode,
+            phase: capturePhase,
+            videos: totalVideos,
+            capture: state.mediaCapture,
+            recall: state.payload
+          });
+          return;
+        }
+      }
+      const browserRelayClientId = validBrowserMediaRelayId(payload?.browserRelayClientId);
+      const phoneConnectionOnly = phoneConnectionCaptureRequested(payload);
+      if (phoneConnectionOnly && !browserRelayClientId) throw new Error('Phone connection requires its source browser relay');
+      const reportedDurationSeconds = Math.max(0, Number(payload?.reportedDurationSeconds || 0));
+      const rawEntries = Array.isArray(payload?.entries) ? payload.entries.slice(0, 500) : [];
+      const grouped = new Map();
+      const identityMetadata = new Map();
+      const durationByMediaUrl = new Map();
+      const contextByMediaUrl = new Map();
+      const titleByPageUrl = new Map();
+      for (const rawEntry of rawEntries) {
+        const pageUrl = publicMediaPageUrl(rawEntry?.postUrl || rawEntry?.pageUrl || sourceUrl).toString();
+        const logicalVideoId = normalizeRecallVideoId(rawEntry?.logicalVideoId);
+        const groupKey = recallMediaIdentity(pageUrl, logicalVideoId);
+        identityMetadata.set(groupKey, { pageUrl, logicalVideoId, title: String(rawEntry?.title || '').slice(0, 500) });
+        if (rawEntry?.title) titleByPageUrl.set(pageUrl, String(rawEntry.title).slice(0, 500));
+        let contextUrl = pageUrl;
+        try {
+          contextUrl = publicMediaPageUrl(rawEntry?.contextUrl || pageUrl).toString();
+        } catch (_) {}
+        const candidates = [...new Set([
+          rawEntry?.videoUrl,
+          rawEntry?.rawVideoUrl,
+          ...(Array.isArray(rawEntry?.videoUrls) ? rawEntry.videoUrls : [])
+        ].map(value => String(value || '').trim()).filter(Boolean))];
+        if (!grouped.has(groupKey)) grouped.set(groupKey, []);
+        for (const candidate of candidates) {
+          try {
+            // Keep logical page identity separate from the immediate player
+            // context. Embedded CDNs often validate the latter as Referer.
+            const mediaUrl = authorizeGenericMediaUrl(candidate, contextUrl).toString();
+            if (!grouped.get(groupKey).includes(mediaUrl)) grouped.get(groupKey).push(mediaUrl);
+            contextByMediaUrl.set(mediaUrl, contextUrl);
+            const duration = Math.max(0, Number(rawEntry?.durationSeconds || rawEntry?.duration || 0));
+            if (duration > 0) durationByMediaUrl.set(mediaUrl, duration);
+          } catch (_) {}
+        }
+      }
+      const requestedPages = [...new Set((Array.isArray(payload?.pageUrls) ? payload.pageUrls : [])
+        .map(value => {
+          try { return publicMediaPageUrl(value).toString(); } catch (_) { return ''; }
+        }).filter(Boolean))].slice(0, mode === 'main' ? 1 : 80);
+      if (!requestedPages.length && !grouped.size) requestedPages.push(sourceUrl);
+      for (const pageUrl of requestedPages) {
+        if (mode === 'main' && grouped.size) break;
+        if (grouped.get(pageUrl)?.length) continue;
+        // Browser-assisted captures must use candidates minted in that exact
+        // browser network/session. Resolving missing pages again on the PC
+        // server is both slow (large model pages previously did this serially)
+        // and can create signed URLs bound to the wrong network identity.
+        if (browserRelayClientId || capturePhase === 'append') continue;
+        try {
+          const resolved = await resolveGenericMediaPage(pageUrl, { allowListing: mode !== 'main' });
+          if (resolved.title) titleByPageUrl.set(pageUrl, resolved.title);
+          if (Array.isArray(resolved.entries) && resolved.entries.length) {
+            for (const entry of resolved.entries) {
+              const entryUrl = entry.pageUrl || entry.requestedUrl || pageUrl;
+              if (entry.title) titleByPageUrl.set(entryUrl, entry.title);
+              if (!grouped.has(entryUrl)) grouped.set(entryUrl, []);
+              for (const mediaUrl of entry.videoUrls || []) {
+                if (!grouped.get(entryUrl).includes(mediaUrl)) grouped.get(entryUrl).push(mediaUrl);
+                if (Number(entry.durationSeconds || 0) > 0) {
+                  durationByMediaUrl.set(mediaUrl, Number(entry.durationSeconds));
+                }
+              }
+            }
+          } else if (resolved.videoUrls?.length) {
+            grouped.set(pageUrl, [...resolved.videoUrls]);
+            const resolvedDuration = Number(resolved.durationSeconds || 0) > 0
+              ? Number(resolved.durationSeconds)
+              : pageUrl === sourceUrl
+                ? reportedDurationSeconds
+                : 0;
+            if (resolvedDuration > 0) {
+              resolved.videoUrls.forEach(mediaUrl => durationByMediaUrl.set(mediaUrl, resolvedDuration));
+            }
+          }
+        } catch (_) {}
+      }
+      const videos = [];
+      const seen = new Set();
+      let browserRelaySourcesCreated = 0;
+      for (const [groupKey, mediaUrls] of grouped) {
+        const identity = identityMetadata.get(groupKey);
+        const pageUrl = identity?.pageUrl || groupKey;
+        const logicalVideoId = identity?.logicalVideoId || '';
+        const rankedMediaUrls = [...mediaUrls]
+          .filter(mediaUrl => {
+            try {
+              return !/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(mediaUrl).pathname);
+            } catch (_) {
+              return false;
+            }
+          })
+          .map((mediaUrl, index) => ({
+            mediaUrl,
+            index,
+            score: (/master\.m3u8(?:[?#]|$)/i.test(mediaUrl) ? 10_000_000 : 0) +
+              (/\.m3u8(?:[?#]|$)/i.test(mediaUrl) ? 1_000_000 : 0) +
+              Number(String(mediaUrl).match(/(?:^|[/_-])(\d{3,4})P(?:[_./-]|$)/i)?.[1] || 0)
+          }))
+          .sort((left, right) => right.score - left.score || left.index - right.index)
+          .map(item => item.mediaUrl);
+        const relayDurationSeconds = rankedMediaUrls.reduce((best, mediaUrl) => Math.max(
+          best,
+          Number(durationByMediaUrl.get(mediaUrl) || 0)
+        ), pageUrl === sourceUrl ? reportedDurationSeconds : 0);
+        // The byte-range relay is for complete media files. Relaying an HLS
+        // manifest through an opaque stream URL would leave its segment URLs
+        // relative to the Pong server, so HLS stays on the existing rewriting
+        // proxy path instead.
+        const relayCandidates = phoneConnectionOnly
+          ? phoneConnectionFileCandidates(rankedMediaUrls)
+          : rankedMediaUrls.filter(mediaUrl => !/\.m3u8(?:[?#]|$)/i.test(mediaUrl));
+        if (phoneConnectionOnly && !relayCandidates.length) continue;
+        // Complete files use the authenticated browser relay whenever the
+        // capturing userscript offers one. A header-only server probe cannot
+        // prove that a signed URL is usable from the PC's network identity.
+        // HLS stays on the manifest-rewriting proxy below.
+        const requiresBrowserRelay = !!(browserRelayClientId && relayCandidates.length);
+        if (requiresBrowserRelay && relayCandidates.length) {
+          if (ignoreUnder30 && (relayDurationSeconds <= 0 || relayDurationSeconds < 30)) continue;
+          const sourceId = crypto.randomUUID();
+          browserMediaRelaySources.set(sourceId, {
+            id: sourceId,
+            clientId: browserRelayClientId,
+            phoneConnectionOnly,
+            requiresTransfer: phoneConnectionOnly && payload?.phoneTransferBeforeReady === true,
+            // Keep the logical watch page separate from the nested player
+            // context. HQPorner refreshes from the former; the browser worker
+            // still uses the latter as the captured media Referer.
+            watchPageUrl: pageUrl,
+            pageUrl: contextByMediaUrl.get(relayCandidates[0]) || pageUrl,
+            candidates: relayCandidates.slice(0, 12),
+            durationSeconds: relayDurationSeconds,
+            expiresAt: Date.now() + BROWSER_MEDIA_RELAY_TTL_MS
+          });
+          const capturedVideo = {
+            // Preserve the captured media URL as the primary source. Making
+            // the temporary relay URL primary caused valid captures to show
+            // duration while remaining unplayable whenever the source tab was
+            // suspended or an unauthenticated keeper consumed the range job.
+            videoUrl: relayCandidates[0],
+            browserRelayUrl: `/media-browser-relay/stream/${sourceId}`,
+            videoUrls: rankedMediaUrls.slice(0, 12),
+            pageUrl,
+            logicalVideoId,
+            title: identity?.title || titleByPageUrl.get(pageUrl) || '',
+            durationSeconds: relayDurationSeconds
+          };
+          videos.push(phoneConnectionOnly
+            ? phoneConnectionVideoRecord(capturedVideo, `/media-browser-relay/stream/${sourceId}`)
+            : capturedVideo);
+          browserRelaySourcesCreated++;
+          if (mode === 'main') break;
+          continue;
+        }
+        for (const mediaUrl of rankedMediaUrls) {
+          if (!mediaUrl || seen.has(mediaUrl)) continue;
+          const inspection = await inspectRecallMediaSource(mediaUrl, contextByMediaUrl.get(mediaUrl) || pageUrl);
+          if (!inspection.playable) {
+            genericMediaResolutionCache.delete(`main:${pageUrl}`);
+            genericMediaResolutionCache.delete(`list:${pageUrl}`);
+            continue;
+          }
+          const durationSeconds = Math.max(0, Number(durationByMediaUrl.get(mediaUrl) || inspection.durationSeconds || 0));
+          // The filter is strict: an unknown duration is not allowed through
+          // as a possible short preview. Browser-reported or resolved media
+          // duration must prove that the logical video is at least 30 seconds.
+          if (ignoreUnder30 && (durationSeconds <= 0 || durationSeconds < 30)) continue;
+          seen.add(mediaUrl);
+          videos.push({
+            videoUrl: mediaUrl,
+            videoUrls: rankedMediaUrls.slice(0, 12),
+            pageUrl,
+            logicalVideoId,
+            title: identity?.title || titleByPageUrl.get(pageUrl) || '',
+            durationSeconds
+          });
+          // A page can expose HLS, MP4, WebM, several resolutions and hover
+          // previews for the same logical movie. Recall represents the page as
+          // one Paperclip; alternate renditions are never extra videos.
+          break;
+        }
+        if (mode === 'main' && videos.length) break;
+      }
+      if (!videos.length && capturePhase === 'append') {
+        state.mediaCapture.completedPages = Math.max(
+          Number(state.mediaCapture.completedPages || 0),
+          Math.min(500, Number(payload?.completedPages || 0))
+        );
+        state.mediaCapture.updatedAt = new Date().toISOString();
+        const currentVideos = state.payload.genericBundles?.[0]?.videos || [];
+        json(res, 200, {
+          ok: true,
+          channel,
+          mode,
+          phase: capturePhase,
+          accepted: 0,
+          videos: currentVideos.length,
+          browserRelay: null,
+          capture: state.mediaCapture,
+          recall: state.payload
+        });
+        return;
+      }
+      if (!videos.length) throw new Error(ignoreUnder30
+        ? 'No video with a verified duration of at least 30 seconds was found'
+        : 'The browser capture found no transferable video');
+      state.controller?.abort();
+      state.pending = null;
+      const nextPayload = {
+        id: /^[a-z0-9-]{8,100}$/i.test(String(payload?.id || '')) ? String(payload.id) : crypto.randomUUID(),
+        fingerprint: crypto.createHash('sha256').update(`${sourceUrl}\n${videos.map(video => video.videoUrl).join('\n')}`).digest('hex'),
+        names: [],
+        albums: [],
+        genericBundles: [{
+          id: String(payload?.bundleId || crypto.randomUUID()),
+          title: String(payload?.title || 'Browser capture').slice(0, 240),
+          pageUrl: sourceUrl,
+          videos
+        }],
+        aiExtracted: false,
+        threadUrl: sourceUrl,
+        savedAt: new Date().toISOString(),
+        live: false,
+        channel
+      };
+      if (capturePhase === 'append') {
+        const existingBundle = state.payload.genericBundles?.[0] || {
+          id: captureBundleId,
+          title: captureTitle,
+          pageUrl: sourceUrl,
+          videos: []
+        };
+        const mergedVideos = mergeRecallCapturedVideos(existingBundle.videos, videos);
+        state.payload = {
+          ...state.payload,
+          fingerprint: crypto.createHash('sha256').update(
+            `${sourceUrl}\n${mergedVideos.map(video => video.videoUrl).join('\n')}`
+          ).digest('hex'),
+          genericBundles: [{
+            ...existingBundle,
+            id: captureBundleId,
+            title: captureTitle,
+            pageUrl: sourceUrl,
+            videos: mergedVideos
+          }],
+          savedAt: new Date().toISOString(),
+          live: true
+        };
+        state.mediaCapture = {
+          ...state.mediaCapture,
+          completedPages: Math.max(
+            Number(state.mediaCapture.completedPages || 0),
+            Math.min(500, Number(payload?.completedPages || 0))
+          ),
+          deliveredVideos: mergedVideos.length,
+          updatedAt: new Date().toISOString()
+        };
+      } else {
+        state.mediaCapture = null;
+        state.payload = nextPayload;
+      }
+      const responseVideos = state.payload.genericBundles?.[0]?.videos?.length || 0;
+      json(res, 200, {
+        ok: true,
+        channel,
+        mode,
+        ignoreUnder30,
+        phase: capturePhase || 'replace',
+        accepted: videos.length,
+        videos: responseVideos,
+        browserRelay: browserRelaySourcesCreated ? {
+          enabled: true,
+          clientId: browserRelayClientId,
+          phoneConnectionOnly,
+          sources: browserRelaySourcesCreated,
+          sourceIds: videos.map(video => String(video.browserRelayUrl || '').split('/').pop()).filter(Boolean),
+          // Only the authenticated capturing tab may service fallback jobs.
+          // A PC keeper has a different cookie/network identity and can steal
+          // a job that it cannot fulfill.
+          keeperStarted: false,
+          expiresInSeconds: Math.floor(BROWSER_MEDIA_RELAY_TTL_MS / 1000)
+        } : null,
+        capture: state.mediaCapture,
+        recall: state.payload
+      });
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/simpcity/recall') {
       const channel = simpCityRecallChannel(url.searchParams.get('channel'));
       const state = simpCityRecallState(channel);
@@ -13860,7 +19979,9 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, {
         ok: true,
         recall,
+        mediaTransport: { boundedRanges: true },
         pending: state.pending,
+        mediaCapture: state.mediaCapture,
         channel,
         queueCount: recall ? 1 : 0,
         background: backgroundRun ? {
@@ -13893,6 +20014,7 @@ const server = http.createServer(async (req, res) => {
       state.skippedCreatorKeys = new Set();
       state.collectionStoppedCreatorKeys = new Set();
       state.collectionControllers = new Map();
+      state.creatorPairAggregates = new Map();
       state.pending = {
         id: suppliedId,
         channel,
@@ -13948,17 +20070,57 @@ const server = http.createServer(async (req, res) => {
       // requested creator. Extracting every collaborator mentioned inside the
       // posts launched redundant host/Balbums/TikTok jobs and could hold the
       // next pasted name for more than a minute.
+      const artistLookupAliases = [...new Set(deterministic.creators.flatMap(creator => [
+        creator?.primaryName,
+        ...(creator?.aliases || []),
+        ...(creator?.usernames || [])
+      ]).map(value => String(value || '').trim()).filter(Boolean))];
+      const artistLookupTikTokEvidence = deterministic.creators.find(creator =>
+        /(?:^|\.)tiktok\.com\/@/i.test(String(creator?.evidence || ''))
+      )?.evidence || '';
+      const deterministicThreadCreator = deterministic.creators.find(creator => creator?.threadUrl) || null;
+      const orderedRootThreadUrl = payload?.orderedPair === true && !deterministicThreadCreator
+        ? normalizeSimpCityThreadUrl(state.pending.threadUrl)
+        : '';
+      const orderedRootAliases = orderedRootThreadUrl
+        ? simpCityCreatorAliases(orderedRootThreadUrl)
+        : [];
+      const orderedRootName = String(orderedRootAliases[0] || '').trim();
+      // On a direct thread, the synthetic self-link is intentionally excluded
+      // by deterministic extraction because it equals currentThreadUrl. That
+      // previously left an arbitrary social link as the primary creator and
+      // sent every other post to the sleeping AI fallback. Bind the whole
+      // ordered thread to its own slug instead.
       const pairedCreators = artistLookupName
         ? [{
             primaryName: artistLookupName,
-            aliases: [],
-            usernames: [artistLookupName],
+            // Preserve exact social handles discovered in every streamed page.
+            // The bundle remains the requested artist, while later pages can
+            // contribute a better TikTok handle without launching collaborator
+            // media jobs or replacing already-published videos.
+            aliases: artistLookupAliases,
+            usernames: [...new Set([artistLookupName, ...artistLookupAliases])],
+            evidence: artistLookupTikTokEvidence,
             postId: String(deterministic.posts[0]?.postId || `artist-lookup-${suppliedId}`),
             confidence: 1,
             source: 'artist-lookup-thread'
           }]
-        : deterministic.creators;
-      const newCreators = addSimpCityRecallCreators(state, suppliedId, pairedCreators);
+        : orderedRootName
+          ? [{
+              primaryName: orderedRootName,
+              aliases: orderedRootAliases,
+              usernames: orderedRootAliases,
+              evidence: orderedRootThreadUrl,
+              threadUrl: orderedRootThreadUrl,
+              postId: String(deterministic.posts[0]?.postId || `ordered-thread-${suppliedId}`),
+              confidence: 1,
+              source: 'ordered-root-thread'
+            }]
+          : deterministic.creators;
+      const profileCreators = payload?.orderedPair === true
+        ? simpCityPrimaryPairCreator(pairedCreators)
+        : simpCityProfilePairCreators(pairedCreators);
+      const newCreators = addSimpCityRecallCreators(state, suppliedId, profileCreators);
       state.pending.postsProcessed += deterministic.posts.length;
       state.pending.batchesReceived++;
       state.pending.deterministicCreators += newCreators.length;
@@ -13968,9 +20130,7 @@ const server = http.createServer(async (req, res) => {
         channel,
         suppliedId,
         deterministic.posts,
-        payload?.orderedPair === true
-          ? simpCityPrimaryPairCreator(pairedCreators)
-          : simpCityProfilePairCreators(pairedCreators),
+        profileCreators,
         {
           includeAllPosts: payload?.orderedPair === true,
           // Ordered creator-thread scans are now streamed page-by-page. Allow
@@ -13982,7 +20142,7 @@ const server = http.createServer(async (req, res) => {
       // can publish at 20 videos while later host/Balbums/TikTok work continues.
 
       if (
-        !artistLookupName &&
+        payload?.orderedPair !== true &&
         deterministic.unresolvedPosts.length &&
         state.pending.aiBatchesQueued < SIMPCITY_RECALL_AI_BATCH_LIMIT
       ) {
@@ -13998,7 +20158,10 @@ const server = http.createServer(async (req, res) => {
               state.pending?.threadUrl || ''
             );
             if (!state.pending?.id || state.pending.id !== suppliedId || signal?.aborted) return;
-            const aiCreators = addSimpCityRecallCreators(state, suppliedId, extracted.creators);
+            const aiProfileCreators = payload?.orderedPair === true
+              ? simpCityPrimaryPairCreator(extracted.creators)
+              : simpCityProfilePairCreators(extracted.creators);
+            const aiCreators = addSimpCityRecallCreators(state, suppliedId, aiProfileCreators);
             state.pending.aiBatchesCompleted++;
             state.pending.updatedAt = new Date().toISOString();
             scheduleSimpCityCreatorPairs(
@@ -14006,9 +20169,7 @@ const server = http.createServer(async (req, res) => {
               channel,
               suppliedId,
               deterministic.unresolvedPosts,
-              payload?.orderedPair === true
-                ? simpCityPrimaryPairCreator(extracted.creators)
-                : simpCityProfilePairCreators(extracted.creators),
+              aiProfileCreators,
               { includeAllPosts: payload?.orderedPair === true }
             );
           } catch (error) {
@@ -14237,15 +20398,30 @@ const server = http.createServer(async (req, res) => {
         ? JSON.parse(await readBody(req) || '{}')
         : {};
       if (req.method === 'GET' && url.pathname === '/local2-fast/health') {
-        json(res, 200, local2FlashEngine.snapshot());
+        json(res, 200, {
+          ...local2FlashEngine.snapshot(),
+          sourceHints: local2SourceHintSnapshot(),
+          playbackMirrors: local2PlaybackMirrorSnapshot()
+        });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/local2-fast/start') {
-        await ensureAiWorkersReady(LOCAL2_QWEN_MODEL);
+        // Claim foreground ownership before waking the workers. Otherwise the
+        // 15-minute idle manager can observe no active engine during model
+        // warm-up and shut the same workers down underneath this request.
+        enterLocalDiscoveryForeground();
+        try {
+          await ensureAiWorkersReady(LOCAL2_QWEN_MODEL);
+        } catch (error) {
+          leaveLocalDiscoveryForeground();
+          throw error;
+        }
         await local2Adapter.stop({ clearAudit: true }).catch(() => {});
         await local22TurboEngine.stop().catch(() => {});
-        enterLocalDiscoveryForeground();
+        await testAiEngine.stop().catch(() => {});
         local2FlashClearForegroundPlaybackProtection();
+        resetLocal2SourceHintRunStats();
+        resetLocal2PlaybackMirrorStats();
         const state = await local2FlashEngine.start({
           pages: Array.isArray(body.pages) ? body.pages : [],
           seed: Number(body.seed || 0),
@@ -14275,6 +20451,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'GET' && url.pathname === '/local2-fast/candidates') {
         if (!local2FlashEngine.snapshot().active && !local2FlashEngine.snapshot().done) {
+          resetLocal2PlaybackMirrorStats();
           await local2FlashEngine.start();
         }
         const count = Math.max(1, Math.min(64, Number(url.searchParams.get('count') || 12)));
@@ -14308,35 +20485,58 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && url.pathname === '/local22-turbo/health') {
         json(res, 200, {
           ...local22TurboEngine.snapshot(),
+          pipeline: 'blank-slate-history-v1',
+          minimumVerifiedMedia: LOCAL22_BLANK_MIN_VIDEOS,
+          decisionPolicy: 'one complete-history binary head; no secondary AI or legacy hard-filter projection',
+          desktopPlayback: false,
+          sourceHints: local2SourceHintSnapshot(),
+          playbackMirrors: local2PlaybackMirrorSnapshot(),
           scheduling: {
             foregroundIsolated: localDiscoveryForegroundActive,
             workActive: local22TurboWorkActive,
             workQueued: local22TurboWorkWaiters.length,
+            workLimit: local22TurboWorkLimit(),
             qualificationActive: local22TurboQualificationActive,
             qualificationQueued: local22TurboQualificationWaiters.length,
             qualificationLimit: local22TurboQualificationLimit(),
+            mediaProofActive: local2MediaProofActive,
+            mediaProofQueued: local2MediaProofWaiters.length,
+            mediaProofLimit: LOCAL2_MEDIA_PROOF_CONCURRENCY,
             speculativeAiActive: local22TurboSpeculativeAiActive,
-            warmBuffer: false
+            warmBuffer: false,
+            sourceBackoffRemainingMs: Math.max(0, local22BlankSourceBackoffUntil - Date.now())
           }
         });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/local22-turbo/start') {
-        await ensureAiWorkersReady(LOCAL2_QWEN_MODEL);
+        enterLocalDiscoveryForeground();
+        try {
+          await ensureAiWorkersReady(LOCAL2_QWEN_MODEL);
+        } catch (error) {
+          leaveLocalDiscoveryForeground();
+          throw error;
+        }
         await local2Adapter.stop({ clearAudit: true }).catch(() => {});
         await local2FlashEngine.stop().catch(() => {});
-        enterLocalDiscoveryForeground();
+        await testAiEngine.stop().catch(() => {});
         local2FlashClearForegroundPlaybackProtection();
         const requestedPages = Array.isArray(body.pages) ? body.pages : [];
         const requestedSeed = Number(body.seed || 0);
-        // Every real button press starts a fresh random run. Accepted artists
-        // are never prepared or retained for a later Local2.2 press.
+        // Every real button press starts a fresh blank-slate run. The model may
+        // read historical labels, but candidates and decisions are never
+        // prepared or retained for a later Local2.2 press.
         await local22TurboEngine.stop().catch(() => {});
         local22TurboResetRuntime();
+        resetLocal2SourceHintRunStats();
+        resetLocal2PlaybackMirrorStats();
         const state = await local22TurboEngine.start({
           pages: requestedPages,
           seed: requestedSeed,
-          diagnostics: body.diagnostics === true
+          // Keep the bounded in-memory outcome trace for every real run. This
+          // makes operational source failures distinguishable from genuine AI
+          // rejections without persisting browsing data or changing decisions.
+          diagnostics: true
         });
         json(res, 200, state);
         return;
@@ -14364,6 +20564,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && url.pathname === '/local22-turbo/candidates') {
         if (!local22TurboEngine.snapshot().active && !local22TurboEngine.snapshot().done) {
           enterLocalDiscoveryForeground();
+          resetLocal2PlaybackMirrorStats();
           await local22TurboEngine.start({ diagnostics: true });
         }
         const count = Math.max(1, Math.min(64, Number(url.searchParams.get('count') || 12)));
@@ -14393,6 +20594,72 @@ const server = http.createServer(async (req, res) => {
       json(res, 404, { ok: false, error: 'Local2.2 Turbo route not found' });
       return;
     }
+    if (url.pathname.startsWith('/test-ai/')) {
+      const body = ['POST', 'PUT', 'PATCH'].includes(String(req.method || '').toUpperCase())
+        ? JSON.parse(await readBody(req) || '{}')
+        : {};
+      if (req.method === 'GET' && url.pathname === '/test-ai/health') {
+        json(res, 200, {
+          ...testAiEngine.snapshot(),
+          evaluationOnly: true,
+          deliveryRule: '15 independently confirmed videos; five playable videos delivered first; AI is audit-only'
+        });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/test-ai/start') {
+        await local2Adapter.stop({ clearAudit: true }).catch(() => {});
+        await local2FlashEngine.stop().catch(() => {});
+        await local22TurboEngine.stop().catch(() => {});
+        await testAiEngine.stop().catch(() => {});
+        enterLocalDiscoveryForeground();
+        local2FlashClearForegroundPlaybackProtection();
+        local22TurboResetRuntime();
+        resetLocal2SourceHintRunStats();
+        resetLocal2PlaybackMirrorStats();
+        const state = await testAiEngine.start({
+          pages: Array.isArray(body.pages) ? body.pages : [],
+          seed: Number(body.seed || 0),
+          diagnostics: body.diagnostics === true
+        });
+        json(res, 200, state);
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/test-ai/stop') {
+        await testAiEngine.stop();
+        local2FlashClearForegroundPlaybackProtection();
+        local22TurboResetRuntime();
+        leaveLocalDiscoveryForeground();
+        json(res, 200, testAiEngine.snapshot());
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/test-ai/candidates') {
+        if (!testAiEngine.snapshot().active && !testAiEngine.snapshot().done) {
+          enterLocalDiscoveryForeground();
+          await testAiEngine.start();
+        }
+        const count = Math.max(1, Math.min(64, Number(url.searchParams.get('count') || 12)));
+        const candidates = testAiEngine.lease(count);
+        const state = testAiEngine.snapshot();
+        json(res, 200, {
+          ...state,
+          candidates,
+          remaining: state.accepted,
+          leased: state.leased
+        });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/test-ai/candidates/ack') {
+        const values = [
+          ...(Array.isArray(body.artistIds) ? body.artistIds : []),
+          ...(Array.isArray(body.artistUrls) ? body.artistUrls.map(random40ReservoirIdentity) : [])
+        ].filter(Boolean);
+        const consumed = testAiEngine.acknowledge(values);
+        json(res, 200, { ...testAiEngine.snapshot(), consumed });
+        return;
+      }
+      json(res, 404, { ok: false, error: 'Test AI route not found' });
+      return;
+    }
     if (url.pathname.startsWith('/local2/')) {
       const body = ['POST', 'PUT', 'PATCH'].includes(String(req.method || '').toUpperCase())
         ? JSON.parse(await readBody(req))
@@ -14401,6 +20668,7 @@ const server = http.createServer(async (req, res) => {
         await ensureAiWorkersReady(LOCAL2_QWEN_MODEL);
         await local2FlashEngine.stop().catch(() => {});
         await local22TurboEngine.stop().catch(() => {});
+        await testAiEngine.stop().catch(() => {});
         await local2Adapter.stop({ clearAudit: true }).catch(() => {});
         local2ProducerRecentArtists.clear();
         local2ProducerRecentPages.clear();
@@ -14472,6 +20740,30 @@ const server = http.createServer(async (req, res) => {
       res.once('close', markDisconnected);
       if (!RANDOM40_RESERVOIR_ENABLED) {
         json(res, 200, { ok: true, storage: 'memory-only', enabled: false, candidates: [], remaining: 0, target: 0 });
+        return;
+      }
+      if (!RANDOM40_ACCEPTED_PREAPPROVAL_ENABLED) {
+        random40ReservoirRefillPausedUntil = 0;
+        // Lease only source-qualified candidates. These contain no AI verdict;
+        // the browser must run the current Local1 classifier fresh.
+        const count = Math.max(1, Math.min(16, Number(url.searchParams.get('count') || 12)));
+        const candidates = random40Reservoir
+          .filter(item => item?.verified === true && Array.isArray(item?.verifiedEntries) && item.verifiedEntries.length >= 15)
+          .slice(0, count);
+        for (const item of candidates) random40ReservoirRemoveItem(item);
+        json(res, 200, {
+          ok: true,
+          storage: 'memory-only',
+          enabled: true,
+          eligibilityOnly: true,
+          preapproved: false,
+          ready: candidates.length >= Math.min(3, count),
+          candidates,
+          remaining: random40ReservoirVerifiedCount(),
+          readyMin: Math.min(3, RANDOM40_RESERVOIR_READY_MIN),
+          videoQualified: candidates.length
+        });
+        if (random40ReservoirVerifiedCount() < RANDOM40_RESERVOIR_VERIFIED_TARGET) fillRandom40Reservoir().catch(() => {});
         return;
       }
       // Deliver one production-sized batch at a time. Removing the batch from
@@ -14547,12 +20839,58 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if ((req.method === 'GET' || req.method === 'HEAD') && isGenericHlsProxyPath(url.pathname)) {
+      const target = url.searchParams.get('url') || '';
+      await requireMediaVpn(target);
+      try {
+        try {
+          gatewayTargetUrl(target);
+        } catch (error) {
+          // Directly pasted and previously saved HLS masters have not passed
+          // through this process's resolver yet. Public-URL validation keeps
+          // this narrow self-authorization safe while child/segment hosts are
+          // still admitted only by playlist rewriting and verified redirects.
+          if (!looksLikeGenericHlsResource(target)) throw error;
+          authorizeGenericMediaUrl(target);
+        }
+      } catch (error) {
+        json(res, 400, { error: error.message || 'bad generic HLS request' });
+        return;
+      }
+      await streamGenericHlsResponse(req, res, target);
+      return;
+    }
+
     if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/proxy') {
       const target = url.searchParams.get('url') || '';
+      await requireMediaVpn(target);
       try {
         gatewayTargetUrl(target);
       } catch (error) {
         json(res, 400, { error: error.message || 'bad gateway request' });
+        return;
+      }
+      if (url.searchParams.get('mode') === 'html') {
+        try {
+          const html = await random40ReservoirFetchHtml(target, GATEWAY_TIMEOUT_MS);
+          const body = Buffer.from(html, 'utf8');
+          res.writeHead(200, {
+            ...gatewayCorsHeaders(),
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Length': body.length,
+            'Cache-Control': 'no-store'
+          });
+          if (req.method === 'HEAD') res.end();
+          else res.end(body);
+        } catch (error) {
+          json(res, 503, { error: error.message || 'HTML gateway request failed' });
+        }
+        return;
+      }
+      const prepared = videoFileCacheRecords.get(videoFileCacheCanonical(target).id);
+      if (prepared?.sourceUrl === target && prepared.startupPrepared &&
+          Number(prepared.bytes || 0) > 0 && ['idle', 'queued', 'downloading', 'ready'].includes(prepared.status)) {
+        await serveVideoFileCacheMedia(req, res, prepared.id);
         return;
       }
       await streamGatewayResponse(req, res, target);
@@ -14560,12 +20898,25 @@ const server = http.createServer(async (req, res) => {
     }
 
     if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/video-cache/stream') {
-      const target = url.searchParams.get('url') || '';
+      const requestedTarget = url.searchParams.get('url') || '';
+      await requireMediaVpn(requestedTarget);
+      let target = requestedTarget;
       let record;
       try {
+        try {
+          gatewayTargetUrl(target);
+        } catch (error) {
+          if (!looksLikeGenericMediaResource(target)) throw error;
+          target = authorizeGenericMediaUrl(target).toString();
+        }
+        if (isBunkrFilePageCandidate(target)) {
+          target = await resolveBunkrFileVideoUrl(target);
+          if (!target) throw new Error('Bunkr file page did not expose playable media');
+        }
         record = queueVideoFileCacheUrl(target, 0, {
           playbackProfile: url.searchParams.get('profile') || ''
         });
+        if (record && requestedTarget && requestedTarget !== target) record.aliases.add(requestedTarget);
       } catch (error) {
         json(res, 400, { ok: false, error: error.message || 'bad video cache stream request' });
         return;
@@ -14625,11 +20976,14 @@ const server = http.createServer(async (req, res) => {
       const currentUrls = new Set((Array.isArray(payload?.currentUrls) ? payload.currentUrls : []).map(String));
       const entryUrls = new Set((Array.isArray(payload?.entryUrls) ? payload.entryUrls : []).map(String));
       const records = [];
+      const mediaHints = playbackProfile==='tiktok' && Array.isArray(payload?.mediaHints)
+        ? payload.mediaHints.slice(0,3) : [];
       for (const rawUrl of urls) {
         try {
           const priority = rawUrl === activeUrl ? 0 : entryUrls.has(rawUrl) ? 0.5 : currentUrls.has(rawUrl) ? 1 : 2;
           const record = queueVideoFileCacheUrl(rawUrl, priority, {
             ...(metadataByUrl.get(rawUrl) || {}),
+            tiktokMediaHint: mediaHints.find(hint=>hint?.pageUrl===rawUrl),
             playbackProfile
           });
           if (record) records.push(videoFileCacheRecordJson(record, videoFileCacheEndpointFromRequest(req)));
@@ -14771,6 +21125,43 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'POST' && url.pathname === '/local1/wake') {
+      // A fresh Local1 press has source work it can do while the personal model
+      // starts. Return immediately so listing/profile discovery overlaps worker
+      // startup instead of paying the cold-start cost at the first classifier.
+      markAiWorkerActivity();
+      void ensureAiWorkersReady().catch(error => {
+        aiWorkerLastError = String(error?.message || error).slice(0, 300);
+      });
+      json(res, 202, { ok: true, waking: true, storage: 'memory-only' });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/local1/rank-thumbnails') {
+      const payload = JSON.parse(await readBody(req) || '{}');
+      const thumbnailUrls = (Array.isArray(payload?.thumbnailUrls) ? payload.thumbnailUrls : [])
+        .slice(0, 16)
+        .map(value => String(value || '').trim())
+        .map(value => {
+          try {
+            const parsed = new URL(value);
+            const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+            return GATEWAY_ALLOWED_HOSTS.includes(host) ? parsed.toString() : '';
+          } catch (_) {
+            return '';
+          }
+        });
+      if (!thumbnailUrls.length) {
+        json(res, 400, { ok: false, error: 'thumbnailUrls must contain at least one allowed source URL' });
+        return;
+      }
+      const ranked = await preferenceAiRequest('/local2-clean/rank-thumbnails', {
+        thumbnailUrls
+      }, 30_000, { workload: true });
+      json(res, 200, ranked);
+      return;
+    }
+
     if (req.method === 'GET' && url.pathname === '/health') {
       const preferenceAi = await preferenceAiHealth(true);
       const learnedStore = preferenceAi ? { records: [] } : await loadLearnedStore();
@@ -14838,13 +21229,19 @@ const server = http.createServer(async (req, res) => {
           http1_fallback: { ...gatewayHttp1FallbackStats },
           html_fetch: {
             ...gatewayHtmlFetchStats,
+            sharedSourceGapMs: GATEWAY_SHARED_SOURCE_GAP_MS,
+            sharedSourceNextStartAt: gatewaySharedSourceNextStartAt,
             backoffRemainingMs: gatewayHtmlBackoffRemainingMs()
           },
           native_fallback: { ...gatewayPowerShellFetchStats },
           error: gatewayWarmState.error
         },
+        local2_source_hints: local2SourceHintSnapshot(),
+        local2_playback_mirrors: local2PlaybackMirrorSnapshot(),
         random40_reservoir: {
           enabled: RANDOM40_RESERVOIR_ENABLED,
+          eligibility_only: RANDOM40_RESERVOIR_ENABLED && !RANDOM40_ACCEPTED_PREAPPROVAL_ENABLED,
+          preapproval_enabled: RANDOM40_ACCEPTED_PREAPPROVAL_ENABLED,
           storage: 'memory-only',
           ready: acceptedReady,
           local1_ready: acceptedReady,
@@ -14887,11 +21284,14 @@ const server = http.createServer(async (req, res) => {
           per_artist_concurrency: VIDEO_VERIFY_PER_ARTIST_CONCURRENCY,
           active_per_artist_host: VIDEO_VERIFY_ACTIVE_PER_ARTIST_HOST,
           request_start_gap_ms: VIDEO_VERIFY_START_GAP_MS,
+          shared_source_gap_ms: GATEWAY_SHARED_SOURCE_GAP_MS,
           active: [...videoVerifyHostStates.values()].reduce((sum, state) => sum + state.active, 0),
           queued: [...videoVerifyHostStates.values()].reduce((sum, state) => sum + state.queue.length, 0),
           cached_posts: videoVerifyCache.size,
           hosts: Object.fromEntries([...videoVerifyHostStates.entries()].map(([host, state]) => [host, {
             active: state.active,
+            foreground_proof_active: Number(state.foregroundProofActive || 0),
+            foreground_proof_queued: state.queue.filter(item => item.priorityControl?.foregroundProof === true).length,
             queued: state.queue.length,
             rate_limits: state.rateLimits,
             completed: state.completed,
@@ -15021,6 +21421,7 @@ const server = http.createServer(async (req, res) => {
       await local2Adapter.stop({ clearAudit: true }).catch(() => {});
       await local2FlashEngine.stop().catch(() => {});
       await local22TurboEngine.stop().catch(() => {});
+      await testAiEngine.stop().catch(() => {});
       local2ForcedProducerPages = [];
       local2ProducerRecentArtists.clear();
       local2ProducerRecentPages.clear();
@@ -15032,7 +21433,10 @@ const server = http.createServer(async (req, res) => {
       }
       random40ReservoirAbortController?.abort();
       random40AcceptedAbortController?.abort();
-      random40Reservoir.splice(0);
+      // A clean refresh retires active work, not already-completed source
+      // eligibility. Keep the RAM-only 15-video queue when preapproval is off;
+      // otherwise every refresh/button benchmark would erase the speedup.
+      if (RANDOM40_ACCEPTED_PREAPPROVAL_ENABLED) random40Reservoir.splice(0);
       random40AcceptedReservoir.splice(0);
       random40EvaluatedReservoir.splice(0);
       random40TrainAiEvidenceCards.clear();
@@ -15193,6 +21597,52 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// Face-swap media readers are deliberately long-lived. Android WebView's
+// HTTP/1.1 pool can otherwise queue create/activate/seek control requests
+// behind those readers for several seconds. A second local port gives the
+// small JSON control plane an independent connection pool; video bytes stay
+// on the normal Pong origin and this listener refuses stream requests.
+function createPongSwapControlServer() {
+  return http.createServer(async (req, res) => {
+  let requestUrl;
+  try {
+    requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  } catch (_) {
+    json(res, 400, { ok: false, error: 'invalid request URL' });
+    return;
+  }
+  const localCaller = isPrivateLanAddress(req.socket.remoteAddress) || isLoopbackAddress(req.socket.remoteAddress);
+  if (!localCaller || !isAllowedBrowserOrigin(req.headers.origin, req.socket.remoteAddress)) {
+    json(res, 403, { ok: false, error: 'browser origin is not allowed' });
+    return;
+  }
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, gatewayCorsHeaders());
+    res.end();
+    return;
+  }
+  if (
+    !(requestUrl.pathname === '/pong-swap' || requestUrl.pathname.startsWith('/pong-swap/')) ||
+    /\/stream\/?$/.test(requestUrl.pathname)
+  ) {
+    json(res, 404, { ok: false, error: 'control endpoint not found' });
+    return;
+  }
+  try {
+    await proxyPongSwapRequest(req, res, requestUrl, { cors: true });
+  } catch (error) {
+    if (res.headersSent) {
+      if (!res.destroyed) res.destroy(error);
+      return;
+    }
+    json(res, 502, { ok: false, error: error.message || String(error) });
+  }
+  });
+}
+
+const pongSwapControlServer = createPongSwapControlServer();
+const pongSwapBackgroundControlServer = createPongSwapControlServer();
+
 // Privacy is fail-closed: do not expose the server unless stale bytes were
 // removed and the new cache directory is verifiably hidden.
 await cleanupStaleSimpCityProfiles();
@@ -15202,6 +21652,9 @@ server.listen(PORT, HOST, () => {
   console.log(`Pong local AI listening on http://${HOST}:${PORT}`);
   console.log(`Model: ${MODEL}`);
   console.log(`Vision model: ${OLLAMA_VISION_MODEL} via ${OLLAMA_URL}`);
+  ensurePongSwapService({ warm: true })
+    .then(health => console.log(`Pong Swap ready on RTX: ${health?.gpu?.name || 'GPU ready'}`))
+    .catch(error => console.error(`Pong Swap warmup failed: ${error.message || error}`));
   warmGatewayConnections()
     .then(() => {
       console.log(`RAM gateway warm: ${gatewayWarmState.successes} connections ready`);
@@ -15272,3 +21725,17 @@ server.listen(PORT, HOST, () => {
     }, 1200);
   }
 });
+
+if (PONG_SWAP_CONTROL_PORT !== PORT) {
+  pongSwapControlServer.listen(PONG_SWAP_CONTROL_PORT, HOST, () => {
+    console.log(`Pong Swap control plane listening on http://${HOST}:${PONG_SWAP_CONTROL_PORT}`);
+  });
+}
+if (
+  PONG_SWAP_BACKGROUND_CONTROL_PORT !== PORT &&
+  PONG_SWAP_BACKGROUND_CONTROL_PORT !== PONG_SWAP_CONTROL_PORT
+) {
+  pongSwapBackgroundControlServer.listen(PONG_SWAP_BACKGROUND_CONTROL_PORT, HOST, () => {
+    console.log(`Pong Swap background control plane listening on http://${HOST}:${PONG_SWAP_BACKGROUND_CONTROL_PORT}`);
+  });
+}

@@ -1,0 +1,1 @@
+(()=>{const original=window.__pongTikTokStep;window.__pongTikTokStep=d=>{const active=document.activeElement;if(active&&active!==document.body&&active.closest?.('[data-e2e="recommend-list-item-container"]'))active.blur();return original(d)};return {focusTrial:true}})()

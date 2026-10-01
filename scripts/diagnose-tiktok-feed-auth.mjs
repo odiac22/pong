@@ -1,0 +1,23 @@
+// Summarize authentication/feed state without emitting identities or credentials.
+const port=Number(process.argv[2]);
+const pages=await fetch(`http://127.0.0.1:${port}/json/list`).then(r=>r.json());
+const target=pages.find(p=>p.type==='page'&&new URL(p.url).hostname==='www.tiktok.com');
+if(!target)throw Error('No TikTok WebView');
+const ws=new WebSocket(target.webSocketDebuggerUrl),pending=new Map(),requests=new Map();let seq=0;
+await new Promise((resolve,reject)=>{ws.onopen=resolve;ws.onerror=reject;});
+const send=(method,params={})=>new Promise(resolve=>{const id=++seq;pending.set(id,resolve);ws.send(JSON.stringify({id,method,params}));setTimeout(()=>{if(pending.delete(id))resolve({timeout:true});},6000).unref();});
+ws.onmessage=async e=>{const m=JSON.parse(e.data);if(m.id){pending.get(m.id)?.(m.result);pending.delete(m.id);return;}const p=m.params||{};
+ if(m.method==='Network.responseReceived'){let path;try{path=new URL(p.response.url).pathname;}catch{return;}
+ if(/\/api\/recommend\/item_list\/|\/passport\/web\/account\/info\/|\/api\/user\/settings\//.test(path))requests.set(p.requestId,{path,status:p.response.status});}
+ if(m.method==='Network.loadingFinished'&&requests.has(p.requestId)){const meta=requests.get(p.requestId);requests.delete(p.requestId);const result=await send('Network.getResponseBody',{requestId:p.requestId});try{const j=JSON.parse(result.base64Encoded?Buffer.from(result.body,'base64').toString():result.body);console.log(JSON.stringify({event:'apiSummary',...meta,statusCode:j.statusCode??j.status_code??null,message:j.message==='success'?'success':undefined,hasMore:j.hasMore??j.has_more??null,itemCount:Array.isArray(j.itemList)?j.itemList.length:Array.isArray(j.item_list)?j.item_list.length:null,accountPresent:!!(j.data?.user_id||j.data?.uid||j.data?.username)}));}catch{console.log(JSON.stringify({event:'apiSummary',...meta,unreadable:true}));}}
+};
+await send('Network.enable');
+const expression=`(()=>{let scope={};try{scope=JSON.parse(document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__')?.textContent||'{}').__DEFAULT_SCOPE__||{}}catch{}const auth=[];for(const [k,v]of Object.entries(scope)){if(!/app-context|user-detail|login/.test(k)||!v)continue;const walk=(o,path,d)=>{if(!o||typeof o!=='object'||d>3)return;for(const [key,value]of Object.entries(o)){if(/^(isLogin|isLoggedIn|loggedIn|is_login|isLogged|hasLogin)$/i.test(key))auth.push({path:path+'.'+key,value:typeof value==='boolean'?value:String(value)==='true'});else if(value&&typeof value==='object'&&!Array.isArray(value))walk(value,path+'.'+key,d+1)}};walk(v,k,0)};return {pathType:location.pathname==='/foryou'?'foryou':/\\/video\\//.test(location.pathname)?'video':'other',auth,scopeKeys:Object.keys(scope).filter(k=>/app-context|login|recommend/.test(k)),accountPresent:!!(scope['webapp.app-context']?.user?.uid&&String(scope['webapp.app-context'].user.uid)!=='0'),viewingPermission:scope['webapp.app-context']?.user?.hasExtendedViewingPermission??null,viewport:{width:innerWidth,height:innerHeight},appPrompt:/Get the full app experience/.test(document.body.innerText),loginPrompt:/Log in to TikTok/.test(document.body.innerText),videos:[...document.querySelectorAll('video')].map(v=>({duration:v.duration||0,ready:v.readyState,paused:v.paused,error:v.error?.code||0}))}})()`;
+async function snapshot(){const r=await send('Runtime.evaluate',{expression,returnByValue:true});console.log(JSON.stringify({event:'state',state:r?.result?.value||{unavailable:true}}));}
+await snapshot();
+// Passive, removable touch counters distinguish ignored swipes from missing network pagination.
+await send('Runtime.evaluate',{expression:`(()=>{window.__pongFeedAuditCleanup?.();const counts={start:0,end:0,cancel:0};const handlers={touchstart:()=>counts.start++,touchend:()=>counts.end++,touchcancel:()=>counts.cancel++};for(const[k,f]of Object.entries(handlers))addEventListener(k,f,{capture:true,passive:true});window.__pongFeedAuditCounts=counts;window.__pongFeedAuditCleanup=()=>{for(const[k,f]of Object.entries(handlers))removeEventListener(k,f,true);delete window.__pongFeedAuditCounts;delete window.__pongFeedAuditCleanup};return true})()`,returnByValue:true});
+console.log('READY: passive swipe and feed-request observation for 40 seconds');
+await new Promise(r=>setTimeout(r,Number(process.argv[3]??40)*1000));await snapshot();
+const counts=await send('Runtime.evaluate',{expression:'JSON.stringify(window.__pongFeedAuditCounts||{})',returnByValue:true});console.log(JSON.stringify({event:'touchCounts',counts:counts?.result?.value}));
+await send('Runtime.evaluate',{expression:'window.__pongFeedAuditCleanup?.()'});ws.close();

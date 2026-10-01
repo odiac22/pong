@@ -1,0 +1,1 @@
+(()=>({events:window.PongRuntimeDiagnostics.snapshot().events.filter(e=>String(e.type).startsWith('swap.')).slice(-25),phases:pongFaceSwapState.phaseEvents.slice(-12),deck:videoMetadata.map((m,i)=>({index:i,current:m.originalVideoUrl===pongTikTokLiveState.current,next:m.originalVideoUrl===pongTikTokLiveState.next})),nextCount:pongTikTokLiveState.urls.length}))()
