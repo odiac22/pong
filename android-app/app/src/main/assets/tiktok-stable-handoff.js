@@ -21,7 +21,8 @@
     const drift=target-o.currentTime;
     // Correct a seek using already-buffered swapped frames, without flashing
     // the original between seek request and decoder completion.
-    if(s.visible&&Math.abs(drift)>1.25&&bufferEnd>target+.05&&!o.seeking)o.currentTime=target;
+    // Baseline 1.3: seek for any jump over 0.25 s that is already rendered (was 1.25 s).
+    if(s.visible&&Math.abs(drift)>.25&&bufferEnd>target+.05&&!o.seeking)o.currentTime=target;
     if(s.visible&&o.seeking)return {active:true,visible:true,lag:0,bufferHeadroom:bufferEnd-target,ageMs:performance.now()-s.createdAt,readyState:o.readyState,sessionId:s.sessionId};
     const wasVisible=s.visible;
     // Preserve the decoder's exact owner/timestamp receipt. Dropping this

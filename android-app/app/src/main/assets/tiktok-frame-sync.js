@@ -53,7 +53,12 @@
     if(v.paused||(!s.visible&&delta<-.15)){if(!o.paused)o.pause();}
     else if(o.paused)o.play().catch(()=>{});
     if(o.seeking)return result();
-    const seekThreshold=s.visible?1.25:.45;
+    // Baseline 1.3: before the first reveal, jump straight to the original's
+    // frame when it is already buffered, instead of revealing up to 450 ms
+    // off and chasing it at a higher playback rate.
+    // While visible, Baseline 1.0 only seeked beyond 1.25 s and otherwise
+    // slow-chased at 0.8x, showing wrong frames for seconds after a small scrub.
+    const seekThreshold=s.visible?(contains?.25:1.25):(contains?.15:.45);
     let seekTarget=Math.max(0,target),canSeek=contains;
     // Qualification-only: a producer slightly behind the original cannot
     // buffer target+50ms yet. Align to an ALREADY buffered frame with decoder
@@ -74,8 +79,15 @@
       return result();
     }
     const base=Math.max(.25,Math.min(3,Number(v.playbackRate||1)));
-    const rate=delta>.12&&end-o.currentTime>.15?Math.min(3,base+(s.visible?.3:1)):
-      delta<-.12?Math.max(.25,base-.2):base;
+    // Baseline 1.3: continuous proportional correction keeps the swapped layer
+    // on the original's frame (TikTok's audio comes from the original, so any
+    // offset is a lip-sync error). Baseline 1.0 ignored offsets under 120 ms.
+    // Half-frame dead band, +-25% rate limit, never speed into an empty buffer.
+    const headroom=end-o.currentTime;
+    let gain=Math.abs(delta)<.02?0:Math.max(-.25,Math.min(.25,delta*1.5));
+    if(gain>0&&headroom<.15)gain=0;
+    const rate=!s.visible&&delta>.12&&headroom>.15?Math.min(3,base+1):
+      Math.max(.25,Math.min(3,base*(1+gain)));
     if(Math.abs(Number(o.playbackRate||1)-rate)>.01)o.playbackRate=rate;
     // Audit-only until a matched live A/B qualifies the handoff. Production
     // keeps its existing reveal path; numeric model quality is not sufficient
