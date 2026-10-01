@@ -2493,7 +2493,7 @@ def prepare(self, edge, *, allow_create=True):
 
 
 # Source: pong_swap_engine.PongSwapEngine.process_frame
-# SHA256: 0f9291d71d457f0aad9307b2b5f066172a3a1b92de6c0fef98e212c95532096b
+# SHA256: cd9751b0ff3f26e846e5d131ee15c2718da5b5e3eb48bfc0ec1dbcef8e82490a
 def process_frame(
     self,
     frame: Any,
@@ -2856,6 +2856,100 @@ def process_frame(
                             )
                 elif detected_kps is not None and tracking_state is not None:
                     tracking_state["identityGraceFrames"] = 0
+                # Baseline 1.7: short occlusion bridge. When BOTH the
+                # detector and optical flow lose an already-locked face
+                # for a moment (hair whipping across the nose, a hand or a
+                # cone), the frame used to flash back to the original face.
+                # Carry the last observed motion forward for at most
+                # ~0.15 s instead. Never bridges when the detector sees any
+                # face where the prediction lands (a different person or a
+                # rejected candidate), and never starts without a lock.
+                if detected_kps is None:
+                    import os as _debug_os
+                    _debug_path = _debug_os.environ.get("PONG_BRIDGE_DEBUG_PATH", "")
+                if detected_kps is None and _debug_path:
+                    import json as _debug_json
+                    try:
+                        with open(_debug_path, "a", encoding="utf-8") as debug_log:
+                            debug_log.write(_debug_json.dumps({
+                                "frame": (temporal_context or {}).get("frameIndex"),
+                                "anchor": anchor is not None,
+                                "tracking": tracking_state is not None,
+                                "trackFailed": bool(track_failed),
+                                "lkPrediction": detector_lk_prediction is not None,
+                                "reasons": list(getattr(frame_evidence, "rejection_reasons", []) or []),
+                                "detections": len(getattr(frame_evidence, "detections", ()) or ()),
+                                "lastKps": tracking_state.get("kps") is not None if tracking_state is not None else None,
+                            }) + "\n")
+                    except Exception:
+                        pass
+                if (
+                    detected_kps is None
+                    and anchor is not None
+                    and tracking_state is not None
+                    and bool(effective_config["runtime"].get("targetOcclusionBridgeEnabled", True))
+                ):
+                    bridge_frames = int(tracking_state.get("occlusionBridgeFrames", 0))
+                    nominal_seconds = float(
+                        (temporal_context or {}).get("nominalFrameSeconds", 1.0 / 30.0)
+                    ) or (1.0 / 30.0)
+                    bridge_limit = max(1, int(round(float(
+                        effective_config["runtime"].get("targetOcclusionBridgeSeconds", 0.15)
+                    ) / max(1e-3, nominal_seconds))))
+                    try:
+                        last_kps = np.asarray(tracking_state.get("kps"), dtype=np.float32).reshape(5, 2)
+                    except (TypeError, ValueError):
+                        last_kps = None
+                    if (
+                        bridge_frames < bridge_limit
+                        and last_kps is not None
+                        and np.isfinite(last_kps).all()
+                    ):
+                        span = max(1.0, _landmark_span(last_kps))
+                        velocity = np.zeros_like(last_kps)
+                        try:
+                            before_kps = np.asarray(
+                                tracking_state.get("bridgePrevKps"), dtype=np.float32
+                            ).reshape(5, 2)
+                            if np.isfinite(before_kps).all():
+                                velocity = last_kps - before_kps
+                        except (TypeError, ValueError):
+                            pass
+                        speed = float(np.median(np.linalg.norm(velocity, axis=1)))
+                        if speed > 0.15 * span:
+                            velocity *= (0.15 * span) / speed
+                        predicted = last_kps + velocity
+                        center = predicted.mean(axis=0)
+                        # A face found at the predicted spot but rejected
+                        # only for landmark geometry is the occluded target
+                        # itself (hair/hands distort its points). Block the
+                        # bridge when an identity check rejected a nearby
+                        # face, or when several faces crowd the spot.
+                        reasons = set(getattr(frame_evidence, "rejection_reasons", []) or [])
+                        identity_rejected = any(
+                            r.startswith("target-identity") or r.startswith("target-appearance")
+                            for r in reasons
+                        )
+                        nearby = 0
+                        for _area, other_kps, _embedding in tuple(
+                            getattr(frame_evidence, "detections", ()) or ()
+                        ):
+                            try:
+                                other = np.asarray(other_kps, dtype=np.float32).reshape(5, 2)
+                            except (TypeError, ValueError):
+                                continue
+                            if float(np.linalg.norm(other.mean(axis=0) - center)) < span:
+                                nearby += 1
+                        crowded = nearby > 1 or (nearby == 1 and identity_rejected)
+                        if not crowded:
+                            detected_kps = predicted
+                            tracking_state["occlusionBridgeFrames"] = bridge_frames + 1
+                            if frame_evidence is not None:
+                                frame_evidence.rejection_reasons.append(
+                                    "target-occlusion-bridge"
+                                )
+                elif detected_kps is not None and tracking_state is not None:
+                    tracking_state["occlusionBridgeFrames"] = 0
                 if detected_kps is not None and tracking_state is not None:
                     raw_kps = np.asarray(detected_kps, dtype=np.float32)
                     if detector_lk_prediction is not None:
@@ -2942,6 +3036,9 @@ def process_frame(
                         tracking_state["trackRevision"] = int(
                             tracking_state.get("trackRevision", 0)
                         ) + 1
+                # Baseline 1.7: previous pose for the occlusion bridge's
+                # one-frame motion estimate.
+                tracking_state["bridgePrevKps"] = tracking_state.get("kps")
                 tracking_state["kps"] = (
                     None if kps is None else np.asarray(kps, dtype=np.float32)
                 )

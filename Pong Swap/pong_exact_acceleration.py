@@ -35,7 +35,10 @@ SOURCE_HASHES = {
     # Reviewed 2026-09-30: Approved 28 session/preview strength policy only.
     # Removing its import and four calls recovers ffdc49ff... exactly.
     # No inference kernels changed; frozen producer includes selection calls.
-    'pong_swap_engine.py': '97f739543e3cd4dc44d543992aed7ca7c65dbf48a25ad48f86a6edca34a71d34',
+    # Reviewed 2026-10-01 (Claude, Baseline 1.7): process_frame short occlusion
+    # bridge (pose carry-forward <=0.15 s for a locked face when detector and LK
+    # both miss) + previous-pose bookkeeping. No inference kernels changed.
+    'pong_swap_engine.py': '637950db36e698f87d19de4bb0a5bfe817eb61a8a857fa24122d06417b5db14a',
     'engine/Rope/rope/Models.py': '77d6f7afee9111c85e38d71addb55c3c6ea890c876c1fd146bba81732e6871b1',
     'engine/Rope/rope/VideoManager.py': 'aaf8646ceeb2bf7c97101af9b8879a63a8c52e36adbc18bd3a8642e76520fb6f',
     # Reviewed 2026-09-30: adds only the cold user-approved loader branch;
