@@ -15,6 +15,7 @@ import { hlsRangeEligibleRequest, tryStreamHlsRanges } from './hls-range-stream.
 import { createTikTokProgressTracker, TIKTOK_PROGRESS_TEMPLATE } from './video-cache-tiktok-progress.mjs';
 import { startupPreparationUrl, startupPrefixRange, genericCacheRequestMayRetry, GENERIC_FAILURE_COOLDOWN_MS, STARTUP_PREFIX_BYTES } from './video-cache-startup-policy.mjs';
 import {normalizeTikTokMediaHint,streamTikTokMediaHint} from './tiktok-media-hints.mjs';
+import {createTikTokWarmExtractor,tikTokWarmExtractorScript} from './tiktok-warm-extractor.mjs';
 import { normalizeRecallVideoId, recallMediaIdentity, mergeRecallCapturedVideos } from './recall-media-identity.mjs';
 import { createDesktopCaptureJobs, desktopCaptureFingerprint, preferredDesktopCaptureMediaUrls } from './desktop-capture-jobs.mjs';
 import { normalizeSourceMediaHints, planSourceMediaHints, verifySourceMediaHint } from './desktop-capture-source-hints.mjs';
@@ -6549,6 +6550,15 @@ function isTikTokVideoPageUrl(rawUrl) {
   }
 }
 
+let tikTokWarmExtractorInstance=null;
+function tikTokWarmExtractor() {
+  tikTokWarmExtractorInstance ||= createTikTokWarmExtractor({
+    python:path.join(LOCAL_AI_DIR,'lora-venv','Scripts','python.exe'),
+    script:tikTokWarmExtractorScript(process.cwd()),cwd:process.cwd()
+  });
+  return tikTokWarmExtractorInstance;
+}
+
 async function downloadTikTokVideoFile(record, partPath, controller) {
   const python = path.join(LOCAL_AI_DIR, 'lora-venv', 'Scripts', 'python.exe');
   await fs.rm(partPath, { force: true }).catch(() => {});
@@ -6591,6 +6601,35 @@ async function downloadTikTokVideoFile(record, partPath, controller) {
       await fs.rm(partPath,{force:true}).catch(()=>{});
       record.bytes=0;record.totalBytes=0;record.headersReadyAt=0;
       record.tiktokSourceTransport='extractor-fallback';
+    }
+  }
+  // Baseline 1.1: warm extractor first; the cold per-video yt-dlp below
+  // remains the fallback whenever nothing has been published yet.
+  if(process.env.PONG_TIKTOK_WARM_EXTRACTOR!=='0') {
+    let output;
+    try {
+      const info=await tikTokWarmExtractor().resolve(record.sourceUrl,controller.signal);
+      output=await fs.open(partPath,'w');
+      let position=0;
+      const tracker=createTikTokProgressTracker(record,{maxFileBytes:VIDEO_FILE_CACHE_MAX_FILE_BYTES,
+        onInvalid:()=>{throw new Error('TikTok resolved entity changed');}});
+      await tikTokWarmExtractor().stream(info,{
+        signal:controller.signal,maxBytes:VIDEO_FILE_CACHE_MAX_FILE_BYTES,agent:GATEWAY_AGENT,
+        write:async chunk=>{let written=0;while(written<chunk.length){const r=await output.write(chunk,written,chunk.length-written,position);if(!r.bytesWritten)throw Error('TikTok resolved file write failed');written+=r.bytesWritten;position+=r.bytesWritten;}},
+        onMetadata:length=>tracker.stderr(`__PONG_TIKTOK_PROGRESS__${length}\n`),
+        onBytes:(chunk,bytes)=>{tracker.bytes(chunk);record.bytes=bytes;record.updatedAt=Date.now();}
+      });
+      await output.close();output=null;
+      record.totalBytes=record.bytes;record.contentType='video/mp4';record.headersReadyAt ||= Date.now();
+      record.tiktokSourceTransport='warm-extractor';
+      return;
+    }catch(error){
+      await output?.close().catch(()=>{});
+      if(record.progressiveMetadataValidated){record.segmentedPrefixFailed=true;throw error;}
+      if(controller.signal.aborted)throw error;
+      await fs.rm(partPath,{force:true}).catch(()=>{});
+      record.bytes=0;record.totalBytes=0;record.headersReadyAt=0;
+      record.tiktokSourceTransport='warm-extractor-fallback';
     }
   }
   await new Promise((resolve, reject) => {
@@ -21655,6 +21694,7 @@ server.listen(PORT, HOST, () => {
   ensurePongSwapService({ warm: true })
     .then(health => console.log(`Pong Swap ready on RTX: ${health?.gpu?.name || 'GPU ready'}`))
     .catch(error => console.error(`Pong Swap warmup failed: ${error.message || error}`));
+  if (process.env.PONG_TIKTOK_WARM_EXTRACTOR !== '0') tikTokWarmExtractor().warm();
   warmGatewayConnections()
     .then(() => {
       console.log(`RAM gateway warm: ${gatewayWarmState.successes} connections ready`);
