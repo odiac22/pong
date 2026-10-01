@@ -27,6 +27,7 @@ from pong_activity_warmth import ActivityWarmth
 from pong_playback_credit import PlaybackSessionStopped, apply_ordered_playback
 from pong_external_playback_lease import ExternalPlaybackLeases
 from pong_remote_gateway import create_remote_gateway
+from pong_prefetch_boost import PrefetchBoost
 
 
 SERVICE_VERSION = "30.38.6"
@@ -112,6 +113,7 @@ REMOTE_SESSIONS = RemoteSessionManager(ENGINE)
 EXTERNAL_PLAYBACK_LEASES = ExternalPlaybackLeases()
 TIKTOK_PROFILE_WARMUP = ProfileWarmup(ENGINE, qualified=True)
 ACTIVITY_WARMTH = ActivityWarmth(ENGINE)
+PREFETCH_BOOST = PrefetchBoost(ENGINE)
 REMOTE_TOKEN_PATH = ROOT / "cache" / "remote-bridge-token"
 REMOTE_FULL_PATH_WARMUP_ENABLED = os.environ.get("PONG_REMOTE_FULL_PATH_WARMUP") == "1"
 REMOTE_FULL_PATH_WARMUP_STATUS: dict[str, int | float | bool] = {"enabled": REMOTE_FULL_PATH_WARMUP_ENABLED,
@@ -233,6 +235,7 @@ def _start_service_workers() -> None:
         threading.Thread(target=startup_target, name="PongSwapStartupWarm", daemon=True).start()
         threading.Thread(target=_idle_unload_loop, name="PongSwapIdleUnload", daemon=True).start()
         threading.Thread(target=_external_playback_lease_loop, name="PongExternalPlaybackLease", daemon=True).start()
+        PREFETCH_BOOST.start()
         _SERVICE_WORKERS_STARTED = True
 
 
@@ -414,6 +417,7 @@ def health() -> dict[str, Any]:
     result = {**ENGINE.health(), "serviceVersion": SERVICE_VERSION}
     result['approvedStartupPreparation'] = dict(APPROVED_STARTUP_STATUS)
     result['activityWarmth'] = ACTIVITY_WARMTH.snapshot()
+    result['prefetchBoost'] = PREFETCH_BOOST.snapshot()
     if REMOTE_FULL_PATH_WARMUP_ENABLED:
         result["remoteFullPathWarmup"] = dict(REMOTE_FULL_PATH_WARMUP_STATUS)
     return result
