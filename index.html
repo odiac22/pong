@@ -2612,7 +2612,7 @@ function openPongTikTokLiveMode() {
   if (isNativePong) {
     // Prepare the authorized TikTok-only GPEN512 profile while TikTok opens.
     // Never wait for warmup before showing the site or alter ordinary Pong.
-    void warmPongFaceSwapEngine('tiktok-gpen512');
+    void warmPongFaceSwapEngine('default');
     hideControls();
     location.href = 'pong-native://tiktok/open';
     return;
@@ -5843,7 +5843,8 @@ function retireStalePongFaceSwapSession(sessionId) {
 }
 
 function pongFaceSwapRestorationProfile() {
-  return document.documentElement.classList.contains('pong-tiktok-original-overlay') ? 'tiktok-gpen512' : 'default';
+  // Baseline 1.4: owner preference is GPEN1024 everywhere, TikTok included.
+  return 'default';
 }
 
 function pongFaceSwapSourceKey(faceId, source, startSeconds = 0) {
