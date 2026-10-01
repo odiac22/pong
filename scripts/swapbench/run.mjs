@@ -24,7 +24,8 @@ const eligible = new Set(Object.entries(manifest.clips).filter(([, info]) => inf
 const options = {faceFor,
   mode: MODE, clips, faceId: arg('face', 'approved-8-f7bf754ac81f'), profile: arg('profile', 'tiktok-gpen512'),
   prefetchPolicy: arg('prefetch', 'after-presented'), dwellMs: Number(arg('dwell', MODE === 'feed' ? 5000 : 9000)),
-  scrub: arg('scrub', '1') === '1'
+  scrub: arg('scrub', '1') === '1', traceTicks: arg('trace', '0') === '1',
+  ...(arg('fpswin') ? {fpsWindowMs: Number(arg('fpswin'))} : {})
 };
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -103,6 +104,9 @@ async function main() {
       swappedFps: stat(swappedRows.map(r => r.playback.transformedVisibleFps)),
       sourcePresentedFps: stat(all.map(r => r.playback.sourcePresentedFps)),
       maxSwappedGapMs: stat(swappedRows.map(r => r.playback.maxTransformedGapMs)),
+      driftMedianMs: stat(swappedRows.map(r => r.playback.driftMedianMs)),
+      driftP95Ms: stat(swappedRows.map(r => r.playback.driftP95Ms)),
+      alignedFraction: stat(swappedRows.map(r => r.playback.alignedFraction)),
       scrubForward: scrubStat('forward'),
       scrubBackward: scrubStat('backward'),
       catchUps: all.reduce((sum, r) => sum + r.catchUps, 0),

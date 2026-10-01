@@ -28,10 +28,20 @@
       end=Math.max(end,o.buffered.end(i));
       if(o.buffered.start(i)<=target&&o.buffered.end(i)>=target+.05)contains=true;
     }
+    // Baseline 1.2: a scrub (or a stall) that leaves the playhead outside this
+    // session's rendered frames must never keep stale swapped pixels on top
+    // of the original. Hide at once and ask native for a session at the new
+    // position. Natural startup (session starts up to 0.6 s ahead, or a cold
+    // producer still filling) keeps the existing missed-handoff rule.
+    const drift=target-Number(o.currentTime||0);
+    const scrubbedBefore=target<-.9;
+    const outsideRendered=!contains&&Math.abs(drift)>1;
+    if(s.visible&&(target<-.05||outsideRendered)){s.reseekHide=true;hide();if(!o.paused)o.pause();}
+    const needsReseek=scrubbedBefore||(!!s.reseekHide&&!s.visible&&target>end+1);
     const result=()=>({active:true,visible:!!s.visible,lag:Math.max(0,target-o.currentTime),target,
       bufferEnd:end,bufferHeadroom:end-target,readyState:o.readyState,ageMs:clock-s.createdAt,
       firstVisibleAt:s.firstVisibleAt||0,sessionId:s.sessionId,seeking:!!o.seeking,
-      presentedMediaTime:s.lastPaintedMediaTime??-1,
+      presentedMediaTime:s.lastPaintedMediaTime??-1,needsReseek,
       paintedRecently:!!s.lastPaintedAt&&(v.paused||clock-s.lastPaintedAt<750)});
     if(target<-.05){hide();if(!o.paused)o.pause();return {...result(),waitingForSourceTime:true};}
     let delta=Math.max(0,target)-Number(o.currentTime||0);
@@ -83,7 +93,7 @@
         if(window.__pongDomSwap!==s||!v.isConnected||o.error||o.seeking||o.readyState<2)return;
         const actual=Number(metadata?.mediaTime??o.currentTime),wanted=Number(v.currentTime||0)-s.start;
         if(wanted<-.05||Math.abs(actual-Math.max(0,wanted))>.45)return;
-        s.visible=true;s.firstVisibleAt=performance.now();
+        s.visible=true;s.reseekHide=false;s.firstVisibleAt=performance.now();
         s.lastPaintedMediaTime=actual;s.lastPaintedAt=performance.now();
         // A loop/seek can hide and reveal this same session repeatedly. Start
         // its permanent paint observer only once, or every reveal adds another

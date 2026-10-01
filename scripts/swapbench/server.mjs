@@ -15,7 +15,7 @@ const arg = (name, fallback) => {
 const PORT = Number(arg('port', 18800));
 const RENDERER = Number(arg('renderer', 18792));
 const STOCK = arg('stock', 'F:\\pong-claude-bench\\stock');
-const ASSETS = path.join(repo, 'android-app', 'app', 'src', 'main', 'assets');
+const ASSETS = arg('assets', path.join(repo, 'android-app', 'app', 'src', 'main', 'assets'));
 
 const types = { '.mp4': 'video/mp4', '.js': 'text/javascript', '.html': 'text/html; charset=utf-8', '.json': 'application/json' };
 

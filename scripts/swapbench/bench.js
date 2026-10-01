@@ -66,7 +66,7 @@
       if (window.__pongDomSwap?.overlay !== overlay) return;
       const owner = window.__pongDomSwap;
       rec.paints.push({t: now() - current.t0, media: meta.mediaTime, visible: overlay.style.opacity === '1',
-        orig: Number(video.currentTime) - owner.start, session: owner.sessionId});
+        orig: Number(video.currentTime) - owner.start, start: owner.start, disp: meta.expectedDisplayTime, session: owner.sessionId});
       overlay.requestVideoFrameCallback(paint);
     };
     overlay.requestVideoFrameCallback(paint);
@@ -79,7 +79,15 @@
     watchOverlay();
     let state = {};
     try { state = window.__pongDomSwapSync ? window.__pongDomSwapSync() : {}; } catch (_) {}
-    const missed = !state.visible && (state.readyState || 0) >= 2 && (state.ageMs || 0) >= 2500 && (state.lag || 0) >= 1.25;
+    if (state.visible !== current.lastVisible || state.needsReseek) {
+      current.lastVisible = state.visible;
+      const o = window.__pongDomSwap?.overlay, ranges = [];
+      for (let i = 0; o && i < o.buffered.length; i++) ranges.push([+o.buffered.start(i).toFixed(2), +o.buffered.end(i).toFixed(2)]);
+      if (current.rec.syncLog.length < 60) current.rec.syncLog.push({t: Math.round(now() - current.t0), visible: !!state.visible, needsReseek: !!state.needsReseek,
+        target: +(state.target ?? -1).toFixed(2), overlayTime: o ? +o.currentTime.toFixed(2) : null, bufferEnd: +(state.bufferEnd ?? -1).toFixed(2), ranges, session: (state.sessionId || '').slice(0, 8)});
+    }
+    const missed = (!state.visible && (state.readyState || 0) >= 2 && (state.ageMs || 0) >= 2500 && (state.lag || 0) >= 1.25) ||
+      state.needsReseek === true;   // Baseline 1.2 native rule (MainActivity.syncTikTokNativeTimeline)
     if (!missed || state.sessionId !== current.sessionId) return;
     const key = current.pageUrl + '|' + current.sessionId, t = now();
     if (t - gate.pendingAt < 2000 || (key === gate.acceptedKey && t - gate.acceptedAt < 8000)) return;
@@ -88,11 +96,12 @@
     const start = swapStart(owner.video.currentTime, owner.video.duration);
     owner.rec.catchUps += 1;
     try {
+      owner.rec.retired.push(...await serverStats([owner.sessionId]));
       const session = await createSession(owner.clip, start, false);
       if (current !== owner) return;
       owner.sessionId = session.id; owner.start = start;
       window.__pongDomSwapAttach(session.streamUrl, session.id, start, owner.video, owner.pageUrl);
-      gate.acceptedKey = owner.pageUrl + '|' + session.id; gate.acceptedAt = now();
+      gate.acceptedKey = key; gate.acceptedAt = now();   // cooldown keyed by the replaced session, as TikTokCatchUpReceiptGate
     } catch (error) { owner.rec.errors.push(String(error.message || error)); }
     gate.pendingAt = 0;
   }
@@ -107,6 +116,12 @@
   }
   setInterval(nativeTick, 250);
   setInterval(creditTick, 500);
+  setInterval(() => {
+    if (!config.traceTicks || !current || current.rec.ticks.length >= 600) return;
+    const s = window.__pongDomSwap, o = s?.overlay;
+    current.rec.ticks.push([Math.round(now() - current.t0), +current.video.currentTime.toFixed(3), o ? +o.currentTime.toFixed(3) : null,
+      s?.visible ? 1 : 0, o ? +o.playbackRate.toFixed(2) : null, o?.seeking ? 1 : 0]);
+  }, 40);
 
   // ---- cards -------------------------------------------------------------
   function mountCard(clip, index) {
@@ -117,12 +132,12 @@
     card.appendChild(video); document.body.appendChild(card);
     const t0 = now();
     const rec = {clip, index, loadMs: null, sessionCreateMs: null, firstVisibleMs: null, prepared: false,
-      catchUps: 0, failures: 0, errors: [], events: [], paints: [], origPaints: [], scrubs: []};
+      catchUps: 0, failures: 0, errors: [], events: [], paints: [], origPaints: [], scrubs: [], retired: [], syncLog: [], ticks: []};
     const pageUrl = `https://www.tiktok.com/@bench/video/${7000000000000000000 + index}`;
     const owner = {clip, card, video, pageUrl, sessionId: '', start: 0, rec, t0};
     const origPaint = (_t, meta) => {
       if (rec.loadMs === null) rec.loadMs = now() - t0;
-      rec.origPaints.push({t: now() - t0, media: meta.mediaTime});
+      rec.origPaints.push({t: now() - t0, media: meta.mediaTime, disp: meta.expectedDisplayTime});
       if (card.isConnected) video.requestVideoFrameCallback(origPaint);
     };
     video.requestVideoFrameCallback(origPaint);
@@ -198,7 +213,8 @@
           firstSourceFrameMs: rel('firstSourceFrameAt'), firstTransformedMs: rel('firstTransformedFrameAt'),
           firstByteMs: rel('firstByteAt'), playableMs: rel('playableAt'), compatibility: s.compatibilityStatus,
           restorer: s.adaptiveRestoration?.model || null, error: s.error || null, state: s.state,
-          fullId: id, fps: s.fps, ranges: s.transformedFrameRanges || []});
+          fullId: id, fps: s.fps, ranges: s.transformedFrameRanges || [],
+          inferenceFrames: s.inferenceFrames, temporalReuseFrames: s.temporalReuseFrames, timing: s.timingTotals || null});
       } catch (error) { out.push({id: id.slice(0, 8), error: String(error.message)}); }
     }
     return out;
@@ -244,7 +260,16 @@
       await scrub(owner, 0.75, 'forward');
       await scrub(owner, 0.15, 'backward');
     }
-    rec.server = await serverStats(sessionIdsFor(rec).filter(Boolean));
+    const live = await serverStats(sessionIdsFor(rec).filter(id => id && !rec.retired.some(s => s.fullId === id)));
+    rec.server = [...rec.retired, ...live.filter(s => !s.error)];
+    // True drift: pair each swapped paint with the original frame shown at the same refresh.
+    const origByDisp = rec.origPaints.filter(q => Number.isFinite(q.disp));
+    let j = 0;
+    for (const p of rec.paints) {
+      while (j + 1 < origByDisp.length && Math.abs(origByDisp[j + 1].disp - p.disp) <= Math.abs(origByDisp[j].disp - p.disp)) j++;
+      const q = origByDisp[j];
+      p.drift = q && Math.abs(q.disp - p.disp) < 20 ? p.media - (q.media - p.start) : null;
+    }
     // A revealed overlay is not a swap: count only paints of frames the
     // renderer actually transformed (per-session output frame ranges).
     const bySession = new Map(rec.server.map(s => [s.fullId, s]));
@@ -255,6 +280,11 @@
       return s.ranges.some(([a, b]) => frame >= a && frame <= b);
     };
     for (const p of rec.paints) p.transformed = transformedPaint(p);
+    // Aligned = the swapped frame shown is the original's frame (+-1 frame).
+    // Scrub success: shown swapped frame within 200 ms of the original (normal
+    // playback drift is reported separately). Wrong: more than 500 ms off.
+    const aligned = p => Number.isFinite(p.drift) ? Math.abs(p.drift) <= 0.2 : Math.abs(p.media - p.orig) <= 0.2;
+    const wrong = p => Number.isFinite(p.drift) ? Math.abs(p.drift) > 0.5 : Math.abs(p.media - p.orig) > 0.5;
     const firstSwapped = rec.paints.find(p => p.visible && p.transformed);
     rec.firstSwappedVisibleMs = firstSwapped ? firstSwapped.t : null;
     rec.swappedWithinDeadline = Boolean(rec.firstSwappedVisibleMs && rec.firstSwappedVisibleMs <= config.swapDeadlineMs);
@@ -265,10 +295,16 @@
     for (let i = 1; i < swapped.length; i++) gap = Math.max(gap, swapped[i].t - swapped[i - 1].t);
     rec.playback.transformedVisibleFps = +(swapped.length / Math.max(0.001, (fpsTo - fpsFrom) / 1000)).toFixed(2);
     rec.playback.maxTransformedGapMs = Math.round(gap);
+    const drifts = swapped.map(p => p.drift).filter(Number.isFinite).map(Math.abs).sort((a, b) => a - b);
+    rec.playback.driftMedianMs = drifts.length ? Math.round(drifts[Math.floor(drifts.length / 2)] * 1000) : null;
+    rec.playback.driftP95Ms = drifts.length ? Math.round(drifts[Math.min(drifts.length - 1, Math.ceil(drifts.length * .95) - 1)] * 1000) : null;
+    rec.playback.alignedFraction = swapped.length ? +(swapped.filter(p => Number.isFinite(p.drift) && Math.abs(p.drift) <= 0.06).length / swapped.length).toFixed(3) : 0;
     // Scrub success = first visible, aligned AND transformed paint after the seek.
     for (const sc of rec.scrubs) {
-      const hit = rec.paints.find(p => p.t > sc.atMs + 1 && p.visible && p.transformed && Math.abs(p.media - p.orig) <= 0.1);
+      const hit = rec.paints.find(p => p.t > sc.atMs + 1 && p.visible && p.transformed && aligned(p));
       sc.scrubToSwappedMs = hit ? Math.round(hit.t - sc.atMs) : null;
+      const wrongAfter = rec.paints.filter(p => p.t > sc.atMs && p.t < sc.atMs + 8000 && p.visible && wrong(p));
+      sc.misalignedVisibleMs = wrongAfter.length ? Math.round(wrongAfter[wrongAfter.length - 1].t - wrongAfter[0].t + 33) : 0;
     }
     for (const s of rec.server) delete s.ranges;
     const result = {...rec};

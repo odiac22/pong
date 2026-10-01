@@ -11,7 +11,10 @@
     if(target<-.05){
       if(s.visible){s.visible=false;v.style.opacity=v.dataset.pongDomOriginalOpacity||'';o.style.opacity='0';document.documentElement.classList.remove('pong-dom-swap');}
       o.pause();
-      return {active:true,visible:false,lag:0,waitingForSourceTime:true,readyState:o.readyState,ageMs:performance.now()-s.createdAt,sessionId:s.sessionId};
+      // Baseline 1.2: scrubbed back before this session's first frame (not
+      // the <=0.6 s startup lead) -> native should start a session here.
+      return {active:true,visible:false,lag:0,waitingForSourceTime:true,readyState:o.readyState,ageMs:performance.now()-s.createdAt,sessionId:s.sessionId,
+        needsReseek:target<-.9};
     }
     let bufferEnd=0;
     for(let i=0;i<o.buffered.length;i++)if(o.buffered.start(i)<=target+.05&&o.buffered.end(i)>=target)bufferEnd=o.buffered.end(i);
@@ -28,7 +31,8 @@
     // Once this exact source has a presented swapped frame, decoder/buffer
     // recovery must not expose its unswapped pixels. Keep the last swapped
     // frame during recovery; normal clear still handles navigation/off/errors.
-    if(wasVisible&&!s.visible&&window.__pongDomSwap===s&&v.isConnected&&!o.error){
+    // Baseline 1.2: never hold frames that a scrub made wrong.
+    if(wasVisible&&!s.visible&&!s.reseekHide&&window.__pongDomSwap===s&&v.isConnected&&!o.error){
       s.visible=true;
       v.style.setProperty('opacity','0','important');
       o.style.opacity='1';

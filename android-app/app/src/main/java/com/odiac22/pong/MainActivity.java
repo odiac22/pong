@@ -1232,9 +1232,12 @@ public class MainActivity extends Activity {
             ageMs >= 2_500d && lag >= 1.25d;
           // A visible stream owns its buffered frames. Do not tear it down
           // merely because the producer temporarily has little lead.
-          if (missedInitialHandoff &&
+          // Baseline 1.2: the compositor reports a scrub outside this
+          // session's rendered frames; it has already hidden the stale layer.
+          boolean reseek = state.optBoolean("needsReseek", false);
+          if ((missedInitialHandoff || reseek) &&
               sessionId.equals(tiktokVideoSessionId)) {
-            requestTikTokSwapCatchUp(sessionId);
+            requestTikTokSwapCatchUp(sessionId, reseek);
           }
         } catch (Exception ignored) {}
       }
@@ -1242,6 +1245,10 @@ public class MainActivity extends Activity {
   }
 
   private void requestTikTokSwapCatchUp(String laggingSessionId) {
+    requestTikTokSwapCatchUp(laggingSessionId, false);
+  }
+
+  private void requestTikTokSwapCatchUp(String laggingSessionId, boolean reseek) {
     if (!tiktokVisible || !tiktokSwapEnabled || web == null || currentTikTokUrl.isEmpty() ||
         laggingSessionId == null || !laggingSessionId.equals(tiktokVideoSessionId)) return;
     String requestedUrl = currentTikTokUrl;
@@ -1252,7 +1259,8 @@ public class MainActivity extends Activity {
     web.evaluateJavascript(
       "try{window.PongTikTokLiveCatchUp&&window.PongTikTokLiveCatchUp(" +
         JSONObject.quote(requestedUrl) + "," + targetSeconds + "," +
-        JSONObject.quote(laggingSessionId) + "," + JSONObject.quote(token) + ")}catch(e){}",
+        JSONObject.quote(laggingSessionId) + "," + JSONObject.quote(token) + "," +
+        JSONObject.quote(reseek ? "reseek" : "lag") + ")}catch(e){}",
       null
     );
   }

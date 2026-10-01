@@ -2532,7 +2532,7 @@ window.PongTikTokLiveSwapFailed = (rawUrl, failedSessionId, startSeconds = 0) =>
   return true;
 };
 
-window.PongTikTokLiveCatchUp = (rawUrl, startSeconds = 0, expectedSessionId = '', requestToken = '') => {
+window.PongTikTokLiveCatchUp = (rawUrl, startSeconds = 0, expectedSessionId = '', requestToken = '', reason = 'lag') => {
   const current = pongCanonicalTikTokVideoPage(rawUrl);
   const expected = String(expectedSessionId || '');
   const token = String(requestToken || '');
@@ -2553,7 +2553,9 @@ window.PongTikTokLiveCatchUp = (rawUrl, startSeconds = 0, expectedSessionId = ''
   }
   // Low headroom is not a failed handoff. Restarting an already presented
   // producer discards its buffer and repeatedly flashes the unswapped source.
-  if (wrapper.dataset.pongTikTokPresentedSession &&
+  // Baseline 1.2: a scrub outside the rendered range is different - the
+  // compositor already hid the stale layer, so a new session is required.
+  if (reason !== 'reseek' && wrapper.dataset.pongTikTokPresentedSession &&
       wrapper.dataset.pongTikTokPresentedSession === wrapper.dataset.pongFaceSwapSessionId) {
     receipt(false);return false;
   }
