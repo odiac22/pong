@@ -41,7 +41,12 @@ class HairPolicyTests(unittest.TestCase):
     def test_rules_exact_ids_only(self):
         for n in (2,3,13,23):self.assertEqual(required_hair(f'approved-{n}-abcdef123456'),'dark')
         for n in (8,19):self.assertEqual(required_hair(f'approved-{n}'),'light')
-        for name in ('approved-18','approved-20','other-approved-2','approved-2-wrong'):self.assertIsNone(required_hair(name))
+        # Baseline 1.6: unruled faces with a measured hair profile are hair-ranked;
+        # hard light/dark gates stay exact-id only.
+        from pong_hair_policy import _hard_rule
+        with patch('pong_hair_profile.source_profile', return_value=None):
+            for name in ('approved-18','approved-20','other-approved-2','approved-2-wrong'):self.assertIsNone(required_hair(name))
+        for name in ('approved-18','approved-20','other-approved-2','approved-2-wrong'):self.assertIsNone(_hard_rule(name))
     def test_unknown_and_low_confidence_rank_all_selected_but_known_mismatch_blocks(self):
         self.assertFalse(hair_allows('approved-2','light',1))
         for color,confidence in [('unknown',1),('light',.79),('dark',float('nan'))]:

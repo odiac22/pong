@@ -68,7 +68,9 @@ class MultiFaceTests(unittest.TestCase):
                 [target()],minimum_similarity=45).selection)
 
     def test_unrelated_or_nonfinite_embedding_cannot_win_by_colour(self):
-        self.assertIsNone(choose_multi_face([candidate('a',0,(.5,)*6)], [target(appearance=(.5,)*6)]).selection)
+        # Baseline 1.6 owner rule: with nothing resembling, still use the best
+        # selected source (Baseline 1.0 rendered no swap at all here).
+        self.assertEqual(choose_multi_face([candidate('a',0,(.5,)*6)], [target(appearance=(.5,)*6)]).selection.candidate.face_id,'a')
         self.assertIsNone(choose_multi_face([candidate('a',.5)], [target([np.nan,0,0])]).selection)
         bad=CandidateIdentity('bad',np.zeros(3),FacePresentation('female',.99))
         self.assertIsNone(choose_multi_face([bad],[target()]).selection)

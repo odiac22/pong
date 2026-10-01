@@ -13,6 +13,7 @@ import time
 import numpy as np
 from pong_match_feedback import MATCH_FEEDBACK
 from pong_hair_policy import hair_allows
+from pong_hair_profile import HAIR_WEIGHT, hair_match
 from pong_swap_identity import (
     IdentitySelection, compatible_identity_rankings, rope_similarity,
     target_identity_continuity_threshold,
@@ -72,9 +73,10 @@ class MultiFaceDecision:
     scores: tuple = ()
 
     def public(self):
-        return {"policy": "multi-face-feature-led-v1", "reason": self.reason,
+        return {"policy": "multi-face-face-plus-hair-v2", "reason": self.reason,
                 "margin": self.margin,
-                "hairPolicy": "original-segmented-hair-v3",
+                "hairPolicy": "original-segmented-hair-v3+colour-rank",
+                "targetHairLab": getattr(self.selection.target.hair_color, "lab", None) if self.selection else None,
                 "targetHair": self.selection.target.hair_color if self.selection else "unknown",
                 "hairEvidenceScore": round(float(self.selection.target.hair_confidence),4) if self.selection else 0,
                 "hairFallback": self.selection is not None and self.selection.target.hair_color == 'unknown',
@@ -111,10 +113,25 @@ def choose_multi_face(candidates, targets, *, minimum_similarity=0.0,
         # boosted, ineligible winner vetoes the whole target and suppresses an
         # eligible runner-up. Colour-only matches likewise must not block a
         # valid feature match. Neither gate is relaxed by this ordering fix.
-        ranked = tuple(x for x in ranked if x.similarity >= minimum_similarity
-                       and rope_similarity(x.candidate.embedding, target.embedding) > 0)
+        # Baseline 1.6: no ArcFace>0 veto. Approved photos and video people are
+        # different identities, so that veto rejected almost every stranger
+        # (Baseline 1.0: no swap on 3 of 4 stock clips with Approved 3 + 8).
+        # Owner rule: always use the best match among the selected faces.
+        ranked = tuple(x for x in ranked if x.similarity >= minimum_similarity)
+        if getattr(target.hair_color, "lab", None) is None:
+            # Without hair evidence keep the feature-led preference: a source
+            # with real ArcFace resemblance beats colour-only look-alikes, and
+            # colour-only sources are used only when nothing else resembles.
+            featured = tuple(x for x in ranked if rope_similarity(x.candidate.embedding, target.embedding) > 0)
+            ranked = featured or ranked
         bonuses = MATCH_FEEDBACK.bonuses(target.embedding)
-        ranked = tuple(replace(x, similarity=x.similarity+bonuses.get(x.candidate.face_id, 0.0)) for x in ranked)
+        # Baseline 1.6: hair colour is a big ranking factor (owner request).
+        # Measured colour distance, scaled by evidence; 0 when unmeasured.
+        def hair_term(face_id):
+            match = hair_match(target.hair_color, face_id)
+            return 0.0 if match is None else HAIR_WEIGHT * match
+        ranked = tuple(replace(x, similarity=x.similarity+bonuses.get(x.candidate.face_id, 0.0)
+                               +hair_term(x.candidate.face_id)) for x in ranked)
         # Collapse duplicate IDs before computing ambiguity. IDs are semantic
         # choices, not extra votes, and candidate ordering is not evidence.
         unique = {}

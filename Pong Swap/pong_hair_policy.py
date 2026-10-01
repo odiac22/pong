@@ -9,12 +9,18 @@ import numpy as np
 
 HAIR_RULES = {2:'dark',3:'dark',8:'light',13:'dark',19:'light',23:'dark'}
 
-def required_hair(face_id):
+def _hard_rule(face_id):
     match=re.fullmatch(r'approved-(\d+)(?:-[0-9a-f]{12})?',str(face_id))
     return HAIR_RULES.get(int(match.group(1))) if match else None
 
+def required_hair(face_id):
+    # Baseline 1.6: the engine measures target hair whenever this is truthy.
+    # With hair profiles present, every Multi Face source is hair-ranked.
+    from pong_hair_profile import source_profile
+    return _hard_rule(face_id) or ('profile' if source_profile(face_id) else None)
+
 def hair_allows(face_id, color, confidence):
-    required=required_hair(face_id)
+    required=_hard_rule(face_id)
     uncertain = color not in ('dark', 'light') or not np.isfinite(confidence) or confidence < .80
     return required is None or uncertain or color == required
 
@@ -50,6 +56,16 @@ def segmented_hair_score(logits):
 
 
 def color_from_hair_mask(crop_rgb, hair_probability):
+    # Baseline 1.6: same category result, now carrying the measured colour.
+    from pong_hair_profile import HairColor, hair_lab
+    category, confidence = _category_from_hair_mask(crop_rgb, hair_probability)
+    try:
+        lab = hair_lab(crop_rgb, hair_probability)
+    except Exception:
+        lab = None
+    return (HairColor(category, lab), confidence)
+
+def _category_from_hair_mask(crop_rgb, hair_probability):
     probability=np.asarray(hair_probability)
     if crop_rgb.shape!=(512,512,3) or probability.shape!=(512,512):return ('unknown',0.)
     mask=np.isfinite(probability)&(probability>=.80)
