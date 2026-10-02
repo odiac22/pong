@@ -10,7 +10,7 @@ def session(sid, *, prefetch, frames=0, prepared=False, headroom=0.0):
     return SimpleNamespace(
         id=sid, channel="tiktok", prefetch=prefetch, activation_requested=not prefetch,
         playback_started_at=0 if prefetch else 1.0, frames=frames, fps=30.0,
-        complete=False, stop=threading.Event(), subscribers=1,
+        complete=False, stop=threading.Event(), subscribers=1, created_at=0.0,
         is_prepared=lambda: prepared, headroom=headroom)
 
 
@@ -53,6 +53,22 @@ class ShareHeadroomTest(unittest.TestCase):
     def test_prepared_next_video_waits_for_engine_policy(self):
         engine, _ = self.build(headroom=1.8, prepared=True)
         self.assertTrue(engine._foreground_playback_needs_gpu("n"))
+
+    def test_only_next_video_gets_boost_frames(self):
+        visible = session("v", prefetch=False, frames=90, headroom=0.2)
+        nxt = session("n", prefetch=True, frames=3)
+        later = session("l", prefetch=True, frames=3)
+        later.created_at = 5.0
+        engine = FakeEngine(visible, nxt)
+        engine._sessions["l"] = later
+        boost = PrefetchBoost(engine, share_headroom=0, boost_frames=20, min_foreground_lead=0.5,
+                              admission_slots=2)
+        boost._install_yield_exemption()
+        # visible rendered lead = 90/30 - (90/30 - 0.2) = 0.2 s < 0.5: no boost yet
+        self.assertTrue(engine._foreground_playback_needs_gpu("n"))
+        visible.headroom = 0.8
+        self.assertFalse(engine._foreground_playback_needs_gpu("n"))
+        self.assertTrue(engine._foreground_playback_needs_gpu("l"))
 
     def test_disabled_share_keeps_engine_policy(self):
         engine, _ = self.build(headroom=1.8, share=0)

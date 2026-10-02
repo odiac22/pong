@@ -24,17 +24,28 @@ from typing import Any
 
 
 class PrefetchBoost:
-    def __init__(self, engine: Any, *, boost_frames: int = 10,
-                 min_foreground_lead: float = 0.6, interval: float = 0.015,
-                 share_headroom: float | None = None):
+    def __init__(self, engine: Any, *, boost_frames: int | None = None,
+                 min_foreground_lead: float | None = None, interval: float = 0.015,
+                 share_headroom: float | None = None, admission_slots: int | None = None):
+        env = os.environ.get
         self.engine = engine
-        self.boost_frames = max(1, int(boost_frames))
-        self.min_foreground_lead = max(0.0, float(min_foreground_lead))
+        # Baseline 1.10 (live 1.5 s auto-swipe): only the NEXT video is boosted,
+        # for ~0.8 s of frames, while the visible one keeps >= 0.3 s rendered.
+        self.boost_frames = max(1, int(boost_frames if boost_frames is not None
+                                       else env("PONG_PREFETCH_BOOST_FRAMES", "24")))
+        self.min_foreground_lead = max(0.0, float(min_foreground_lead if min_foreground_lead is not None
+                                                  else env("PONG_PREFETCH_MIN_FOREGROUND_LEAD", "0.3")))
         # Baseline 1.8: an unprepared next video may share the GPU once the
         # visible video has this much playable media ahead (engine: 2 s).
         if share_headroom is None:
-            share_headroom = float(os.environ.get("PONG_PREFETCH_SHARE_HEADROOM", "1.0"))
+            share_headroom = float(env("PONG_PREFETCH_SHARE_HEADROOM", "0.6"))
         self.share_headroom = max(0.0, float(share_headroom))
+        # Baseline 1.10: the engine admits ONE speculative session at a time and
+        # it keeps the slot until prepared. With 1.5 s swipes that slot was
+        # held by a video that never got GPU time, so the next video waited
+        # in admission until shown and started cold (first swap ~3.3 s).
+        self.admission_slots = max(1, int(admission_slots if admission_slots is not None
+                                          else env("PONG_PREFETCH_SLOTS", "2")))
         self.shared_frames = 0
         self.interval = max(0.005, float(interval))
         self.enabled = os.environ.get("PONG_PREFETCH_BOOST", "1") != "0"
@@ -59,6 +70,7 @@ class PrefetchBoost:
             speculative = bool(session is not None and session.prefetch
                                and not session.activation_requested)
             if (speculative and session.frames < self.boost_frames
+                    and self._is_next(session)
                     and self._foreground_lead(session.channel) >= self.min_foreground_lead):
                 return False
             # Live 2026-10-01: after each swipe the visible video needs ~5 s to
@@ -75,9 +87,25 @@ class PrefetchBoost:
 
         engine._foreground_playback_needs_gpu = needs_gpu
 
+    def _is_next(self, session: Any) -> bool:
+        """The oldest live speculative session on a channel is the next video:
+        Pong registers prepared videos in feed order and retires passed ones."""
+        engine = self.engine
+        with engine._sessions_lock:
+            peers = [s for s in engine._sessions.values()
+                     if s.channel == session.channel and s.prefetch and not s.activation_requested
+                     and not s.playback_started_at and not s.stop.is_set()]
+        if not peers:
+            return False
+        return min(peers, key=lambda s: s.created_at).id == session.id
+
     def start(self) -> None:
         if not self.enabled or self._thread is not None:
             return
+        if self.admission_slots > 1:
+            # Same acquire(timeout)/release interface as the engine's Lock.
+            # Installed before any session exists (service startup).
+            self.engine._prefetch_gate = threading.BoundedSemaphore(self.admission_slots)
         self._install_yield_exemption()
         self._thread = threading.Thread(target=self._loop, name="PongPrefetchBoost", daemon=True)
         self._thread.start()
@@ -86,7 +114,8 @@ class PrefetchBoost:
         return {"enabled": self.enabled, "boostFrames": self.boost_frames,
                 "minForegroundLead": self.min_foreground_lead,
                 "promotions": self.promotions, "boosted": len(self._boosted),
-                "shareHeadroom": self.share_headroom, "sharedFrames": self.shared_frames}
+                "shareHeadroom": self.share_headroom, "sharedFrames": self.shared_frames,
+                "admissionSlots": self.admission_slots}
 
     def _foreground_lead(self, channel: str) -> float:
         engine = self.engine
@@ -138,7 +167,7 @@ class PrefetchBoost:
                 # forget our bookkeeping without touching that promotion.
                 self._boosted.discard(session.id)
                 continue
-            want = (session.frames < self.boost_frames
+            want = (session.frames < self.boost_frames and self._is_next(session)
                     and self._foreground_lead(session.channel) >= self.min_foreground_lead)
             if want and session.id not in self._boosted:
                 engine._promote_queued_session_work(session)

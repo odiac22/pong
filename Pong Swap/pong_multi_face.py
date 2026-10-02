@@ -27,7 +27,10 @@ def acquisition_probe_step(fps, prefetch, consensus_pending):
     # A 350ms speculative probe interval cannot ever complete a consensus
     # that correctly rejects gaps above 250ms. Finish an already-started
     # acquisition on consecutive source frames, then return to normal cadence.
-    return max(1, int(round(max(1., fps)*.35))) if prefetch and not consensus_pending else 1
+    # Baseline 1.10: 0.35 s -> 0.1 s. With 1.5 s swipes a prepared video got
+    # ~3 probes before it was shown, so most were still unlocked (0 swapped)
+    # when they appeared. Probes stop once the video's face is locked.
+    return max(1, int(round(max(1., fps)*.10))) if prefetch and not consensus_pending else 1
 
 
 def multi_video_key(channel, epoch, source, face_ids, revision, manual=False):
