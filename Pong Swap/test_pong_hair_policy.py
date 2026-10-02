@@ -23,7 +23,7 @@ class HairPolicyTests(unittest.TestCase):
     def test_small_highlights_do_not_turn_dark_hair_light(self):
         image=np.full((512,512,3),25,np.uint8);p=np.zeros((512,512),np.float32)
         p[40:450,110:400]=.95;image[40:90,110:400]=200
-        self.assertEqual(color_from_hair_mask(image,p)[0],'dark')
+        self.assertEqual(color_from_hair_mask(image,p)[0],'black')
     def test_hair_margin_keeps_clear_winner_despite_many_low_alternative_logits(self):
         import torch
         logits=torch.zeros((19,2,2));logits[17]=2
@@ -33,29 +33,41 @@ class HairPolicyTests(unittest.TestCase):
         self.assertLess(float(segmented_hair_score(logits)[0,0]),.5)
     def test_tinted_light_hair_and_brown_hair(self):
         p=np.zeros((512,512),np.float32);p[40:180,130:380]=.95
-        for rgb,expected in [((185,80,95),'light'),((75,55,40),'dark'),((30,30,30),'dark')]:
+        for rgb,expected in [((185,80,95),'light'),((75,55,40),'brown'),((30,30,30),'black')]:
             image=np.full((512,512,3),220,np.uint8)
             values=np.linspace(.85,1.2,250)[None,:,None]
             image[40:180,130:380]=np.clip(np.array(rgb)*values,0,255).astype(np.uint8)
             self.assertEqual(color_from_hair_mask(image,p)[0],expected)
     def test_rules_exact_ids_only(self):
-        for n in (2,3,13,23):self.assertEqual(required_hair(f'approved-{n}-abcdef123456'),'dark')
-        for n in (8,19):self.assertEqual(required_hair(f'approved-{n}'),'light')
-        # Baseline 1.6: unruled faces with a measured hair profile are hair-ranked;
-        # hard light/dark gates stay exact-id only.
-        from pong_hair_policy import _hard_rule
+        # 1.9 owner roster: ruled faces always measure hair/skin.
+        for n in (3,8,13,17,23,27,28):self.assertEqual(required_hair(f'approved-{n}-abcdef123456'),'rule')
         with patch('pong_hair_profile.source_profile', return_value=None):
-            for name in ('approved-18','approved-20','other-approved-2','approved-2-wrong'):self.assertIsNone(required_hair(name))
-        for name in ('approved-18','approved-20','other-approved-2','approved-2-wrong'):self.assertIsNone(_hard_rule(name))
-    def test_unknown_and_low_confidence_rank_all_selected_but_known_mismatch_blocks(self):
-        self.assertFalse(hair_allows('approved-2','light',1))
-        for color,confidence in [('unknown',1),('light',.79),('dark',float('nan'))]:
-            self.assertTrue(hair_allows('approved-2',color,confidence))
-        self.assertTrue(hair_allows('approved-2','dark',.9))
-        self.assertTrue(hair_allows('approved-17','unknown',0))
+            for name in ('approved-18','approved-19','approved-20','other-approved-3','approved-3-wrong'):self.assertIsNone(required_hair(name))
+    def test_owner_hair_rules_block_only_confident_mismatches(self):
+        cases=[('approved-3','black',True),('approved-3','brown',False),('approved-3','colorful',False),
+               ('approved-8','light',True),('approved-8','colorful',True),('approved-8','brown',False),('approved-8','black',False),
+               ('approved-13','black',True),('approved-13','colorful',True),('approved-13','light',False),
+               ('approved-17','light',True),('approved-17','black',False),
+               ('approved-27','black',True),('approved-27','brown',True),('approved-27','light',False),
+               ('approved-19','light',True),('approved-19','black',True)]
+        for face,color,expected in cases:self.assertEqual(hair_allows(face,color,.95),expected,(face,color))
+        for color,confidence in [('unknown',1),('light',.79),('black',float('nan'))]:
+            self.assertTrue(hair_allows('approved-3',color,confidence))
+    def test_dark_skin_rule(self):
+        from pong_hair_profile import HairColor
+        def target(category):
+            c=HairColor('black');c.skin={'category':category};return c
+        for face in ('approved-23','approved-28'):
+            self.assertFalse(hair_allows(face,target('light'),.95))
+            for category in ('dark','medium','unknown'):self.assertTrue(hair_allows(face,target(category),.95))
+        self.assertTrue(hair_allows('approved-23','black',.95))
+    def test_colorful_hair_detected(self):
+        p=np.zeros((512,512),np.float32);p[40:180,130:380]=.95
+        image=np.full((512,512,3),220,np.uint8);image[40:180,130:380]=(230,60,200)
+        self.assertEqual(color_from_hair_mask(image,p)[0],'colorful')
     def test_segmented_pixels_not_background_decide_color(self):
         p=np.zeros((512,512),np.float32);p[40:180,130:380]=.99
-        for hair,background,expected in [(35,220,'dark'),(200,30,'light')]:
+        for hair,background,expected in [(35,220,'black'),(200,30,'light')]:
             image=np.full((512,512,3),background,np.uint8);image[p>.8]=hair
             self.assertEqual(color_from_hair_mask(image,p)[0],expected)
     def test_bald_covered_mixed_midtones_uncertain(self):
@@ -65,9 +77,9 @@ class HairPolicyTests(unittest.TestCase):
         self.assertIsNone(head_crop(image,np.zeros((5,2))))
     def test_hard_hair_gate_precedes_strong_feedback(self):
         p=FacePresentation('female',.99);v=np.array([1.,0.,0.]);k=np.zeros((5,2))
-        dark=CandidateIdentity('approved-2',v,p);light=CandidateIdentity('approved-8',v,p)
+        dark=CandidateIdentity('approved-3',v,p);light=CandidateIdentity('approved-8',v,p)
         t=TargetIdentity(k,v,p,100,'light',.99)
-        with patch('pong_multi_face.MATCH_FEEDBACK.bonuses',return_value={'approved-2':1000}):
+        with patch('pong_multi_face.MATCH_FEEDBACK.bonuses',return_value={'approved-3':1000}):
             decision=choose_multi_face([dark,light],[t])
             self.assertEqual(decision.selection.candidate.face_id,'approved-8')
         self.assertIsNone(choose_multi_face([dark],[t]).selection)

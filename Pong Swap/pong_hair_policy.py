@@ -7,22 +7,29 @@ import re
 import cv2
 import numpy as np
 
-HAIR_RULES = {2:'dark',3:'dark',8:'light',13:'dark',19:'light',23:'dark'}
+from pong_face_roster import rule as _roster_rule
 
-def _hard_rule(face_id):
-    match=re.fullmatch(r'approved-(\d+)(?:-[0-9a-f]{12})?',str(face_id))
-    return HAIR_RULES.get(int(match.group(1))) if match else None
+HAIR_CATEGORIES = ('black', 'brown', 'light', 'colorful')
 
 def required_hair(face_id):
-    # Baseline 1.6: the engine measures target hair whenever this is truthy.
-    # With hair profiles present, every Multi Face source is hair-ranked.
+    # The engine measures target hair (and, since 1.9, skin) whenever this is
+    # truthy. With hair profiles present, every Multi Face source is hair-ranked.
     from pong_hair_profile import source_profile
-    return _hard_rule(face_id) or ('profile' if source_profile(face_id) else None)
+    return ('rule' if _roster_rule(face_id) else None) or ('profile' if source_profile(face_id) else None)
 
 def hair_allows(face_id, color, confidence):
-    required=_hard_rule(face_id)
-    uncertain = color not in ('dark', 'light') or not np.isfinite(confidence) or confidence < .80
-    return required is None or uncertain or color == required
+    """Owner roster rules (pong_face_roster). Unmeasured evidence never blocks."""
+    found=_roster_rule(face_id)
+    if not found:
+        return True
+    allowed_hair=found.get('hair')
+    hair_known = color in HAIR_CATEGORIES and np.isfinite(confidence) and confidence >= .80
+    if allowed_hair is not None and hair_known and str(color) not in allowed_hair:
+        return False
+    skin=getattr(color,'skin',None) or {}
+    if found.get('skin')=='dark' and skin.get('category')=='light':
+        return False
+    return True
 
 def head_crop(frame, keypoints):
     points=np.asarray(keypoints,dtype=np.float32)
@@ -63,7 +70,53 @@ def color_from_hair_mask(crop_rgb, hair_probability):
         lab = hair_lab(crop_rgb, hair_probability)
     except Exception:
         lab = None
-    return (HairColor(category, lab), confidence)
+    color = HairColor(category, lab)
+    try:
+        color.skin = skin_tone(crop_rgb, hair_probability)
+    except Exception:
+        color.skin = {'category': 'unknown'}
+    return (color, confidence)
+
+# head_crop puts the eyes 1.25 eye-distances above centre on a crop 6.5
+# eye-distances wide, so in the 512 px crop: eye distance ~79 px, eyes at y~158.
+_EYE_D = 512 / 6.5
+_EYE_Y = 256 - 1.25 * _EYE_D
+
+def skin_tone(crop_rgb, hair_probability):
+    """Cheek skin tone from the same crop, no extra inference.
+
+    Uses the Individual Typology Angle, ITA = atan((L*-50)/b*). Calibrated on
+    the approved photos: dark-skinned Ash/Moni/24 median 8-23, light-skinned
+    faces 42-66. 'light' (>= 35) is the only category a dark-skin rule blocks;
+    'medium' (28-35) stays allowed because lighting moves single frames.
+    Hair-covered, clipped or too-small samples return 'unknown'.
+    """
+    probability = np.asarray(hair_probability)
+    if crop_rgb.shape != (512, 512, 3) or probability.shape != (512, 512):
+        return {'category': 'unknown'}
+    y = int(_EYE_Y + .75 * _EYE_D)
+    half = 15
+    pixels = []
+    for x in (int(256 - .55 * _EYE_D), int(256 + .55 * _EYE_D)):
+        patch = crop_rgb[y-half:y+half, x-half:x+half]
+        clear = np.asarray(probability[y-half:y+half, x-half:x+half]) < .5
+        pixels.append(patch[clear])
+    pixels = np.concatenate(pixels) if pixels else np.empty((0, 3), np.uint8)
+    if len(pixels) < 300:
+        return {'category': 'unknown'}
+    lab = cv2.cvtColor(pixels.reshape(-1, 1, 3).astype(np.uint8), cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
+    lightness = lab[:, 0] * 100 / 255
+    usable = (lightness > 8) & (lightness < 97)
+    if np.count_nonzero(usable) < 300:
+        return {'category': 'unknown'}
+    L = float(np.median(lightness[usable]))
+    b = float(np.median(lab[usable, 2] - 128))
+    if b < 4:
+        # Skin always has a warm b*; grey/blue values mean coloured lighting.
+        return {'category': 'unknown', 'L': round(L, 1), 'b': round(b, 1)}
+    ita = float(np.degrees(np.arctan2(L - 50, b)))
+    category = 'dark' if ita < 28 else 'medium' if ita < 35 else 'light'
+    return {'category': category, 'ita': round(ita, 1), 'L': round(L, 1), 'b': round(b, 1)}
 
 def _category_from_hair_mask(crop_rgb, hair_probability):
     probability=np.asarray(hair_probability)
@@ -81,12 +134,15 @@ def _category_from_hair_mask(crop_rgb, hair_probability):
     if np.max(crop_rgb)<35 or np.mean(np.min(pixels,axis=1)>250)>.35:return ('unknown',0.)
     lab=cv2.cvtColor(crop_rgb,cv2.COLOR_RGB2LAB)[mask,0].astype(np.float32)*100/255
     hsv=cv2.cvtColor(crop_rgb,cv2.COLOR_RGB2HSV)[mask]
-    if np.mean((hsv[:,1]>120)&(hsv[:,0]>35)&(hsv[:,0]<170))>.25:return ('unknown',0.)
-    q25,median,q75=np.percentile(lab,[25,50,75])
     confidence=float(np.mean(probability[mask]))
+    # Dyed green/blue/purple/pink (natural hair hues are red-orange-yellow).
+    if np.mean((hsv[:,1]>120)&(hsv[:,0]>35)&(hsv[:,0]<170))>.25:return ('colorful',confidence)
+    q25,median,q75=np.percentile(lab,[25,50,75])
     # Roots and shadows do not make highlighted/blonde hair uniformly bright.
     # Use robust distributions, retaining an explicit intermediate/ambiguous band.
-    if median<=38 and q75<=48:return ('dark',confidence)
+    # 1.9: owner rules separate black from brown hair.
+    if median<=25 and q75<=40:return ('black',confidence)
+    if median<=38 and q75<=48:return ('brown',confidence)
     # Substantial light lengths can coexist with >25% genuinely dark roots.
     # Require a majority of bright segmented hair, never a few highlights.
     if median>=45 and q75>=56 and (q25>=25 or np.mean(lab>=50)>=.60):
@@ -96,4 +152,7 @@ def _category_from_hair_mask(crop_rgb, hair_probability):
     value25,value50,value75=np.percentile(hsv[:,2],[25,50,75])
     if median>=38 and q25>=25 and value25>=135 and value50>=170 and value75>=190:
         return ('light',confidence)
+    # Medium brown. 36-45 stays ambiguous: Lau's own reference hair measures
+    # L* 41 (dark blonde), so calling it brown would block her look-alikes.
+    if median<36:return ('brown',confidence)
     return ('unknown',0.)

@@ -28,6 +28,7 @@ from pong_playback_credit import PlaybackSessionStopped, apply_ordered_playback
 from pong_external_playback_lease import ExternalPlaybackLeases
 from pong_remote_gateway import create_remote_gateway
 from pong_prefetch_boost import PrefetchBoost
+from pong_face_roster import display_name
 
 
 SERVICE_VERSION = "30.38.6"
@@ -552,6 +553,8 @@ def faces() -> dict[str, Any]:
     for public_face in ENGINE.faces_public():
         entry = dict(public_face)
         face_id = str(entry.get("id") or "")
+        # Owner roster names (Ala, Lau, ...); IDs stay folder-derived.
+        entry["name"] = display_name(face_id, str(entry.get("name") or ""))
         if face_id:
             try:
                 # Android WebView normally permits only a small number of
