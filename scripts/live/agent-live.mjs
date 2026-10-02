@@ -30,8 +30,9 @@ async function pongTarget(app) {
   adb('forward', `tcp:${PORT}`, `localabstract:${pongSocket(app)}`);
   const targets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
   // The Pong WebView carries the PongAgentLive bridge; TikTok's does not.
-  const pages = targets.filter(t => t.type === 'page' && !/tiktok\.com/i.test(t.url));
-  if (!pages.length) throw new Error('Pong page not found in WebView targets');
+  const wantTikTok = process.env.AGENT_LIVE_TARGET === 'tiktok';
+  const pages = targets.filter(t => t.type === 'page' && (/tiktok\.com/i.test(t.url) === wantTikTok));
+  if (!pages.length) throw new Error(`${wantTikTok ? 'TikTok' : 'Pong'} page not found in WebView targets`);
   return pages[0];
 }
 
@@ -72,11 +73,20 @@ if (command === 'start') {
   console.log('live session stopped');
 } else if (command === 'eval') {
   const page = await cdp(await pongTarget(arg2 || 'pong1'));
-  const value = await page.evaluate(arg1);
+  const source = arg1.endsWith('.js') && existsSync(arg1) ? readFileSync(arg1, 'utf8') : arg1;
+  const value = await page.evaluate(source);
   console.log(JSON.stringify(value, null, 1).replace(/https?:\/\/[^\s"]+/g, '<url>'));
   page.close();
 } else if (command === 'shot') {
-  const png = execFileSync(ADB, ['exec-out', 'screencap', '-p'], {maxBuffer: 64 * 1024 * 1024});
+  // Foldables expose several displays; capture the one that is currently ON.
+  let display = [];
+  try {
+    const ids = [...adb('shell', 'dumpsys', 'SurfaceFlinger', '--display-id').matchAll(/Display (\d+) \(HWC display (\d+)\)/g)];
+    const on = adb('shell', 'dumpsys', 'display');
+    const active = ids.find(([, id]) => new RegExp(`local:${id}"[\\s\\S]{0,4000}?state ON`).test(on)) || ids[0];
+    if (active) display = ['-d', active[1]];
+  } catch {}
+  const png = execFileSync(ADB, ['exec-out', 'screencap', '-p', ...display], {maxBuffer: 64 * 1024 * 1024});
   writeFileSync(arg1 || 'phone.png', png);
   console.log(`saved ${arg1 || 'phone.png'} (${png.length} bytes)`);
 } else {

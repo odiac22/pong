@@ -302,7 +302,9 @@ public class MainActivity extends Activity {
       Gravity.START | Gravity.TOP
     );
     params.leftMargin = dp(10);
-    params.topMargin = dp(40);
+    // 29.47: below Pong's swap-status chip (it covered the pill at 40 dp).
+    params.topMargin = dp(76);
+    agentLiveIndicator.setElevation(dp(101));
     root.addView(agentLiveIndicator, params);
   }
 
@@ -2049,18 +2051,23 @@ public class MainActivity extends Activity {
         tiktokExitButton = new android.widget.Button(this);
         tiktokExitButton.setText("Exit");
         tiktokExitButton.setAllCaps(false);
-        tiktokExitButton.setTextSize(13);
+        // 29.47: owner asked for 1/5 of the previous size (64x48 dp -> ~29x22 dp area).
+        tiktokExitButton.setTextSize(8);
         tiktokExitButton.setTextColor(Color.rgb(255, 230, 210));
         tiktokExitButton.setContentDescription("Exit TikTok and return to Pong");
-        tiktokExitButton.setPadding(dp(10), 0, dp(10), 0);
+        tiktokExitButton.setPadding(0, 0, 0, 0);
+        tiktokExitButton.setIncludeFontPadding(false);
         tiktokExitButton.setMinimumWidth(0);
         tiktokExitButton.setMinimumHeight(0);
+        tiktokExitButton.setMinWidth(0);
+        tiktokExitButton.setMinHeight(0);
+        tiktokExitButton.setStateListAnimator(null);
         GradientDrawable exitBackground = new GradientDrawable();
         exitBackground.setColor(Color.rgb(170, 24, 36));
-        exitBackground.setCornerRadius(dp(10));
+        exitBackground.setCornerRadius(dp(6));
         tiktokExitButton.setBackground(exitBackground);
         tiktokExitButton.setElevation(dp(100));
-        FrameLayout.LayoutParams exitParams = new FrameLayout.LayoutParams(dp(64), dp(48), android.view.Gravity.TOP | android.view.Gravity.RIGHT);
+        FrameLayout.LayoutParams exitParams = new FrameLayout.LayoutParams(dp(29), dp(22), android.view.Gravity.TOP | android.view.Gravity.RIGHT);
         exitParams.topMargin = dp(8);
         exitParams.rightMargin = dp(8);
         root.addView(tiktokExitButton, exitParams);
@@ -2068,6 +2075,7 @@ public class MainActivity extends Activity {
       }
       tiktokExitButton.setVisibility(View.VISIBLE);
       tiktokExitButton.bringToFront();
+      setTikTokRefreshCap(true);
       appState.edit().putBoolean("tiktok-mode-open", true).apply();
       tiktokPongUiForeground = false;
       if (TIKTOK_MOBILE_WEB && web != null) {
@@ -2103,8 +2111,36 @@ public class MainActivity extends Activity {
     tiktokSwipeHandled = false;
   }
 
+  // 29.47 smoothness: TikTok/swap video is 24-30 fps, so compositing the
+  // feed at the Fold's 120 Hz only adds GPU/compositor work. Prefer the
+  // same-resolution 60 Hz mode while TikTok is shown; restore on exit.
+  private void setTikTokRefreshCap(boolean cap) {
+    try {
+      android.view.Window window = getWindow();
+      android.view.WindowManager.LayoutParams attributes = window.getAttributes();
+      int wanted = 0;
+      if (cap) {
+        android.view.Display display = getWindowManager().getDefaultDisplay();
+        android.view.Display.Mode current = display.getMode();
+        for (android.view.Display.Mode mode : display.getSupportedModes()) {
+          if (Math.abs(mode.getRefreshRate() - 60f) < 1f &&
+              mode.getPhysicalWidth() == current.getPhysicalWidth() &&
+              mode.getPhysicalHeight() == current.getPhysicalHeight()) {
+            wanted = mode.getModeId();
+            break;
+          }
+        }
+      }
+      if (attributes.preferredDisplayModeId != wanted) {
+        attributes.preferredDisplayModeId = wanted;
+        window.setAttributes(attributes);
+      }
+    } catch (Exception ignored) {}
+  }
+
   private void hideTikTokMode() {
     if (tiktokWeb == null) return;
+    setTikTokRefreshCap(false);
     cancelTikTokVisibleFrameAudit();
     cancelTikTokPendingGesture();
     CookieManager.getInstance().flush();
