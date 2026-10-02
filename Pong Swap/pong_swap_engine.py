@@ -8583,12 +8583,20 @@ class PongSwapEngine:
                             guard = tracking_state["landmarkGuard"] = LandmarkGuard()
                         tracking_state["landmarkGuardSeenAt"] = now
                         detected_points = np.asarray(detected_kps, dtype=np.float32).reshape(5, 2)
-                        detected_kps = guard.observe(
-                            detected_points,
-                            getattr(self, "_detect_score_lookup", {}).get(
-                                detected_points.tobytes()
-                            ),
+                        detected_score = getattr(self, "_detect_score_lookup", {}).get(
+                            detected_points.tobytes()
                         )
+                        if os.environ.get("PONG_LANDMARK106", "1") != "0":
+                            # Baseline 1.15: average with 2d106det's points
+                            # (real eye/nose/lip positions at side angles).
+                            from pong_landmark106 import Landmark106
+                            if getattr(self, "_landmark106", None) is None:
+                                self._landmark106 = Landmark106(MODELS_DIR)
+                            if self._landmark106.available():
+                                detected_points = self._landmark106.fuse(
+                                    self._torch, img_chw, detected_points
+                                )
+                        detected_kps = guard.observe(detected_points, detected_score)
                         if detected_kps is None and frame_evidence is not None:
                             frame_evidence.rejection_reasons.append("landmark-guard-hold")
                     if detected_kps is not None and tracking_state is not None:

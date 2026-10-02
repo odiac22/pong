@@ -3,8 +3,8 @@
   "files": {
     "__init__.py": "d997f6b19f350d1317623de6ea477e128dba7b85ecea9434b6c9f59f09d97fcc",
     "frozen_factories.py": "09ffe0ebf244192f14c98737bb4b4ca2104448a83beee5280810a316afb61095",
-    "frozen_manifest.json": "d96f0e4371531aa3d1361a6a96fbcd42182756622e5c8c92ff87f649fca2423d",
-    "frozen_methods.py": "33a8ebf4c4ab0cc0bdf85757c315b73b5b3937aec5cf05822e63fc384c2e5fff",
+    "frozen_manifest.json": "44dedf2b31429ac1107ebe55bb9b0d4d1ef75016a007c518f054dc33f38531e5",
+    "frozen_methods.py": "531d8fd2cc94fdd31187c75f2fa15a139ba365db40a5f24e74477df0ef52578d",
     "install.py": "1880d44eabf4f5a9636b51645501490f836707fece396c8fd2794c45510d1f5a",
     "service_adapter.py": "e821d96066a55fd484b8231037dd2dd10d3aef35e35d0a041614aa76c20c2858",
     "vendor/__init__.py": "2308484a3dfbfb4c5236fa01cc0b8b31ac6d0730ccd60113450d2f88b1fc7157",
