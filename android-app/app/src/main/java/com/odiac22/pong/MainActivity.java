@@ -252,6 +252,82 @@ public class MainActivity extends Activity {
     setConnectionIndicator("Connecting");
   }
 
+  // Agent live indicator: a blinking red "LIVE" pill shown only while Claude
+  // is connected over wireless debugging and sending heartbeats through the
+  // Pong page bridge (window.PongAgentLive.ping(seconds)). It expires by
+  // itself shortly after the last heartbeat, so it can never stay on after
+  // the session ends. Only the Pong WebView gets this bridge, never TikTok.
+  private TextView agentLiveIndicator;
+  private long agentLiveUntil = 0L;
+  private final Handler agentLiveHandler = new Handler(Looper.getMainLooper());
+  private final Runnable agentLiveTick = new Runnable() {
+    @Override public void run() {
+      if (agentLiveIndicator == null) return;
+      long now = android.os.SystemClock.elapsedRealtime();
+      if (now >= agentLiveUntil) {
+        agentLiveIndicator.animate().cancel();
+        agentLiveIndicator.setVisibility(View.GONE);
+        return;
+      }
+      // Recorder-style blink; re-raise above TikTok layers added later.
+      agentLiveIndicator.bringToFront();
+      boolean dim = agentLiveIndicator.getAlpha() > 0.6f;
+      agentLiveIndicator.animate().alpha(dim ? 0.35f : 1f).setDuration(450).start();
+      agentLiveHandler.postDelayed(this, 500);
+    }
+  };
+
+  private void ensureAgentLiveIndicator() {
+    ensureRoot();
+    if (agentLiveIndicator != null) return;
+    agentLiveIndicator = new TextView(this);
+    agentLiveIndicator.setText("● LIVE");
+    agentLiveIndicator.setTextColor(Color.WHITE);
+    agentLiveIndicator.setTextSize(11f);
+    agentLiveIndicator.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+    agentLiveIndicator.setGravity(Gravity.CENTER);
+    agentLiveIndicator.setPadding(dp(9), dp(4), dp(10), dp(4));
+    agentLiveIndicator.setClickable(false);
+    agentLiveIndicator.setFocusable(false);
+    agentLiveIndicator.setContentDescription("Claude is viewing this app live over wireless debugging");
+    GradientDrawable background = new GradientDrawable();
+    background.setCornerRadius(dp(12));
+    background.setColor(Color.rgb(220, 38, 38));
+    background.setStroke(dp(1), Color.argb(200, 255, 255, 255));
+    agentLiveIndicator.setBackground(background);
+    agentLiveIndicator.setVisibility(View.GONE);
+    FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+      ViewGroup.LayoutParams.WRAP_CONTENT,
+      ViewGroup.LayoutParams.WRAP_CONTENT,
+      Gravity.START | Gravity.TOP
+    );
+    params.leftMargin = dp(10);
+    params.topMargin = dp(40);
+    root.addView(agentLiveIndicator, params);
+  }
+
+  private void agentLivePing(int seconds) {
+    ensureAgentLiveIndicator();
+    long window = Math.max(2, Math.min(15, seconds)) * 1000L;
+    boolean wasHidden = agentLiveIndicator.getVisibility() != View.VISIBLE;
+    agentLiveUntil = android.os.SystemClock.elapsedRealtime() + window;
+    if (wasHidden) {
+      agentLiveIndicator.setAlpha(1f);
+      agentLiveIndicator.setVisibility(View.VISIBLE);
+      agentLiveHandler.removeCallbacks(agentLiveTick);
+      agentLiveHandler.post(agentLiveTick);
+    }
+  }
+
+  private final class AgentLiveBridge {
+    @JavascriptInterface public void ping(int seconds) {
+      runOnUiThread(() -> agentLivePing(seconds));
+    }
+    @JavascriptInterface public void stop() {
+      runOnUiThread(() -> { agentLiveUntil = 0L; agentLiveHandler.post(agentLiveTick); });
+    }
+  }
+
   private void setConnectionIndicator(String route) {
     activePongRoute = route;
     if (connectionIndicator == null) return;
@@ -372,6 +448,7 @@ public class MainActivity extends Activity {
     CookieManager.getInstance().setAcceptCookie(true);
     CookieManager.getInstance().setAcceptThirdPartyCookies(web, true);
     web.addJavascriptInterface(new PongNativeSwapBridge(), "PongNativeSwap");
+    web.addJavascriptInterface(new AgentLiveBridge(), "PongAgentLive");
     web.setWebViewClient(new WebViewClient() {
       @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
         // Refreshing the overlay must not dismiss the independent TikTok page.
@@ -2754,6 +2831,7 @@ public class MainActivity extends Activity {
     super.onStop();
   }
   @Override protected void onDestroy() {
+    agentLiveHandler.removeCallbacksAndMessages(null);
     cancelTikTokBinaryMedia();
     cancelTikTokVisibleFrameAudit();
     cancelTikTokPendingGesture();
