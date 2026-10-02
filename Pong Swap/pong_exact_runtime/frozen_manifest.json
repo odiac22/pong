@@ -44,7 +44,7 @@
     "owner": "Models",
     "method": "_detect_retinaface_inner",
     "captured": true,
-    "sha256": "ac932a6e9736a5e113c7c87513f83d4df53642a2718745bda6522a0c5cddd8f8"
+    "sha256": "9b23800ff527d7281c14379190d9d3d61b2e941ce67962b4b20d5be9649135ac"
   },
   {
     "module": "rope.gpen_runtime",
@@ -58,7 +58,7 @@
     "owner": "PongSwapEngine",
     "method": "process_frame",
     "captured": true,
-    "sha256": "cd9751b0ff3f26e846e5d131ee15c2718da5b5e3eb48bfc0ec1dbcef8e82490a"
+    "sha256": "1ff232a826d034614c811fd19c3c3c5f9e8fcde1f818d70f6e2b314552b3201d"
   },
   {
     "module": "pong_swap_engine",
