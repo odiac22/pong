@@ -407,7 +407,10 @@ RUNTIME_DEFAULTS: dict[str, Any] = {
 # profiles the user retained. Historical comparison assets remain isolated on
 # disk, but a live settings update must never make them resident in the GPU
 # worker.
-PRODUCTION_SWAPPER_OPTIONS = ("128",)
+# 2026-10-02 owner live trial: 256 (InSwapper x4), AlphaFace 256, HyperSwap 1C 256.
+# A swapper change must be applied with a renderer restart (the exact
+# acceleration bundle is not re-qualified for a hot model switch).
+PRODUCTION_SWAPPER_OPTIONS = ("128", "256", "AlphaFace", "HyperSwap1C")
 PRODUCTION_RESTORER_OPTIONS = ("GPEN256", "GPEN512", "GPEN1024")
 
 
