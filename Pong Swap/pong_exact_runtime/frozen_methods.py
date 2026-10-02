@@ -2496,7 +2496,7 @@ def prepare(self, edge, *, allow_create=True):
 
 
 # Source: pong_swap_engine.PongSwapEngine.process_frame
-# SHA256: dd6f6b105ad489b58cca9905f62799b60cb6754e66e784d1703df75fbc3d3989
+# SHA256: d4068d3d0e4fb926271153e6a01b24f9e23fe796a4005d019a02c9d1f4aa5398
 def process_frame(
     self,
     frame: Any,
@@ -3143,10 +3143,16 @@ def process_frame(
                         diagnostics.setdefault(
                             f"maskAdaptiveBackend.{adaptive_mask_backend}", []
                         ).append(1.0)
+                swap_kps = kps
+                if os.environ.get("PONG_HEAD_POSE", "1") != "0":
+                    # Baseline 1.16: frame the swap for the head's
+                    # real turn instead of a flat front template.
+                    from pong_head_pose import pseudo_points
+                    swap_kps, _yaw = pseudo_points(kps)
                 try:
                     img_chw = self._vm.swap_core(
                         img_chw,
-                        kps,
+                        swap_kps,
                         source_embedding,
                         self._vm.parameters,
                         self._vm.control,

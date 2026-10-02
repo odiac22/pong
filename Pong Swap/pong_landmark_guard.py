@@ -100,7 +100,12 @@ class LandmarkGuard:
             if self.waited <= self.acquire_wait_frames:
                 self.stats["held"] += 1
                 return None
-            return self._repair(kps, TEMPLATE, learn=False)
+            # Baseline 1.16: the standard shape is turned to the head's
+            # estimated yaw, so a mostly hidden side face is rebuilt at its
+            # real angle rather than as a front-facing face.
+            from pong_head_pose import estimate_yaw, turned_template
+            yaw, _ = estimate_yaw(kps)
+            return self._repair(kps, turned_template(yaw), learn=False)
         return self._repair(kps, self.shape, learn=True, score=score)
 
     def _repair(self, kps: np.ndarray, shape: np.ndarray, *, learn: bool, score: float = 0.0):

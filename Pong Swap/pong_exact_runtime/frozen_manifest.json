@@ -58,7 +58,7 @@
     "owner": "PongSwapEngine",
     "method": "process_frame",
     "captured": true,
-    "sha256": "dd6f6b105ad489b58cca9905f62799b60cb6754e66e784d1703df75fbc3d3989"
+    "sha256": "d4068d3d0e4fb926271153e6a01b24f9e23fe796a4005d019a02c9d1f4aa5398"
   },
   {
     "module": "pong_swap_engine",

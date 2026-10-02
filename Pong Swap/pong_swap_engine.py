@@ -8755,10 +8755,16 @@ class PongSwapEngine:
                             diagnostics.setdefault(
                                 f"maskAdaptiveBackend.{adaptive_mask_backend}", []
                             ).append(1.0)
+                    swap_kps = kps
+                    if os.environ.get("PONG_HEAD_POSE", "1") != "0":
+                        # Baseline 1.16: frame the swap for the head's
+                        # real turn instead of a flat front template.
+                        from pong_head_pose import pseudo_points
+                        swap_kps, _yaw = pseudo_points(kps)
                     try:
                         img_chw = self._vm.swap_core(
                             img_chw,
-                            kps,
+                            swap_kps,
                             source_embedding,
                             self._vm.parameters,
                             self._vm.control,
