@@ -29,7 +29,8 @@ try {
   const created = await json('/sessions', {method: 'POST', body: JSON.stringify({
     channel: 'render', sourceUrl: `${BENCH}/stock/${encodeURIComponent(clip)}`, faceId: face, faceIds: [face],
     startSeconds: 0, prebufferSeconds: 0.25, navigationClass: 'foreground', externalPlaybackClock: true,
-    restorationProfile: 'default', clientEpoch: epoch, activationSequence: 1})});
+    restorationProfile: 'default', clientEpoch: epoch, activationSequence: 1,
+    diagnosticsEnabled: arg('diag', '0') === '1'})});
   const id = created.session.id;
   const started = Date.now();
   let sequence = 0;
@@ -52,7 +53,10 @@ try {
   spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', raw, '-c', 'copy', '-movflags', '+faststart', out]);
   console.log(JSON.stringify({clip, out, frames: status.frames, transformed: status.transformedFrames,
     wallSeconds: (Date.now() - started) / 1000, renderFps: +(status.frames / Math.max(0.001, status.frameWorkSeconds ?? status.timingTotals?.frameWorkSeconds ?? 1)).toFixed(1),
-    timing: status.timingTotals, compatibility: status.compatibilityStatus}));
+    timing: status.timingTotals, compatibility: status.compatibilityStatus,
+    // Median per-stage GPU ms when --diag 1 (cuda_* keys).
+    stages: Object.fromEntries(Object.entries(status.diagnostics || {}).filter(([k, v]) => /Ms$/.test(k) && v.length)
+      .map(([k, v]) => [k, +[...v].sort((a, b) => a - b)[Math.floor(v.length / 2)].toFixed(2)]))}));
   await fetch(`${RENDERER}/sessions/${id}`, {method: 'DELETE'});
 } finally {
   // Restore the live (process-local) configuration exactly as it was.

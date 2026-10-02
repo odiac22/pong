@@ -38,8 +38,8 @@ SOURCE_HASHES = {
     # Reviewed 2026-10-01 (Claude, Baseline 1.7): process_frame short occlusion
     # bridge (pose carry-forward <=0.15 s for a locked face when detector and LK
     # both miss) + previous-pose bookkeeping. No inference kernels changed.
-    'pong_swap_engine.py': 'fac31a3a6393c465c425baeb8818573beb116a6ada7a47817eac049389975fa6',
-    'engine/Rope/rope/Models.py': '9b0682794910b71f0043805852f03339a4dee6362cd171cd10d5576d3449b38b',
+    'pong_swap_engine.py': '617295ec3dab5997e443cc2fa1c08cacff9dfb710fc8c4ec1891929330877fa4',
+    'engine/Rope/rope/Models.py': '4b45f6c63c5a126fd30334edda46e242e5b148ff2014de7279bdb0a3ca337334',
     'engine/Rope/rope/VideoManager.py': 'aaf8646ceeb2bf7c97101af9b8879a63a8c52e36adbc18bd3a8642e76520fb6f',
     # Reviewed 2026-09-30: adds only the cold user-approved loader branch;
     # frame execution, graph capture, ownership and fallback are unchanged.

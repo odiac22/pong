@@ -278,6 +278,8 @@ class SessionRequest(BaseModel):
     prefetch: bool = False
     externalPlaybackClock: bool = False
     prebufferSeconds: float = Field(default=1.0, ge=0.25, le=5.0)
+    # Profiling only (per-stage GPU timings in the session status).
+    diagnosticsEnabled: bool = False
     navigationClass: str = "prefetch"
     restorationProfile: Literal["default", "tiktok-face-size", "tiktok-face-size-motion-trial", "tiktok-gpen512"] = "default"
     clientEpoch: str = Field(default="", max_length=96)
@@ -889,6 +891,7 @@ def create_session(payload: SessionRequest) -> dict[str, Any]:
     # responsive while the foreground-priority gate takes over from priming.
     try:
         session = ENGINE.create_session(
+            diagnostics_enabled=payload.diagnosticsEnabled,
             channel=payload.channel,
             source_url=_engine_source_url(payload.sourceUrl),
             source_urls=[_engine_source_url(value) for value in payload.sourceUrls],
