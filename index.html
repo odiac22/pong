@@ -33469,7 +33469,13 @@ window.PongObserverStateBridge = () => ({
     'min-width:28px;height:28px;padding:0 6px;box-sizing:border-box;align-items:center;justify-content:center;z-index:1001;' +
     'border-radius:999px;border:1px solid rgba(255,255,255,.35);background:rgba(20,40,80,.75);color:#fff;' +
     'font:600 10px/1 system-ui,sans-serif;letter-spacing:.02em;-webkit-tap-highlight-color:transparent}' +
-    'html.pong-tiktok-original-overlay #pong-swap-model-button[data-busy="1"]{background:rgba(120,80,20,.8)}';
+    'html.pong-tiktok-original-overlay #pong-swap-model-button[data-busy="1"]{background:rgba(120,80,20,.8)}' +
+    '#pong-swap-model-menu{display:none}' +
+    'html.pong-tiktok-original-overlay #pong-swap-model-menu[data-open="1"]{display:grid;position:fixed;left:60px;top:calc(50% - 152px);' +
+    'z-index:1002;gap:4px;padding:6px;border-radius:10px;background:rgba(10,16,30,.92);border:1px solid rgba(255,255,255,.25)}' +
+    '#pong-swap-model-menu button{min-width:118px;height:30px;padding:0 10px;border-radius:7px;border:1px solid rgba(255,255,255,.2);' +
+    'background:rgba(255,255,255,.08);color:#fff;font:600 12px/1 system-ui,sans-serif;text-align:left;-webkit-tap-highlight-color:transparent}' +
+    '#pong-swap-model-menu button[aria-current="true"]{background:#2f5bd3;border-color:#7d9bff}';
   document.head.appendChild(style);
   const button = document.createElement('button');
   button.id = 'pong-swap-model-button'; button.type = 'button';
@@ -33488,10 +33494,31 @@ window.PongObserverStateBridge = () => ({
     button.dataset.busy = '';
   };
   const refresh = () => read().then(show).catch(() => {});
-  button.addEventListener('click', async event => {
+  // Tap opens the list of models (live one highlighted); picking one applies
+  // it. Tapping the button again closes the list without changing anything.
+  const labels = {'128': 'InSwapper 128', 'HyperSwap1C': 'HyperSwap 256', 'AlphaFace': 'AlphaFace 256', '256': 'InSwapper 256'};
+  const menu = document.createElement('div');
+  menu.id = 'pong-swap-model-menu'; menu.setAttribute('role', 'menu');
+  for (const model of order) {
+    const item = document.createElement('button');
+    item.type = 'button'; item.dataset.model = model; item.setAttribute('role', 'menuitem');
+    item.textContent = labels[model];
+    item.addEventListener('click', event => {
+      event.preventDefault(); event.stopPropagation();
+      menu.dataset.open = '';
+      if (model !== current) choose(model);
+    });
+    menu.appendChild(item);
+  }
+  document.body.appendChild(menu);
+  button.addEventListener('click', event => {
     event.preventDefault(); event.stopPropagation();
     if (busy) return;
-    const next = order[(Math.max(0, order.indexOf(current)) + 1) % order.length];
+    for (const item of menu.children) item.setAttribute('aria-current', String(item.dataset.model === current));
+    menu.dataset.open = menu.dataset.open === '1' ? '' : '1';
+    window.dispatchEvent(new Event('pong-toolbar-layout'));
+  });
+  async function choose(next) {
     busy = true; button.dataset.busy = '1'; button.textContent = '…';
     try {
       const response = await pongFaceSwapControlFetch('/pong-swap/swapper-model', {
@@ -33509,7 +33536,7 @@ window.PongObserverStateBridge = () => ({
       busy = false; button.dataset.busy = '';
       if (button.textContent === '…') await refresh();
     }
-  });
+  }
   refresh();
   setInterval(() => { if (!busy && document.documentElement.classList.contains('pong-tiktok-original-overlay')) refresh(); }, 30000);
 })();
