@@ -33392,7 +33392,10 @@ window.PongObserverStateBridge = () => ({
   const style=document.createElement('style'),positions=document.createElement('style');
   style.id='pong-toolbar-approved-size';positions.id='pong-tiktok-approved-positions';
   // Only the named playback toolbar is resized. Never scale a panel or its descendants.
-  style.textContent=toolbar.map(s=>s+':not('+excluded+' *)').join(',')+'{scale:.625!important;transform-origin:top left!important}\nhtml.pong-tiktok-original-overlay #github-token-button{display:none!important}';
+  style.textContent=toolbar.map(s=>s+':not('+excluded+' *)').join(',')+'{scale:.625!important;transform-origin:top left!important}\nhtml.pong-tiktok-original-overlay #github-token-button{display:none!important}'
+    // 29.48: TikTok's own sound button (left, above Exit) controls TikTok audio;
+    // Pong's deck audio toggle sat on top of it and did nothing in TikTok mode.
+    +'\nhtml.pong-tiktok-original-overlay .audio-toggle-button{display:none!important}';
   document.head.append(style,positions);
   let pending=0, lastLayoutKey='';
   const place=(s,x,y)=>'html.pong-tiktok-original-overlay '+s+'{position:fixed!important;left:'+x+'px!important;top:'+y+'px!important;right:auto!important;bottom:auto!important;transform:none!important;translate:none!important;margin:0!important;transition:none!important}';

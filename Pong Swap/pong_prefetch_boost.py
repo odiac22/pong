@@ -25,10 +25,17 @@ from typing import Any
 
 class PrefetchBoost:
     def __init__(self, engine: Any, *, boost_frames: int = 10,
-                 min_foreground_lead: float = 0.6, interval: float = 0.015):
+                 min_foreground_lead: float = 0.6, interval: float = 0.015,
+                 share_headroom: float | None = None):
         self.engine = engine
         self.boost_frames = max(1, int(boost_frames))
         self.min_foreground_lead = max(0.0, float(min_foreground_lead))
+        # Baseline 1.8: an unprepared next video may share the GPU once the
+        # visible video has this much playable media ahead (engine: 2 s).
+        if share_headroom is None:
+            share_headroom = float(os.environ.get("PONG_PREFETCH_SHARE_HEADROOM", "1.0"))
+        self.share_headroom = max(0.0, float(share_headroom))
+        self.shared_frames = 0
         self.interval = max(0.005, float(interval))
         self.enabled = os.environ.get("PONG_PREFETCH_BOOST", "1") != "0"
         self.promotions = 0
@@ -49,9 +56,20 @@ class PrefetchBoost:
         def needs_gpu(excluded_session_id: str, *args: Any, **kwargs: Any) -> bool:
             with engine._sessions_lock:
                 session = engine._sessions.get(excluded_session_id)
-            if (session is not None and session.prefetch and not session.activation_requested
-                    and session.frames < self.boost_frames
+            speculative = bool(session is not None and session.prefetch
+                               and not session.activation_requested)
+            if (speculative and session.frames < self.boost_frames
                     and self._foreground_lead(session.channel) >= self.min_foreground_lead):
+                return False
+            # Live 2026-10-01: after each swipe the visible video needs ~5 s to
+            # bank 2 s of headroom, so with swipes every 2-5 s the next video sat
+            # at its 10 boost frames (0 swapped) until shown. Until it is
+            # prepared, let it use the surplus above ``share_headroom``; the
+            # visible video regains priority the moment it drops below that.
+            if (speculative and self.share_headroom > 0 and not session.is_prepared()
+                    and self._foreground_headroom(session.channel, kwargs.get("now"))
+                    >= self.share_headroom):
+                self.shared_frames += 1
                 return False
             return original(excluded_session_id, *args, **kwargs)
 
@@ -67,7 +85,8 @@ class PrefetchBoost:
     def snapshot(self) -> dict[str, Any]:
         return {"enabled": self.enabled, "boostFrames": self.boost_frames,
                 "minForegroundLead": self.min_foreground_lead,
-                "promotions": self.promotions, "boosted": len(self._boosted)}
+                "promotions": self.promotions, "boosted": len(self._boosted),
+                "shareHeadroom": self.share_headroom, "sharedFrames": self.shared_frames}
 
     def _foreground_lead(self, channel: str) -> float:
         engine = self.engine
@@ -80,6 +99,22 @@ class PrefetchBoost:
             return 0.0
         played = engine._estimated_playback_position_seconds(active, time.monotonic())
         return active.frames / active.fps - played
+
+    def _foreground_headroom(self, channel: str, now: float | None = None) -> float:
+        """Smallest playable headroom among visible streams, as the engine measures it."""
+        engine = self.engine
+        observed = time.monotonic() if now is None else float(now)
+        with engine._sessions_lock:
+            active_ids = set(engine._active_by_channel.values())
+            sessions = [engine._sessions[i] for i in active_ids if i in engine._sessions]
+        headroom = math.inf
+        for active in sessions:
+            if (active.complete or active.stop.is_set() or active.prefetch
+                    or not active.activation_requested or not active.playback_started_at
+                    or active.fps <= 0 or active.subscribers <= 0):
+                continue
+            headroom = min(headroom, engine._playback_headroom_seconds(active, observed))
+        return headroom
 
     def _unpromote(self, session: Any) -> None:
         engine = self.engine

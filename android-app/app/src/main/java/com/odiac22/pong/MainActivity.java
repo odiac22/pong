@@ -1641,7 +1641,8 @@ public class MainActivity extends Activity {
   private String tiktokMobileObserverScript() {
     return bundledJavascript("tiktok-phone-fit.js") + ";" +
       bundledJavascript("tiktok-mobile.js").replaceFirst("^javascript:", "") + ";" +
-      bundledJavascript("tiktok-scrub.js").replaceFirst("^javascript:", "");
+      bundledJavascript("tiktok-scrub.js").replaceFirst("^javascript:", "") + ";" +
+      bundledJavascript("tiktok-sound-button.js").replaceFirst("^javascript:", "");
   }
 
   private String bundledJavascript(String name) {
@@ -2067,9 +2068,14 @@ public class MainActivity extends Activity {
         exitBackground.setCornerRadius(dp(6));
         tiktokExitButton.setBackground(exitBackground);
         tiktokExitButton.setElevation(dp(100));
-        FrameLayout.LayoutParams exitParams = new FrameLayout.LayoutParams(dp(29), dp(22), android.view.Gravity.TOP | android.view.Gravity.RIGHT);
-        exitParams.topMargin = dp(8);
-        exitParams.rightMargin = dp(8);
+        // 29.48: owner asked for Exit on the left, directly above Pong's eye.
+        // The eye's centre is 50% - 42 dp (Pong WebView CSS px == dp here),
+        // 28 dp tall; Exit sits 6 dp above it, so its centre is 50% - 73 dp.
+        // TikTok's sound button (tiktok-sound-button.js) stacks above Exit.
+        FrameLayout.LayoutParams exitParams = new FrameLayout.LayoutParams(dp(29), dp(22),
+          android.view.Gravity.LEFT | android.view.Gravity.CENTER_VERTICAL);
+        exitParams.leftMargin = dp(12);
+        exitParams.bottomMargin = dp(73);
         root.addView(tiktokExitButton, exitParams);
         tiktokExitButton.setOnClickListener(v -> hideTikTokMode());
       }

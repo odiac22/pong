@@ -40,8 +40,17 @@ async function cdp(target) {
   const socket = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
   let id = 0; const waiting = new Map();
-  socket.onmessage = event => { const m = JSON.parse(event.data); if (m.id && waiting.has(m.id)) { waiting.get(m.id)(m); waiting.delete(m.id); } };
-  const send = (method, params = {}) => new Promise(resolve => { const n = ++id; waiting.set(n, resolve); socket.send(JSON.stringify({id: n, method, params})); });
+  socket.onmessage = event => { const m = JSON.parse(event.data); if (m.id && waiting.has(m.id)) { waiting.get(m.id).resolve(m); waiting.delete(m.id); } };
+  // A dropped wireless-debug link closes the socket: fail pending calls so the
+  // heartbeat reconnects instead of Node exiting on a never-settled await.
+  const failAll = () => { for (const w of waiting.values()) w.reject(new Error('debug socket closed')); waiting.clear(); };
+  socket.onclose = failAll; socket.onerror = failAll;
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const n = ++id;
+    const timer = setTimeout(() => { waiting.delete(n); reject(new Error(`${method} timed out`)); }, 15000);
+    waiting.set(n, {resolve: v => { clearTimeout(timer); resolve(v); }, reject: e => { clearTimeout(timer); reject(e); }});
+    socket.send(JSON.stringify({id: n, method, params}));
+  });
   const evaluate = async expression => {
     const r = await send('Runtime.evaluate', {expression, returnByValue: true, awaitPromise: true});
     if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description || 'evaluation failed');
@@ -62,10 +71,15 @@ if (command === 'start') {
   }
   // Child: heartbeat every 2 s with a 6 s expiry; reconnect if the page reloads.
   for (;;) {
+    let page;
     try {
-      const page = await cdp(await pongTarget(app));
+      page = await cdp(await pongTarget(app));
       for (;;) { await page.evaluate('window.PongAgentLive && window.PongAgentLive.ping(6), true'); await sleep(2000); }
-    } catch { await sleep(2000); }
+    } catch (error) {
+      try { page?.close(); } catch {}
+      console.log(new Date().toISOString(), 'reconnecting:', String(error?.message || error).slice(0, 120));
+      await sleep(3000);
+    }
   }
 } else if (command === 'stop') {
   if (existsSync(PID_FILE)) { try { process.kill(Number(readFileSync(PID_FILE, 'utf8'))); } catch {} unlinkSync(PID_FILE); }
