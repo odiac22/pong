@@ -407,21 +407,32 @@
     stats.scans++;stats.fullScans++;stats.fullMs+=elapsed;
     stats.totalMs+=elapsed;stats.maxMs=Math.max(stats.maxMs,elapsed);
   };
+  // 29.49: profile grids, Discover and Inbox have nothing to swap, but every
+  // TikTok re-render there triggered a full scan (up to 4/s, each forcing
+  // layout on the WebView main thread that Pong's page shares). Off the feed,
+  // scan at most once a second; feed, video and cinema routes are unchanged.
+  const onFeed = () => {
+    const path = location.pathname.replace(/^\/[a-z]{2}(-[A-Z]{2})?(?=\/)/, '');
+    return path === '/' || path === '' || /^\/(foryou|following|friends)\/?$/.test(path) ||
+      /\/(video|photo)\/\d+/.test(path) || !!document.querySelector('[data-e2e="cinema-mode-exit"]');
+  };
   const schedule = (forceFull=true) => {
     pendingFull ||= forceFull;
     if (scanTimer === null) scanTimer = setTimeout(()=>{
       const full=pendingFull;pendingFull=false;scan(full);
-    }, Math.max(0, 250 - (performance.now() - lastScan)));
+    }, Math.max(0, (onFeed() ? 250 : 1000) - (performance.now() - lastScan)));
   };
   // A newly visible post should not wait for the next 500ms polling tick.
   document.addEventListener('playing', event => {
-    if (event.target?.tagName === 'VIDEO' && !event.target.classList.contains('pong-tiktok-swap-stream')) scan();
+    if (event.target?.tagName !== 'VIDEO' || event.target.classList.contains('pong-tiktok-swap-stream')) return;
+    if (onFeed()) scan(); else schedule();
   }, true);
   // Admit the incoming decoder on its load event, without waiting a quarter
   // second for the periodic metadata scan. Batch same-turn load events and
   // ignore our own warm/active decoder so this cannot create a feedback loop.
   document.addEventListener('loadstart', event => {
     if(event.target?.tagName!=='VIDEO'||event.target.classList.contains('pong-tiktok-swap-stream'))return;
+    if(!onFeed()){schedule();return;}
     if(scanTimer!==null)clearTimeout(scanTimer);
     scanTimer=setTimeout(scan,0);
   },true);
@@ -439,6 +450,17 @@
     if(stableFeedTrial){photoCache=null;clockCache=null;if(!document.hidden){scan(true);return;}}
     schedule(true);
   });
-  setInterval(()=>schedule(false), 500);
+  // TikTok navigates with pushState (no popstate): scan at once on a route
+  // change so returning to the feed never waits for the 1 s off-feed cadence.
+  let lastRoute = location.pathname;
+  setInterval(()=>{
+    if (location.pathname !== lastRoute) {
+      lastRoute = location.pathname;
+      if (stableFeedTrial) { photoCache = null; clockCache = null; }
+      scan(true);
+      return;
+    }
+    schedule(false);
+  }, 500);
   schedule();
 })();
