@@ -2161,7 +2161,7 @@ def _match_color(self, swap, target, valid_mask=None):
 
 
 # Source: rope.Models.Models._detect_retinaface_inner
-# SHA256: ac932a6e9736a5e113c7c87513f83d4df53642a2718745bda6522a0c5cddd8f8
+# SHA256: 9b23800ff527d7281c14379190d9d3d61b2e941ce67962b4b20d5be9649135ac
 def _detect_retinaface_inner(self, img, max_num, score, input_size=640):
     # Resize image to fit within the input_size. Model is fully
     # convolutional so it accepts any multiple-of-32 edge length;
@@ -2385,6 +2385,9 @@ def _detect_retinaface_inner(self, img, max_num, score, input_size=640):
 
         # Single device boundary at the very end. Everything before
         # was queued on the worker's CUDA stream.
+        # Baseline 1.12: keep the scores of the returned faces (same
+        # order) for occlusion-aware landmark checks. Same sync point.
+        self._last_detect_scores = all_scores[keep].cpu().numpy()
         return all_kpss[keep].cpu().numpy()
 
 
@@ -2493,7 +2496,7 @@ def prepare(self, edge, *, allow_create=True):
 
 
 # Source: pong_swap_engine.PongSwapEngine.process_frame
-# SHA256: cd9751b0ff3f26e846e5d131ee15c2718da5b5e3eb48bfc0ec1dbcef8e82490a
+# SHA256: 1ff232a826d034614c811fd19c3c3c5f9e8fcde1f818d70f6e2b314552b3201d
 def process_frame(
     self,
     frame: Any,
@@ -2950,6 +2953,32 @@ def process_frame(
                                 )
                 elif detected_kps is not None and tracking_state is not None:
                     tracking_state["occlusionBridgeFrames"] = 0
+                if (
+                    detected_kps is not None
+                    and tracking_state is not None
+                    and os.environ.get("PONG_LANDMARK_GUARD", "1") != "0"
+                ):
+                    # Baseline 1.12: repair detector guesses for covered
+                    # face parts (hands, food, hair, objects) before they
+                    # reach the LK fusion and the swap alignment.
+                    from pong_landmark_guard import LandmarkGuard
+                    guard = tracking_state.get("landmarkGuard")
+                    now = time.monotonic()
+                    if (
+                        guard is None
+                        or now - float(tracking_state.get("landmarkGuardSeenAt", 0.0)) > 1.0
+                    ):
+                        guard = tracking_state["landmarkGuard"] = LandmarkGuard()
+                    tracking_state["landmarkGuardSeenAt"] = now
+                    detected_points = np.asarray(detected_kps, dtype=np.float32).reshape(5, 2)
+                    detected_kps = guard.observe(
+                        detected_points,
+                        getattr(self, "_detect_score_lookup", {}).get(
+                            detected_points.tobytes()
+                        ),
+                    )
+                    if detected_kps is None and frame_evidence is not None:
+                        frame_evidence.rejection_reasons.append("landmark-guard-hold")
                 if detected_kps is not None and tracking_state is not None:
                     raw_kps = np.asarray(detected_kps, dtype=np.float32)
                     if detector_lk_prediction is not None:

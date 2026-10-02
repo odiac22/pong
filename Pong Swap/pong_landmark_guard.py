@@ -87,6 +87,11 @@ class LandmarkGuard:
                 self.waited = 0
                 self.stats["accepted"] += 1
                 return kps
+            if self.streak:
+                # Confident, but not yet learned: render it unchanged so a
+                # clear face never waits.
+                self.stats["accepted"] += 1
+                return kps
             # Never learn this person's shape from a guessed (low-score)
             # detection: a covered face at the start of a clip would become
             # the reference. Hold briefly, then repair against the standard
@@ -101,6 +106,21 @@ class LandmarkGuard:
     def _repair(self, kps: np.ndarray, shape: np.ndarray, *, learn: bool, score: float = 0.0):
         eye = float(np.linalg.norm(kps[1] - kps[0]))
         scale = max(eye, float(np.linalg.norm(kps[[3, 4]].mean(0) - kps[[0, 1]].mean(0))), 1.0)
+        if not learn:
+            # Standard-shape mode (no confident frame of this person yet):
+            # anchor on the eyes, the points that usually stay visible when
+            # hands, food or a cup cover the lower face. A consensus search
+            # here picked the squashed mouth/nose pair and shrank the face.
+            transform = _similarity(shape[[0, 1]], kps[[0, 1]])
+            if transform is None:
+                return kps
+            predicted = _apply(transform, shape)
+            outliers = np.linalg.norm(predicted - kps, axis=1) > self.agree_ratio * scale
+            if not outliers.any():
+                self.stats["accepted"] += 1
+                return kps
+            self.stats["repaired"] += 1
+            return np.where(outliers[:, None], predicted, kps).astype(np.float32)
         # Least-median-of-squares pose from the best-agreeing point pair.
         best = None
         for i, j in combinations(range(5), 2):
