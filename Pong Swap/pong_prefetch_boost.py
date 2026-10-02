@@ -30,15 +30,16 @@ class PrefetchBoost:
         env = os.environ.get
         self.engine = engine
         # Baseline 1.10 (live 1.5 s auto-swipe): only the NEXT video is boosted,
-        # for ~0.8 s of frames, while the visible one keeps >= 0.3 s rendered.
+        # for 15 frames once the visible one is 0.8 s ahead (live A/B 2026-10-02);
+        # its setup and first 3 frames always go first (startup_frames).
         self.boost_frames = max(1, int(boost_frames if boost_frames is not None
-                                       else env("PONG_PREFETCH_BOOST_FRAMES", "24")))
+                                       else env("PONG_PREFETCH_BOOST_FRAMES", "15")))
         self.min_foreground_lead = max(0.0, float(min_foreground_lead if min_foreground_lead is not None
-                                                  else env("PONG_PREFETCH_MIN_FOREGROUND_LEAD", "0.3")))
+                                                  else env("PONG_PREFETCH_MIN_FOREGROUND_LEAD", "0.8")))
         # Baseline 1.8: an unprepared next video may share the GPU once the
         # visible video has this much playable media ahead (engine: 2 s).
         if share_headroom is None:
-            share_headroom = float(env("PONG_PREFETCH_SHARE_HEADROOM", "0.6"))
+            share_headroom = float(env("PONG_PREFETCH_SHARE_HEADROOM", "1.0"))
         self.share_headroom = max(0.0, float(share_headroom))
         # Baseline 1.10: the engine admits ONE speculative session at a time and
         # it keeps the slot until prepared. With 1.5 s swipes that slot was
@@ -46,6 +47,7 @@ class PrefetchBoost:
         # in admission until shown and started cold (first swap ~3.3 s).
         self.admission_slots = max(1, int(admission_slots if admission_slots is not None
                                           else env("PONG_PREFETCH_SLOTS", "2")))
+        self.startup_frames = max(0, int(env("PONG_PREFETCH_STARTUP_FRAMES", "3")))
         self.shared_frames = 0
         self.interval = max(0.005, float(interval))
         self.enabled = os.environ.get("PONG_PREFETCH_BOOST", "1") != "0"
@@ -69,9 +71,9 @@ class PrefetchBoost:
                 session = engine._sessions.get(excluded_session_id)
             speculative = bool(session is not None and session.prefetch
                                and not session.activation_requested)
-            if (speculative and session.frames < self.boost_frames
-                    and self._is_next(session)
-                    and self._foreground_lead(session.channel) >= self.min_foreground_lead):
+            if (speculative and session.frames < self.boost_frames and self._is_next(session)
+                    and (session.frames < self.startup_frames
+                         or self._foreground_lead(session.channel) >= self.min_foreground_lead)):
                 return False
             # Live 2026-10-01: after each swipe the visible video needs ~5 s to
             # bank 2 s of headroom, so with swipes every 2-5 s the next video sat
@@ -86,6 +88,17 @@ class PrefetchBoost:
             return original(excluded_session_id, *args, **kwargs)
 
         engine._foreground_playback_needs_gpu = needs_gpu
+
+    def tune(self, *, boost_frames: int | None = None, min_foreground_lead: float | None = None,
+             share_headroom: float | None = None, startup_frames: int | None = None) -> None:
+        if startup_frames is not None:
+            self.startup_frames = max(0, min(60, int(startup_frames)))
+        if boost_frames is not None:
+            self.boost_frames = max(1, min(300, int(boost_frames)))
+        if min_foreground_lead is not None:
+            self.min_foreground_lead = max(0.0, min(5.0, float(min_foreground_lead)))
+        if share_headroom is not None:
+            self.share_headroom = max(0.0, min(5.0, float(share_headroom)))
 
     def _is_next(self, session: Any) -> bool:
         """The oldest live speculative session on a channel is the next video:
@@ -115,7 +128,7 @@ class PrefetchBoost:
                 "minForegroundLead": self.min_foreground_lead,
                 "promotions": self.promotions, "boosted": len(self._boosted),
                 "shareHeadroom": self.share_headroom, "sharedFrames": self.shared_frames,
-                "admissionSlots": self.admission_slots}
+                "admissionSlots": self.admission_slots, "startupFrames": self.startup_frames}
 
     def _foreground_lead(self, channel: str) -> float:
         engine = self.engine
@@ -167,8 +180,13 @@ class PrefetchBoost:
                 # forget our bookkeeping without touching that promotion.
                 self._boosted.discard(session.id)
                 continue
+            # Setup (warm, face embeddings, first identity probe) and the first
+            # frames are short one-off jobs: with 1.5 s swipes they otherwise sat
+            # at priority 10 behind the visible video's continuous priority-0
+            # frames, so most videos were shown with 0 frames prepared.
             want = (session.frames < self.boost_frames and self._is_next(session)
-                    and self._foreground_lead(session.channel) >= self.min_foreground_lead)
+                    and (session.frames < self.startup_frames
+                         or self._foreground_lead(session.channel) >= self.min_foreground_lead))
             if want and session.id not in self._boosted:
                 engine._promote_queued_session_work(session)
                 self._boosted.add(session.id)

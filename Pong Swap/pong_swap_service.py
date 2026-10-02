@@ -544,6 +544,17 @@ def preview_settings(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.put("/prefetch-boost")
+def tune_prefetch_boost(payload: dict[str, Any]) -> dict[str, Any]:
+    """Process-local tuning of the next-video scheduler (not persisted)."""
+    try:
+        PREFETCH_BOOST.tune(**{key: payload[key] for key in
+                               ("boost_frames", "min_foreground_lead", "share_headroom", "startup_frames") if key in payload})
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "prefetchBoost": PREFETCH_BOOST.snapshot()}
+
+
 @app.get("/faces")
 def faces() -> dict[str, Any]:
     # Inventory refreshes stat/hash local files. Keep that work in FastAPI's

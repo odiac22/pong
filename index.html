@@ -17052,6 +17052,12 @@ function random40PumpPreloadQueue(delay = 0) {
   clearTimeout(random40PreloadPumpTimer);
   random40PreloadPumpTimer = setTimeout(() => {
     random40PreloadPumpTimer = null;
+    // 29.50: the deck is hidden behind TikTok; preloading its media there only
+    // costs main-thread time shared with TikTok's WebView. Resume on return.
+    if (document.documentElement.classList.contains('pong-tiktok-original-overlay')) {
+      random40PumpPreloadQueue(1500);
+      return;
+    }
     const limit = random40PreloadConcurrencyLimit();
     if (limit <= 0) {
       // A foreground stall should pause hidden media, but it must not strand the
@@ -22509,7 +22515,10 @@ async function random40PollServerVideoCache() {
   const activeVideo = activeWrapper?.querySelector('video');
   const activeOriginalUrl = pongCanonicalMediaUrlForWrapper(activeWrapper);
   const activeRecord = activeOriginalUrl ? random40ServerVideoCacheRecordFor(activeOriginalUrl) : null;
-  const activePlaybackDemand = Boolean(activeVideo && (
+  // 29.50: in TikTok mode the hidden deck video is not playing; reporting its
+  // empty buffer as critical kept the helper's downloads constrained.
+  const activePlaybackDemand = Boolean(activeVideo &&
+    !document.documentElement.classList.contains('pong-tiktok-original-overlay') && (
     !activeVideo.paused || activeWrapper?.dataset?.playIntent === 'true'
   ));
   const playbackQuery = activePlaybackDemand
