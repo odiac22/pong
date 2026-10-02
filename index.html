@@ -33456,6 +33456,64 @@ window.PongObserverStateBridge = () => ({
   return {saved:true,toolbarScale:.625,panelsUnchanged:true,tiktokPositionsOnly:true};
 })()
 </script>
+<script id="pong-tiktok-model-switch">
+(() => {
+  // Owner model trial (2026-10-02): one button above TikTok's sound button
+  // (sound is at 50% - 118px, 28px tall) that cycles the swap model. The PC
+  // renderer restarts to apply a model (~40 s); the label shows what is live.
+  const order = ['128', 'HyperSwap1C', 'AlphaFace', '256'];
+  const short = {'128': '128', 'HyperSwap1C': 'Hyper', 'AlphaFace': 'Alpha', '256': '256'};
+  const style = document.createElement('style');
+  style.textContent = '#pong-swap-model-button{display:none}' +
+    'html.pong-tiktok-original-overlay #pong-swap-model-button{display:flex;position:fixed;left:12px;top:calc(50% - 152px);' +
+    'min-width:28px;height:28px;padding:0 6px;box-sizing:border-box;align-items:center;justify-content:center;z-index:1001;' +
+    'border-radius:999px;border:1px solid rgba(255,255,255,.35);background:rgba(20,40,80,.75);color:#fff;' +
+    'font:600 10px/1 system-ui,sans-serif;letter-spacing:.02em;-webkit-tap-highlight-color:transparent}' +
+    'html.pong-tiktok-original-overlay #pong-swap-model-button[data-busy="1"]{background:rgba(120,80,20,.8)}';
+  document.head.appendChild(style);
+  const button = document.createElement('button');
+  button.id = 'pong-swap-model-button'; button.type = 'button';
+  button.setAttribute('aria-label', 'Swap model'); button.textContent = '…';
+  document.body.appendChild(button);
+  let current = '', busy = false;
+  const read = async () => {
+    const response = await pongFaceSwapControlFetch('/pong-swap/swapper-model', {cache: 'no-store'});
+    if (!response.ok) throw new Error(String(response.status));
+    return response.json();
+  };
+  const show = info => {
+    current = info.model;
+    button.textContent = short[info.model] || info.model;
+    button.title = info.label;
+    button.dataset.busy = '';
+  };
+  const refresh = () => read().then(show).catch(() => {});
+  button.addEventListener('click', async event => {
+    event.preventDefault(); event.stopPropagation();
+    if (busy) return;
+    const next = order[(Math.max(0, order.indexOf(current)) + 1) % order.length];
+    busy = true; button.dataset.busy = '1'; button.textContent = '…';
+    try {
+      const response = await pongFaceSwapControlFetch('/pong-swap/swapper-model', {
+        method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({model: next})});
+      if (!response.ok) throw new Error(String(response.status));
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 2000));
+        const info = await read().catch(() => null);
+        if (info && info.model === next && info.ready) { show(info); break; }
+      }
+    } catch (_) {
+      await refresh();
+    } finally {
+      busy = false; button.dataset.busy = '';
+      if (button.textContent === '…') await refresh();
+    }
+  });
+  refresh();
+  setInterval(() => { if (!busy && document.documentElement.classList.contains('pong-tiktok-original-overlay')) refresh(); }, 30000);
+})();
+</script>
 <script src="pong-observer.js?v=10"></script>
 <script src="pong-sync.js?v=121"></script>
 </body>

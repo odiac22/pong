@@ -201,6 +201,33 @@ def _external_playback_lease_loop() -> None:
             lambda session_id: ENGINE.stop_session(session_id, deferred=True))
 
 
+_RENDERER_LOCK_HANDLE = None
+
+
+def _hold_single_renderer_lock() -> None:
+    """One renderer per port. A model switch respawns this process while the
+    helper may also spawn one; two concurrent GPU startups hung the winner
+    (2026-10-02). The loser exits here, before any model loads or the port
+    is bound. The lock is released by the OS when the holder exits."""
+    global _RENDERER_LOCK_HANDLE
+    port = os.environ.get("PONG_SWAP_PORT", "8792")
+    path = Path(__file__).resolve().parent / "logs" / f"renderer-{port}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print(f"[pong-swap] another renderer owns port {port}; exiting", flush=True)
+        os._exit(0)
+    _RENDERER_LOCK_HANDLE = handle
+
+
 @app.on_event("startup")
 def _start_service_workers() -> None:
     """Qualify the exact runtime before model threads or requests can enter.
@@ -213,6 +240,7 @@ def _start_service_workers() -> None:
     with _SERVICE_WORKERS_LOCK:
         if _SERVICE_WORKERS_STARTED:
             return
+        _hold_single_renderer_lock()
         from pong_exact_runtime.service_adapter import bootstrap_cold
 
         bootstrap_cold(ENGINE)
@@ -542,6 +570,49 @@ def preview_settings(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+SWAPPER_LABELS = {"128": "InSwapper 128", "HyperSwap1C": "HyperSwap 256",
+                  "AlphaFace": "AlphaFace 256", "256": "InSwapper 256"}
+
+
+@app.get("/swapper-model")
+def get_swapper_model() -> dict[str, Any]:
+    from pong_swap_config import PRODUCTION_SWAPPER_OPTIONS
+    current = str(ENGINE.config["parameters"].get("SwapperTypeTextSel", "128"))
+    return {"ok": True, "model": current, "label": SWAPPER_LABELS.get(current, current),
+            "options": [{"model": m, "label": SWAPPER_LABELS.get(m, m)} for m in PRODUCTION_SWAPPER_OPTIONS],
+            "ready": bool(ENGINE.health().get("ready"))}
+
+
+@app.put("/swapper-model")
+def set_swapper_model(payload: dict[str, Any]) -> dict[str, Any]:
+    """Owner model trial: save the swapper and restart this renderer.
+
+    A hot swapper change under exact acceleration crashed the CUDA context
+    (bundle qualified for one model), so the choice is written to the preset
+    and a replacement process starts with it. The replacement waits for this
+    process to release the port; the helper proxy keeps serving the phone.
+    """
+    import subprocess
+    import sys
+    from pong_swap_config import PRODUCTION_SWAPPER_OPTIONS, save_config
+    model = str(payload.get("model", ""))
+    if model not in PRODUCTION_SWAPPER_OPTIONS:
+        raise HTTPException(400, f"model must be one of {list(PRODUCTION_SWAPPER_OPTIONS)}")
+    config = ENGINE.config
+    if str(config["parameters"].get("SwapperTypeTextSel")) == model:
+        return {"ok": True, "model": model, "label": SWAPPER_LABELS.get(model, model), "restarting": False}
+    config["parameters"]["SwapperTypeTextSel"] = model
+    save_config(config, backup=True)
+    logs = Path(__file__).resolve().parent / "logs"
+    env = {**os.environ, "PONG_SWAP_RESPAWN_WAIT": "1"}
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    with open(logs / "service-stdout.log", "ab") as out, open(logs / "service-stderr.log", "ab") as err:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve())], cwd=str(Path(__file__).resolve().parent),
+                         env=env, stdout=out, stderr=err, stdin=subprocess.DEVNULL, creationflags=flags)
+    threading.Timer(0.5, lambda: os._exit(0)).start()
+    return {"ok": True, "model": model, "label": SWAPPER_LABELS.get(model, model), "restarting": True}
 
 
 @app.put("/prefetch-boost")
@@ -1054,4 +1125,14 @@ if __name__ == "__main__":
     # separate service instead of falling back to (or interrupting) the live
     # phone backend when its proxy is configured with PONG_SWAP_PORT.
     service_port = int(os.environ.get("PONG_SWAP_PORT", "8792"))
+    if os.environ.pop("PONG_SWAP_RESPAWN_WAIT", "") == "1":
+        # Started by PUT /swapper-model: wait for the old renderer to exit.
+        import socket
+        import time as _time
+        deadline = _time.monotonic() + 20
+        while _time.monotonic() < deadline:
+            with socket.socket() as probe:
+                if probe.connect_ex(("127.0.0.1", service_port)) != 0:
+                    break
+            _time.sleep(0.25)
     uvicorn.run(app, host="127.0.0.1", port=service_port, log_level="info")
