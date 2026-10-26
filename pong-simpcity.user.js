@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.13.9
+// @version      1.14.0
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -45,7 +45,7 @@
   if (!isSimpCityHost(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.13.9';
+  const SCRIPT_VERSION = '1.14.0';
   const FORUM_CREATOR_CONCURRENCY = 3;
   // Use a conservative source pace. The PC worker still delegates
   // to the server's shared adaptive limiter, so both Recall channels remain
@@ -1095,6 +1095,37 @@
         const threadPages = depth ? Math.min(discoveredPages, MAX_LINKED_THREAD_PAGES) : discoveredPages;
         totalPages += threadPages;
         const posts = extractPostPayloads(firstHtml, 1, threadUrl);
+        let processingChain = Promise.resolve();
+        const processPage = async pagePosts => {
+          // A linked thread's unattributed media belongs to that thread itself.
+          // Parent-post media is submitted separately against its nearest link.
+          if (depth > 0) await submitMultiThreadPosts(pagePosts, threadUrl, true, threadUrl);
+          for (const linkedThreadUrl of multiLinkedThreads(pagePosts, threadUrl)) {
+            const alreadySeen = seenThreads.has(linkedThreadUrl);
+            if (!alreadySeen) {
+              if (seenLinkedThreads.size >= MAX_LINKED_THREADS) continue;
+              seenThreads.add(linkedThreadUrl);
+              seenLinkedThreads.add(linkedThreadUrl);
+            }
+            try {
+              // Even an already-scanned thread can gain media from a new parent
+              // post. Only recursive fetching is globally deduplicated.
+              await submitMultiThreadPosts(pagePosts, threadUrl, false, linkedThreadUrl);
+              if (!alreadySeen && depth < MAX_LINKED_THREAD_DEPTH) {
+                await scanMultiThread({ url: linkedThreadUrl, depth: depth + 1 });
+              }
+            } catch (error) {
+              if (error?.status === 409 || !isCurrentRun()) throw error;
+              diagnostic('Multi linked thread skipped', `url=${linkedThreadUrl}; ${error?.message || error}`);
+            }
+          }
+        };
+        const queuePage = pagePosts => {
+          // Keep association and reaction order sequential while the independent
+          // page-fetch loop below continues using the same shared source limiter.
+          processingChain = processingChain.then(() => processPage(pagePosts));
+        };
+        queuePage(posts);
         pagesFetched++;
         update();
         for (let start = 2; start <= threadPages; start += PAGE_CONCURRENCY) {
@@ -1105,33 +1136,15 @@
             pageUrl.pathname = `${pageUrl.pathname.replace(/\/$/, '')}/page-${page}`;
             return { page, url: pageUrl.href, html: await fetchSimpCityPage(pageUrl.href, page) };
           }));
-          for (const item of fetched) posts.push(...extractPostPayloads(item.html, item.page, item.url));
+          for (const item of fetched) {
+            const pagePosts = extractPostPayloads(item.html, item.page, item.url);
+            posts.push(...pagePosts);
+            queuePage(pagePosts);
+          }
           pagesFetched += fetched.length;
           update();
         }
-
-        // A linked thread's unattributed media belongs to that thread itself.
-        // Parent-post media is submitted separately against its nearest link.
-        if (depth > 0) await submitMultiThreadPosts(posts, threadUrl, true, threadUrl);
-        for (const linkedThreadUrl of multiLinkedThreads(posts, threadUrl)) {
-          const alreadySeen = seenThreads.has(linkedThreadUrl);
-          if (!alreadySeen) {
-            if (seenLinkedThreads.size >= MAX_LINKED_THREADS) continue;
-            seenThreads.add(linkedThreadUrl);
-            seenLinkedThreads.add(linkedThreadUrl);
-          }
-          try {
-            // Even an already-scanned thread can gain media from a new parent
-            // post. Only recursive fetching is globally deduplicated.
-            await submitMultiThreadPosts(posts, threadUrl, false, linkedThreadUrl);
-            if (!alreadySeen && depth < MAX_LINKED_THREAD_DEPTH) {
-              await scanMultiThread({ url: linkedThreadUrl, depth: depth + 1 });
-            }
-          } catch (error) {
-            if (error?.status === 409 || !isCurrentRun()) throw error;
-            diagnostic('Multi linked thread skipped', `url=${linkedThreadUrl}; ${error?.message || error}`);
-          }
-        }
+        await processingChain;
         return posts;
       };
       const currentPage = Number(location.pathname.match(/\/page-(\d+)/i)?.[1] || 1);
