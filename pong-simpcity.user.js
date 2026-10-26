@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pong SimpCity AI Scraper
 // @namespace    https://odiac22.github.io/pong/
-// @version      1.13.7
+// @version      1.13.9
 // @description  Streams direct creator handles immediately, then uses local AI only for ambiguous SimpCity post text.
 // @match        https://simpcity.cr/threads/*
 // @match        https://www.simpcity.cr/threads/*
@@ -13,6 +13,14 @@
 // @match        https://www.simpcity.cr/forums/*
 // @match        https://simpcity.cr/*
 // @match        https://www.simpcity.cr/*
+// @include      https://simpcity.*/threads/*
+// @include      https://www.simpcity.*/threads/*
+// @include      https://simpcity.*/tags/*
+// @include      https://www.simpcity.*/tags/*
+// @include      https://simpcity.*/search/*
+// @include      https://www.simpcity.*/search/*
+// @include      https://simpcity.*/forums/*
+// @include      https://www.simpcity.*/forums/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
@@ -32,10 +40,12 @@
 
 (() => {
   'use strict';
-  if (!/(?:^|\.)simpcity\.cr$/i.test(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
+  const SIMPCITY_HOST_PATTERN = /^(?:www\.)?simpcity\.[a-z0-9-]+$/i;
+  const isSimpCityHost = hostname => SIMPCITY_HOST_PATTERN.test(String(hostname || '').toLowerCase());
+  if (!isSimpCityHost(location.hostname) || !/^\/(?:threads|tags|search|forums)\//i.test(location.pathname)) return;
 
   const PAGE_CONCURRENCY = 2;
-  const SCRIPT_VERSION = '1.13.7';
+  const SCRIPT_VERSION = '1.13.9';
   const FORUM_CREATOR_CONCURRENCY = 3;
   // Use a conservative source pace. The PC worker still delegates
   // to the server's shared adaptive limiter, so both Recall channels remain
@@ -253,7 +263,7 @@
   const canonicalSimpCityThreadUrl = raw => {
     try {
       const url = new URL(raw, location.href);
-      if (!/(?:^|\.)simpcity\.cr$/i.test(url.hostname)) return '';
+      if (!isSimpCityHost(url.hostname)) return '';
       const match = url.pathname.match(/^\/threads\/([^/?#]+)/i);
       if (!match) return '';
       url.protocol = 'https:';
@@ -268,7 +278,7 @@
   const canonicalSimpCityListingUrl = raw => {
     try {
       const url = new URL(raw, location.href);
-      if (!/(?:^|\.)simpcity\.cr$/i.test(url.hostname) || !/^\/(?:tags|search|forums)\//i.test(url.pathname)) return '';
+      if (!isSimpCityHost(url.hostname) || !/^\/(?:tags|search|forums)\//i.test(url.pathname)) return '';
       url.protocol = 'https:';
       url.hostname = 'simpcity.cr';
       url.pathname = url.pathname.replace(/\/page-\d+\/?$/i, '/');
@@ -474,7 +484,7 @@
       let candidate;
       try { candidate = new URL(anchor.getAttribute('href'), baseUrl); }
       catch (_) { continue; }
-      if (!/(?:^|\.)simpcity\.cr$/i.test(candidate.hostname) || !/^\/search\//i.test(candidate.pathname)) continue;
+      if (!isSimpCityHost(candidate.hostname) || !/^\/search\//i.test(candidate.pathname)) continue;
       // "View older posts" creates a new /search/{id}/ window. Its numbered
       // pages must be compared with that current window, not the original ID.
       const sameSearch = candidate.pathname.replace(/\/$/, '') === currentSearch.pathname.replace(/\/$/, '');
@@ -545,7 +555,7 @@
           if (!url) continue;
           try {
             const parsed = new URL(url);
-            if (/^(?:www\.)?simpcity\.cr$/i.test(parsed.hostname)) {
+            if (isSimpCityHost(parsed.hostname)) {
               for (const key of ['link', 'url', 'target', 'to', 'u', 'redirect']) {
                 const target = parsed.searchParams.get(key);
                 if (target) pending.push(target);
@@ -571,7 +581,7 @@
             const linkedThreadUrl = canonicalSimpCityThreadUrl(parsed);
             if (linkedThreadUrl) {
               links.push({ text: '', url: linkedThreadUrl, simpcityThread: true });
-            } else if (!/(?:^|\.)simpcity\.cr$/i.test(parsed.hostname)) {
+            } else if (!isSimpCityHost(parsed.hostname)) {
               parsed.hash = '';
               links.push({ text: '', url: parsed.toString().slice(0, 1500) });
             }
@@ -740,13 +750,17 @@
               channel,
               resumeFromSaved: resumeCheckbox.checked === true,
               multi: multiEnabled
-            }, 30000);
+            }, 60000);
           } catch (firstError) {
             diagnostic('Stored-session PC start failed', firstError?.message || String(firstError));
-            if (!cookies.length) throw firstError;
-            if (/login cookie is missing/i.test(firstError?.message || '') && !hasLoginCookie) {
-              throw new Error('Firefox did not expose the HttpOnly SimpCity login cookie. Enable Tampermonkey HttpOnly cookie access, then retry');
+            // A transport failure does not establish that authentication failed.
+            // Never mutate the saved session in response to a lost response.
+            if (!firstError?.serverResponse) throw firstError;
+            if (!/session|login|sign-in|access check/i.test(firstError?.message || '')) throw firstError;
+            if (!hasLoginCookie) {
+              throw new Error('Android did not expose a complete login session. Stored PC session was preserved; open Pong and reconnect the PC session, then retry');
             }
+            if (!cookies.length) throw firstError;
             status.textContent = `Pong ${channel}: refreshing PC session…`;
             diagnostic('Sending Android cookies to PC', `count=${cookies.length}; values omitted`);
             await sendToPong('/simpcity/session/handoff', {
@@ -759,7 +773,12 @@
               channel,
               resumeFromSaved: resumeCheckbox.checked === true,
               multi: multiEnabled
-            }, 30000);
+            }, 60000);
+          }
+          if (background?.loginRequired || background?.state === 'waiting_for_login') {
+            status.textContent = `Pong ${channel}: PC sign-in required · reconnect in Pong`;
+            diagnostic('PC session needs sign-in', `channel=${channel}; worker not started`);
+            return;
           }
           if (!background?.sourceCaptureRequired) {
             status.textContent = background?.profileResume
@@ -1015,6 +1034,106 @@
         }
         return collectedPosts;
       };
+      const normalizeMultiLinkedThread = rawUrl => canonicalSimpCityThreadUrl(rawUrl);
+      const multiLinkedThreads = (posts, currentThreadUrl) => {
+        const current = canonicalSimpCityThreadUrl(currentThreadUrl);
+        const discovered = [];
+        const seen = new Set();
+        for (const post of posts) {
+          for (const link of post?.links || []) {
+            const threadUrl = normalizeMultiLinkedThread(link?.url);
+            if (!threadUrl || threadUrl === current || seen.has(threadUrl)) continue;
+            seen.add(threadUrl);
+            discovered.push(threadUrl);
+          }
+        }
+        return discovered;
+      };
+      const submitMultiThreadPosts = async (posts, threadUrl, includeCurrentThread, targetThreadUrl = '') => {
+        const target = canonicalSimpCityThreadUrl(targetThreadUrl);
+        const relevantPosts = posts.filter(post => {
+          const linked = multiLinkedThreads([post], threadUrl);
+          if (includeCurrentThread) return linked.length === 0;
+          return target && linked.includes(target);
+        });
+        let lastResult = { creators: [], albums: [] };
+        // Target only the associations that can belong to this paperclip. Small
+        // sequential chunks keep large threads below request-body limits while
+        // retaining reaction-sorted post order.
+        for (let offset = 0; offset < relevantPosts.length; offset += 100) {
+          const batch = relevantPosts.slice(offset, offset + 100);
+          const result = await sendToPong('/simpcity/extract-creators', {
+            id: scrapeId,
+            channel,
+            posts: batch,
+            orderedPair: true,
+            allowExisting: true,
+            multiThread: true,
+            threadUrl,
+            includeCurrentThread,
+            targetThreadUrl
+          }, 15 * 60 * 1000);
+          lastResult = result;
+          postsSent += batch.length;
+          for (const creator of result.creators || []) {
+            for (const raw of [creator.primaryName, ...(creator.aliases || []), ...(creator.usernames || [])]) {
+              const value = String(raw || '').trim();
+              const key = value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+              if (key.length >= 2 && value.length <= 100 && !names.has(key)) names.set(key, value);
+            }
+          }
+          for (const album of result.albums || []) if (album?.url) albums.set(album.url, album);
+          serverAlbumCount = Math.max(serverAlbumCount, Number(result?.totals?.albums || 0));
+          update();
+        }
+        return lastResult;
+      };
+      const scanMultiThread = async ({ url: threadUrl, depth }, currentHtml = '') => {
+        if (!isCurrentRun()) throw Object.assign(new Error('This scrape was superseded'), { status: 409 });
+        const firstHtml = currentHtml || await fetchSimpCityPage(threadUrl, 1);
+        const discoveredPages = pageCountFromHtml(firstHtml);
+        const threadPages = depth ? Math.min(discoveredPages, MAX_LINKED_THREAD_PAGES) : discoveredPages;
+        totalPages += threadPages;
+        const posts = extractPostPayloads(firstHtml, 1, threadUrl);
+        pagesFetched++;
+        update();
+        for (let start = 2; start <= threadPages; start += PAGE_CONCURRENCY) {
+          const pages = Array.from({ length: PAGE_CONCURRENCY }, (_, index) => start + index)
+            .filter(page => page <= threadPages);
+          const fetched = await Promise.all(pages.map(async page => {
+            const pageUrl = new URL(threadUrl);
+            pageUrl.pathname = `${pageUrl.pathname.replace(/\/$/, '')}/page-${page}`;
+            return { page, url: pageUrl.href, html: await fetchSimpCityPage(pageUrl.href, page) };
+          }));
+          for (const item of fetched) posts.push(...extractPostPayloads(item.html, item.page, item.url));
+          pagesFetched += fetched.length;
+          update();
+        }
+
+        // A linked thread's unattributed media belongs to that thread itself.
+        // Parent-post media is submitted separately against its nearest link.
+        if (depth > 0) await submitMultiThreadPosts(posts, threadUrl, true, threadUrl);
+        for (const linkedThreadUrl of multiLinkedThreads(posts, threadUrl)) {
+          const alreadySeen = seenThreads.has(linkedThreadUrl);
+          if (!alreadySeen) {
+            if (seenLinkedThreads.size >= MAX_LINKED_THREADS) continue;
+            seenThreads.add(linkedThreadUrl);
+            seenLinkedThreads.add(linkedThreadUrl);
+          }
+          try {
+            // Even an already-scanned thread can gain media from a new parent
+            // post. Only recursive fetching is globally deduplicated.
+            await submitMultiThreadPosts(posts, threadUrl, false, linkedThreadUrl);
+            if (!alreadySeen && depth < MAX_LINKED_THREAD_DEPTH) {
+              await scanMultiThread({ url: linkedThreadUrl, depth: depth + 1 });
+            }
+          } catch (error) {
+            if (error?.status === 409 || !isCurrentRun()) throw error;
+            diagnostic('Multi linked thread skipped', `url=${linkedThreadUrl}; ${error?.message || error}`);
+          }
+        }
+        return posts;
+      };
       const currentPage = Number(location.pathname.match(/\/page-(\d+)/i)?.[1] || 1);
       const rootIsSinglePageThread = /\/threads\/who-is-this-identify-unknown-models-in-here\./i.test(first.pathname);
       if (listingRootUrl) {
@@ -1212,6 +1331,13 @@
           await Promise.all(creatorWorkers);
           await resumeCheckpointChain;
         }
+      } else if (multiEnabled) {
+        // Multi is a thread-collection crawl, not a creator-name expansion.
+        // Each discovered thread gets its own ordered paperclip, including
+        // rules and megathreads that ordinary creator traversal excludes.
+        // Fetch the canonical reaction-sorted first page even when the open tab
+        // used SimpCity's default ordering.
+        await scanMultiThread({ url: first.href, depth: 0 });
       } else if (rootIsSinglePageThread) {
         totalPages = 1;
         queuePosts(extractPostPayloads(document.documentElement.outerHTML, currentPage, location.href), 0);
@@ -1220,14 +1346,13 @@
       } else {
         // A direct profile-thread Recall is one creator by default. Bind every
         // page to the thread title deterministically so media discovery never
-        // depends on the optional AI extractor. Multi explicitly opts into
-        // linked creator-thread traversal.
+        // depends on the optional AI extractor.
         await scanThread({
           url: first.href,
           depth: 0,
           atomic: true,
           streamFirstPage: true,
-          followLinkedThreads: multiEnabled
+          followLinkedThreads: false
         }, currentPage === 1 ? document.documentElement.outerHTML : '');
       }
       await Promise.allSettled(linkedThreadTasks);
