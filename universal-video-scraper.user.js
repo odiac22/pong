@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.34.0
-// @description  Tap Pong, select red video/thumbnail boxes, then Send. Copy log for troubleshooting.
+// @version      7.36.0
+// @description  Tap Pong, select red video/thumbnail boxes and Send, or tap Send all. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
 // @downloadURL  https://odiac22.github.io/pong/universal-video-scraper.user.js
@@ -28,10 +28,10 @@
 
   /* CONFIG */
 
-  const VIDEO_EXT_RE = /\.(mp4|m4v|mov|webm|mkv|m3u8|mpd|ogv)(\?|#|$)/i;
+  const VIDEO_EXT_RE = /\.(mp4|m4v|mov|webm|mkv|m3u8|mpd|ogv)\/?(?:[?#]|$)/i;
 
   const RAW_VIDEO_URL_RE =
-    /(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:mp4|m4v|mov|webm|mkv|m3u8|mpd|ogv)(?:\?[^\s"'<>\\]*)?/gi;
+    /(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:mp4|m4v|mov|webm|mkv|m3u8|mpd|ogv)\/?(?:[?#][^\s"'<>\\]*)?(?=[\s"'<>\\]|$)/gi;
 
   const EROME_ALBUM_RE =
     /^https?:\/\/(?:www\.)?erome\.com\/a\/[\w-]+\/?$/i;
@@ -874,6 +874,25 @@ function primaryVideoEvidence(html, pageUrl) {
       seen.add(key);
       records.push({ value, height: scoreMediaQuality(value, label), label: String(label || ''), order });
     };
+    // KVS declares its renditions before creating a native <video>. Read
+    // literal source fields only, never execute page code or admit reporting,
+    // preview or advertising URLs as renditions.
+    for (const config of source.matchAll(/\b(?:var|let|const)\s+flashvars\s*=\s*\{([\s\S]*?)\}\s*;/gi)) {
+      const fields = new Map();
+      for (const field of config[1].matchAll(/(?:^|,)\s*["']?(video_id|video_url(?:_\d+)?(?:_text)?|video_alt_url\d*(?:_text)?)["']?\s*:\s*(["'])(.*?)\2/gi)) {
+        fields.set(field[1].toLowerCase(), field[3]);
+      }
+      if (!/^\d+$/.test(fields.get('video_id') || '')) continue;
+      for (const [key, raw] of fields) {
+        if (!/^(?:video_url(?:_\d+)?|video_alt_url\d*)$/.test(key)) continue;
+        // Encoded function/0 URLs remain owned by the desktop resolver.
+        if (!/^(?:https?:)?\/\//i.test(decodeLiteralMediaValue(raw))) continue;
+        addRecord(raw, fields.get(`${key}_text`) || '');
+      }
+    }
+    if (records.length) return records
+      .map(record => ({ ...record, identityEvidence: 'kvs-flashvars' }))
+      .sort((left, right) => right.height - left.height || left.order - right.order);
     const literalValue = /(?:^|,)\s*["']?(?:file|src|url|videoUrl|video_url|contentUrl|hls|dash|mp4)["']?\s*:\s*(["'])(.*?)\1/gi;
     for (const arrays of source.matchAll(/["']?(?:sources|mediaDefinitions|media_definitions|files|qualities|renditions)["']?\s*:\s*\[([\s\S]*?)\]/gi)) {
       for (const object of arrays[1].matchAll(/\{([^{}]*)\}/g)) {
@@ -1211,6 +1230,7 @@ function primaryVideoEvidence(html, pageUrl) {
       for (const anchor of doc.querySelectorAll(selector)) {
         stats.matched++;
         try {
+          if (anchor.closest('nav,header,footer,[role="navigation"]')) { stats.invalid++; continue; }
           const url = new URL(anchor.getAttribute('href') || anchor.href, current);
           if (url.hostname.toLowerCase() !== current.hostname.toLowerCase()) { stats.foreign++; continue; }
           if (!prevalidated && !isLogicalVideoPageUrl(url, current, anchor)) { stats.invalid++; continue; }
@@ -1301,10 +1321,12 @@ function primaryVideoEvidence(html, pageUrl) {
     })));
     const durationSeconds = extractPageDurationSeconds(doc);
     const prioritized = [];
-    const add = (rawValue, declaredMedia = false) => {
+    const add = (rawValue, declaredMedia = false, selectedNative = false) => {
       const value = absUrl(rawValue, pageUrl);
       if (!value || !/^https?:\/\//i.test(value) || (!declaredMedia && !VIDEO_EXT_RE.test(value))) return;
-      if (/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname)) return;
+      // A user's actual native player may be a trailer. Exclude such names
+      // from page-wide discovery, but not from its explicit <video> sources.
+      if (!selectedNative && /(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname)) return;
       if (!prioritized.includes(value)) prioritized.push(value);
     };
     try {
@@ -1314,6 +1336,13 @@ function primaryVideoEvidence(html, pageUrl) {
       // opaque filenames such as `_7.mp4` do not otherwise reveal that they
       // are HD while `_3.mp4` is only 360p.
       const rawHtml = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+      const declaredSources = literalSourceRecordsFromText(rawHtml, pageUrl);
+      if (declaredSources.some(source => source.identityEvidence === 'kvs-flashvars')) {
+        return enrichRenditionQuality(doc, pageUrl, declaredSources.map(source => ({
+          videoUrl: source.value, rawVideoUrl: source.value, postUrl: pageUrl, pageUrl,
+          durationSeconds, identityEvidence: source.identityEvidence
+        })));
+      }
       const labelledSources = [];
       for (const match of rawHtml.matchAll(/\bfile\s*:\s*["']([^"']+)["']/gi)) {
         for (const item of match[1].split(',')) {
@@ -1327,7 +1356,7 @@ function primaryVideoEvidence(html, pageUrl) {
       labelledSources
         .sort((left, right) => right.height - left.height || left.order - right.order)
         .forEach(source => add(source.value));
-      literalSourceRecordsFromText(rawHtml, pageUrl)
+      declaredSources
         .forEach(source => add(source.value, true));
 
       const media = [...doc.querySelectorAll('video')]
@@ -1338,9 +1367,10 @@ function primaryVideoEvidence(html, pageUrl) {
         }))
         .sort((left, right) => Number(right.visible) - Number(left.visible) || right.area - left.area);
       for (const item of media.slice(0, 2)) {
-        add(item.element.currentSrc, true);
-        add(item.element.getAttribute('src'), true);
-        item.element.querySelectorAll('source[src]').forEach(source => add(source.getAttribute('src'), true));
+        const selectedNative = media.length === 1;
+        add(item.element.currentSrc, true, selectedNative);
+        add(item.element.getAttribute('src'), true, selectedNative);
+        item.element.querySelectorAll('source[src]').forEach(source => add(source.getAttribute('src'), true, selectedNative));
       }
       if (doc === document && typeof performance?.getEntriesByType === 'function') {
         performance.getEntriesByType('resource')
@@ -1442,7 +1472,8 @@ function primaryVideoEvidence(html, pageUrl) {
       const current = byUrl.get(absUrl(video.currentSrc || '', pageUrl));
       if (current && video.videoWidth > 0 && video.videoHeight > 0) {
         Object.assign(current, { width: video.videoWidth, height: video.videoHeight,
-          qualityEvidence: 'live_decoder', browserCurrent: true });
+          qualityEvidence: 'live_decoder', browserCurrent: true,
+          ...(Number.isFinite(video.duration) && video.duration > 0 ? { durationEvidence: 'native_decoder', nativeDurationSeconds: video.duration } : {}) });
       }
     }
     return [...byUrl.values()];
@@ -1483,8 +1514,13 @@ function primaryVideoEvidence(html, pageUrl) {
     try {
       doc.querySelectorAll(
         '#playerWrapper iframe[src],.video-container iframe[src],[class*="player" i] iframe[src],' +
-        'iframe[src*="/video/"],iframe[src*="/embed/"],iframe[src*="player"]'
+        'iframe[src*="/video/"],iframe[src*="/embed/"],iframe[src*="/e/"],iframe[src*="player"]'
       ).forEach(frame => add(frame.getAttribute('src') || frame.src));
+      // Some posts declare the actual hosting player as a normal external
+      // link while their own native <video> starts empty or carries a thumb.
+      // Restrict this to the current post body; never follow page-wide links.
+      doc.querySelectorAll('.post_el_post .post_text a.extlink[href]')
+        .forEach(anchor => add(anchor.getAttribute('href') || anchor.href));
       // Public players are often declared in metadata before an iframe exists.
       // Use only explicitly declared player links, never arbitrary script URLs.
       doc.querySelectorAll('meta[name="twitter:player"],meta[property="og:video"],meta[property="og:video:secure_url"],link[itemprop="embedUrl"]')
@@ -1604,16 +1640,46 @@ function primaryVideoEvidence(html, pageUrl) {
     throw Object.assign(new Error(helperNeedsUpdate ? 'Restart the updated Pong capture helper; Copy log for details' : 'YouTube stream unavailable; Copy log for details'), { code: helperNeedsUpdate ? 'youtube_helper_update' : 'youtube_stream' });
   }
 
+  async function declaredStreamingApiEntries(doc, pageUrl, durationSeconds, options = {}) {
+    const html = String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || '');
+    const endpoint = html.match(/\bapiURL\s*=\s*["'](\/api\/stream)["']/)?.[1];
+    // Resolve only a declared public player configuration, never an arbitrary
+    // API guessed from a hostname or an executable page script.
+    if (!endpoint || !/\bfile\s*:\s*t\.streaming_url\b/.test(html)) return [];
+    const filecode = new URL(pageUrl).pathname.match(/^\/(?:e|v)\/([A-Za-z0-9_-]{4,128})\/?$/)?.[1];
+    if (!filecode) return [];
+    const trace = diagnosticRequest(options.diagnostics, 'platform_resolve', 12000);
+    try {
+      const response = await browserRelayRequest({
+        method: 'POST', url: new URL(endpoint, pageUrl).href,
+        headers: { 'Content-Type': 'application/json', Referer: pageUrl },
+        data: JSON.stringify({ filecode, device: 'web', codecs: [] }), timeout: 12000
+      });
+      trace.httpStatus = response.status;
+      if (response.status < 200 || response.status >= 300 || String(response.responseText || '').length > 1000000) return [];
+      const payload = JSON.parse(response.responseText || '{}');
+      if (payload.filecode && payload.filecode !== filecode) return [];
+      const videoUrl = absUrl(payload.streaming_url, pageUrl);
+      if (!videoUrl || !/^https:\/\//i.test(videoUrl) || !VIDEO_EXT_RE.test(videoUrl)) return [];
+      trace.parsedResponse = true;
+      return [{ videoUrl, rawVideoUrl: videoUrl, postUrl: pageUrl, pageUrl,
+        contextUrl: pageUrl, durationSeconds, identityEvidence: 'declared-stream-api',
+        qualityEvidence: 'resolver' }];
+    } catch (_) { return []; }
+    finally { finishDiagnosticRequest(trace, trace.httpStatus >= 200 && trace.httpStatus < 300 && trace.parsedResponse ? 'none' : 'invalid_response'); }
+  }
+
   async function browserResolvedMediaEntries(doc, pageUrl, durationHint = 0, depth = 0, seen = new Set(), options = {}) {
     if (options.signal?.aborted) throw Object.assign(new Error('Timed out'), { code: 'timeout' });
     if (youtubeVideoId(pageUrl)) return youtubeMediaEntries(doc, pageUrl, options);
     const durationSeconds = Math.max(Number(durationHint || 0), extractPageDurationSeconds(doc));
+    const declaredApi = await declaredStreamingApiEntries(doc, pageUrl, durationSeconds, options);
     const direct = primaryMediaEntriesFromDoc(doc, pageUrl).map(entry => ({
       ...entry,
       durationSeconds: Math.max(Number(entry.durationSeconds || 0), durationSeconds),
       contextUrl: pageUrl
     }));
-    if (direct.length) return direct;
+    if (declaredApi.length || direct.length) return [...declaredApi, ...direct];
     if (depth >= 2) {
       return extractVideoUrls(doc, pageUrl)
         .filter(value => !/(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(value).pathname))
@@ -3258,7 +3324,7 @@ function primaryVideoEvidence(html, pageUrl) {
     return ['none','pending','timeout','aborted','network_error','request_error','http_error','server_rejected','invalid_response','not_accepted',
       'platform_access','platform_stream','helper_update','extraction_error','no_media','duration_filter','media_unverified','page_fetch',
       'non_media_response','invalid_url','delivery_failed','identity_unverified','superseded','vpn_required','desktop_timeout',
-      'no_video','source_unavailable','duration_unverified','vpn_unavailable','resolution_failed','quality_unverified'].includes(code) ? code : 'request_error';
+      'no_video','source_unavailable','duration_unverified','vpn_unavailable','resolution_failed','quality_unverified','page_challenge'].includes(code) ? code : 'request_error';
   }
 
   function diagnosticMime(value) {
@@ -3436,7 +3502,62 @@ function primaryVideoEvidence(html, pageUrl) {
     });
   }
 
-  function probeCapturedMetadata(url, diagnostics = null, phase = 'quality_probe', signal = null) {
+  function fetchHlsManifestMetadata(url, pageUrl, signal) {
+    return new Promise(resolve => {
+      let request, settled = false;
+      const finish = value => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); resolve(value); };
+      const abort = () => { finish(null); try { request?.abort(); } catch (_) {} };
+      const timer = setTimeout(abort, 9000);
+      if (signal?.aborted) { abort(); return; }
+      signal?.addEventListener('abort', abort, { once: true });
+      try {
+        request = GM_xmlhttpRequest({ method: 'GET', url, responseType: 'text', timeout: 8000,
+          headers: { Accept: 'application/vnd.apple.mpegurl,application/x-mpegURL,*/*;q=0.1', Referer: String(pageUrl || location.href) },
+          onload: response => {
+            if (response.status < 200 || response.status >= 300 || String(response.responseText || '').length > 1000000) { finish(null); return; }
+            const text = String(response.responseText || '');
+            finish(text.includes('#EXTM3U') ? { url: response.finalUrl || url, text } : null);
+          }, onerror: abort, ontimeout: abort, onabort: abort });
+      } catch (_) { finish(null); }
+    });
+  }
+
+  async function probeCapturedAdaptiveMetadata(url, diagnostics, phase, signal, pageUrl) {
+    const trace = diagnosticRequest(diagnostics, phase, 20000);
+    let current = url, width = 0, height = 0;
+    try {
+      for (let depth = 0; depth < 3 && !signal?.aborted; depth++) {
+        const manifest = await fetchHlsManifestMetadata(current, pageUrl, signal);
+        if (!manifest) return { durationSeconds: 0, width: 0, height: 0, failure: 'media_unverified' };
+        const lines = manifest.text.split(/\r?\n/).map(line => line.trim());
+        const variants = [];
+        for (let index = 0; index < lines.length - 1; index++) {
+          if (!lines[index].startsWith('#EXT-X-STREAM-INF:')) continue;
+          const next = lines.slice(index + 1).find(line => line && !line.startsWith('#'));
+          if (!next) continue;
+          const resolution = lines[index].match(/RESOLUTION=(\d+)x(\d+)/i);
+          variants.push({ url: absUrl(next, manifest.url), bandwidth: Number(lines[index].match(/BANDWIDTH=(\d+)/i)?.[1] || 0),
+            width: Number(resolution?.[1] || 0), height: Number(resolution?.[2] || 0) });
+        }
+        if (variants.length) {
+          variants.sort((a, b) => b.bandwidth - a.bandwidth || b.width * b.height - a.width * a.height);
+          current = variants[0].url; width = variants[0].width; height = variants[0].height;
+          if (!current || !/^https?:\/\//i.test(current)) break;
+          continue;
+        }
+        const durationSeconds = lines.reduce((total, line) => {
+          const duration = line.match(/^#EXTINF:([0-9]+(?:\.[0-9]+)?)/i);
+          return total + (duration ? Number(duration[1]) : 0);
+        }, 0);
+        Object.assign(trace, { durationSeconds, videoWidth: width, videoHeight: height });
+        return { durationSeconds, width, height, failure: durationSeconds > 0 ? 'none' : 'duration_unverified' };
+      }
+      return { durationSeconds: 0, width: 0, height: 0, failure: signal?.aborted ? 'aborted' : 'duration_unverified' };
+    } finally { finishDiagnosticRequest(trace, trace.durationSeconds > 0 ? 'none' : signal?.aborted ? 'aborted' : 'duration_unverified'); }
+  }
+
+  function probeCapturedMetadata(url, diagnostics = null, phase = 'quality_probe', signal = null, pageUrl = location.href) {
+    if (/\.m3u8(?:[?#]|$)/i.test(url)) return probeCapturedAdaptiveMetadata(url, diagnostics, phase, signal, pageUrl);
     const trace = diagnosticRequest(diagnostics, phase, 3500);
     // Unknown metadata is not proof that a video is missing. Ask the actual
     // media decoder, without playing or enabling sound, with a strict deadline.
@@ -3501,16 +3622,17 @@ function primaryVideoEvidence(html, pageUrl) {
     // URLs often have opaque names (_3.mp4, _7.mp4); a response-range check
     // cannot measure quality. Read metadata, never play, and rank BEFORE send.
     const renditions = (entries || []).map(entry => ({ ...entry }));
-    const pending = renditions.length > 1 ? renditions.filter(entry =>
-      !/\.(?:m3u8|mpd)(?:[?#]|$)/i.test(entry.videoUrl) && entry.qualityEvidence !== 'live_decoder') : [];
+    const pending = renditions.filter(entry =>
+      !/\.mpd(?:[?#]|$)/i.test(entry.videoUrl) && (entry.durationEvidence !== 'native_decoder' ||
+        Number(entry.nativeDurationSeconds || 0) < durationSeconds - Math.max(2, durationSeconds * 0.02)));
     let next = 0;
     await Promise.all(Array.from({ length: Math.min(3, pending.length) }, async () => {
       while (next < pending.length) {
         if (signal?.aborted) return;
         const entry = pending[next++];
-        const metadata = await probeCapturedMetadata(entry.videoUrl, diagnostics, 'quality_probe', signal);
-        if (metadata.durationSeconds && Math.abs(metadata.durationSeconds - durationSeconds) > Math.max(2, durationSeconds * 0.02)) {
-          entry.qualityRejected = true; continue; // Preview/wrong-duration asset.
+        const metadata = await probeCapturedMetadata(entry.videoUrl, diagnostics, 'quality_probe', signal, entry.contextUrl || pageUrl);
+        if (metadata.durationSeconds && metadata.durationSeconds < durationSeconds - Math.max(2, durationSeconds * 0.02)) {
+          entry.qualityRejected = true; continue; // Short preview; longer full cuts may exceed approximate page metadata.
         }
         if (metadata.width > 0 && metadata.height > 0) Object.assign(entry, {
           width: metadata.width, height: metadata.height, qualityEvidence: 'metadata_decoder' });
@@ -3692,12 +3814,27 @@ function primaryVideoEvidence(html, pageUrl) {
     const id = globalThis.crypto?.randomUUID?.() || 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
       const n = crypto.getRandomValues(new Uint8Array(1))[0] & 15; return (c === 'x' ? n : (n & 3) | 8).toString(16);
     });
+    const mediaIdentityHashes = await Promise.all(targets.map(async target => {
+      if (!/^inline-video-[1-9]\d{0,3}$/.test(target.logicalVideoId || '') || target.element?.tagName !== 'VIDEO') return '';
+      const video = target.element;
+      const raw = video.getAttribute('src') || video.querySelector('source[src]')?.getAttribute('src') || video.currentSrc || '';
+      let source;
+      try { source = new URL(raw, location.href); } catch { return ''; }
+      if (!/^https?:$/.test(source.protocol) || !VIDEO_EXT_RE.test(source.href) || !globalThis.crypto?.subtle) return '';
+      source.hash = '';
+      try {
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source.href));
+        return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+      } catch { return ''; }
+    }));
     const payload = { id, channel: Number(channel) === 2 ? 2 : 1, mode: mode === 'main' ? 'main' : 'all',
       sourceUrl: targets[0].url, ignoreUnder30: ignoreUnder30 !== false,
-      // Only selected links and identity hints leave the phone. Never media,
+      // Only selected links and bounded selected-player hints leave the phone. Never media bytes,
       // cookies, HTML, browser sessions, or relay-worker registrations.
-      targets: targets.map(target => ({ url: target.url,
+      targets: targets.map((target, index) => ({ url: target.url,
         ...(target.logicalVideoId ? { logicalVideoId: target.logicalVideoId } : {}),
+        ...(mediaIdentityHashes[index] ? { mediaIdentityHash: mediaIdentityHashes[index] } : {}),
+        ...(target.kind === 'player' ? { sourceMediaHints: selectedPlayerMediaHints(target) } : {}),
         durationSeconds: Math.max(0, Number(target.durationSeconds) || 0) })) };
     const diagnostics = targets.map(target => {
       const result = { startedAt: performance.now(), done: false, delivered: false, desktopOwned: true,
@@ -4075,6 +4212,9 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function videoLinkEvidence(element, url) {
     if (!url || element.closest('#uvs-recall-capture,#uvs-panel,#uvs-target-preview,[data-ad],.advertisement,.ad-container')) return '';
+    // A route such as /details/texts can look like a watch-page URL, but a
+    // site-wide navigation link is not evidence of a selectable video.
+    if (element.closest('nav,header,footer,[role="navigation"]')) return '';
     try { if (/(^|\.)(youtube\.com|youtu\.be)$/i.test(new URL(url).hostname) && !youtubeVideoId(url)) return ''; } catch (_) { return ''; }
     if (/\.(?:jpe?g|png|gif|webp|svg|avif|pdf|zip)(?:[?#]|$)/i.test(url)) return '';
     if (VIDEO_EXT_RE.test(url)) return 'direct';
@@ -4082,7 +4222,6 @@ function primaryVideoEvidence(html, pageUrl) {
     // A thumbnail, play affordance or duration is evidence of a potential video
     // even when its destination is an opaque slug, redirect, or another host.
     // Never execute onclick handlers or navigate to establish that evidence.
-    if (element.closest('nav,header,footer,[role="navigation"]')) return '';
     const card = element.closest('ytm-video-with-context-renderer,ytd-compact-video-renderer,ytd-rich-item-renderer,ytm-compact-video-renderer,article,li,[class*="card" i],[class*="thumb" i]') || element;
     const text = `${element.getAttribute('aria-label') || ''} ${element.getAttribute('title') || ''} ${element.textContent || ''}`;
     if (element.hasAttribute('data-video-url') || element.hasAttribute('data-watch-url')) return 'video_attribute';
@@ -4091,6 +4230,42 @@ function primaryVideoEvidence(html, pageUrl) {
     if (card.querySelector('img,picture,video,[poster]')) return 'thumbnail';
     if (/url\(/i.test(getComputedStyle(element).backgroundImage || '')) return 'thumbnail';
     return '';
+  }
+
+  // DOM-only hints for the explicitly selected current-page player. These are
+  // not verification, and never cause a phone fetch or carry cookies/HTML.
+  // The desktop independently validates identity, address, duration and quality.
+  function selectedPlayerMediaHints(target, doc = document, pageUrl = location.href) {
+    const current = canonicalWatchPageUrl(pageUrl, pageUrl) || pageUrl;
+    if (target?.kind !== 'player' || target.logicalVideoId || target.url !== current || !target.element?.isConnected) return [];
+    const element = target.element;
+    const native = element.tagName === 'VIDEO' ? element :
+      element.querySelector?.('video') || element.shadowRoot?.querySelector?.('video') ||
+      (['MUX-PLAYER','VIDEO-JS','MEDIA-PLAYER'].includes(element.tagName) ? element : null);
+    if (!native || native.ownerDocument !== doc) return [];
+    const safe = raw => {
+      if (!raw || String(raw).length > 8192) return '';
+      try { const u = new URL(raw, pageUrl);
+        if (u.protocol !== 'https:' || u.username || u.password || !/\.(?:mp4|webm|m4v|mov)\/?$/i.test(u.pathname)) return '';
+        u.hash = ''; return u.href;
+      } catch { return ''; }
+    };
+    const own = [...new Set([native.currentSrc, native.getAttribute('src'),
+      ...[...native.querySelectorAll('source[src]')].map(s => s.getAttribute('src'))].map(safe).filter(Boolean))];
+    if (!own.length) return [];
+    const evidence = primaryVideoEvidence(String(doc.__uvsRawHtml || doc.documentElement?.innerHTML || ''), current);
+    // Never attach a different page-wide VideoObject to a selected inline video.
+    const related = evidence?.videoUrls?.some(url => own.includes(safe(url))) ? evidence.videoUrls : [];
+    const durationSeconds = Number.isFinite(native.duration) && native.duration > 0 ? native.duration :
+      Math.max(0, Number(target.durationSeconds) || 0);
+    if (!durationSeconds) return [];
+    const liveUrl = safe(native.currentSrc);
+    return [...new Set([...own, ...related.map(safe).filter(Boolean)])].map(url => {
+      const dimensions = new URL(url).pathname.match(/(?:^|[_/-])(\d{3,4})[_x](\d{3,4})(?:[_./-]|$)/i);
+      const width = url === liveUrl && native.videoWidth > 0 ? native.videoWidth : Number(dimensions?.[1] || 0);
+      const height = url === liveUrl && native.videoHeight > 0 ? native.videoHeight : Number(dimensions?.[2] || 0);
+      return {url, sourcePageUrl: current, durationSeconds, width, height};
+    }).sort((a,b) => b.width*b.height-a.width*a.height).slice(0,8);
   }
 
   function collectSelectableTargets(mode = 'all', includeAllLinks = false) {
@@ -4102,18 +4277,47 @@ function primaryVideoEvidence(html, pageUrl) {
       const rect = element?.getBoundingClientRect();
       return rect && targetElementVisible(element) ? rect.width * rect.height : 0;
     };
+    // A floated/block thumbnail can escape its inline anchor's layout box.
+    // Keep the link's URL identity, but outline its largest visible surface.
+    // Only inspect descendants: a neighbouring card is never a substitute.
+    const linkSurfaces = new Map();
+    const linkSurface = link => {
+      if (!link) return link;
+      if (!linkSurfaces.has(link)) {
+        const surfaces = [link, ...Array.from(link.querySelectorAll?.('img,picture,video,[poster]') || []).slice(0, 12)];
+        linkSurfaces.set(link, surfaces.sort((a, b) => visibleArea(b) - visibleArea(a))[0]);
+      }
+      return linkSurfaces.get(link);
+    };
     // YouTube parks its <video> above the poster before playback. Highlight
     // the visible player surface, not that offscreen decoder element.
     const youtubeSurface = youtubeVideoId(currentUrl) ? ['#movie_player','#player-container-id','#player-container','ytd-player','ytm-player']
       .map(selector => document.querySelector(selector)).find(item => visibleArea(item) > 0) : null;
-    const mainElement = youtubeSurface || videos.slice().filter(item => visibleArea(item) > 0).sort((a, b) => visibleArea(b) - visibleArea(a))[0];
+    // Several stock-video sites put the actual player in a custom element
+    // (notably <mux-player>) while native <video> nodes are only related-card
+    // previews. Compare their visible surfaces before choosing the main box.
+    // Video.js commonly renders a visible .video-js DIV while its native
+    // <video> child stays visibility:hidden until playback starts.
+    const customPlayers = [...document.querySelectorAll('mux-player,video-js,.video-js,media-player'),
+      ...[...document.querySelectorAll('#kt_player,.kt-player')]
+        .map(element => element.closest?.('.player-wrap') || element)];
+    const mainElement = youtubeSurface || [...videos, ...customPlayers].filter(item => visibleArea(item) > 0)
+      .sort((a, b) => visibleArea(b) - visibleArea(a))[0];
+    const selectedNativeGroup = videos.includes(mainElement)
+      ? groups.find(group => group.logicalVideoId === `inline-video-${videos.indexOf(mainElement) + 1}`) : null;
+    // A selected trailer-named native source needs exact same-element identity;
+    // the generic page resolver intentionally filters page-wide trailers.
+    const selectedNativeNeedsIdentity = groups.length === 1 && !!selectedNativeGroup?.entries.some(entry => {
+      try { return /(?:^|[/_-])(?:preview|trailer|thumb)(?:[/_.-]|$)/i.test(new URL(entry.videoUrl).pathname); }
+      catch { return false; }
+    });
     const embeddedUrls = embeddedPlayerPageUrls(document, currentUrl, 80);
     const players = [...document.querySelectorAll('iframe[src],embed[src],object[data]')].filter(element => {
       const value = element.getAttribute('src') || element.getAttribute('data');
       return embeddedUrls.includes(absUrl(value, currentUrl));
     });
     let targets = collectLogicalWatchPageTargets(document, currentUrl, 80);
-    if (groups.length > 1) {
+    if (groups.length > 1 || selectedNativeNeedsIdentity) {
       targets = targets.filter(target => target.url !== currentUrl);
       targets.unshift(...groups.map(group => ({ url: currentUrl, logicalVideoId: group.logicalVideoId, durationSeconds: group.durationSeconds })));
     }
@@ -4129,7 +4333,7 @@ function primaryVideoEvidence(html, pageUrl) {
       const group = groups.find(item => item.logicalVideoId === `inline-video-${index + 1}`);
       targets = mainElement || players.length || primaryMediaEntriesFromDoc(document, currentUrl).length
         ? [{ url: currentUrl, durationSeconds: group?.durationSeconds || extractPageDurationSeconds(document),
-          ...(groups.length > 1 && group ? { logicalVideoId: group.logicalVideoId } : {}) }]
+          ...((groups.length > 1 || selectedNativeNeedsIdentity) && group ? { logicalVideoId: group.logicalVideoId } : {}) }]
         : targets.slice(0, 1);
     }
     const candidates = targets.map(target => {
@@ -4137,7 +4341,7 @@ function primaryVideoEvidence(html, pageUrl) {
       const matches = links.filter(link => canonicalWatchPageUrl(selectableLinkUrl(link), currentUrl) === target.url);
       const embedded = players.find(element => absUrl(element.getAttribute('src') || element.getAttribute('data'), currentUrl) === target.url);
       const element = target.url === currentUrl ? (index >= 0 ? videos[index] : mainElement || players[0])
-        : embedded || matches.sort((a, b) => visibleArea(b) - visibleArea(a))[0];
+        : embedded || matches.map(linkSurface).sort((a, b) => visibleArea(b) - visibleArea(a))[0];
       return { ...target, element, kind: ['IFRAME','EMBED','OBJECT'].includes(element?.tagName) ? 'embed' : target.url === currentUrl ? 'player' : 'link' };
     });
     for (const link of links) {
@@ -4145,14 +4349,15 @@ function primaryVideoEvidence(html, pageUrl) {
       const evidence = videoLinkEvidence(link, url) || (includeAllLinks && url &&
         !link.closest('#uvs-recall-capture,#uvs-panel,#uvs-target-preview') ? 'manual_link' : '');
       if (!evidence || canonicalWatchPageUrl(url, currentUrl) === currentUrl) continue;
+      const surface = linkSurface(link);
       const duplicate = candidates.find(item => canonicalWatchPageUrl(item.url, currentUrl) === canonicalWatchPageUrl(url, currentUrl));
       if (duplicate) {
         duplicate.linkEvidence ||= evidence;
         // Prefer the clickable thumbnail over a duplicate short title anchor.
-        if (duplicate.kind === 'link' && visibleArea(link) > visibleArea(duplicate.element)) duplicate.element = link;
+        if (duplicate.kind === 'link' && visibleArea(surface) > visibleArea(duplicate.element)) duplicate.element = surface;
         continue;
       }
-      candidates.push({ url, durationSeconds: logicalPageDurationHint(link), element: link,
+      candidates.push({ url, durationSeconds: logicalPageDurationHint(link), element: surface,
         kind: evidence === 'direct' ? 'direct' : 'link', directMedia: evidence === 'direct', linkEvidence: evidence });
     }
     // An inline autoplay preview inside a linked card represents the linked
@@ -4161,6 +4366,22 @@ function primaryVideoEvidence(html, pageUrl) {
       !candidates.some(other => other.kind === 'link' && other.element?.contains(candidate.element)));
     return filtered.slice(0, mode === 'main' ? 1 : 80).map((candidate, index) => ({ ...candidate,
       ...(candidate.url === currentUrl && youtubeVideoId(currentUrl) ? { durationSeconds: extractPageDurationSeconds(document) } : {}), previewId: index + 1 }));
+  }
+
+  function startTargetRebindRetries(needsRebind, rebind, schedule = setTimeout, cancel = clearTimeout) {
+    const delays = [250, 500, 1000, 2000, 4000, 4000];
+    let timer = null, attempt = 0, stopped = false;
+    const next = () => {
+      if (stopped || !needsRebind() || attempt >= delays.length) return;
+      timer = schedule(() => {
+        timer = null;
+        if (stopped || !needsRebind()) return;
+        rebind();
+        next();
+      }, delays[attempt++]);
+    };
+    next();
+    return () => { stopped = true; if (timer !== null) cancel(timer); timer = null; };
   }
 
   function targetElementVisible(element) {
@@ -4174,7 +4395,7 @@ function primaryVideoEvidence(html, pageUrl) {
 
   function buildDetectionFeedback(session) {
     return {
-      schema: 1, diagnosticsVersion: 6, version: '7.34.0', id: session.id, createdAt: session.createdAt,
+      schema: 1, diagnosticsVersion: 6, version: '7.36.0', id: session.id, createdAt: session.createdAt,
       deliveryMode: 'desktop_owned',
       vpn: vpnSafeStatus(session.vpn || {}),
       phoneConnectionOnly: session.phoneConnectionOnly === true,
@@ -4370,7 +4591,7 @@ function primaryVideoEvidence(html, pageUrl) {
       .row{display:flex;flex-wrap:wrap;align-items:center;gap:4px}.row button{padding:4px 7px;min-height:25px}.summary{flex:1;font-size:10px}.status{font-size:10px;line-height:1.3;color:#cbd5e1;margin-top:3px}button:disabled{opacity:.5;cursor:default}
       .bar{background:linear-gradient(145deg,#17243bf5,#18182cf5);border-color:#818cf85c}
       .bar button{transition:filter .12s ease,border-color .12s ease}.bar button:hover:not(:disabled){filter:brightness(1.18)}
-      [data-do=channel]{background:#334155}[data-do=send]{background:#2563eb;border-color:#93c5fd88}
+      [data-do=channel]{background:#334155}[data-do=send],[data-do=send-all]{background:#2563eb;border-color:#93c5fd88}
       [data-do=copy],[data-do=close],[data-vpn=status],[data-vpn=pair],[data-do=pair-copy]{background:#263244}
       [data-vpn=connect]{background:#0f766e;border-color:#5eead488}[data-vpn=disconnect]{background:#78362b;border-color:#fb923c88}
       .section-label{font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8;margin:6px 0 4px}.pairing{margin-top:5px;border-top:1px solid #ffffff18;padding-top:4px}.pairing summary{cursor:pointer;color:#94a3b8}.pairing .row{margin-top:4px}
@@ -4393,6 +4614,8 @@ function primaryVideoEvidence(html, pageUrl) {
     node('div', 'summary', row);
     const channelButton = node('button', '', row); channelButton.type = 'button'; channelButton.dataset.do = 'channel';
     node('button', '', row, 'Send').dataset.do = 'send';
+    const sendAll = node('button', '', row, 'Send all'); sendAll.type = 'button'; sendAll.dataset.do = 'send-all';
+    sendAll.title = 'Select every detected video on this page and send to the chosen Recall';
     node('button', '', row, 'Copy log').dataset.do = 'copy';
     const close = node('button', '', row, '×'); close.type = 'button'; close.dataset.do = 'close';
     close.setAttribute('aria-label', 'Close video selection');
@@ -4445,7 +4668,7 @@ function primaryVideoEvidence(html, pageUrl) {
         GM_setValue(VPN_PAIR_KEY, JSON.stringify({...vpnPairings(), [vpnEndpoint()]:key.trim()}));
       }
       if (action === 'disconnect' && !window.confirm('Disconnect the PC VPN? This affects other PC apps and can interrupt video playback.')) return;
-      vpnWorking = true; vpnButtons.forEach(b => b.disabled = true); send.disabled = true;
+      vpnWorking = true; vpnButtons.forEach(b => b.disabled = true); send.disabled = true; sendAll.disabled = true;
       showVpn({phase:action === 'disconnect' ? 'disconnecting' : 'checking',busy:true});
       try { await runVpnAction(action === 'pair' ? 'connect' : action, showVpn); }
       catch (error) { showVpn({...session.vpn,phase:'error',busy:false,error:error.code || 'vpn_unavailable'}); }
@@ -4466,6 +4689,7 @@ function primaryVideoEvidence(html, pageUrl) {
       channelButton.title = session.sending ? 'Destination is fixed while sending' : 'Tap to switch Recall destination';
       channelButton.disabled = session.sending;
       send.disabled = !session.selected.size || session.sending || vpnWorking;
+      sendAll.disabled = !session.candidates.length || session.sending || vpnWorking;
       vpnButtons.forEach(button => button.disabled = session.sending || vpnWorking);
       for (const candidate of session.candidates) {
         const box = controls.get(candidate.previewId);
@@ -4492,11 +4716,13 @@ function primaryVideoEvidence(html, pageUrl) {
     };
     const schedulePosition = () => { if (!animation && !closed) animation = requestAnimationFrame(position); };
     const resize = new ResizeObserver(schedulePosition);
-    const rescan = () => {
+    const rescan = (refreshDocument = true) => {
       if (closed || session.sending) return;
       if (pageUrl !== canonicalWatchPageUrl(location.href, location.href)) { session.close(); return; }
-      document.__uvsRawHtml = document.documentElement?.innerHTML || '';
-      document.__uvsUrl = location.href;
+      if (refreshDocument) {
+        document.__uvsRawHtml = document.documentElement?.innerHTML || '';
+        document.__uvsUrl = location.href;
+      }
       const found = collectSelectableTargets(mode);
       for (const candidate of found) {
         const existing = session.candidates.find(item => key(item) === key(candidate));
@@ -4509,6 +4735,7 @@ function primaryVideoEvidence(html, pageUrl) {
         session.candidates.push(candidate);
         const box = document.createElement('button');
         box.type = 'button'; box.className = 'box'; box.dataset.target = String(candidate.previewId);
+        box.style.zIndex = candidate.kind === 'player' ? '2' : '1';
         box.appendChild(document.createElement('span'));
         box.onclick = event => {
           event.preventDefault(); event.stopPropagation();
@@ -4530,19 +4757,34 @@ function primaryVideoEvidence(html, pageUrl) {
       }
       update(); schedulePosition();
     };
+    const needsRebind = () => !closed && !session.sending && session.candidates.some(candidate =>
+      candidate.kind === 'player' && !candidate.element?.isConnected);
+    const scheduleRebind = () => {
+      if (!needsRebind() || rescanTimer) return;
+      rescanTimer = setTimeout(() => { rescanTimer = 0; rescan(false); }, 350);
+    };
+    const onVisibilityEnd = event => { if (!host.contains(event.target)) { scheduleRebind(); schedulePosition(); } };
+    let stopRebindRetries = () => {};
     const mutation = new MutationObserver(records => {
       schedulePosition();
       if (records.some(record => !host.contains(record.target) && record.type === 'childList')) {
-        clearTimeout(rescanTimer); rescanTimer = setTimeout(rescan, 350);
+        clearTimeout(rescanTimer); rescanTimer = setTimeout(() => { rescanTimer = 0; rescan(); }, 350);
+      } else if (records.some(record => !host.contains(record.target) && record.type === 'attributes')) {
+        scheduleRebind();
       }
     });
     mutation.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class','style','hidden'] });
+    document.addEventListener('transitionend', onVisibilityEnd, true);
+    document.addEventListener('animationend', onVisibilityEnd, true);
     window.addEventListener('scroll', schedulePosition, true); window.addEventListener('resize', schedulePosition);
     const onKey = event => { if (event.key === 'Escape') session.dismiss(); };
     shadow.addEventListener('keydown', onKey);
     window.addEventListener('keydown', onKey);
     session.close = () => {
       closed = true; resize.disconnect(); mutation.disconnect(); cancelAnimationFrame(animation); clearTimeout(rescanTimer);
+      stopRebindRetries();
+      document.removeEventListener('transitionend', onVisibilityEnd, true);
+      document.removeEventListener('animationend', onVisibilityEnd, true);
       stopMoving();
       window.removeEventListener('scroll', schedulePosition, true); window.removeEventListener('resize', schedulePosition); window.removeEventListener('keydown', onKey);
       host.remove(); if (activeTargetPreview === session) activeTargetPreview = null;
@@ -4574,8 +4816,8 @@ function primaryVideoEvidence(html, pageUrl) {
       const copied = await copyTextToClipboard(JSON.stringify(buildDetectionFeedback(session), null, 2));
       status.textContent = copied ? 'Log copied. Paste it in chat; no cookies or media URLs included.' : 'Clipboard blocked. Allow clipboard access and try again.';
     };
-    send.onclick = async event => {
-      if (session.sending || !session.selected.size) return;
+    const sendSelected = async event => {
+      if (session.sending || vpnWorking || !session.selected.size) return;
       session.sending = true; session.stage = 'capture';
       session.accepted = false;
       session.captureTrace = null; session.captureFailure = null;
@@ -4606,8 +4848,24 @@ function primaryVideoEvidence(html, pageUrl) {
         for (const target of targets) if (['Queued','Checking','Sending'].includes(target.status)) target.status = 'Not sent';
       } finally { if (session.captureTrace) session.captureTrace.elapsedMs = Math.round(performance.now() - session.captureTrace.startedAt); session.sending = false; update(); }
     };
+    send.onclick = sendSelected;
+    sendAll.onclick = async event => {
+      event.preventDefault(); event.stopPropagation();
+      if (session.sending || vpnWorking || closed) return;
+      // Refresh lazy-loaded cards and drop vanished selections before taking
+      // one deduplicated snapshot. Preserve the real click for VPN authorization.
+      session.selected.clear();
+      rescan();
+      if (closed) return;
+      for (const candidate of session.candidates) session.selected.add(candidate.previewId);
+      update();
+      await sendSelected(event);
+    };
     session.update = update;
     activeTargetPreview = session; rescan(); position();
+    // Lazy players may reveal an existing node without adding DOM children.
+    // Retry missing mappings briefly, without repeatedly copying the page HTML.
+    stopRebindRetries = startTargetRebindRetries(needsRebind, () => rescan(false));
     return session;
   }
 
@@ -4856,7 +5114,7 @@ function primaryVideoEvidence(html, pageUrl) {
     window.addEventListener('DOMContentLoaded', addFloatingButtons, { once: true });
   }
 
-  log('Universal Video Scraper v7.34.0 loaded on', location.href);
+  log('Universal Video Scraper v7.36.0 loaded on', location.href);
 
   // Capture is now explicit: no saved legacy auto-scrape setting starts work.
 })();
