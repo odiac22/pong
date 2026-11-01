@@ -306,7 +306,10 @@ html[data-pong-discover] [data-e2e="explore-item-list"] > *{width:100%!important
     if(!Number.isFinite(fraction))return false;
     if(!drag){
       const cards=feedCards();
-      if(cards.length<2||profileButton(1)||profileButton(-1))return false; // browse/cinema viewers keep their own motion
+      // Browse/cinema viewers keep their own motion; the For You feed also exposes
+      // "Go to next video" buttons (feed-navigation-*), which must not disable the drag.
+      const cinemaOnly=d=>{const b=profileButton(d);return b&&!/^feed-navigation/.test(b.getAttribute('data-e2e')||'')?b:null};
+      if(cards.length<2||cinemaOnly(1)||cinemaOnly(-1))return false;
       const active=cards.includes(gestureCard)?gestureCard:nearestCard(cards);
       if(!active)return false;
       const at=cards.indexOf(active);
