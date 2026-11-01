@@ -47,6 +47,7 @@ try{
   $label=('perf'+$Suffix+($cell -replace '[^a-z0-9]','')).ToLower()
   $args=@('-Label',$label,'-Config',$Config)
   if($Overlay){ $args+=@('-Overlay',$Overlay) }
+  if($cell -match '1024'){ $args+=@('-Restorer','GPEN1024') }
   switch -Regex ($cell){
    '^grass'    { $args+=@('-Stock',$stock.grass) }
    '^fitness'  { $args+=@('-Stock',$stock.fitness) }
@@ -59,7 +60,7 @@ try{
   elseif($cell -match 'c3a'){ $args+=@('-Cadence','3','-Adapt','1') }
   elseif($cell -match 'adapt'){ $args+=@('-Cadence','4','-Adapt','1') }
   $started=Get-Date
-  & pwsh -NoProfile -File $runner @args -Env $Env
+  & pwsh -NoProfile -File $runner @args
   $code=$LASTEXITCODE
   $busyAfter=Active-Sessions
   $json="F:\CodexProjects\pong\artifacts\perf-audit-20261101\runs\$label.json"

@@ -9,9 +9,10 @@ from gpu_trial_mutex import acquire
 acquire()
 import sys,os,json,copy,time,threading,subprocess,re,argparse
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
-ROOT=Path(__file__).resolve().parents[1];REFERENCE=ROOT/'artifacts/swap-audit-20261031';OUT=Path(os.environ.get('PONG_AUDIT_OUTPUT',str(REFERENCE)))
-p=argparse.ArgumentParser();p.add_argument('--label',required=True);p.add_argument('--cadence',type=int,default=4);p.add_argument('--baseline',action='store_true');p.add_argument('--rapid-only',action='store_true');a=p.parse_args()
-sys.path.insert(0,str(ROOT/'Pong Swap'));os.environ['PONG_SWAP_SPOOL_DIR']='E:/Pong Benchmarks/swap-audit-20261031/pipeline-spool'
+ROOT=Path(os.environ.get('PONG_AUDIT_ROOT','F:/CodexProjects/pong')).resolve();REFERENCE=ROOT/'artifacts/swap-audit-20261031';OUT=Path(os.environ.get('PONG_AUDIT_OUTPUT',str(ROOT/'artifacts/perf-audit-20261101/runs')))
+p=argparse.ArgumentParser();p.add_argument('--label',required=True);p.add_argument('--cadence',type=int,default=4);p.add_argument('--baseline',action='store_true');p.add_argument('--rapid-only',action='store_true');p.add_argument('--profile',default='tiktok-3x-adapt');p.add_argument('--cold',type=int,default=3);a=p.parse_args()
+sys.path.insert(0,str(ROOT/'Pong Swap'));os.environ['PONG_SWAP_SPOOL_DIR']='E:/Pong Benchmarks/perf-audit-20261101/pipeline-spool'
+if os.environ.get('PONG_AUDIT_OVERLAY'):sys.path.insert(0,os.environ['PONG_AUDIT_OVERLAY'])
 if a.baseline:
  import importlib.abc,importlib.util,importlib.machinery
  class FrozenSource(importlib.machinery.SourceFileLoader):
@@ -27,7 +28,10 @@ if a.baseline:
 import cv2,numpy as np
 cv2.setNumThreads(1)
 import pong_swap_config as cfg
-base=json.loads((REFERENCE/'attachmentstockgrassmatrix4.json').read_text());config=base['config'];config['runtime']['swapAudioEnabled']=False
+base=json.loads((REFERENCE/'attachmentstockgrassmatrix4.json').read_text())
+config=json.loads(Path(os.environ['PONG_AUDIT_CONFIG']).read_text(encoding='utf-8-sig')) if os.environ.get('PONG_AUDIT_CONFIG') else base['config']
+config=config.get('config',config);config['runtime']['swapAudioEnabled']=False
+for key in ('tiktokRestorerProfile','tiktokRestorerState','threeXForce256','crowdRestorerModel','frameReuseCadence'):config['runtime'].pop(key,None)
 cfg.load_config=lambda:copy.deepcopy(config);cfg.save_config=lambda *x,**kw:(_ for _ in ()).throw(RuntimeError('Benchmark preset write forbidden'))
 import pong_swap_engine as pe
 from pong_appearance_client import APPEARANCE,install_acquisition_classifier
@@ -65,7 +69,7 @@ def make_engine():
 def create(stock):
  global sequence
  sequence+=1
- return engine.create_session(channel='audit-pipeline',source_url=f'http://127.0.0.1:{server.server_port}/{stock}',face_id=ids[0],face_ids=ids,start_seconds=0,prefetch=False,prebuffer_seconds=.25,navigation_class='foreground',restoration_profile='tiktok-3x-gpen1024',frame_reuse_cadence=a.cadence,client_epoch=f'{a.label}-{sequence}',activation_sequence=sequence)
+ return engine.create_session(channel='audit-pipeline',source_url=f'http://127.0.0.1:{server.server_port}/{stock}',face_id=ids[0],face_ids=ids,start_seconds=0,prefetch=False,prebuffer_seconds=.25,navigation_class='foreground',restoration_profile=a.profile,frame_reuse_cadence=a.cadence,client_epoch=f'{a.label}-{sequence}',activation_sequence=sequence)
 def run(stock,kind,full=False):
  request=time.perf_counter();wall=time.time()
  if not a.baseline or os.environ.get('PONG_AUDIT_BASELINE_APPEARANCE')=='1':APPEARANCE.request_warm()
@@ -109,7 +113,7 @@ def run(stock,kind,full=False):
       'bufferingSeconds':sum(x['seconds'] for x in stalls),'stalls':stalls,'consumer':ticks,'cancelMs':(time.perf_counter()-stopped)*1000,'received':received,'session':s.public()}
  report['runs'].append(row);save();print(json.dumps({k:row[k] for k in ('kind','stock','firstSwapMs','firstFragmentMs','bufferingSeconds','playedFrames')}),flush=True)
 try:
- for i in range(0 if a.rapid_only else 3):
+ for i in range(0 if a.rapid_only else a.cold):
   engine=make_engine();run('4769378','cold-'+str(i));engine.unload();engine.shutdown_gpu_worker();APPEARANCE.close();engine=None
  engine=make_engine()
  if not a.baseline or os.environ.get('PONG_AUDIT_BASELINE_APPEARANCE')=='1':APPEARANCE.request_warm()

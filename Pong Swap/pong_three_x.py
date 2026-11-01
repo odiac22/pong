@@ -533,10 +533,11 @@ class RestorerLadder:
     DOWN_UTILISATION = 0.85
     UP_UTILISATION = 0.70
     SEVERE_UTILISATION = 1.30
-    PROBE_UTILISATION = 0.45  # sustained real cost this far under budget earns a trial step up
-    PROBE_FRAMES = 120        # ~4 s at 30 fps
-    MIN_FRAMES_BETWEEN_PROBES = 240
+    PROBE_UTILISATION = 0.60  # sustained real cost this far under budget earns a trial step up
+    PROBE_FRAMES = 60         # ~2 s at 30 fps
+    MIN_FRAMES_BETWEEN_PROBES = 120
     PROBE_CONFIRM_FRAMES = 12  # raw frame cost also judges a probe during these frames
+    WARMUP_FRAMES = 3
 
     def __init__(self, configured, *, ceiling='GPEN1024', floor='GPEN357', ready=None, start=None):
         order = list(RESTORER_LADDER_ORDER)
@@ -550,6 +551,7 @@ class RestorerLadder:
         configured_rung = ladder_rung_for(configured)
         initial = start if start in self.rungs else (configured_rung if configured_rung in self.rungs else self.rungs[-1])
         self.index = self.rungs.index(initial)
+        self.started_from_hint = start in self.rungs
         self.ema = None
         self.faces = 0
         self.fresh_ratio = 1.0
@@ -622,6 +624,19 @@ class RestorerLadder:
         ms = float(seconds) * 1000.0
         budget = 1000.0 / max(1.0, float(fps or 30))
         self.last_budget_ms = budget
+        if self.frames <= self.WARMUP_FRAMES:
+            # Cold first frames (lazy kernels, caches) are not steady-state evidence.
+            # Pick the opening rung from the visible face count instead: one person
+            # starts at the finest resident rung, a crowd at the cheapest; measured
+            # frames correct either within a few frames.
+            self.faces = faces
+            if self.frames == 1 and not self.started_from_hint:
+                opening = 0 if faces <= 1 else (len(self.rungs) // 2 if faces == 2 else len(self.rungs) - 1)
+                target = self._next_ready(-1 if opening < self.index else +1, abs(opening - self.index)) if opening != self.index else None
+                if target is not None and self._move(target, 'opening-face-count'):
+                    self.switches = 0
+                    self.last_change = -10_000
+            return False
         if fresh_faces is not None:
             ratio = max(0.0, min(1.0, float(fresh_faces) / max(1, faces)))
             self.fresh_ratio = ratio if self.fresh_ratio is None else 0.1 * ratio + 0.9 * self.fresh_ratio
@@ -653,7 +668,6 @@ class RestorerLadder:
         self.over = self.over + 1 if over else 0
         at_bottom = self.index >= len(self.rungs) - 1
         if at_bottom:
-            self.headroom = 0
             self.reason = 'buffer-low' if buffer_low else ('compute-budget' if over else 'floor')
         elif over and (self.over >= (1 if severe else self.DOWN_FRAMES)) and (
                 severe or self.frames - self.last_change >= self.MIN_FRAMES_BETWEEN_DOWNS):

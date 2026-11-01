@@ -9,6 +9,12 @@ from pong_tiktok_restorer import (ADAPT_THREE_X_PROFILE, TIKTOK_THREE_X_PROFILE,
     restorer_models, select_restorer, adapt_restorer_ladder)
 
 
+def warm(ladder, faces=1):
+    for _ in range(RestorerLadder.WARMUP_FRAMES):
+        ladder.observe(.010, 30, faces, None, fresh_faces=faces)
+    return ladder
+
+
 def cadence_frames(ladder, count, seconds, faces, buffer_seconds, cadence=4, fps=30):
     """Feed frames the way Adapt+1/4 produces them: one fresh generation every ``cadence`` frames."""
     changes = []
@@ -20,8 +26,19 @@ def cadence_frames(ladder, count, seconds, faces, buffer_seconds, cadence=4, fps
 
 
 class LadderControllerTest(unittest.TestCase):
+    def test_single_face_opens_at_1024_and_crowd_opens_at_floor(self):
+        one = RestorerLadder('GPEN357')
+        one.observe(.800, 30, 1, None, fresh_faces=1)  # cold first frame is ignored
+        self.assertEqual((one.model, one.switches), ('GPEN1024', 0))
+        crowd = RestorerLadder('GPEN1024')
+        crowd.observe(.300, 30, 5, None, fresh_faces=5)
+        self.assertEqual(crowd.model, 'GPEN357')
+        two = RestorerLadder('GPEN1024')
+        two.observe(.050, 30, 2, None, fresh_faces=2)
+        self.assertEqual(two.model, 'GPEN512')
+
     def test_single_face_with_headroom_climbs_to_1024_gradually(self):
-        ladder = RestorerLadder('GPEN357')
+        ladder = RestorerLadder('GPEN357', start='GPEN357')
         self.assertEqual(ladder.model, 'GPEN357')
         # 12 ms frames at 1/4 cadence: a 1024 rung adds 36 ms * 1 face * 0.25 = 9 ms.
         changes = cadence_frames(ladder, 600, .012, 1, 1.5)
@@ -30,7 +47,7 @@ class LadderControllerTest(unittest.TestCase):
         self.assertEqual(ladder.reason, 'headroom')
 
     def test_more_faces_entering_steps_down_before_a_slow_frame_is_measured(self):
-        ladder = RestorerLadder('GPEN1024')
+        ladder = warm(RestorerLadder('GPEN1024', start='GPEN1024'))
         cadence_frames(ladder, 40, .020, 1, 1.5)
         self.assertEqual(ladder.model, 'GPEN1024')
         # Four more people arrive: the predicted cost jumps far beyond a 33 ms budget.
@@ -39,19 +56,19 @@ class LadderControllerTest(unittest.TestCase):
         self.assertIn(ladder.reason, ('faces-entered', 'faces-entered-severe'))
 
     def test_sustained_over_budget_steps_down_and_buffer_low_is_severe(self):
-        ladder = RestorerLadder('GPEN1024')
+        ladder = warm(RestorerLadder('GPEN1024', start='GPEN1024'), 2)
         for _ in range(2):
             self.assertFalse(ladder.observe(.031, 30, 2, 1.5, fresh_faces=0))
         self.assertEqual(ladder.model, 'GPEN1024')
         self.assertTrue(ladder.observe(.031, 30, 2, 1.5, fresh_faces=0))
         self.assertEqual(ladder.model, 'GPEN512')
-        low = RestorerLadder('GPEN1024')
+        low = warm(RestorerLadder('GPEN1024', start='GPEN1024'))
         self.assertTrue(low.observe(.010, 30, 1, .2, fresh_faces=1))
         self.assertEqual(low.model, 'GPEN357')
         self.assertEqual(low.reason, 'buffer-low')
 
     def test_single_spike_and_unknown_buffer_do_not_flap(self):
-        ladder = RestorerLadder('GPEN1024')
+        ladder = warm(RestorerLadder('GPEN1024', start='GPEN1024'))
         cadence_frames(ladder, 60, .012, 1, None)
         ladder.observe(.090, 30, 1, None, fresh_faces=1)
         cadence_frames(ladder, 30, .012, 1, None)
@@ -59,7 +76,7 @@ class LadderControllerTest(unittest.TestCase):
         self.assertEqual(ladder.switches, 0)
 
     def test_down_then_recover_requires_dwell_and_safe_buffer(self):
-        ladder = RestorerLadder('GPEN1024')
+        ladder = warm(RestorerLadder('GPEN1024', start='GPEN1024'), 3)
         for _ in range(5):
             ladder.observe(.045, 30, 3, 1.5, fresh_faces=3)
         self.assertEqual(ladder.model, 'GPEN357')
@@ -72,7 +89,7 @@ class LadderControllerTest(unittest.TestCase):
     def test_probe_climbs_when_measured_cost_stays_far_under_budget(self):
         # Fresh every frame: the prior says 1024 for one face costs 36 ms, which would never
         # fit a 33 ms budget, but real frames at 9 ms earn a rate-limited probe upward.
-        ladder = RestorerLadder('GPEN357')
+        ladder = RestorerLadder('GPEN357', start='GPEN357')
         changes = []
         for i in range(900):
             if ladder.observe(.009, 30, 1, 1.5, fresh_faces=1):
@@ -86,7 +103,7 @@ class LadderControllerTest(unittest.TestCase):
         self.assertLess(i, 12)
         self.assertEqual(ladder.model, 'GPEN512')
         # And a probe that fails immediately is reversed on raw frame evidence.
-        probe = RestorerLadder('GPEN357')
+        probe = RestorerLadder('GPEN357', start='GPEN357')
         for _ in range(RestorerLadder.PROBE_FRAMES + 5):
             if probe.observe(.009, 30, 1, 1.5, fresh_faces=1):
                 break
@@ -96,15 +113,15 @@ class LadderControllerTest(unittest.TestCase):
         self.assertEqual(probe.model, 'GPEN357')
 
     def test_only_resident_rungs_are_selected(self):
-        ladder = RestorerLadder('GPEN357', ready=lambda m: m != 'GPEN512')
+        ladder = RestorerLadder('GPEN357', ready=lambda m: m != 'GPEN512', start='GPEN357')
         cadence_frames(ladder, 600, .008, 1, 1.5)
         self.assertEqual(ladder.model, 'GPEN1024')
-        none_ready = RestorerLadder('GPEN357', ready=lambda m: m == 'GPEN357')
+        none_ready = RestorerLadder('GPEN357', ready=lambda m: m == 'GPEN357', start='GPEN357')
         cadence_frames(none_ready, 600, .008, 1, 1.5)
         self.assertEqual(none_ready.model, 'GPEN357')
         self.assertEqual(none_ready.switches, 0)
         # Severe pressure skips to the lowest resident rung even when one rung is absent.
-        gap = RestorerLadder('GPEN1024', ready=lambda m: m != 'GPEN512')
+        gap = warm(RestorerLadder('GPEN1024', ready=lambda m: m != 'GPEN512', start='GPEN1024'))
         self.assertTrue(gap.observe(.010, 30, 1, .1, fresh_faces=1))
         self.assertEqual(gap.model, 'GPEN357')
 
