@@ -107,6 +107,9 @@ html[data-pong-discover] [data-e2e="search-box"]{display:flex!important;width:10
 html[data-pong-discover] [data-e2e="search-user-input"]{display:block!important;min-width:0!important;flex:1!important;width:100%!important;color:#fff!important;font-size:20px!important}
 html[data-pong-discover] :is([data-e2e="nav-following"],[data-e2e="nav-foryou"],[data-e2e="nav-search"]){display:none!important}
 html[data-pong-discover] [class*="ExploreLayout"]{padding-top:88px!important;padding-bottom:76px!important}
+/* TikTok renders its search tab/filter bar (Top / Videos / Users, Filters) at this
+   width, but it scrolled underneath Pong's fixed 76px header. Keep it visible. */
+html[data-pong-discover] [class*="DivSearchTabB"],html[data-pong-discover] [class*="DivSearchTabBar"],html[data-pong-discover] [class*="DivFilter"]{display:flex!important;visibility:visible!important;position:sticky!important;top:76px!important;z-index:1009!important;background:#080808!important;margin:0!important;padding:4px 12px!important;max-width:none!important}
 html[data-pong-discover] [data-e2e="explore-item-list"]{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:14px 10px!important;width:calc(100% - 24px)!important;margin:0 12px!important}
 html[data-pong-discover] [data-e2e="explore-item-list"] > *{width:100%!important;min-width:0!important;margin:0!important}
 /* Creator browse viewer is a desktop two-column modal, not cinema mode. */
