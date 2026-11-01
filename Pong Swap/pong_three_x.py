@@ -1237,7 +1237,11 @@ class ThreeXRenderer:
             active_patch_keys = {key for key, _ in pairs}
             self.face_patches = {key: value for key, value in self.face_patches.items()
                                  if key in active_patch_keys}
-            if self.gpu_patch_enabled:
+            if self.gpu_patch_enabled and os.environ.get('PONG_LAZY_PATCH_SUPPORT', '1') != '1':
+                # Eager support readback forces a host fence on the previous frame's GPU
+                # tail before any new work is queued. FacePatch.render reads the same
+                # 128px alpha lazily when a patch is first considered, so by default the
+                # pre-pass is skipped and the CPU/GPU overlap is preserved.
                 from pong_face_patch import FacePatch
                 with engine._lock, engine._torch.cuda.stream(engine._compute_stream):
                     FacePatch.prepare_supports(list(self.face_patches.values()))
