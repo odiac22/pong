@@ -36,6 +36,29 @@ def rope_similarity(a,b):
     return state.cosine(a,b,False) if state is not None else _rope_similarity(a,b)
 
 
+def rope_similarity_many(references, embedding):
+    """Vectorised ``rope_similarity`` of one embedding against a list of references.
+
+    Same scaling as the frame-scoped FrameMath non-strict cosine
+    (100 * clip((cos - .05) / .65, 0, 1)); an invalid pair scores -inf like it does.
+    One matrix product replaces hundreds of per-pair Python cosines per frame.
+    """
+    if references is None or len(references) == 0:
+        return np.zeros(0, np.float64)
+    target = np.asarray(embedding, np.float32).reshape(-1)
+    norm = float(np.linalg.norm(target))
+    matrix = np.asarray(references, np.float32).reshape(len(references), -1)
+    if matrix.shape[1] != target.size or not np.isfinite(norm) or norm <= 1e-8:
+        return np.full(len(references), -np.inf)
+    norms = np.linalg.norm(matrix, axis=1)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        cosines = (matrix @ target) / (norms * norm)
+    cosines = np.clip(np.nan_to_num(cosines, nan=-1.0), -1.0, 1.0)
+    scores = 100.0 * np.clip((cosines - .05) / .65, 0.0, 1.0)
+    scores[~np.isfinite(norms) | (norms <= 1e-8)] = -np.inf
+    return scores.astype(np.float64)
+
+
 def hair_preference(face_id, color, confidence):
     """Soft ranking: verified agreement > unmeasured > verified mismatch.
 
@@ -1626,7 +1649,11 @@ class ThreeXRenderer:
         if not rows or not self.assignments.anchors:return rows
         floor=target_identity_lock_threshold(self.session.config['parameters'].get('DetectScoreSlider',45))
         references=list(self.assignments.anchors.values())+[v for refs in self.assignments.pose_references.values() for v in refs]
-        def score(row):return max((rope_similarity(ref,row[2]) for ref in references),default=0) if valid_embedding(row[2]) else 0
+        reference_matrix=np.stack([np.asarray(r,np.float32).reshape(-1) for r in references]) if references else None
+        def score(row):
+            if not valid_embedding(row[2]) or reference_matrix is None:return 0
+            best=float(np.max(rope_similarity_many(reference_matrix,row[2])))
+            return best if np.isfinite(best) else 0
         weak=[i for i,row in enumerate(rows) if score(row)<floor]
         if not weak:return rows
         config=deepcopy(self.session.config)
@@ -1662,11 +1689,14 @@ class ThreeXRenderer:
                 except Exception as exc:self.batch_policy_error=str(exc)
         eligible = []
         self.eligibility_counts = {'detectedCount': len(detected), 'eligibleCount': 0, 'maleFilteredCount': 0, 'uncertainFilteredCount': 0, 'classificationErrorCount': 0}
+        cache_matrix = None  # built lazily once per frame; invalidated when the cache grows
         for row in detected:
             if row[2] is None or not valid_embedding(row[2]):
                 continue
-            ranked = sorted([(rope_similarity(entry[1], row[2]), n)
-                             for n, entry in enumerate(self.presentation_cache)], reverse=True)
+            if cache_matrix is None and self.presentation_cache:
+                cache_matrix = np.stack([np.asarray(entry[1], np.float32).reshape(-1) for entry in self.presentation_cache])
+            cache_scores = rope_similarity_many(cache_matrix, row[2]) if cache_matrix is not None else np.zeros(0)
+            ranked = sorted([(float(cache_scores[n]), n) for n in range(len(self.presentation_cache))], reverse=True)
             if (ranked and ranked[0][0] >= target_identity_lock_threshold(100)
                     and (len(ranked) == 1 or ranked[0][0] - ranked[1][0] >= 5)
                     and (os.environ.get('PONG_RETRY_UNCERTAIN_POLICY','0')!='1' or self.presentation_cache[ranked[0][1]][2])):
@@ -1682,6 +1712,7 @@ class ThreeXRenderer:
                     reason = 'classificationErrorCount'
                 self.presentation_cache.append((now, np.asarray(row[2]).copy(), admitted, reason))
                 self.presentation_cache = self.presentation_cache[-MAX_THREE_X_FACES:]
+                cache_matrix = None
             if not admitted and os.environ.get('PONG_ELIGIBILITY_CONTINUITY','0')=='1':
                 # The later strict pair gate already permits this exact raw
                 # identity proof. Do not filter that known person out before

@@ -6749,7 +6749,42 @@ class PongSwapEngine:
 
     def _frame_tensor(self, rgb: np.ndarray):
         torch = self._torch
-        return torch.from_numpy(np.ascontiguousarray(rgb, dtype=np.uint8)).to("cuda").permute(2, 0, 1)
+        array = np.ascontiguousarray(rgb, dtype=np.uint8)
+        if os.environ.get("PONG_PINNED_UPLOAD", "1") != "1":
+            return torch.from_numpy(array).to("cuda").permute(2, 0, 1)
+        # perf-audit-20261101: the pageable `.to("cuda")` of a full 1080p frame
+        # measured ~7.5 ms per frame on the render thread (synchronous staging
+        # copy by the driver). Stage through a small ring of pinned buffers and
+        # issue the device copy asynchronously on the current stream instead;
+        # a slot is reused only after its previous copy has completed.
+        lock = getattr(self, "_upload_ring_lock", None)
+        if lock is None:
+            lock = self._upload_ring_lock = threading.Lock()
+        with lock:
+            ring = getattr(self, "_upload_ring", None)
+            if ring is None:
+                ring = self._upload_ring = {"buffers": [None] * 3, "events": [None] * 3, "next": 0}
+            index = ring["next"]
+            ring["next"] = (index + 1) % 3
+            buffer = ring["buffers"][index]
+            try:
+                if buffer is None or tuple(buffer.shape) != array.shape:
+                    buffer = torch.empty(array.shape, dtype=torch.uint8, pin_memory=True)
+                    ring["buffers"][index] = buffer
+                    ring["events"][index] = None
+                event = ring["events"][index]
+                if event is not None:
+                    event.synchronize()
+                buffer.numpy()[...] = array
+                device = buffer.to("cuda", non_blocking=True)
+                event = torch.cuda.Event()
+                event.record(torch.cuda.current_stream())
+                ring["events"][index] = event
+                return device.permute(2, 0, 1)
+            except Exception:
+                ring["buffers"][index] = None
+                ring["events"][index] = None
+                return torch.from_numpy(array).to("cuda").permute(2, 0, 1)
 
     def _warm_frame_enhancer(self, config: dict[str, Any] | None = None) -> None:
         if self._enhancer_session is not None:
