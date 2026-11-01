@@ -5181,8 +5181,11 @@ class PongSwapEngine:
         self._gpu_worker_cancelled_before_start = 0
         self._gpu_worker_closing = False
         self._config = load_config()
+        # PONG_SWAP_HOME lets an overlay copy of this module (offline A/B harness) keep
+        # using the live tree's presets and vendored models; unset in production.
+        swap_home = Path(os.environ.get("PONG_SWAP_HOME") or Path(__file__).resolve().parent)
         self._detection_calibration = DetectionCalibration(
-            Path(__file__).resolve().parent / "presets" / "detection-learning.json"
+            swap_home / "presets" / "detection-learning.json"
         )
         self._config_revision = 1
         self._multi_video_sources = MultiVideoSources()
@@ -5196,7 +5199,7 @@ class PongSwapEngine:
         self._presentation_key_locks_guard = threading.Lock()
         self._presentation_key_locks: dict[tuple[str, str], threading.Lock] = {}
         self._presentation_classifier = FairFacePresentationClassifier(
-            Path(__file__).resolve().parent
+            swap_home
             / "vendor"
             / "facefusion-benchmark"
             / ".assets"

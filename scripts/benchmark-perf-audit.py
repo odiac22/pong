@@ -231,9 +231,9 @@ try:
   finally:wait_ms['sync']+=(time.perf_counter()-t)*1000;wait_ms['syncCalls']+=1
  compute_stream.synchronize=timed_sync
  original_enhance=renderer._enhance
- def timed_enhance(tensor,points):
+ def timed_enhance(tensor,points,*a,**k):
   t=time.perf_counter()
-  try:return original_enhance(tensor,points)
+  try:return original_enhance(tensor,points,*a,**k)
   finally:wait_ms['readback']+=(time.perf_counter()-t)*1000
  renderer._enhance=timed_enhance
  previous_counters={'reused':0,'tracked':0,'corrections':0,'rechecks':0}

@@ -47,7 +47,7 @@ if($Config){$env:PONG_AUDIT_CONFIG=$Config}else{Remove-Item Env:PONG_AUDIT_CONFI
 if($Restorer){$env:PONG_AUDIT_RESTORER=$Restorer}else{Remove-Item Env:PONG_AUDIT_RESTORER -ErrorAction SilentlyContinue}
 if($Attachment -ne ''){$env:PONG_AUDIT_ATTACHMENT=$Attachment}else{Remove-Item Env:PONG_AUDIT_ATTACHMENT -ErrorAction SilentlyContinue}
 if($Faces){$env:PONG_AUDIT_FACES=$Faces}else{Remove-Item Env:PONG_AUDIT_FACES -ErrorAction SilentlyContinue}
-if($Overlay){$env:PONG_AUDIT_OVERLAY=$Overlay}else{Remove-Item Env:PONG_AUDIT_OVERLAY -ErrorAction SilentlyContinue}
+if($Overlay){$env:PONG_AUDIT_OVERLAY=$Overlay;$env:PONG_SWAP_HOME=(Join-Path $Root 'Pong Swap')}else{Remove-Item Env:PONG_AUDIT_OVERLAY -ErrorAction SilentlyContinue;Remove-Item Env:PONG_SWAP_HOME -ErrorAction SilentlyContinue}
 $python=Join-Path $Root 'Pong Swap\runtime\venv\Scripts\python.exe'
 Push-Location -LiteralPath $Root
 try{
