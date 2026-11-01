@@ -18,7 +18,9 @@ try{
   let changedAt=null;
   for(let k=0;k<12;k++){await delay(100);const now=await state();if(now.id&&now.id!==before.id){changedAt=Date.now()-t0;break;}}
   const after=await state();
-  rows.push({i,beforeId:!!before.id,changed:after.id!==before.id,changedAtMs:changedAt,swapVisibleBefore:before.swap,swapVisibleAfter:after.swap,sessionChanged:after.session!==before.session,arrows:after.arrows,feedNext:after.feedNext,stats:after.stats});
+  let visibleAtMs=null;
+  for(let k=0;k<30;k++){const now=await state();if(now.swap&&now.session!==before.session){visibleAtMs=Date.now()-t0;break;}await delay(100);}
+  rows.push({i,beforeId:!!before.id,changed:after.id!==before.id,changedAtMs:changedAt,swapVisibleBefore:before.swap,swapVisibleAfter:after.swap,newSwapVisibleAtMs:visibleAtMs,sessionChanged:after.session!==before.session,arrows:after.arrows,feedNext:after.feedNext,stats:after.stats});
   console.log(JSON.stringify(rows[rows.length-1]));
   await delay(1500);
  }
