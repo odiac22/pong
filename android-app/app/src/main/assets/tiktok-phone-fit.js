@@ -306,34 +306,48 @@ html[data-pong-discover] [data-e2e="explore-item-list"] > *{width:100%!important
     if(!Number.isFinite(fraction))return false;
     if(!drag){
       const cards=feedCards();
-      // Browse/cinema viewers keep their own motion; the For You feed also exposes
-      // "Go to next video" buttons (feed-navigation-*), which must not disable the drag.
+      // The For You feed also exposes "Go to next video" buttons (feed-navigation-*),
+      // which must not be mistaken for the browse/cinema viewer's arrows.
       const cinemaOnly=d=>{const b=profileButton(d);return b&&!/^feed-navigation/.test(b.getAttribute('data-e2e')||'')?b:null};
-      if(cards.length<2||cinemaOnly(1)||cinemaOnly(-1))return false;
-      const active=cards.includes(gestureCard)?gestureCard:nearestCard(cards);
-      if(!active)return false;
-      const at=cards.indexOf(active);
-      drag={active,prev:cards[at-1]||null,next:cards[at+1]||null,overlay:window.__pongDomSwap?.overlay||null,dy:0};
-      for(const e of dragTargets(drag)){e.style.transition='none';e.style.willChange='transform';}
+      const browse=cinemaOnly(1)||cinemaOnly(-1);
+      if(browse){
+        // Browse/cinema viewer (search results, creator grid): no neighbour card
+        // exists in the DOM, so only the outgoing media and the overlay follow the
+        // finger; the arrow click then brings in the next post.
+        const media=document.querySelector('[data-pong-browse-media],[class*="DivCinemaModeRoot"] video,[data-e2e="browse-video"] video');
+        if(!media)return false;
+        drag={active:media,prev:cinemaOnly(-1)?media:null,next:cinemaOnly(1)?media:null,overlay:window.__pongDomSwap?.overlay||null,dy:0,browse:true};
+        for(const e of new Set(dragTargets(drag))){e.style.transition='none';e.style.willChange='transform';}
+      }else{
+        if(cards.length<2)return false;
+        const active=cards.includes(gestureCard)?gestureCard:nearestCard(cards);
+        if(!active)return false;
+        const at=cards.indexOf(active);
+        drag={active,prev:cards[at-1]||null,next:cards[at+1]||null,overlay:window.__pongDomSwap?.overlay||null,dy:0};
+        for(const e of dragTargets(drag)){e.style.transition='none';e.style.willChange='transform';}
+      }
     }
     const dy=fraction*innerHeight;
     const neighbour=dy<0?drag.next:drag.prev;
-    const applied=neighbour?dy:dy*.35; // rubber-band at the ends of the loaded list
+    // Rubber-band at the ends of the loaded list; the browse viewer moves only a
+    // little (its next post is not in the DOM to slide in behind the finger).
+    const applied=neighbour?(drag.browse?dy*.25:dy):dy*.35;
     drag.dy=applied;
     const value=`translate3d(0,${applied.toFixed(1)}px,0)`;
-    for(const e of dragTargets(drag))e.style.transform=value;
+    for(const e of new Set(dragTargets(drag)))e.style.transform=value;
     return !!neighbour;
   };
   window.__pongTikTokDragEnd=(commit,direction)=>{
     const d=drag;drag=null;
     if(!d)return commit?!!window.__pongTikTokStep?.(direction):false;
-    const els=dragTargets(d);
+    const els=[...new Set(dragTargets(d))];
     const finish=()=>{for(const e of els){e.style.transition='';e.style.transform='';e.style.willChange='';}};
     const neighbour=direction>0?d.next:d.prev;
     if(commit&&neighbour){
-      const remaining=Math.max(0,innerHeight-Math.abs(d.dy));
-      const ms=Math.max(60,Math.min(180,Math.round(remaining/innerHeight*220)));
-      const target=direction>0?-innerHeight:innerHeight;
+      const travel=d.browse?Math.round(innerHeight*.25):innerHeight;
+      const remaining=Math.max(0,travel-Math.abs(d.dy));
+      const ms=Math.max(60,Math.min(180,Math.round(remaining/travel*220)));
+      const target=direction>0?-travel:travel;
       for(const e of els){e.style.transition=`transform ${ms}ms cubic-bezier(.2,.8,.2,1)`;e.style.transform=`translate3d(0,${target}px,0)`;}
       stepStats.dragCommits=(stepStats.dragCommits||0)+1;
       setTimeout(()=>{finish();window.__pongTikTokStep?.(direction);},ms+10);

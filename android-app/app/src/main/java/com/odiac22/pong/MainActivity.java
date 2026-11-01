@@ -563,8 +563,12 @@ public class MainActivity extends Activity {
     // The step script retires outgoing pixels synchronously before clicking
     // Next; a page without the drag helper (older asset) falls back to it.
     tiktokWeb.evaluateJavascript(
-      "window.__pongTikTokDragEnd?window.__pongTikTokDragEnd(" + doCommit + "," + direction + "):(" +
-      doCommit + "&&window.__pongTikTokStep&&window.__pongTikTokStep(" + direction + "))", null);
+      "window.__pongTikTokDragEnd&&window.__pongTikTokDragEnd(" + doCommit + "," + direction + ")", null);
+    if (doCommit) {
+      // Older page assets without the drag helper still get the real step.
+      tiktokWeb.evaluateJavascript(
+        "window.__pongTikTokStep&&!window.__pongTikTokDragEnd&&window.__pongTikTokStep(" + direction + ")", null);
+    }
   }
 
   private static boolean isTikTokPageUrl(String rawUrl) {
