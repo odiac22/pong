@@ -295,6 +295,52 @@ html[data-pong-discover] [data-e2e="explore-item-list"] > *{width:100%!important
     },VERIFY_MS);
     verifyingStep=record;
   };
+  // Finger-following feed transition (2026-11-01). While the native layer owns a
+  // vertical gesture it reports the drag as a fraction of the view height; the
+  // active card, its neighbour in the drag direction and the swap overlay move
+  // with the finger on the compositor (transform only). On release the cards
+  // finish the motion and the existing step performs TikTok's real transition.
+  let drag=null;
+  const dragTargets=d=>[d.active,d.prev,d.next,d.overlay].filter(Boolean);
+  window.__pongTikTokDrag=fraction=>{
+    if(!Number.isFinite(fraction))return false;
+    if(!drag){
+      const cards=feedCards();
+      if(cards.length<2||profileButton(1)||profileButton(-1))return false; // browse/cinema viewers keep their own motion
+      const active=cards.includes(gestureCard)?gestureCard:nearestCard(cards);
+      if(!active)return false;
+      const at=cards.indexOf(active);
+      drag={active,prev:cards[at-1]||null,next:cards[at+1]||null,overlay:window.__pongDomSwap?.overlay||null,dy:0};
+      for(const e of dragTargets(drag)){e.style.transition='none';e.style.willChange='transform';}
+    }
+    const dy=fraction*innerHeight;
+    const neighbour=dy<0?drag.next:drag.prev;
+    const applied=neighbour?dy:dy*.35; // rubber-band at the ends of the loaded list
+    drag.dy=applied;
+    const value=`translate3d(0,${applied.toFixed(1)}px,0)`;
+    for(const e of dragTargets(drag))e.style.transform=value;
+    return !!neighbour;
+  };
+  window.__pongTikTokDragEnd=(commit,direction)=>{
+    const d=drag;drag=null;
+    if(!d)return commit?!!window.__pongTikTokStep?.(direction):false;
+    const els=dragTargets(d);
+    const finish=()=>{for(const e of els){e.style.transition='';e.style.transform='';e.style.willChange='';}};
+    const neighbour=direction>0?d.next:d.prev;
+    if(commit&&neighbour){
+      const remaining=Math.max(0,innerHeight-Math.abs(d.dy));
+      const ms=Math.max(60,Math.min(180,Math.round(remaining/innerHeight*220)));
+      const target=direction>0?-innerHeight:innerHeight;
+      for(const e of els){e.style.transition=`transform ${ms}ms cubic-bezier(.2,.8,.2,1)`;e.style.transform=`translate3d(0,${target}px,0)`;}
+      stepStats.dragCommits=(stepStats.dragCommits||0)+1;
+      setTimeout(()=>{finish();window.__pongTikTokStep?.(direction);},ms+10);
+      return true;
+    }
+    for(const e of els){e.style.transition='transform 160ms ease-out';e.style.transform='translate3d(0,0,0)';}
+    stepStats.dragCancels=(stepStats.dragCancels||0)+1;
+    setTimeout(finish,180);
+    return false;
+  };
   const cancelForNavigation=()=>cancelWaitingStep();
   document.addEventListener('pointerdown',cancelForNavigation,true);
   addEventListener('popstate',cancelForNavigation);
