@@ -6750,7 +6750,7 @@ class PongSwapEngine:
     def _frame_tensor(self, rgb: np.ndarray):
         torch = self._torch
         array = np.ascontiguousarray(rgb, dtype=np.uint8)
-        if os.environ.get("PONG_PINNED_UPLOAD", "1") != "1":
+        if os.environ.get("PONG_PINNED_UPLOAD", "0") != "1":
             return torch.from_numpy(array).to("cuda").permute(2, 0, 1)
         # perf-audit-20261101: the pageable `.to("cuda")` of a full 1080p frame
         # measured ~7.5 ms per frame on the render thread (synchronous staging
