@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Video Scraper - Visible Buttons + Page Links
 // @namespace    https://coomerfans.com/
-// @version      7.36.0
+// @version      7.37.0
 // @description  Tap Pong, select red video/thumbnail boxes and Send, or tap Send all. Copy log for troubleshooting.
 // @author       regginyggaf
 // @match        *://*/*
@@ -27,6 +27,9 @@
   'use strict';
 
   /* CONFIG */
+
+  // Recall ignores clips and previews shorter than this (verified on the PC).
+  const MINIMUM_VIDEO_SECONDS = 30;
 
   const VIDEO_EXT_RE = /\.(mp4|m4v|mov|webm|mkv|m3u8|mpd|ogv)\/?(?:[?#]|$)/i;
 
@@ -3775,10 +3778,43 @@ function primaryVideoEvidence(html, pageUrl) {
     return state;
   }
 
+  // Read each selected card's page in this browser session (which may have
+  // already passed a site challenge the PC cannot) and pass on only external
+  // player page URLs. The PC opens and verifies those players itself.
+  async function cardPlayerUrlHints(targets, timeoutMs = 3500) {
+    const hints = targets.map(() => ({ playerUrls: [] }));
+    const work = targets.map(async (target, index) => {
+      if (target.kind !== 'link' || target.logicalVideoId || !/^https:/i.test(target.url || '')) return;
+      const doc = await fetchDoc(target.url, { timeout: timeoutMs, maxRetries: 1 });
+      if (!doc) return;
+      const pageHost = new URL(target.url).hostname.replace(/^www\./, '');
+      const raw = String(doc.__uvsRawHtml || '').replace(/\\\//g, '/');
+      const found = [...embeddedPlayerPageUrls(doc, target.url, 8),
+        ...(raw.match(/https:\/\/[^"'\s<>\\]+\/(?:e|embed|v)\/[\w-]{6,}[^"'\s<>\\]*/gi) || [])];
+      hints[index].playerUrls = [...new Set(found)].filter(value => {
+        try {
+          const url = new URL(value);
+          return url.protocol === 'https:' && url.hostname.replace(/^www\./, '') !== pageHost &&
+            /\/(?:e|embed|v|d|player|play|f)\/|embed|player/i.test(url.pathname + url.search) && !VIDEO_EXT_RE.test(url.pathname);
+        } catch (_) { return false; }
+      }).slice(0, 6);
+    });
+    await Promise.race([Promise.allSettled(work), sleep(timeoutMs + 250)]);
+    return hints;
+  }
+
   async function sendCaptureToRecall(mode, channel, ignoreUnder30 = true, selection = null) {
     if (busy) throw new Error('A capture is already running');
-    const targets = selection?.targets || collectSelectableTargets(mode === 'main' ? 'main' : 'all');
-    if (!targets.length) throw new Error('Select at least one video or video link');
+    const selectedTargets = selection?.targets || collectSelectableTargets(mode === 'main' ? 'main' : 'all');
+    if (!selectedTargets.length) throw new Error('Select at least one video or video link');
+    // Cards that visibly show a length under 30 seconds are clips/previews.
+    // Unknown lengths still go to the PC, which verifies the real duration.
+    const targets = selectedTargets.filter(target => {
+      const seconds = Number(target.durationSeconds) || 0;
+      if (seconds > 0 && seconds < MINIMUM_VIDEO_SECONDS) { selection?.onStatus?.(target, 'Skipped · under 30s'); return false; }
+      return true;
+    });
+    if (!targets.length) throw new Error('Every selected video is shorter than 30 seconds');
     const trace = { startedAt: performance.now(), requests: [], desktopOwned: true };
     selection?.onCaptureDiagnostics?.(trace);
     const request = async (endpoint, method, suffix = '', body = null) => {
@@ -3814,6 +3850,7 @@ function primaryVideoEvidence(html, pageUrl) {
     const id = globalThis.crypto?.randomUUID?.() || 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
       const n = crypto.getRandomValues(new Uint8Array(1))[0] & 15; return (c === 'x' ? n : (n & 3) | 8).toString(16);
     });
+    const playerHints = await cardPlayerUrlHints(targets);
     const mediaIdentityHashes = await Promise.all(targets.map(async target => {
       if (!/^inline-video-[1-9]\d{0,3}$/.test(target.logicalVideoId || '') || target.element?.tagName !== 'VIDEO') return '';
       const video = target.element;
@@ -3828,13 +3865,14 @@ function primaryVideoEvidence(html, pageUrl) {
       } catch { return ''; }
     }));
     const payload = { id, channel: Number(channel) === 2 ? 2 : 1, mode: mode === 'main' ? 'main' : 'all',
-      sourceUrl: targets[0].url, ignoreUnder30: ignoreUnder30 !== false,
+      sourceUrl: targets[0].url, ignoreUnder30: false, minimumDurationSeconds: MINIMUM_VIDEO_SECONDS,
       // Only selected links and bounded selected-player hints leave the phone. Never media bytes,
       // cookies, HTML, browser sessions, or relay-worker registrations.
       targets: targets.map((target, index) => ({ url: target.url,
         ...(target.logicalVideoId ? { logicalVideoId: target.logicalVideoId } : {}),
         ...(mediaIdentityHashes[index] ? { mediaIdentityHash: mediaIdentityHashes[index] } : {}),
         ...(target.kind === 'player' ? { sourceMediaHints: selectedPlayerMediaHints(target) } : {}),
+        ...(playerHints[index]?.playerUrls.length ? { playerUrls: playerHints[index].playerUrls } : {}),
         durationSeconds: Math.max(0, Number(target.durationSeconds) || 0) })) };
     const diagnostics = targets.map(target => {
       const result = { startedAt: performance.now(), done: false, delivered: false, desktopOwned: true,
@@ -3904,7 +3942,7 @@ function primaryVideoEvidence(html, pageUrl) {
       primaryVideoEvidence(document.documentElement?.innerHTML || '', location.href);
     if (!declaredMain) await waitForPageSettled();
     const ignoreUnder30 = _ignoreUnder30 !== false;
-    const minimumDurationSeconds = ignoreUnder30 ? 30 : 1;
+    const minimumDurationSeconds = 30;
     const currentUrl = canonicalWatchPageUrl(location.href, location.href) || location.href;
     const targets = selection?.targets || (captureMode === 'main'
       ? [{ url: currentUrl, durationSeconds: extractPageDurationSeconds(document) }]
@@ -3939,7 +3977,7 @@ function primaryVideoEvidence(html, pageUrl) {
       mode: captureMode,
       sourceUrl: location.href,
       title: cleanTitle(document.title || location.hostname),
-      ignoreUnder30,
+      ignoreUnder30: false, minimumDurationSeconds: 30,
       sourceIsWatchPage: isLikelyWatchPage(),
       browserRelayClientId,
       phoneConnectionOnly,
@@ -4185,12 +4223,12 @@ function primaryVideoEvidence(html, pageUrl) {
         sentThisRun: verifiedSentThisRun,
         recallVideosAfterRun: deliveredVideos,
         skippedTargets: Math.max(0, targets.length - verifiedSentThisRun),
-        ignoreUnder30
+        ignoreUnder30: false, minimumDurationSeconds: 30
       });
     } catch (_) {}
     if (!verifiedSentThisRun && phoneRouteErrors.length) throw new Error(phoneRouteErrors[0]);
     if (!verifiedSentThisRun) throw new Error(ignoreUnder30
-      ? 'No verified playable video of at least 30 seconds was found; uncheck Skip <30s for short clips'
+      ? 'No verified playable video of at least 30 seconds was found'
       : 'No verified playable video was found');
     notify(
       `Recall ${captureChannel} ready: ${verifiedSentThisRun}/${targets.length} sent this run` +
