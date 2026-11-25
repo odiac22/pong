@@ -1,0 +1,265 @@
+--- a/Pong Swap/pong_swap_engine.py
++++ b/Pong Swap/pong_swap_engine.py
+@@ -50,7 +50,7 @@
+ from pong_swap_source_quality import highest_quality_video_stream
+ from pong_swap_source_pool import StandbySourcePool
+ from pong_swap_buffer_policy import render_ahead_ceiling_seconds
+-from pong_three_x import ThreeXRenderer, MAX_THREE_X_FACES
++from pong_three_x import ThreeXRenderer, MAX_THREE_X_FACES, RestorerLadder, ladder_rung_for, restorer_ready, playback_buffer
+ from pong_tiktok_restorer import ADAPTIVE_512_PROFILE, THREE_X_PROFILES
+ from pong_acquisition_budget import AcquisitionBudget
+ from pong_multi_face import (MAX_MULTI_FACES, MultiFaceConsensus, MultiVideoSources,
+@@ -5815,7 +5815,7 @@
+         with torch.cuda.stream(stream):
+             for restorer in restorer_models(config):
+                 if (config.get("runtime", {}).get("tiktokRestorerProfile") == ADAPTIVE_512_PROFILE
+-                        or (config.get('runtime', {}).get('tiktokRestorerProfile') == 'tiktok-3x-adapt'
++                        or (config.get('runtime', {}).get('tiktokRestorerProfile') in ADAPT_PROFILES
+                             and restorer != selected_physical)):
+                     # A missing 256 plan must not compile on the shared playback
+                     # worker. Reuse cached native plans or the existing CUDA graph.
+@@ -11500,6 +11500,14 @@
+                 deferred_writer = None
+                 from pong_adapt_motion_rate import AdaptiveMotionRate, MotionFrameStore
+                 motion_rate, motion_store = AdaptiveMotionRate(), MotionFrameStore()
++                single_ladder = None
++                if (runtime.get('tiktokRestorerProfile') == 'tiktok-adapt'
++                        and parameters.get('RestorerSwitch') and ladder_rung_for(parameters.get('RestorerTypeTextSel'))):
++                    single_ladder = RestorerLadder(parameters['RestorerTypeTextSel'],
++                        ceiling=runtime.get('adaptRestorerCeiling', 'GPEN1024'),
++                        floor=runtime.get('adaptRestorerFloor', 'GPEN357'),
++                        ready=lambda model: restorer_ready(self, model))
++
+                 try:
+                     # Constructor validation must use the same error reporting and
+                     # encoder/decoder cleanup as frame processing.
+@@ -11705,6 +11713,7 @@
+                                 output_frame = motion_store.packet()
+                                 visible_faces = int(decision.get('renderedCount') or 0)
+                             else:
++                                three_x.frame_submitted_at = time.perf_counter()
+                                 output_frame, visible_faces = self._run_gpu_work(
+                                     three_x.render, frame,
+                                     priority=(10 if session.prefetch else 0),
+@@ -12385,7 +12394,8 @@
+                                     )
+                                     output_future = None
+                                 output_frame = None
+-                        if output_frame is None and output_future is None:
++                        fresh_swap = output_frame is None and output_future is None
++                        if fresh_swap:
+                             exact_work_started = time.perf_counter()
+                             temporal_context.pop("fullCanonicalTransform", None)
+                             temporal_context.pop("fullCanonicalPipelineSize", None)
+@@ -12909,6 +12919,11 @@
+                             session.reuse_work_seconds += (
+                                 time.perf_counter() - frame_work_started
+                             )
++                        if single_ladder is not None and frame_was_transformed:
++                            single_ladder.observe(time.perf_counter() - frame_work_started, fps, 1,
++                                playback_buffer(self, session), fresh_faces=int(fresh_swap))
++                            if restorer_ready(self, single_ladder.model):
++                                runtime['crowdRestorerModel'] = single_ladder.model
+                         pending_outputs.append({
+                             "result": output_frame,
+                             "future": output_future,
+--- a/Pong Swap/pong_three_x.py
++++ b/Pong Swap/pong_three_x.py
+@@ -464,6 +464,36 @@
+ ASSIGNMENTS = AssignmentRegistry()
+ 
+ 
++def restorer_ready(engine, model):
++    """A ladder rung is selectable only while its GPEN plan is resident and warmed."""
++    models = getattr(engine, '_models', None)
++    runtime = getattr(models, '_gpen_runtime', None)
++    if runtime is None:
++        return True  # synthetic engines in tests have no native runtime
++    from pong_restorer_profiles import physical_restorer
++    try:
++        edge = int(physical_restorer(model)[4:])
++        state = getattr(runtime, '_states', {}).get(edge) or {}
++        return bool(state.get('ready'))
++    except Exception:
++        return False
++
++
++def playback_buffer(engine, session):
++    if (getattr(session, 'prefetch', True)
++            or not getattr(session, 'playback_started_at', 0)
++            or getattr(session, 'playback_paused', True)
++            or not getattr(session, 'playback_position_updated_at', 0)
++            or session.stop.is_set()
++            or (getattr(session, 'scrub_suspended', None) is not None and session.scrub_suspended.is_set())):
++        return None
++    now = time.monotonic()
++    if now - session.playback_position_updated_at > 2.5:
++        return None  # A hidden/disconnected player must not request catch-up.
++    value = engine._playback_headroom_seconds(session, now)
++    return max(0., float(value)) if np.isfinite(value) else None
++
++
+ class AdaptiveRenderQuality:
+     """Bounded quality adaptation; never skips people or changes cadence."""
+     def __init__(self, responsive=False, warmup_frames=0):
+@@ -575,6 +605,29 @@
+     return model if model in RESTORER_LADDER_ORDER else None
+ 
+ 
++class BufferForecast:
++    """Estimate one second of runway from recent foreground playback reports."""
++    def __init__(self):
++        self.sample = None
++        self.drain = 0.
++
++    def observe(self, seconds, now):
++        if seconds is None or not np.isfinite(seconds):
++            self.sample = None
++            self.drain = 0.
++            return None
++        if self.sample is None or not 0 <= now - self.sample[0] <= 2.5:
++            self.sample = (now, seconds)
++            self.drain = 0.
++        else:
++            elapsed = now - self.sample[0]
++            if elapsed >= .4:
++                loss = (self.sample[1] - seconds) / elapsed
++                self.drain = .5 * self.drain + .5 * max(0., min(1., loss))
++                self.sample = (now, seconds)
++        return max(0., seconds - self.drain)
++
++
+ class RestorerLadder:
+     """Dynamic restorer quality for responsive 3X Adapt.
+ 
+@@ -610,6 +663,7 @@
+         configured_rung = ladder_rung_for(configured)
+         initial = start if start in self.rungs else (configured_rung if configured_rung in self.rungs else self.rungs[-1])
+         self.index = self.rungs.index(initial)
++        self.buffer_forecast = BufferForecast()
+         self.started_from_hint = start in self.rungs
+         self.ema = None
+         self.faces = 0
+@@ -680,6 +734,7 @@
+         if not self.active or faces < 1 or not np.isfinite(seconds) or seconds <= 0:
+             return False
+         self.frames += 1
++        buffer_seconds = self.buffer_forecast.observe(buffer_seconds, time.monotonic())
+         ms = float(seconds) * 1000.0
+         budget = 1000.0 / max(1.0, float(fps or 30))
+         self.last_budget_ms = budget
+@@ -1151,6 +1206,9 @@
+         if session.stop.is_set():
+             return None, 0
+         started = time.perf_counter()
++        submitted = getattr(self, 'frame_submitted_at', None)
++        self.frame_queue_delay = max(0., started - submitted) if submitted is not None else 0.
++        self.frame_submitted_at = None
+         reused_faces_before = self.gpu_patch_reused
+         gray, scale = self.tracker.prepare(frame)
+         if self.last_revision != self.assignments.revision:
+@@ -1530,6 +1588,10 @@
+                     for name, values in stage_diagnostics.items()
+                     if name.endswith('Ms') and isinstance(values, list)}
+                 self.stage_timings['originalDetectionMs'] = round(detection_seconds * 1000, 2)
++            # A busy GPU queue consumes the same playback runway as inference.
++            # Include foreground scheduling delay once in both budget decisions.
++            if self.responsive_adapt and not getattr(session, 'prefetch', True):
++                elapsed += getattr(self, 'frame_queue_delay', 0.0)
+             rendered_level = self.quality.level
+             rendered_model = self.restorer_ladder.model if self.restorer_ladder is not None else None
+             if self.quality_adaptation_enabled:
+@@ -1621,33 +1683,10 @@
+             return output, len(rendered_points)
+ 
+     def _restorer_ready(self, model):
+-        """A ladder rung is selectable only while its GPEN plan is resident and warmed."""
+-        models = getattr(self.engine, '_models', None)
+-        runtime = getattr(models, '_gpen_runtime', None)
+-        if runtime is None:
+-            return True  # synthetic engines in tests have no native runtime
+-        from pong_restorer_profiles import physical_restorer
+-        try:
+-            edge = int(physical_restorer(model)[4:])
+-            state = getattr(runtime, '_states', {}).get(edge) or {}
+-            return bool(state.get('ready'))
+-        except Exception:
+-            return False
++        return restorer_ready(self.engine, model)
+ 
+     def _playback_buffer(self):
+-        session = self.session
+-        if (not self.responsive_adapt or getattr(session, 'prefetch', True)
+-                or not getattr(session, 'playback_started_at', 0)
+-                or getattr(session, 'playback_paused', True)
+-                or not getattr(session, 'playback_position_updated_at', 0)
+-                or session.stop.is_set()
+-                or (getattr(session, 'scrub_suspended', None) is not None and session.scrub_suspended.is_set())):
+-            return None
+-        now = time.monotonic()
+-        if now - session.playback_position_updated_at > 2.5:
+-            return None  # A hidden/disconnected player must not request catch-up.
+-        value = self.engine._playback_headroom_seconds(session, now)
+-        return max(0., float(value)) if np.isfinite(value) else None
++        return playback_buffer(self.engine, self.session) if self.responsive_adapt else None
+ 
+     def _cap_pairs(self, pairs, detected):
+         # Keep already-visible people stable; fill free places with the largest
+--- a/Pong Swap/pong_tiktok_restorer.py
++++ b/Pong Swap/pong_tiktok_restorer.py
+@@ -54,6 +54,17 @@
+     if profile not in ("default", PROFILE, MOTION_TRIAL_PROFILE, PLAYBACK_PROFILE, FIXED_512_PROFILE, FIXED_GFPGAN12_PROFILE, ADAPT_PROFILE, *THREE_X_PROFILES):
+         raise ValueError("Unsupported restoration profile")
+     result = deepcopy(config)
++    runtime = result.setdefault('runtime', {})
++    params = result['parameters']
++    if 'preAdaptSwapper' in runtime:
++        present, value = runtime.pop('preAdaptSwapper')
++        if present:
++            params['SwapperTypeTextSel'] = value
++        else:
++            params.pop('SwapperTypeTextSel', None)
++    if profile in ADAPT_PROFILES:
++        runtime['preAdaptSwapper'] = ('SwapperTypeTextSel' in params, params.get('SwapperTypeTextSel'))
++        params['SwapperTypeTextSel'] = 'HyperSwap1C'
+     # Recover the saved selection when cloning a3X session, then apply the
+     # new session's override. Never persist the automatic357 into the preset.
+     original_restorer=result.setdefault('runtime',{}).pop('threeXOriginalRestorer',None)
+@@ -168,7 +179,7 @@
+ def _logical_restorer_models(config):
+     if not config["parameters"].get("RestorerSwitch"):
+         return ()
+-    if (config.get('runtime', {}).get('tiktokRestorerProfile') == ADAPT_THREE_X_PROFILE
++    if (config.get('runtime', {}).get('tiktokRestorerProfile') in ADAPT_PROFILES
+             and config['parameters'].get('RestorerTypeTextSel') in ('GPEN1024', 'GPEN512', 'GPEN256', 'GPEN257', 'GPEN357')):
+         # Every ladder rung must be resident so the dynamic controller can switch
+         # per frame without compiling or loading on the playback worker.
+@@ -202,7 +213,7 @@
+     """
+     runtime = config.get("runtime", {})
+     configured = config['parameters'].get('RestorerTypeTextSel')
+-    if (runtime.get('tiktokRestorerProfile') == ADAPT_THREE_X_PROFILE
++    if (runtime.get('tiktokRestorerProfile') in ADAPT_PROFILES
+             and runtime.get('crowdRestorerModel') in ADAPT_RESTORER_LADDER
+             and configured in ('GPEN1024', 'GPEN512', 'GPEN256', 'GPEN257', 'GPEN357')):
+         # Dynamic restorer ladder chosen by the 3X controller for this frame.
+--- a/Pong Swap/test_pong_adapt.py
++++ b/Pong Swap/test_pong_adapt.py
+@@ -21,14 +21,14 @@
+             before = copy.deepcopy(original)
+             for profile in (ADAPT_PROFILE, ADAPT_THREE_X_PROFILE):
+                 session = session_config_for_profile(original, profile)
+-                if profile == ADAPT_THREE_X_PROFILE and model != 'GFPGAN1.2':
+-                    # Responsive 3X Adapt keeps the whole dynamic ladder resident.
++                if model != 'GFPGAN1.2':
++                    # Both Adapt profiles make all supported GPEN rungs available.
+                     self.assertEqual(restorer_models(session)[0], model)
+                     self.assertEqual(set(restorer_models(session)), {'GPEN1024', 'GPEN512', 'GPEN256'})
+                 else:
+                     self.assertEqual(restorer_models(session), (model,))
+                 self.assertEqual(select_restorer(session, None), model)
+-                self.assertEqual(session['parameters'], original['parameters'])
++                self.assertEqual(session['parameters'], dict(original['parameters'], SwapperTypeTextSel='HyperSwap1C'))
+                 for key in ('temporalDetectorLkFusionEnabled', 'temporalDetectorShapeContinuityEnabled',
+                             'temporalIdentityResidualStabilizationEnabled', 'temporalFullMaxFaceMae',
+                             'maximumFps', 'maximumWidth'):
